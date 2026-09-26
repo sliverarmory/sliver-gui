@@ -139,7 +139,8 @@ async function readBofPackage(
           }
         }
       }
-      const available = !!objectPath && isObject && supportedExecutor && (usesLegacyLoader ? !loaderError : supportsBuiltInBof);
+      const platformSupported = !!objectPath && isObject;
+      const available = platformSupported && supportedExecutor && (usesLegacyLoader ? !loaderError : supportsBuiltInBof);
       const reason = !objectPath ? "No BOF object matches this target's OS and architecture."
         : !isObject ? "This target artifact is not a BOF object."
           : !supportedExecutor ? "This BOF manifest declares an unsupported executor."
@@ -154,6 +155,7 @@ async function readBofPackage(
         commandName,
         description: armoryText(command["help"]),
         arguments: args,
+        platformSupported,
         available,
         ...(reason ? { reason } : {}),
       };

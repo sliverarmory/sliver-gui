@@ -230,12 +230,18 @@ export function TargetExecutionWorkbench({
   }, [discardToken, exactIdentity]);
 
   const catalog = catalogState.status === "ready" ? catalogState.value : undefined;
+  const isNonWindowsTarget = catalog !== undefined &&
+    catalog.target.os.trim().toLocaleLowerCase() !== "windows";
+  const activeCategory = isNonWindowsTarget && category === "dotnet" ? "process" : category;
+  useEffect(() => {
+    if (catalogIsCurrent && isNonWindowsTarget && category === "dotnet") setCategory("process");
+  }, [catalogIsCurrent, isNonWindowsTarget, category]);
   const capabilities = useMemo(() => catalog
     ? catalog.capabilities.filter((capability) => executionCapabilitySupportsTarget(capability, catalog.target))
     : [], [catalog]);
   const categoryCapabilities = useMemo(() => capabilities.filter((capability) =>
-    executionActionPresentation(capability.operationId).category === category), [capabilities, category]);
-  const categoryCopy = executionCategoryPresentation(category);
+    executionActionPresentation(capability.operationId).category === activeCategory), [capabilities, activeCategory]);
+  const categoryCopy = executionCategoryPresentation(activeCategory);
   const processHistoryTarget = catalog?.target.mode === "session" &&
     targetRefsSameIdentity(catalog.targetRef, expectedTarget)
     ? catalog.targetRef
@@ -609,6 +615,7 @@ export function TargetExecutionWorkbench({
   }
   const isSession = catalogState.value.target.mode === "session";
   const selectCategory = (selected: ExecutionCategoryId): void => {
+    if (selected === "dotnet" && isNonWindowsTarget) return;
     readRequestSequence.current += 1;
     setCategory(selected);
     setReadState({ status: "idle" });
@@ -617,13 +624,17 @@ export function TargetExecutionWorkbench({
     <Segment
       aria-label="Execution categories"
       className={isSession ? "min-w-0 w-fit overflow-x-auto" : "mt-5 w-full overflow-x-auto sm:w-fit"}
-      selectedKey={category}
+      selectedKey={activeCategory}
       size="sm"
       onSelectionChange={(key) => selectCategory(String(key) as ExecutionCategoryId)}
     >
       {EXECUTION_CATEGORIES.filter((candidate) => !isSession ||
         (candidate.id !== "payloads" && candidate.id !== "remote" && candidate.id !== "identity")).map((candidate) => (
-        <Segment.Item id={candidate.id} key={candidate.id}>
+        <Segment.Item
+          id={candidate.id}
+          isDisabled={candidate.id === "dotnet" && isNonWindowsTarget}
+          key={candidate.id}
+        >
           <span className="inline-flex items-center gap-2">
             <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={candidate.icon} />
             {candidate.label}
@@ -667,7 +678,7 @@ export function TargetExecutionWorkbench({
             <div className="flex shrink-0 items-center gap-2">
               <Dropdown>
                 <Button aria-label="Advanced actions" size="sm" variant="tertiary">
-                  {category === "payloads" || category === "remote" || category === "identity" ? categoryCopy.label : "Advanced actions"}
+                  {activeCategory === "payloads" || activeCategory === "remote" || activeCategory === "identity" ? categoryCopy.label : "Advanced actions"}
                   <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
                 </Button>
                 <Dropdown.Popover className="min-w-44" placement="bottom end">
@@ -700,14 +711,14 @@ export function TargetExecutionWorkbench({
           </div>
         ) : categoryTabs}
 
-        {category === "bofs" ? (
+        {activeCategory === "bofs" ? (
           <BofExecutionView
             key={selectionIdentity}
             isRefreshing={!catalogIsCurrent}
             target={catalogState.value.target}
             targetRef={catalogState.value.targetRef}
           />
-        ) : category === "dotnet" ? (
+        ) : activeCategory === "dotnet" ? (
           <DotNetExecutionView
             key={selectionIdentity}
             capability={capabilities.find((capability) => capability.operationId === "execution.assembly")}
@@ -719,7 +730,7 @@ export function TargetExecutionWorkbench({
             result={result?.operationId === "execution.assembly" ? result : undefined}
             onPrepare={prepare}
           />
-        ) : isSession && category === "process" ? (
+        ) : isSession && activeCategory === "process" ? (
           <>
             {processHistoryError ? <p className="mt-4 text-xs text-danger" role="alert">{processHistoryError}</p> : null}
             <ProcessExecutionView

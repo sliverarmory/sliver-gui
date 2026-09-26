@@ -17,6 +17,8 @@ export interface BofCommand {
   readonly commandName: string;
   readonly description: string;
   readonly arguments: readonly BofArgumentDefinition[];
+  /** A BOF object in the manifest matches the selected target's OS and architecture. */
+  readonly platformSupported: boolean;
   readonly available: boolean;
   readonly reason?: string;
 }

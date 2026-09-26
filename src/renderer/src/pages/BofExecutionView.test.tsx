@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import type { BofCatalog, BofDirectorySelection, BofExecutionRecord } from "../../../shared/bof-contracts";
@@ -55,7 +56,7 @@ const catalog: BofCatalog = {
   commands: [
     {
       id: "sa-dir/sa-dir", packageName: "Directory Listing (SA)", commandName: "sa-dir",
-      description: "List directory contents", available: true,
+      description: "List directory contents", platformSupported: true, available: true,
       arguments: [
         { name: "targetdir", description: "Directory path", type: "string", optional: true, default: "." },
         { name: "subdirs", description: "Recurse into subdirectories", type: "short", optional: true, default: 0 },
@@ -63,7 +64,7 @@ const catalog: BofCatalog = {
     },
     {
       id: "sa-nslookup/sa-nslookup", packageName: "NS Lookup (SA)", commandName: "sa-nslookup",
-      description: "Resolve a hostname", available: true,
+      description: "Resolve a hostname", platformSupported: true, available: true,
       arguments: [
         { name: "hostname", description: "Hostname to resolve", type: "string", optional: false },
         { name: "server", description: "Optional DNS server", type: "string", optional: true },
@@ -72,7 +73,7 @@ const catalog: BofCatalog = {
     },
     {
       id: "inject/inject", packageName: "Injection", commandName: "inject", description: "Use a local file",
-      available: true,
+      platformSupported: true, available: true,
       arguments: [
         { name: "pid", description: "Target process ID", type: "integer", optional: false },
         { name: "bin", description: "Shellcode file", type: "file", optional: false },
@@ -191,6 +192,64 @@ describe("BOF execution view", () => {
     expect(within(composer).getByText("List directory contents")).toBeInTheDocument();
     expect(within(composer).queryByText("3 BOFs for windows/amd64. Type to search or browse.")).not.toBeInTheDocument();
     expect(composer.querySelector(".bg-surface-secondary")).not.toBeInTheDocument();
+  });
+
+  it("lists only BOFs with a matching target OS and architecture while explaining other availability failures", async () => {
+    const user = userEvent.setup();
+    const { api } = installApi();
+    api.listInstalledBofs.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ...catalog,
+        commands: [
+          catalog.commands[0]!,
+          { id: "linux-only/probe", packageName: "Linux BOF", commandName: "linux-only", description: "Linux object", platformSupported: false, available: false, reason: "No BOF object matches this target's OS and architecture.", arguments: [] },
+          { id: "arm64-only/probe", packageName: "ARM64 BOF", commandName: "arm64-only", description: "ARM64 object", platformSupported: false, available: false, reason: "No BOF object matches this target's OS and architecture.", arguments: [] },
+          { id: "needs-loader/probe", packageName: "Loader BOF", commandName: "needs-loader", description: "Needs a loader", platformSupported: true, available: false, reason: "The required Armory loader is unavailable.", arguments: [] },
+        ],
+      },
+    });
+    renderView();
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    expect(within(composer).getByText("2 BOFs for windows/amd64. Type to search or browse.")).toBeInTheDocument();
+    await user.click(composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]')!);
+    expect(await screen.findByRole("option", { name: /sa-dir/iu })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /needs-loader/iu })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /linux-only/iu })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: /arm64-only/iu })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /needs-loader/iu }));
+    expect(within(composer).getByRole("alert")).toHaveTextContent("The required Armory loader is unavailable.");
+    expect(within(composer).getByRole("button", { name: "Execute" })).toBeDisabled();
+    expect(api.runBof).not.toHaveBeenCalled();
+  });
+
+  it("rejects a BOF directory selection without an object for the current session platform", async () => {
+    const user = userEvent.setup();
+    const { api } = installApi();
+    const dangerToast = vi.spyOn(toast, "danger");
+    const localCommand = {
+      id: "local_1234/linux-probe", packageName: "Linux Probe", commandName: "linux-probe",
+      description: "Linux-only probe", platformSupported: false, available: false,
+      reason: "No BOF object matches this target's OS and architecture.", arguments: [],
+    };
+    api.chooseBofDirectory.mockResolvedValueOnce({
+      ok: true,
+      value: { catalog: { ...catalog, commands: [...catalog.commands, localCommand] }, selectedCommandId: localCommand.id },
+    });
+    renderView();
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    try {
+      await user.click(within(composer).getByRole("button", { name: "Open BOF directory" }));
+      await waitFor(() => expect(dangerToast).toHaveBeenCalledWith("Could not open BOF directory", {
+        description: "The selected BOF has no object for windows/amd64.",
+      }));
+      expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select a BOF");
+      expect(within(composer).getByText("3 BOFs for windows/amd64. Type to search or browse.")).toBeInTheDocument();
+      expect(within(composer).getByRole("button", { name: "Execute" })).toBeDisabled();
+      expect(api.runBof).not.toHaveBeenCalled();
+    } finally {
+      dangerToast.mockRestore();
+    }
   });
 
   it("preserves the open autocomplete search through a routine target domain revision update", async () => {
@@ -338,12 +397,43 @@ describe("BOF execution view", () => {
     expect(api.runBof).not.toHaveBeenCalled();
   });
 
+  it("clears a selected BOF when the refreshed catalog no longer has a matching platform object", async () => {
+    const user = userEvent.setup();
+    const { api, setTarget } = installApi();
+    const view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    await chooseBof(user, composer, "hostname", /sa-nslookup/iu);
+    await user.type(within(composer).getByRole("textbox", { name: "hostname" }), "draft.example");
+
+    const refreshedTargetRef = { ...targetRef, domainRevision: targetRef.domainRevision + 1 };
+    api.listInstalledBofs.mockResolvedValueOnce({
+      ok: true,
+      value: {
+        ...catalog,
+        target: refreshedTargetRef,
+        commands: catalog.commands.map((item) => item.id === "sa-nslookup/sa-nslookup"
+          ? { ...item, platformSupported: false, available: false, reason: "No BOF object matches this target's OS and architecture." }
+          : item),
+      },
+    });
+    setTarget(refreshedTargetRef, [], 1);
+    view.rerender(<BofExecutionView isRefreshing={false} target={target} targetRef={refreshedTargetRef} />);
+
+    await waitFor(() => expect(composer.querySelector('[data-slot="autocomplete-trigger"]')).toHaveTextContent("Select a BOF"));
+    expect(within(composer).queryByRole("textbox", { name: "hostname" })).not.toBeInTheDocument();
+    expect(within(composer).getByText("2 BOFs for windows/amd64. Type to search or browse.")).toBeInTheDocument();
+    expect(within(composer).getByRole("alert")).toHaveTextContent("no longer supports this target's OS and architecture");
+    await user.click(composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]')!);
+    expect(screen.queryByRole("option", { name: /sa-nslookup/iu })).not.toBeInTheDocument();
+    expect(api.runBof).not.toHaveBeenCalled();
+  });
+
   it("opens a BOF directory and renders its manifest arguments for execution", async () => {
     const user = userEvent.setup();
     const { api } = installApi();
     const localCommand = {
       id: "local_1234/local-probe", packageName: "Local Probe", commandName: "local-probe",
-      description: "Probe a directory", available: true,
+      description: "Probe a directory", platformSupported: true, available: true,
       arguments: [{ name: "query", description: "Query text", type: "wstring" as const, optional: false }],
     };
     api.chooseBofDirectory.mockResolvedValueOnce({
@@ -398,7 +488,7 @@ describe("BOF execution view", () => {
       value: {
         catalog: { ...catalog, commands: [{
           id: "local_1234/local-probe", packageName: "Local Probe", commandName: "local-probe",
-          description: "Probe", available: true, arguments: [],
+          description: "Probe", platformSupported: true, available: true, arguments: [],
         }] },
         selectedCommandId: "local_1234/local-probe",
       },

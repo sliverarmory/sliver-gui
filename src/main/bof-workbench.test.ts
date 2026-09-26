@@ -30,14 +30,16 @@ describe("installed BOF selection", () => {
 
     const selected = await installedBofCommands(root, target, ref, true);
     expect(selected.catalog.commands).toEqual([{ id: "fixture-bof/fixture-bof", packageName: "Fixture BOF",
-      commandName: "fixture-bof", description: "Fixture description", available: true,
+      commandName: "fixture-bof", description: "Fixture description", platformSupported: true, available: true,
       arguments: [{ name: "host", description: "Host to query", type: "wstring", optional: false },
         { name: "count", description: "Count", type: "integer", optional: true, default: 5, choices: ["5", "10"] }] }]);
     expect(await readInstalledBofObject(selected.entries[0]!)).toEqual(Buffer.from("fixture-object"));
     const unsupported = await installedBofCommands(root, target, ref, false);
-    expect(unsupported.catalog.commands[0]).toMatchObject({ available: false, reason: expect.stringContaining("does not advertise") });
+    expect(unsupported.catalog.commands[0]).toMatchObject({ platformSupported: true, available: false, reason: expect.stringContaining("does not advertise") });
     const otherArch = await installedBofCommands(root, { ...target, arch: "arm64" }, ref, true);
-    expect(otherArch.catalog.commands[0]).toMatchObject({ available: false, reason: expect.stringContaining("No BOF object") });
+    expect(otherArch.catalog.commands[0]).toMatchObject({ platformSupported: false, available: false, reason: expect.stringContaining("No BOF object") });
+    const otherOs = await installedBofCommands(root, { ...target, os: "linux" }, ref, true);
+    expect(otherOs.catalog.commands[0]).toMatchObject({ platformSupported: false, available: false, reason: expect.stringContaining("No BOF object") });
   });
 
   it("refuses a symlinked object inside an installed package", async () => {
@@ -75,7 +77,7 @@ describe("installed BOF selection", () => {
     }));
     const unavailable = await installedBofCommands(root, target, ref, false);
     expect(unavailable.catalog.commands.find((item) => item.id === "legacy-probe/legacy-probe"))
-      .toMatchObject({ available: false, reason: expect.stringContaining("loader") });
+      .toMatchObject({ platformSupported: true, available: false, reason: expect.stringContaining("loader") });
     await writeFile(join(loaderDirectory, "loader.dll"), Buffer.from("DLL"));
     const available = await installedBofCommands(root, target, ref, false);
     expect(available.catalog.commands.find((item) => item.id === "legacy-probe/legacy-probe"))
@@ -103,13 +105,13 @@ describe("operator-selected BOF directory", () => {
     const selected = await readBofCommandsFromDirectory(root, directory, "local-fixture", target, ref, true);
     expect(selected.entries).toHaveLength(1);
     expect(selected.entries[0]?.dto).toMatchObject({
-      id: "local-fixture/probe", packageName: "Local Probe", commandName: "probe", available: true,
+      id: "local-fixture/probe", packageName: "Local Probe", commandName: "probe", platformSupported: true, available: true,
       arguments: [{ name: "domain", type: "wstring" }, { name: "depth", type: "short", default: 2 }],
     });
     expect(await readInstalledBofObject(selected.entries[0]!)).toEqual(Buffer.from("local-object"));
 
     const unsupported = await readBofCommandsFromDirectory(root, directory, "local-fixture", { ...target, arch: "arm64" }, ref, true);
-    expect(unsupported.entries[0]?.dto).toMatchObject({ available: false, reason: expect.stringContaining("No BOF object") });
+    expect(unsupported.entries[0]?.dto).toMatchObject({ platformSupported: false, available: false, reason: expect.stringContaining("No BOF object") });
   });
 
   it("rejects selected symlinks and unsafe manifest paths", async () => {

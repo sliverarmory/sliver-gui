@@ -120,10 +120,14 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       }
       const previousCommand = commandRef.current;
       const nextCommand = response.value.commands.find((item) => item.id === previousCommand?.id);
-      if (previousCommand && JSON.stringify(previousCommand.arguments) !== JSON.stringify(nextCommand?.arguments)) {
+      if (previousCommand && (!nextCommand?.platformSupported ||
+          JSON.stringify(previousCommand.arguments) !== JSON.stringify(nextCommand.arguments))) {
         setCommandId("");
         setArgumentValues([]);
-        setFormError("The selected BOF's arguments changed or it is no longer installed. Select a BOF again.");
+        const reason = !nextCommand ? "The selected BOF is no longer installed."
+          : !nextCommand.platformSupported ? "The selected BOF no longer supports this target's OS and architecture."
+            : "The selected BOF's arguments changed.";
+        setFormError(`${reason} Select a BOF again.`);
         fileSequence.current += 1;
       }
       setCatalogState({ status: "ready", value: response.value });
@@ -191,9 +195,10 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
 
   const catalog = catalogState.status === "ready" && sameTargetIdentity(catalogState.value.target, targetRef)
     ? catalogState.value : undefined;
+  const selectableCommands = catalog?.commands.filter((item) => item.platformSupported) ?? [];
   const isCatalogLoading = catalogState.status === "loading" || (catalogState.status === "ready" && catalogState.refreshing === true);
   const catalogError = catalogState.status === "error" ? catalogState.message : catalogState.status === "ready" ? catalogState.error : undefined;
-  const command = catalog?.commands.find((item) => item.id === commandId);
+  const command = selectableCommands.find((item) => item.id === commandId);
   commandRef.current = command;
   const historyRecords = historyState.identityKey === identityKey ? historyState.records : EMPTY_HISTORY;
   const historyRecordsRef = useRef(historyRecords);
@@ -208,7 +213,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
 
   const selectCommand = (id: string, source = catalog): void => {
-    const next = source?.commands.find((item) => item.id === id);
+    const next = source?.commands.find((item) => item.id === id && item.platformSupported);
     setCommandId(next?.id ?? "");
     setArgumentValues(next?.arguments.map((argument) => argument.default === undefined ? undefined : String(argument.default)) ?? []);
     setFormError(undefined);
@@ -228,6 +233,9 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       if (!sameTargetIdentity(selectedCatalog.target, targetRef) ||
           !selectedCatalog.commands.some((item) => item.id === selectedCommandId)) {
         throw new Error("The selected BOF no longer matches this target. Reselect the target and try again.");
+      }
+      if (!selectedCatalog.commands.some((item) => item.id === selectedCommandId && item.platformSupported)) {
+        throw new Error(`The selected BOF has no object for ${target.os}/${target.arch}.`);
       }
       // A pending Armory refresh must not replace the newly opened directory.
       catalogSequence.current += 1;
@@ -527,7 +535,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                   </Autocomplete.Trigger>
                   <Description>{command
                     ? command.description || command.packageName
-                    : `${catalog.commands.length} BOFs for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
+                    : `${selectableCommands.length} BOFs for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
                   <Autocomplete.Popover>
                     <Autocomplete.Filter filter={contains}>
                       <SearchField autoFocus aria-label="Search BOFs" variant="secondary">
@@ -538,7 +546,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                         </SearchField.Group>
                       </SearchField>
                       <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching BOFs.</p>}>
-                        {catalog.commands.map((item) => (
+                        {selectableCommands.map((item) => (
                           <ListBox.Item
                             id={item.id}
                             key={item.id}
@@ -555,7 +563,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                     </Autocomplete.Filter>
                   </Autocomplete.Popover>
                 </Autocomplete>
-                {catalog.commands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs are available. Refresh the Armory catalog or open a BOF directory.</p> : null}
+                {selectableCommands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs match {target.os}/{target.arch}. Refresh the Armory catalog or open a BOF directory.</p> : null}
                 {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
                 {command ? (
                   <>

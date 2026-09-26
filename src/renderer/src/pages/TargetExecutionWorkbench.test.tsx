@@ -401,7 +401,6 @@ describe("TargetExecutionWorkbench", () => {
   });
 
   it("uses the main catalog as authority, preserves unavailable reasons, and omits structural mismatches", async () => {
-    const user = userEvent.setup();
     const api = installAPI(catalog([
       capability("execution.process"),
       capability("execution.children", {
@@ -425,7 +424,7 @@ describe("TargetExecutionWorkbench", () => {
     expect(api.listExecutionCatalog).toHaveBeenCalledOnce();
     expect(screen.getByRole("radio", { name: "Process" })).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "BOFs" })).toBeInTheDocument();
-    expect(screen.getByRole("radio", { name: ".NET" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: ".NET" })).toBeDisabled();
     expect(screen.queryByRole("radio", { name: "Payloads" })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "Remote" })).not.toBeInTheDocument();
     expect(screen.queryByRole("radio", { name: "Identity" })).not.toBeInTheDocument();
@@ -451,9 +450,36 @@ describe("TargetExecutionWorkbench", () => {
     expect(screen.queryByText("Background tracking is disabled by this server.")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Unavailable: Background children" })).not.toBeInTheDocument();
 
+    expect(screen.queryByRole("region", { name: ".NET assembly execution" })).not.toBeInTheDocument();
+    expect(api.listDotNetAssemblies).not.toHaveBeenCalled();
+  });
+
+  it("closes a selected .NET pane when the same session reports a non-Windows OS", async () => {
+    const user = userEvent.setup();
+    const windowsTarget: SessionSummary = { ...target, os: "windows" };
+    const windowsRef: TargetRef = { ...targetRef, fingerprint: "f".repeat(64) };
+    const revisedRef: TargetRef = { ...windowsRef, domainRevision: windowsRef.domainRevision + 1 };
+    const assembly = capability("execution.assembly", { platforms: ["windows"] });
+    const api = installAPI(catalog([assembly], windowsTarget, windowsRef));
+    const refreshedCatalog = deferred<{ ok: true; value: ExecutionCatalog }>();
+    api.listExecutionCatalog
+      .mockResolvedValueOnce({ ok: true, value: catalog([assembly], windowsTarget, windowsRef) })
+      .mockReturnValueOnce(refreshedCatalog.promise);
+
+    const { rerender } = render(<TargetExecutionWorkbench expectedTarget={windowsRef} targetIdentity="same-session" />);
+    await screen.findByRole("region", { name: "Execution operations" });
     await user.click(screen.getByRole("radio", { name: ".NET" }));
     expect(screen.getByRole("region", { name: ".NET assembly execution" })).toBeInTheDocument();
-    expect(screen.getByText(".NET execution is unavailable for this target.")).toBeInTheDocument();
+
+    rerender(<TargetExecutionWorkbench expectedTarget={revisedRef} targetIdentity="same-session" />);
+    await act(async () => {
+      refreshedCatalog.resolve({ ok: true, value: catalog([], target, revisedRef) });
+      await refreshedCatalog.promise;
+    });
+
+    expect(screen.getByRole("radio", { name: ".NET" })).toBeDisabled();
+    expect(screen.queryByRole("region", { name: ".NET assembly execution" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Process execution history and output" })).toBeInTheDocument();
   });
 
   it("opens a typed configuration surface for every catalog action capability", async () => {
@@ -1269,6 +1295,7 @@ describe("TargetExecutionWorkbench", () => {
     await screen.findByRole("region", { name: "Execution operations" });
     await selectAdvancedCategory(user, "Payloads");
     expect(screen.queryByRole("button", { name: "Open: Execute assembly" })).not.toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: ".NET" })).toBeEnabled();
     await user.click(screen.getByRole("radio", { name: ".NET" }));
     await user.click(screen.getByRole("button", { name: "Open assembly file" }));
     await waitFor(() => expect(api.chooseDotNetAssemblyFile).toHaveBeenCalledOnce());
