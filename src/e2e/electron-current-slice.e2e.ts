@@ -608,6 +608,7 @@ async function verifyCloudDeploymentWindow(
   const cloudDeployment = dialog.getByRole("button", { name: "Cloud Deployment" });
   const cancel = dialog.getByRole("button", { name: "Cancel" });
   const connect = dialog.getByRole("button", { name: "Connect", exact: true });
+  await Promise.all([forget, cloudDeployment, cancel, connect].map((button) => button.waitFor({ state: "visible" })));
   const [forgetBox, cloudBox, cancelBox, connectBox] = await Promise.all([
     forget.boundingBox(),
     cloudDeployment.boundingBox(),
@@ -1567,7 +1568,7 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    20,
+    19,
     "the connected workspace should expose the bounded app command catalog",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
@@ -2862,8 +2863,12 @@ async function verifyInteractionWindowPopout(
       await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
       await breadcrumbs.getByText(expectedName, { exact: true }).waitFor();
       await popout.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
-      await popout.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
-      await popout.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
+      const taskTabs = popout.getByRole("tablist", { name: "Beacon task views", exact: true });
+      await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).waitFor();
+      await taskTabs.getByRole("tab", { name: "Task output", exact: true }).waitFor();
+      assert.equal(await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true");
+      assert.equal(await popout.locator(".beacon-task-views").count(), 1,
+        "the beacon popout must combine queue and output into one task card");
       assert.equal(
         await popout.getByRole("heading", { name: "All target operations", exact: true }).count(),
         0,
@@ -3070,8 +3075,13 @@ async function verifyBeaconAsyncTaskWorkspace(
   await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
   await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
-  await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
-  await page.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
+  const taskTabs = page.getByRole("tablist", { name: "Beacon task views", exact: true });
+  const queueTab = taskTabs.getByRole("tab", { name: "Task queue", exact: true });
+  const outputTab = taskTabs.getByRole("tab", { name: "Task output", exact: true });
+  await queueTab.waitFor();
+  await outputTab.waitFor();
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true");
+  assert.equal(await page.locator(".beacon-task-views").count(), 1);
 
   const command = page.locator('[data-slot="autocomplete-trigger"]:visible');
   await command.click();
@@ -3102,15 +3112,33 @@ async function verifyBeaconAsyncTaskWorkspace(
   const queuedRow = queue.getByRole("row").filter({ hasText: queuedTask.id });
   await queuedRow.waitFor();
   await queuedRow.getByText("Pending", { exact: true }).waitFor();
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true", "new beacon tasks must remain in the queue view");
+  await queuedRow.click();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "pending task actions must jump to their output status");
   await page.getByText("Waiting for the beacon", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Cancel task", exact: true }).waitFor();
+  await queueTab.click();
 
   await electronApplication.evaluate((_electron, taskId) => {
     globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, true);
   }, queuedTask.id);
   await queuedRow.getByText("Completed", { exact: true }).waitFor();
-  await page.getByText("Directory listing", { exact: true }).waitFor();
-  await page.getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
-  await page.getByText("projects", { exact: true }).waitFor();
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true", "completion events must preserve the queue view");
+  await queuedRow.click();
+  const output = page.getByRole("tabpanel", { name: "Task output", exact: true });
+  await output.waitFor();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "completed task actions must open their output");
+  const result = output.getByRole("article", { name: `Task output ${queuedTask.id}`, exact: true });
+  await result.waitFor();
+  await page.waitForFunction((expectedId) => (
+    globalThis as unknown as {
+      document: { activeElement: { getAttribute(name: string): string | null } | null };
+    }
+  ).document.activeElement?.getAttribute("data-task-id") === expectedId, queuedTask.id);
+  await result.getByText("Directory listing", { exact: true }).waitFor();
+  await result.getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
+  await result.getByText("projects", { exact: true }).waitFor();
+  assert.equal(await result.locator("dt").filter({ hasText: /^(Origin|Created|Sent|Completed)$/u }).count(), 0);
 
   await page.getByRole("button", { name: "Back to live beacons", exact: true }).click();
   await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();

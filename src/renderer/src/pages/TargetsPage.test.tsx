@@ -23,7 +23,42 @@ import { TargetsPage } from "./TargetsPage";
 import { formatTimestamp } from "./target-page-model";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
+interface IntersectionObserverRecord {
+  readonly callback: IntersectionObserverCallback;
+  readonly root: Element | Document | null;
+  readonly observed: Element[];
+  disconnected: boolean;
+}
+
+const intersectionObserverRecords: IntersectionObserverRecord[] = [];
+
 beforeAll(() => {
+  vi.stubGlobal("IntersectionObserver", class IntersectionObserver {
+    readonly record: IntersectionObserverRecord;
+
+    constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      this.record = {
+        callback,
+        root: options?.root ?? null,
+        observed: [],
+        disconnected: false,
+      };
+      intersectionObserverRecords.push(this.record);
+    }
+
+    observe(target: Element) {
+      this.record.observed.push(target);
+    }
+
+    unobserve(target: Element) {
+      const index = this.record.observed.indexOf(target);
+      if (index >= 0) this.record.observed.splice(index, 1);
+    }
+
+    disconnect() {
+      this.record.disconnected = true;
+    }
+  });
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
     observe() {}
     unobserve() {}
@@ -42,6 +77,7 @@ afterAll(() => {
 
 afterEach(() => {
   cleanup();
+  intersectionObserverRecords.length = 0;
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -250,6 +286,28 @@ function switchableBeaconSnapshot(active: "first" | "second" = "first"): SliverS
   return snapshot;
 }
 
+function beaconTaskDetail(overrides: Partial<BeaconTaskDetail> = {}): BeaconTaskDetail {
+  return {
+    taskId: "task-output-1",
+    beaconId: beacon.id,
+    state: "completed",
+    description: "Read working directory",
+    createdAt: "2026-08-09T20:03:00.000Z",
+    completedAt: "2026-08-09T20:04:00.000Z",
+    resultAvailable: true,
+    cancellation: { available: false },
+    operationId: "beacon.filesystem.pwd",
+    ownership: { origin: "external", actor: { attribution: "unknown" } },
+    disposition: {
+      kind: "structured-detail",
+      title: "Working directory",
+      fields: [{ label: "Path", value: "/srv/first-output" }],
+      truncated: false,
+    },
+    ...overrides,
+  };
+}
+
 function operationRecord(overrides: Partial<TargetOperationRecord> = {}): TargetOperationRecord {
   return {
     requestId: "request-1",
@@ -451,6 +509,23 @@ function sessionWorkspace(snapshot: SliverSnapshot, onSnapshot = vi.fn()): React
       onSnapshot={onSnapshot}
     />
   );
+}
+
+function emitIntersection(
+  record: IntersectionObserverRecord,
+  target: Element,
+  targetTop: number,
+  rootTop = 0,
+): void {
+  record.callback([{
+    boundingClientRect: { top: targetTop } as DOMRectReadOnly,
+    intersectionRatio: targetTop < rootTop ? 0 : 1,
+    intersectionRect: {} as DOMRectReadOnly,
+    isIntersecting: targetTop >= rootTop,
+    rootBounds: { top: rootTop } as DOMRectReadOnly,
+    target,
+    time: 0,
+  }], {} as IntersectionObserver);
 }
 
 describe("TargetsPage", () => {
@@ -798,8 +873,9 @@ describe("TargetsPage", () => {
     expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to live beacons" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Task completion" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tablist", { name: "Beacon task views" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "All target operations" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Operator presence" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
@@ -847,7 +923,7 @@ describe("TargetsPage", () => {
     expect(within(summary).getByRole("button", { name: "Beacon details" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("refreshes the beacon summary from snapshots and handles missing metadata", () => {
@@ -1044,6 +1120,122 @@ describe("TargetsPage", () => {
     expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
   });
 
+  it.each(["app-content", "interaction-window__content"] as const)("observes the beacon summary in the %s viewport without resetting on metadata updates", (viewportClass) => {
+    installAPI();
+    const initializeViewport = (viewport: HTMLDivElement | null): void => {
+      if (viewport) viewport.scrollTop = 120;
+    };
+    const view = render(
+      <div className={viewportClass} ref={initializeViewport}>
+        <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    const marker = view.container.querySelector(".beacon-workspace__scroll-marker");
+    const sticky = view.container.querySelector(".beacon-workspace__sticky");
+    const viewport = view.container.querySelector<HTMLDivElement>(`.${viewportClass}`);
+    if (!marker || !sticky || !viewport) throw new Error("The beacon sticky summary markup is incomplete");
+    const summary = screen.getByRole("heading", { name: beacon.name }).closest("header");
+    expect(sticky).toContainElement(summary);
+    expect(sticky).not.toContainElement(screen.getByRole("heading", { name: "Queue a beacon task" }));
+    expect(sticky).toHaveAttribute("data-stuck", "false");
+    expect(viewport.scrollTop).toBe(0);
+    const observer = intersectionObserverRecords.find((candidate) => candidate.observed.includes(marker));
+    expect(observer?.root).toBe(viewport);
+    if (!observer) throw new Error("The beacon scroll marker was not observed");
+
+    act(() => emitIntersection(observer, marker, 39, 40));
+    expect(sticky).toHaveAttribute("data-stuck", "true");
+    act(() => emitIntersection(observer, marker, 40, 40));
+    expect(sticky).toHaveAttribute("data-stuck", "false");
+    act(() => emitIntersection(observer, marker, 39, 40));
+    viewport.scrollTop = 140;
+    const refreshedBeacon = { ...beacon, name: "refreshed-warehouse", pid: 5002 };
+    const refreshed = targetSnapshot("beacon");
+    refreshed.beacons = [refreshedBeacon];
+    refreshed.domains.beacons.items = [refreshedBeacon];
+    refreshed.targetContext.activeTargetSummary = refreshedBeacon;
+    view.rerender(
+      <div className={viewportClass} ref={initializeViewport}>
+        <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={refreshed} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    expect(screen.getByRole("heading", { name: refreshedBeacon.name })).toBeInTheDocument();
+    expect(sticky).toHaveAttribute("data-stuck", "true");
+    expect(viewport.scrollTop).toBe(140);
+    expect(observer.disconnected).toBe(false);
+    expect(intersectionObserverRecords.filter((candidate) => candidate.observed.includes(marker))).toHaveLength(1);
+    view.unmount();
+    expect(observer.disconnected).toBe(true);
+  });
+
+  it("replaces the beacon summary observer on target switches and disconnects it on quarantine", () => {
+    installAPI();
+    const view = render(
+      <div className="app-content">
+        <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    const marker = view.container.querySelector(".beacon-workspace__scroll-marker");
+    const sticky = view.container.querySelector(".beacon-workspace__sticky");
+    const viewport = view.container.querySelector<HTMLDivElement>(".app-content");
+    if (!marker || !sticky || !viewport) throw new Error("The beacon switch observer markup is incomplete");
+    const initialObserver = intersectionObserverRecords.find((candidate) => candidate.observed.includes(marker));
+    if (!initialObserver) throw new Error("The initial beacon marker was not observed");
+    viewport.scrollTop = 140;
+    act(() => emitIntersection(initialObserver, marker, -1));
+    expect(sticky).toHaveAttribute("data-stuck", "true");
+
+    view.rerender(
+      <div className="app-content">
+        <TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot("second")} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    const switchedMarker = view.container.querySelector(".beacon-workspace__scroll-marker");
+    const switchedSticky = view.container.querySelector(".beacon-workspace__sticky");
+    if (!switchedMarker || !switchedSticky) throw new Error("The switched beacon observer markup is incomplete");
+    expect(initialObserver.disconnected).toBe(true);
+    expect(viewport.scrollTop).toBe(0);
+    expect(switchedSticky).toHaveAttribute("data-stuck", "false");
+    const switchedObserver = intersectionObserverRecords.find((candidate) => candidate.observed.includes(switchedMarker));
+    expect(switchedObserver?.root).toBe(viewport);
+    if (!switchedObserver) throw new Error("The switched beacon marker was not observed");
+    expect(switchedObserver).not.toBe(initialObserver);
+
+    const quarantined = switchableBeaconSnapshot("second");
+    quarantined.targetContext.activeTarget = { ...secondBeaconRef, fingerprint: "f".repeat(64) };
+    view.rerender(
+      <div className="app-content">
+        <TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={quarantined} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    expect(screen.getByRole("heading", { name: "Beacon interaction unavailable" })).toBeInTheDocument();
+    expect(switchedObserver.disconnected).toBe(true);
+    expect(view.container.querySelector(".beacon-workspace__scroll-marker")).toBeNull();
+  });
+
+  it("does not observe a beacon header without a viewport or on catalog and session pages", () => {
+    installAPI();
+    const view = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
+    );
+    expect(screen.getByRole("heading", { name: beacon.name })).toBeInTheDocument();
+    expect(intersectionObserverRecords).toHaveLength(0);
+    view.rerender(
+      <div className="app-content">
+        <TargetsPage mode="beacon" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    expect(screen.getByRole("grid", { name: "Sliver beacons" })).toBeInTheDocument();
+    expect(intersectionObserverRecords).toHaveLength(0);
+    view.rerender(
+      <div className="app-content">
+        <TargetsPage mode="session" snapshot={targetSnapshot("session")} onSnapshot={vi.fn()} />
+      </div>,
+    );
+    expect(screen.getByRole("grid", { name: "Sliver sessions" })).toBeInTheDocument();
+    expect(intersectionObserverRecords).toHaveLength(0);
+  });
+
   it("opens dedicated advanced execution and discards its reviewed plan on exact-target quarantine", async () => {
     const user = userEvent.setup();
     const reviewedPlan = beaconExecutionPlan();
@@ -1142,8 +1334,10 @@ describe("TargetsPage", () => {
     await user.click(screen.getByRole("button", { name: "Queue task" }));
     await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledWith({ operationId: "beacon.filesystem.pwd" }));
     expect(await screen.findByRole("row", { name: /task-pwd-1/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: "task-pwd-1" }));
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
     expect(await screen.findByText("Waiting for the beacon")).toBeInTheDocument();
-    expect(getBeaconTask).toHaveBeenCalledWith({ taskId: "task-pwd-1" });
 
     task = {
       ...task,
@@ -1172,7 +1366,7 @@ describe("TargetsPage", () => {
     await act(async () => invalidateTasks?.(beaconRef));
 
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
-    expect(screen.queryByRole("heading", { name: "Select a task" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "No task output" })).not.toBeInTheDocument();
     expect(screen.getByText("Waiting for the beacon")).toBeInTheDocument();
 
     task = {
@@ -1209,7 +1403,7 @@ describe("TargetsPage", () => {
     await act(async () => invalidateTasks?.(beaconRef));
 
     expect(await screen.findByText("/opt/sliver")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Select a task" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "No task output" })).not.toBeInTheDocument();
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(3));
   });
 
@@ -1273,12 +1467,347 @@ describe("TargetsPage", () => {
 
     await user.click(await screen.findByRole("row", { name: /task-race-1/i }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
     summary = completed;
     await act(async () => invalidateTasks?.(beaconRef));
     firstDetail.resolve({ ok: true, value: pending });
 
     expect(await screen.findByText("/srv/race-complete")).toBeInTheDocument();
     expect(getBeaconTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("automatically appends task outputs and keeps decoded history cached across catalog refreshes", async () => {
+    const user = userEvent.setup();
+    const first = beaconTaskDetail();
+    const second = beaconTaskDetail({
+      taskId: "task-output-2",
+      disposition: {
+        kind: "structured-detail",
+        title: "Working directory",
+        fields: [{ label: "Path", value: "/srv/appended-output" }],
+        truncated: false,
+      },
+    });
+    let listedTasks = [first];
+    let invalidateTasks: ((target: TargetRef) => void) | undefined;
+    const getBeaconTask = vi.fn().mockImplementation(async ({ taskId }) => ({
+      ok: true,
+      value: taskId === first.taskId ? first : second,
+    }));
+    const listBeaconTasks = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      value: { items: listedTasks, page: { limit: 100, total: listedTasks.length, truncated: false } },
+    }));
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks,
+      onBeaconTasksInvalidated: vi.fn((listener) => {
+        invalidateTasks = listener;
+        return vi.fn();
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: first.taskId }));
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const output = screen.getByRole("tabpanel", { name: "Task output" });
+    expect(await within(output).findByText("/srv/first-output")).toBeInTheDocument();
+    listedTasks = [second];
+    await act(async () => invalidateTasks?.(beaconRef));
+    expect(await within(output).findByText("/srv/appended-output")).toBeInTheDocument();
+    expect(within(output).getByText("/srv/first-output")).toBeInTheDocument();
+    expect(within(output).getAllByRole("article")).toHaveLength(2);
+    expect(getBeaconTask).toHaveBeenCalledTimes(2);
+    await act(async () => invalidateTasks?.(beaconRef));
+    await waitFor(() => expect(listBeaconTasks).toHaveBeenCalledTimes(3));
+    expect(getBeaconTask).toHaveBeenCalledTimes(2);
+    expect(within(output).queryByText("Origin")).not.toBeInTheDocument();
+    expect(within(output).queryByText("Created")).not.toBeInTheDocument();
+    expect(within(output).queryByText("Sent")).not.toBeInTheDocument();
+    expect(output.querySelector("dl")).toBeNull();
+  });
+
+  it("opens pending task status in output history and lets operators return to the queue", async () => {
+    const user = userEvent.setup();
+    const pending = beaconTaskDetail({ state: "pending", resultAvailable: false, cancellation: { available: true } });
+    delete pending.completedAt;
+    delete pending.disposition;
+    const getBeaconTask = vi.fn().mockResolvedValue({ ok: true, value: pending });
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: [pending], page: { limit: 100, total: 1, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const emptyOutput = screen.getByRole("tabpanel", { name: "Task output" });
+    expect(within(emptyOutput).getByRole("heading", { name: "No task output" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: pending.taskId }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    const output = screen.getByRole("tabpanel", { name: "Task output" });
+    expect(await within(output).findByText("Waiting for the beacon")).toBeInTheDocument();
+    expect(within(output).getByRole("button", { name: "Cancel task" })).toBeEnabled();
+    expect(screen.queryByRole("grid", { name: "Beacon task queue" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    expect(screen.getByRole("grid", { name: "Beacon task queue" })).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for the beacon")).not.toBeInTheDocument();
+  });
+
+  it("cancels an earlier pending output entry after inspecting another task", async () => {
+    const user = userEvent.setup();
+    const first = beaconTaskDetail({ state: "pending", resultAvailable: false, cancellation: { available: true } });
+    delete first.completedAt;
+    delete first.disposition;
+    const second = { ...first, taskId: "task-pending-2", description: "List processes" };
+    let currentFirst = first;
+    const cancelBeaconTask = vi.fn().mockImplementation(async () => {
+      currentFirst = { ...first, state: "canceled", cancellation: { available: false } };
+      return { ok: true, value: currentFirst };
+    });
+    installAPI({
+      cancelBeaconTask,
+      getBeaconTask: vi.fn().mockImplementation(async ({ taskId }) => ({
+        ok: true,
+        value: taskId === first.taskId ? currentFirst : second,
+      })),
+      listBeaconTasks: vi.fn().mockImplementation(async () => ({
+        ok: true,
+        value: { items: [currentFirst, second], page: { limit: 100, total: 2, truncated: false } },
+      })),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
+    const firstEntry = await screen.findByRole("article", { name: `Task output ${first.taskId}` });
+    expect(await within(firstEntry).findByRole("button", { name: "Cancel task" })).toBeEnabled();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(screen.getByRole("row", { name: /task-pending-2/i }));
+    const output = screen.getByRole("tabpanel", { name: "Task output" });
+    const secondEntry = within(output).getByRole("article", { name: `Task output ${second.taskId}` });
+    expect(await within(secondEntry).findByText("Waiting for the beacon")).toBeInTheDocument();
+    const currentFirstEntry = within(output).getByRole("article", { name: `Task output ${first.taskId}` });
+    await user.click(within(currentFirstEntry).getByRole("button", { name: "Cancel task" }));
+    await waitFor(() => expect(cancelBeaconTask).toHaveBeenCalledExactlyOnceWith({ taskId: first.taskId }));
+    expect(await within(currentFirstEntry).findByText("Canceled")).toBeInTheDocument();
+    expect(within(currentFirstEntry).queryByRole("button", { name: "Cancel task" })).not.toBeInTheDocument();
+    expect(within(secondEntry).getByText("Waiting for the beacon")).toBeInTheDocument();
+  });
+
+  it("opens the completed output entry while keeping other output history visible as details load", async () => {
+    const user = userEvent.setup();
+    const first = beaconTaskDetail();
+    const second = beaconTaskDetail({
+      taskId: "task-output-2",
+      disposition: {
+        kind: "structured-detail",
+        title: "Working directory",
+        fields: [{ label: "Path", value: "/srv/second-output" }],
+        truncated: false,
+      },
+    });
+    const secondDetail = deferred<Awaited<ReturnType<SliverDesktopAPI["getBeaconTask"]>>>();
+    const getBeaconTask = vi.fn().mockImplementation(({ taskId }) =>
+      taskId === first.taskId ? Promise.resolve({ ok: true, value: first }) : secondDetail.promise
+    );
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: [first, second], page: { limit: 100, total: 2, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Beacon task outputs" })).toBeInTheDocument();
+    const firstEntry = screen.getByRole("article", { name: `Task output ${first.taskId}` });
+    await waitFor(() => expect(firstEntry).toHaveFocus());
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(screen.getByRole("row", { name: /task-output-2/i }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    const loadingOutput = screen.getByRole("tabpanel", { name: "Task output" });
+    const secondEntry = within(loadingOutput).getByRole("article", { name: `Task output ${second.taskId}` });
+    expect(within(secondEntry).getByText("Loading task output…")).toBeInTheDocument();
+    expect(within(loadingOutput).getByText("/srv/first-output")).toBeInTheDocument();
+    await waitFor(() => expect(secondEntry).toHaveFocus());
+    await act(async () => secondDetail.resolve({ ok: true, value: second }));
+    expect(await within(loadingOutput).findByText("/srv/second-output")).toBeInTheDocument();
+    expect(within(loadingOutput).queryByText("Loading task output…")).not.toBeInTheDocument();
+    expect(within(loadingOutput).getByText("/srv/first-output")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    expect(screen.getByText("/srv/second-output")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    screen.getByRole("row", { name: /task-output-1/i }).focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getByRole("article", { name: `Task output ${first.taskId}` })).toHaveFocus());
+    expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
+    expect(getBeaconTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("isolates failed output entries and retries them without replacing successful history", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail();
+    const successful = beaconTaskDetail({
+      taskId: "task-successful-1",
+      disposition: {
+        kind: "structured-detail",
+        title: "Working directory",
+        fields: [{ label: "Path", value: "/srv/successful-history" }],
+        truncated: false,
+      },
+    });
+    let failedAttempts = 0;
+    const getBeaconTask = vi.fn().mockImplementation(async ({ taskId }) => {
+      if (taskId === successful.taskId) return { ok: true, value: successful };
+      failedAttempts += 1;
+      return failedAttempts === 1
+        ? { ok: false, error: "The task detail could not be fetched" }
+        : { ok: true, value: task };
+    });
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: [task, successful], page: { limit: 100, total: 2, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const output = screen.getByRole("tabpanel", { name: "Task output" });
+    const failedEntry = within(output).getByRole("article", { name: `Task output ${task.taskId}` });
+    expect(await within(failedEntry).findByRole("alert")).toHaveTextContent("The task detail could not be fetched");
+    expect(within(failedEntry).getByRole("button", { name: "Retry task output" })).toBeEnabled();
+    expect(await within(output).findByText("/srv/successful-history")).toBeInTheDocument();
+    expect(within(output).queryByText("Loading task output…")).not.toBeInTheDocument();
+    expect(within(output).queryByText("/srv/first-output")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(screen.getByRole("row", { name: /task-output-1/i }));
+    expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
+    expect(screen.getByText("/srv/successful-history")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    expect(getBeaconTask).toHaveBeenCalledTimes(3);
+  });
+
+  it.each(["button", "queue"] as const)("retries a decode-uncertain output through the %s without a new task revision", async (retry) => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail();
+    const uncertain = {
+      ...task,
+      error: "The task response could not be decoded yet",
+      errorKind: "decode-uncertain" as const,
+    };
+    delete uncertain.disposition;
+    const successful = beaconTaskDetail({
+      taskId: "task-stable-output",
+      disposition: {
+        kind: "structured-detail",
+        title: "Working directory",
+        fields: [{ label: "Path", value: "/srv/stable-output" }],
+        truncated: false,
+      },
+    });
+    let decodeAttempts = 0;
+    let invalidateTasks: ((target: TargetRef) => void) | undefined;
+    const getBeaconTask = vi.fn().mockImplementation(async ({ taskId }) => {
+      if (taskId === successful.taskId) return { ok: true, value: successful };
+      decodeAttempts += 1;
+      return { ok: true, value: decodeAttempts === 1 ? uncertain : task };
+    });
+    const listBeaconTasks = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      value: { items: [{ ...task }, { ...successful }], page: { limit: 100, total: 2, truncated: false } },
+    }));
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks,
+      onBeaconTasksInvalidated: vi.fn((listener) => {
+        invalidateTasks = listener;
+        return vi.fn();
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const entry = screen.getByRole("article", { name: `Task output ${task.taskId}` });
+    expect(await within(entry).findByRole("alert")).toHaveTextContent(uncertain.error);
+    expect(screen.getByText("/srv/stable-output")).toBeInTheDocument();
+    await act(async () => invalidateTasks?.(beaconRef));
+    await waitFor(() => expect(listBeaconTasks).toHaveBeenCalledTimes(2));
+    expect(getBeaconTask).toHaveBeenCalledTimes(2);
+
+    if (retry === "button") {
+      await user.click(within(entry).getByRole("button", { name: "Retry task output" }));
+    } else {
+      await user.click(screen.getByRole("tab", { name: "Task queue" }));
+      await user.click(screen.getByRole("row", { name: /task-output-1/i }));
+    }
+    const decodedEntry = screen.getByRole("article", { name: `Task output ${task.taskId}` });
+    expect(await within(decodedEntry).findByText("/srv/first-output")).toBeInTheDocument();
+    expect(within(decodedEntry).queryByRole("alert")).not.toBeInTheDocument();
+    expect(within(decodedEntry).queryByRole("button", { name: "Retry task output" })).not.toBeInTheDocument();
+    expect(screen.getByText("/srv/stable-output")).toBeInTheDocument();
+    expect(getBeaconTask).toHaveBeenCalledTimes(3);
+  });
+
+  it("resets task tabs on a beacon switch and ignores a previous beacon's pending output", async () => {
+    const user = userEvent.setup();
+    const first = beaconTaskDetail();
+    const second = beaconTaskDetail({
+      taskId: "task-nightly-1",
+      beaconId: secondBeacon.id,
+      disposition: {
+        kind: "structured-detail",
+        title: "Working directory",
+        fields: [{ label: "Path", value: "/srv/nightly-output" }],
+        truncated: false,
+      },
+    });
+    let listedTasks = [first];
+    const firstDetail = deferred<Awaited<ReturnType<SliverDesktopAPI["getBeaconTask"]>>>();
+    const getBeaconTask = vi.fn().mockImplementation(({ taskId }) =>
+      taskId === first.taskId ? firstDetail.promise : Promise.resolve({ ok: true, value: second })
+    );
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockImplementation(async () => ({
+        ok: true,
+        value: { items: listedTasks, page: { limit: 100, total: listedTasks.length, truncated: false } },
+      })),
+    });
+    const { rerender } = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={vi.fn()} />,
+    );
+    await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Loading task output…")).toBeInTheDocument();
+    listedTasks = [second];
+    rerender(<TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot("second")} onSnapshot={vi.fn()} />);
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByRole("row", { name: /task-nightly-1/i })).toBeInTheDocument();
+    await act(async () => firstDetail.resolve({ ok: true, value: first }));
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const output = screen.getByRole("tabpanel", { name: "Task output" });
+    expect(await within(output).findByText("/srv/nightly-output")).toBeInTheDocument();
+    expect(within(output).getAllByRole("article")).toHaveLength(1);
+    expect(within(output).queryByText("/srv/first-output")).not.toBeInTheDocument();
+    expect(within(output).queryByText("Loading task output…")).not.toBeInTheDocument();
   });
 
   it("configures a directory listing from the beacon command autocomplete", async () => {

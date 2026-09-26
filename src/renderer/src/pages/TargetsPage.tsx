@@ -199,6 +199,7 @@ export function TargetsPage({
   const [isLoadingTasks, setIsLoadingTasks] = useState(false);
   const [isLoadingMoreTasks, setIsLoadingMoreTasks] = useState(false);
   const [selectedTask, setSelectedTask] = useState<BeaconTaskDetail>();
+  const [tasksIdentity, setTasksIdentity] = useState<string>();
   const [selectedTaskIdentity, setSelectedTaskIdentity] = useState<string>();
   const [reviewPlan, setReviewPlan] = useState<TargetActionPlan>();
   const [actionResult, setActionResult] = useState<TargetActionExecutionResult>();
@@ -483,6 +484,7 @@ export function TargetsPage({
   const loadTasks = useCallback(async (cursor?: string) => {
     const append = cursor !== undefined;
     const expectedIncarnation = backendIncarnationRef.current;
+    const expectedTargetIdentity = activeIdentity;
     const requestSequence = ++tasksRequestSequence.current;
     if (active?.mode !== "beacon" || !dedicatedTargetIsCurrent) {
       setTasks([]);
@@ -514,7 +516,8 @@ export function TargetsPage({
       });
       if (
         requestSequence !== tasksRequestSequence.current ||
-        expectedIncarnation !== backendIncarnationRef.current
+        expectedIncarnation !== backendIncarnationRef.current ||
+        expectedTargetIdentity !== activeIdentityRef.current
       ) return;
       if (!result.ok || !result.value) {
         if (!append) {
@@ -524,6 +527,7 @@ export function TargetsPage({
         setTasksError(result.error ?? "Beacon tasks are unavailable");
         return;
       }
+      setTasksIdentity(`${expectedIncarnation}:${expectedTargetIdentity}`);
       setTasks((current) => append
         ? appendUnique(current, result.value.items, (task) => task.taskId)
         : result.value.items);
@@ -532,7 +536,8 @@ export function TargetsPage({
     } catch (error) {
       if (
         requestSequence !== tasksRequestSequence.current ||
-        expectedIncarnation !== backendIncarnationRef.current
+        expectedIncarnation !== backendIncarnationRef.current ||
+        expectedTargetIdentity !== activeIdentityRef.current
       ) return;
       if (!append) {
         setTasks([]);
@@ -542,7 +547,8 @@ export function TargetsPage({
     } finally {
       if (
         requestSequence === tasksRequestSequence.current &&
-        expectedIncarnation === backendIncarnationRef.current
+        expectedIncarnation === backendIncarnationRef.current &&
+        expectedTargetIdentity === activeIdentityRef.current
       ) {
         if (append) setIsLoadingMoreTasks(false);
         else setIsLoadingTasks(false);
@@ -550,11 +556,17 @@ export function TargetsPage({
     }
   }, [active?.id, active?.mode, activeIdentity, dedicatedTargetIsCurrent, taskReadCapability?.available, taskReadCapability?.reason?.message]);
 
-  const selectTaskDetail = useCallback((task: BeaconTaskSummary): void => {
+  const selectTaskDetail = useCallback(async (task: BeaconTaskSummary): Promise<boolean | undefined> => {
     const expectedTargetIdentity = activeIdentityRef.current;
     const expectedIncarnation = backendIncarnationRef.current;
     const requestSequence = ++taskDetailRequestSequence.current;
-    void openTaskDetail(
+    if (selectedTaskIdRef.current !== task.taskId) {
+      selectedTaskIdRef.current = task.taskId;
+      setSelectedTask(undefined);
+      selectedTaskIncarnationRef.current = undefined;
+      setSelectedTaskIdentity(undefined);
+    }
+    return openTaskDetail(
       task,
       (detail) => {
         selectedTaskIncarnationRef.current = expectedIncarnation;
@@ -568,7 +580,7 @@ export function TargetsPage({
     );
   }, []);
 
-  const cancelSelectedTask = useCallback(async (task: BeaconTaskDetail): Promise<void> => {
+  const cancelSelectedTask = useCallback(async (task: BeaconTaskDetail): Promise<BeaconTaskDetail | undefined> => {
     const expectedTargetIdentity = activeIdentityRef.current;
     const expectedIncarnation = backendIncarnationRef.current;
     try {
@@ -577,23 +589,25 @@ export function TargetsPage({
         expectedTargetIdentity === undefined ||
         expectedIncarnation !== backendIncarnationRef.current ||
         expectedTargetIdentity !== activeIdentityRef.current ||
-        selectedTaskIdRef.current !== task.taskId
+        (presentation !== "dedicated" && selectedTaskIdRef.current !== task.taskId)
       ) return;
       if (!result.ok || !result.value) {
         toast.danger("Could not cancel beacon task", { description: result.error });
         return;
       }
       const updated = { ...task, ...result.value };
-      setSelectedTask(updated);
+      if (presentation !== "dedicated") setSelectedTask(updated);
       setTasks((current) => current.map((item) => item.taskId === task.taskId ? updated : item));
+      return updated;
     } catch (error) {
       if (
         expectedIncarnation === backendIncarnationRef.current &&
         expectedTargetIdentity === activeIdentityRef.current &&
-        selectedTaskIdRef.current === task.taskId
+        (presentation === "dedicated" || selectedTaskIdRef.current === task.taskId)
       ) toast.danger("Could not cancel beacon task", { description: errorMessage(error) });
     }
-  }, []);
+    return undefined;
+  }, [presentation]);
 
   useEffect(() => {
     targetInventoryPageRequestSequence.current.session += 1;
@@ -680,6 +694,7 @@ export function TargetsPage({
     setOperationsPage(undefined);
     setOperationsError(undefined);
     setTasks([]);
+    setTasksIdentity(undefined);
     setTasksPage(undefined);
     setTasksError(undefined);
     setSelectedOperation(undefined);
@@ -718,6 +733,7 @@ export function TargetsPage({
   useEffect(() => {
     taskDetailRequestSequence.current += 1;
     setTasks([]);
+    setTasksIdentity(undefined);
     setTasksPage(undefined);
     setSelectedTask(undefined);
     selectedTaskIncarnationRef.current = undefined;
@@ -734,7 +750,7 @@ export function TargetsPage({
     const summary = tasks.find((task) => task.taskId === current.taskId);
     if (!summary) return;
     if (summary.state === current.state && summary.resultAvailable === current.resultAvailable) return;
-    selectTaskDetail(summary);
+    void selectTaskDetail(summary);
   }, [selectTaskDetail, selectedTask, tasks]);
 
   useEffect(() => {
@@ -1090,7 +1106,7 @@ export function TargetsPage({
   const taskExecutionCapability = capabilityFor(snapshot.targetContext.capabilities, "target.task.execute");
 
   return (
-    <section className="page-stack targets-page" data-presentation={presentation}>
+    <section className={`page-stack targets-page${isDedicatedBeacon ? " beacon-workspace" : ""}`} data-presentation={presentation}>
       {presentation === "catalog" ? <header className="page-heading targets-page__header">
         <div className="min-w-0">
           <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={pageIcon} /> {mode === "session" ? "Session" : "Beacon"} workspace</div>
@@ -1235,7 +1251,7 @@ export function TargetsPage({
         </section>
       </div> : isDedicatedBeacon ? (
         <>
-          <header aria-label="Beacon workspace navigation" className="flex min-w-0 items-center justify-between gap-3">
+          <header aria-label="Beacon workspace navigation" className="beacon-workspace__trail-frame flex min-w-0 items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               {onBack ? (
                 <Tooltip delay={250}>
@@ -1346,50 +1362,47 @@ export function TargetsPage({
               </Tooltip>
             ) : null}
           </header>
-          <BeaconWorkspaceHeader beacon={active} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
-            {targetDetail}
+          <BeaconWorkspaceHeader beacon={active} details={targetDetail} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
+            <BeaconInteractionWorkspace
+              canQueue={taskExecutionCapability?.available === true}
+              error={tasksError}
+              isLoading={isLoadingTasks}
+              isLoadingMore={isLoadingMoreTasks}
+              page={tasksPage}
+              targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+              tasks={tasksIdentity === `${backendIncarnation}:${activeIdentity}` ? tasks : []}
+              unavailableReason={taskExecutionCapability?.reason?.message}
+              watchEnabled={snapshot.targetContext.beaconWatch}
+              onCancelTask={cancelSelectedTask}
+              onLoadMore={(cursor) => void loadTasks(cursor)}
+              onRefresh={() => void loadTasks()}
+              onSubmitted={(operation) => {
+                const submittedIncarnation = backendIncarnation;
+                if (submittedIncarnation !== backendIncarnationRef.current) return false;
+                mergeOperation(operation);
+                return true;
+              }}
+            />
+            <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="advanced-execution-heading">
+              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-semibold text-foreground" id="advanced-execution-heading">Advanced execution</h2>
+                  <p className="mt-0.5 text-xs text-muted">Process, payload, remote, and identity actions remain available when needed.</p>
+                </div>
+                <Button size="sm" variant="secondary" onPress={() => setShowDedicatedExecution((current) => !current)}>
+                  <FontAwesomeIcon aria-hidden icon={faBolt} /> {showDedicatedExecution ? "Hide advanced execution" : "Show advanced execution"}
+                </Button>
+              </div>
+              {showDedicatedExecution ? (
+                <div className="border-t border-separator p-4 sm:p-6">
+                  <TargetExecutionWorkbench
+                    expectedTarget={activeRef}
+                    targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+                  />
+                </div>
+              ) : null}
+            </section>
           </BeaconWorkspaceHeader>
-          <BeaconInteractionWorkspace
-            canQueue={taskExecutionCapability?.available === true}
-            error={tasksError}
-            isLoading={isLoadingTasks}
-            isLoadingMore={isLoadingMoreTasks}
-            page={tasksPage}
-            selectedTask={selectedTask}
-            targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
-            tasks={tasks}
-            unavailableReason={taskExecutionCapability?.reason?.message}
-            watchEnabled={snapshot.targetContext.beaconWatch}
-            onCancelTask={cancelSelectedTask}
-            onLoadMore={(cursor) => void loadTasks(cursor)}
-            onRefresh={() => void loadTasks()}
-            onSelectTask={selectTaskDetail}
-            onSubmitted={(operation) => {
-              const submittedIncarnation = backendIncarnation;
-              if (submittedIncarnation !== backendIncarnationRef.current) return false;
-              mergeOperation(operation);
-              return true;
-            }}
-          />
-          <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="advanced-execution-heading">
-            <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
-              <div className="min-w-0">
-                <h2 className="text-sm font-semibold text-foreground" id="advanced-execution-heading">Advanced execution</h2>
-                <p className="mt-0.5 text-xs text-muted">Process, payload, remote, and identity actions remain available when needed.</p>
-              </div>
-              <Button size="sm" variant="secondary" onPress={() => setShowDedicatedExecution((current) => !current)}>
-                <FontAwesomeIcon aria-hidden icon={faBolt} /> {showDedicatedExecution ? "Hide advanced execution" : "Show advanced execution"}
-              </Button>
-            </div>
-            {showDedicatedExecution ? (
-              <div className="border-t border-separator p-4 sm:p-6">
-                <TargetExecutionWorkbench
-                  expectedTarget={activeRef}
-                  targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
-                />
-              </div>
-            ) : null}
-          </section>
         </>
       ) : targetDetail}
 
@@ -2790,18 +2803,20 @@ async function openTaskDetail(
   task: BeaconTaskSummary,
   setTask: (task: BeaconTaskDetail) => void,
   isCurrent: () => boolean,
-): Promise<void> {
+): Promise<boolean | undefined> {
   try {
     const result = await window.sliver.getBeaconTask({ taskId: task.taskId });
-    if (!isCurrent()) return;
+    if (!isCurrent()) return undefined;
     if (!result.ok || !result.value) {
       toast.danger("Could not load beacon task", { description: result.error });
-      return;
+      return false;
     }
     setTask(result.value);
+    return true;
   } catch (error) {
-    if (!isCurrent()) return;
+    if (!isCurrent()) return undefined;
     toast.danger("Could not load beacon task", { description: errorMessage(error) });
+    return false;
   }
 }
 

@@ -22,7 +22,9 @@ import {
   Label,
   ListBox,
   SearchField,
+  ScrollShadow,
   Switch,
+  Tabs,
   Tooltip,
   toast,
   useFilter,
@@ -42,6 +44,7 @@ import type {
 } from "../../../shared/operation-contracts";
 import { Field } from "../components/FormControls";
 import { formatTimestamp, taskStateColor } from "./target-page-model";
+import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 
 export const BEACON_INTERACTION_COMMAND_IDS = [
   "beacon.filesystem.pwd",
@@ -106,12 +109,10 @@ export interface BeaconInteractionWorkspaceProps {
   isLoading: boolean;
   isLoadingMore: boolean;
   watchEnabled: boolean;
-  selectedTask: BeaconTaskDetail | undefined;
   onSubmitted: (operation: TargetOperationRecord) => boolean;
   onRefresh: () => void;
   onLoadMore: (cursor: string) => void;
-  onSelectTask: (task: BeaconTaskSummary) => void;
-  onCancelTask: (task: BeaconTaskDetail) => Promise<void>;
+  onCancelTask: (task: BeaconTaskDetail) => Promise<BeaconTaskDetail | undefined>;
 }
 
 export function BeaconInteractionWorkspace({
@@ -124,11 +125,9 @@ export function BeaconInteractionWorkspace({
   isLoading,
   isLoadingMore,
   watchEnabled,
-  selectedTask,
   onSubmitted,
   onRefresh,
   onLoadMore,
-  onSelectTask,
   onCancelTask,
 }: BeaconInteractionWorkspaceProps): React.JSX.Element {
   const [commandId, setCommandId] = useState<BeaconInteractionCommandId>("beacon.filesystem.pwd");
@@ -136,10 +135,14 @@ export function BeaconInteractionWorkspace({
   const [fullInfo, setFullInfo] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [isCanceling, setIsCanceling] = useState(false);
+  const [cancelingTaskIds, setCancelingTaskIds] = useState<Set<string>>(() => new Set());
   const [queuedTaskId, setQueuedTaskId] = useState<string>();
+  const [taskView, setTaskView] = useState("queue");
+  const [outputJump, setOutputJump] = useState<{ taskId: string; sequence: number }>();
+  const jumpSequence = useRef(0);
   const identityRef = useRef(targetIdentity);
   identityRef.current = targetIdentity;
+  const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks);
   const { contains } = useFilter({ sensitivity: "base" });
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
 
@@ -149,17 +152,27 @@ export function BeaconInteractionWorkspace({
     setFullInfo(false);
     setSubmitError(undefined);
     setIsSubmitting(false);
-    setIsCanceling(false);
+    setCancelingTaskIds(new Set());
     setQueuedTaskId(undefined);
+    setTaskView("queue");
+    setOutputJump(undefined);
   }, [targetIdentity]);
+
+  const selectTask = (task: BeaconTaskSummary): void => {
+    setQueuedTaskId(undefined);
+    loadOutput(task, outputs.some((entry) => entry.task.taskId === task.taskId &&
+      (entry.error !== undefined || entry.detail?.errorKind === "decode-uncertain")));
+    setTaskView("output");
+    setOutputJump({ taskId: task.taskId, sequence: ++jumpSequence.current });
+  };
 
   useEffect(() => {
     if (!queuedTaskId) return;
     const queuedTask = tasks.find((task) => task.taskId === queuedTaskId);
     if (!queuedTask) return;
     setQueuedTaskId(undefined);
-    onSelectTask(queuedTask);
-  }, [onSelectTask, queuedTaskId, tasks]);
+    loadOutput(queuedTask);
+  }, [queuedTaskId, loadOutput, tasks]);
 
   const submit = async (): Promise<void> => {
     const submittedIdentity = targetIdentity;
@@ -189,6 +202,7 @@ export function BeaconInteractionWorkspace({
         return;
       }
       setQueuedTaskId(result.value.taskId);
+      setTaskView("queue");
       toast.success("Task queued", {
         description: `${command.label} will run after the beacon checks in.`,
       });
@@ -200,13 +214,20 @@ export function BeaconInteractionWorkspace({
     }
   };
 
-  const cancel = async (): Promise<void> => {
-    if (!selectedTask) return;
-    setIsCanceling(true);
+  const cancel = async (task: BeaconTaskDetail): Promise<void> => {
+    const expectedIdentity = targetIdentity;
+    setCancelingTaskIds((current) => new Set(current).add(task.taskId));
     try {
-      await onCancelTask(selectedTask);
+      const updated = await onCancelTask(task);
+      if (updated && identityRef.current === expectedIdentity) loadOutput(updated, true);
     } finally {
-      if (identityRef.current === targetIdentity) setIsCanceling(false);
+      if (identityRef.current === expectedIdentity) {
+        setCancelingTaskIds((current) => {
+          const next = new Set(current);
+          next.delete(task.taskId);
+          return next;
+        });
+      }
     }
   };
 
@@ -317,26 +338,44 @@ export function BeaconInteractionWorkspace({
             <FontAwesomeIcon aria-hidden icon={faListCheck} /> Queue task
           </Button>
         </div>
-
-        <BeaconTaskQueue
-          error={error}
-          isLoading={isLoading}
-          isLoadingMore={isLoadingMore}
-          page={page}
-          selectedTaskId={selectedTask?.taskId}
-          tasks={tasks}
-          watchEnabled={watchEnabled}
-          onLoadMore={onLoadMore}
-          onRefresh={onRefresh}
-          onSelectTask={onSelectTask}
-        />
       </section>
 
-      <BeaconCompletionPane
-        isCanceling={isCanceling}
-        task={selectedTask}
-        onCancel={() => void cancel()}
-      />
+      <section aria-label="Beacon tasks" className="beacon-task-views min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface">
+        <Tabs className="min-w-0 gap-0" selectedKey={taskView} onSelectionChange={(key) => setTaskView(String(key))}>
+          <Tabs.ListContainer className="mx-5 my-4 w-fit max-w-full">
+            <Tabs.List aria-label="Beacon task views">
+              <Tabs.Tab className="whitespace-nowrap" id="queue">Task queue<Tabs.Indicator /></Tabs.Tab>
+              <Tabs.Tab className="whitespace-nowrap" id="output">Task output<Tabs.Indicator /></Tabs.Tab>
+            </Tabs.List>
+          </Tabs.ListContainer>
+          <Tabs.Panel className="min-w-0 p-0" id="queue">
+            <BeaconTaskQueue
+              error={error}
+              isLoading={isLoading}
+              isLoadingMore={isLoadingMore}
+              page={page}
+              tasks={tasks}
+              watchEnabled={watchEnabled}
+              onLoadMore={onLoadMore}
+              onRefresh={onRefresh}
+              onSelectTask={selectTask}
+            />
+          </Tabs.Panel>
+          <Tabs.Panel className="min-w-0 p-0" id="output">
+            <BeaconTaskOutputList
+              cancelingTaskIds={cancelingTaskIds}
+              error={error}
+              isLoadingMore={isLoadingMore}
+              jump={outputJump}
+              outputs={outputs}
+              page={page}
+              onCancel={(task) => void cancel(task)}
+              onLoadMore={onLoadMore}
+              onRetry={(task) => loadOutput(task, true)}
+            />
+          </Tabs.Panel>
+        </Tabs>
+      </section>
     </div>
   );
 }
@@ -348,7 +387,6 @@ function BeaconTaskQueue({
   isLoading,
   isLoadingMore,
   watchEnabled,
-  selectedTaskId,
   onLoadMore,
   onRefresh,
   onSelectTask,
@@ -359,7 +397,6 @@ function BeaconTaskQueue({
   isLoading: boolean;
   isLoadingMore: boolean;
   watchEnabled: boolean;
-  selectedTaskId: string | undefined;
   onLoadMore: (cursor: string) => void;
   onRefresh: () => void;
   onSelectTask: (task: BeaconTaskSummary) => void;
@@ -403,14 +440,11 @@ function BeaconTaskQueue({
   const total = Math.max(page?.total ?? tasks.length, tasks.length);
 
   return (
-    <div className="border-t border-separator" aria-labelledby="beacon-queue-heading">
+    <div className="border-t border-separator">
       <div className="flex items-center justify-between gap-3 px-5 py-4">
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold text-foreground" id="beacon-queue-heading">Task queue</h3>
-            {watchEnabled ? <Chip color="accent" size="sm" variant="soft">Watching</Chip> : null}
-          </div>
-          <p className="mt-0.5 text-xs text-muted">Pending and completed tasks for this exact beacon.</p>
+          <p className="text-xs text-muted">Pending and completed tasks for this beacon.</p>
+          {watchEnabled ? <Chip className="mt-2" color="accent" size="sm" variant="soft">Watching</Chip> : null}
         </div>
         <Tooltip delay={250}>
           <Button aria-label="Refresh task queue" isDisabled={isLoadingMore} isIconOnly isPending={isLoading} size="sm" variant="ghost" onPress={onRefresh}>
@@ -426,18 +460,9 @@ function BeaconTaskQueue({
         contentClassName="min-w-[650px]"
         data={tasks}
         getRowId={(task) => task.taskId}
-        selectedKeys={selectedTaskId ? new Set([selectedTaskId]) : new Set()}
-        selectionBehavior="replace"
-        selectionMode="single"
         scrollContainerClassName="max-h-[360px] overflow-auto"
         variant="secondary"
         onRowAction={(key) => {
-          const task = tasks.find((item) => item.taskId === String(key));
-          if (task) onSelectTask(task);
-        }}
-        onSelectionChange={(selection) => {
-          if (selection === "all") return;
-          const key = [...selection][0];
           const task = tasks.find((item) => item.taskId === String(key));
           if (task) onSelectTask(task);
         }}
@@ -446,7 +471,7 @@ function BeaconTaskQueue({
             <EmptyState.Media><FontAwesomeIcon aria-hidden icon={faClockRotateLeft} /></EmptyState.Media>
             <EmptyState.Content>
               <EmptyState.Title>No tasks queued</EmptyState.Title>
-              <EmptyState.Description>Choose a command above to start an asynchronous beacon task.</EmptyState.Description>
+              <EmptyState.Description>Choose a command to queue a beacon task.</EmptyState.Description>
             </EmptyState.Content>
           </EmptyState>
         )}
@@ -465,47 +490,139 @@ function BeaconTaskQueue({
   );
 }
 
-function BeaconCompletionPane({
-  task,
-  isCanceling,
+function BeaconTaskOutputList({
+  outputs,
+  jump,
+  cancelingTaskIds,
+  error,
+  page,
+  isLoadingMore,
   onCancel,
+  onRetry,
+  onLoadMore,
 }: {
-  task: BeaconTaskDetail | undefined;
-  isCanceling: boolean;
-  onCancel: () => void;
+  outputs: BeaconTaskOutputEntry[];
+  jump: { taskId: string; sequence: number } | undefined;
+  cancelingTaskIds: Set<string>;
+  error: string | undefined;
+  page: PageSummary | undefined;
+  isLoadingMore: boolean;
+  onCancel: (task: BeaconTaskDetail) => void;
+  onRetry: (task: BeaconTaskSummary) => void;
+  onLoadMore: (cursor: string) => void;
 }): React.JSX.Element {
-  return (
-    <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface xl:sticky xl:top-0" aria-labelledby="beacon-completion-heading">
-      <div className="flex items-start justify-between gap-3 px-5 py-4">
-        <div className="min-w-0">
-          <h2 className="text-sm font-semibold text-foreground" id="beacon-completion-heading">Task completion</h2>
-          <p className="mt-0.5 text-xs leading-relaxed text-muted">Select a queued task to inspect its latest decoded result.</p>
-        </div>
-        {task ? <Chip color={taskStateColor(task.state)} size="sm" variant="soft">{stateLabel(task.state)}</Chip> : null}
-      </div>
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const entryRefs = useRef(new Map<string, HTMLElement>());
+  const jumpIsLoading = outputs.find((entry) => entry.task.taskId === jump?.taskId)?.isLoading;
+  const nextCursor = page?.nextCursor;
 
-      {!task ? (
-        <EmptyState className="min-h-80 border-t border-separator px-6 py-12" size="sm">
+  useEffect(() => {
+    if (!jump) return;
+    const entry = entryRefs.current.get(jump.taskId);
+    const viewport = viewportRef.current;
+    if (!entry || !viewport) return;
+    entry.focus({ preventScroll: true });
+    viewport.scrollTop += entry.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 20;
+    const scrollport = viewport.closest(".app-content, .interaction-window__content");
+    if (!scrollport) return;
+    const summary = scrollport.querySelector('header[aria-label="Beacon summary"]');
+    const revealOutput = (): void => {
+      const viewportBounds = viewport.getBoundingClientRect();
+      const entryBounds = entry.getBoundingClientRect();
+      const scrollportBounds = scrollport.getBoundingClientRect();
+      const visibleTop = Math.max(scrollportBounds.top, summary?.getBoundingClientRect().bottom ?? 0) + 16;
+      const visibleBottom = scrollportBounds.bottom - 16;
+      const outputTop = Math.max(entryBounds.top, viewportBounds.top + 20);
+      const outputBottom = Math.min(entryBounds.bottom, viewportBounds.bottom - 20, outputTop + 240);
+      if (outputTop < visibleTop || outputBottom > visibleBottom) {
+        scrollport.scrollTop += outputTop - visibleTop;
+      }
+    };
+    revealOutput();
+    // Pinning the summary changes its bounds; remeasure after its scroll observer commits.
+    let frame = requestAnimationFrame(() => {
+      revealOutput();
+      frame = requestAnimationFrame(revealOutput);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [jump, jumpIsLoading]);
+
+  return (
+    <div className="border-t border-separator">
+      {error ? <InlineMessage tone="danger">{error}</InlineMessage> : null}
+      {outputs.length === 0 ? (
+        <EmptyState className="min-h-64 px-6 py-12" size="sm">
           <EmptyState.Media><FontAwesomeIcon aria-hidden icon={faListCheck} /></EmptyState.Media>
           <EmptyState.Content>
-            <EmptyState.Title>Select a task</EmptyState.Title>
-            <EmptyState.Description>Its status and task-specific completion UI will appear here.</EmptyState.Description>
+            <EmptyState.Title>No task output</EmptyState.Title>
+            <EmptyState.Description>Results will appear here as the beacon completes its tasks.</EmptyState.Description>
           </EmptyState.Content>
         </EmptyState>
       ) : (
-        <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-foreground">{task.description || operationResultTitle(task)}</p>
-            <p className="mt-1 truncate font-mono text-[11px] text-muted">{task.taskId}</p>
+        <ScrollShadow aria-label="Beacon task outputs" className="max-h-[520px] overflow-y-auto px-5 py-5" ref={viewportRef} role="region">
+          <div className="flex min-w-0 flex-col gap-5">
+            {outputs.map((output) => (
+              <article
+                aria-label={`Task output ${output.task.taskId}`}
+                className="min-w-0 rounded-xl border-b border-separator pb-5 outline-none last:border-b-0 last:pb-0 focus-visible:ring-2 focus-visible:ring-accent"
+                data-task-id={output.task.taskId}
+                key={output.task.taskId}
+                ref={(element) => {
+                  if (element) entryRefs.current.set(output.task.taskId, element);
+                  else entryRefs.current.delete(output.task.taskId);
+                }}
+                tabIndex={-1}
+              >
+                <BeaconTaskOutput
+                  isCanceling={cancelingTaskIds.has(output.task.taskId)}
+                  output={output}
+                  onCancel={onCancel}
+                  onRetry={() => onRetry(output.task)}
+                />
+              </article>
+            ))}
           </div>
-          <dl className="grid gap-3 rounded-2xl bg-default p-4 sm:grid-cols-2">
-            <ResultMeta label="Origin" value={ownershipLabel(task)} />
-            <ResultMeta label="Created" value={formatTimestamp(task.createdAt)} />
-            <ResultMeta label="Sent" value={formatTimestamp(task.sentAt)} />
-            <ResultMeta label="Completed" value={formatTimestamp(task.completedAt)} />
-          </dl>
+        </ScrollShadow>
+      )}
+      {nextCursor ? (
+        <div className="flex justify-end border-t border-separator px-5 py-3">
+          <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore(nextCursor)}>
+            Load more tasks
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
+function BeaconTaskOutput({ output, isCanceling, onCancel, onRetry }: {
+  output: BeaconTaskOutputEntry;
+  isCanceling: boolean;
+  onCancel: (task: BeaconTaskDetail) => void;
+  onRetry: () => void;
+}): React.JSX.Element {
+  const task = output.detail;
+  return (
+    <div className="flex min-w-0 flex-col gap-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-semibold text-foreground">{output.task.description || (task ? operationResultTitle(task) : "Beacon task")}</h3>
+          <p className="mt-1 truncate font-mono text-[11px] text-muted" title={output.task.taskId}>{output.task.taskId}</p>
+        </div>
+        <Chip color={taskStateColor(task?.state ?? output.task.state)} size="sm" variant="soft">{stateLabel(task?.state ?? output.task.state)}</Chip>
+      </div>
+      {output.isLoading ? <p className="text-xs text-muted" role="status">Loading task output…</p> : null}
+      {output.error ? (
+        <div className="flex flex-col gap-3">
+          <InlineMessage tone="danger">{output.error}</InlineMessage>
+          <Button className="self-start" size="sm" variant="tertiary" onPress={onRetry}>Retry task output</Button>
+        </div>
+      ) : task && !output.isLoading ? (
+        <>
           {task.error ? <InlineMessage tone="danger">{task.error}</InlineMessage> : null}
+          {task.errorKind === "decode-uncertain" ? (
+            <Button className="self-start" size="sm" variant="tertiary" onPress={onRetry}>Retry task output</Button>
+          ) : null}
           {task.state === "pending" || task.state === "sent" ? (
             <div className="rounded-2xl bg-default px-4 py-5" role="status">
               <p className="text-sm font-medium text-foreground">Waiting for the beacon</p>
@@ -520,14 +637,14 @@ function BeaconCompletionPane({
               {!task.cancellation.available && task.cancellation.reason ? (
                 <p className="max-w-sm text-xs leading-relaxed text-muted">{task.cancellation.reason}</p>
               ) : <span />}
-              <Button isDisabled={!task.cancellation.available} isPending={isCanceling} size="sm" variant="danger-soft" onPress={onCancel}>
+              <Button isDisabled={!task.cancellation.available} isPending={isCanceling} size="sm" variant="danger-soft" onPress={() => onCancel(task)}>
                 <FontAwesomeIcon aria-hidden icon={faBan} /> Cancel task
               </Button>
             </div>
           ) : null}
-        </div>
-      )}
-    </section>
+        </>
+      ) : null}
+    </div>
   );
 }
 

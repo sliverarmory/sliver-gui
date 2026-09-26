@@ -999,6 +999,79 @@
   border-radius: 0;
 }
 
+/* Beacon summaries follow the session chrome while details and tasks remain
+   in the surrounding scrollport, including interaction popout windows. */
+.app-content:has(> .beacon-workspace),
+.interaction-window__content:has(> .beacon-workspace) {
+  padding: 0;
+}
+
+.app-content > .beacon-workspace,
+.interaction-window__content > .beacon-workspace {
+  --beacon-workspace-gutter: 1.25rem;
+
+  max-width: none;
+  margin-inline: 0;
+  gap: 0;
+  padding-top: var(--auxiliary-window-content-top, 2rem);
+}
+
+.beacon-workspace :is(.beacon-workspace__trail-frame, .beacon-workspace__summary-frame, .beacon-workspace__body-frame) {
+  width: 100%;
+  padding-inline: var(--beacon-workspace-gutter);
+}
+
+.beacon-workspace__trail-frame,
+.beacon-workspace__sticky {
+  margin-bottom: 1.5rem;
+}
+
+.beacon-workspace__body-frame {
+  padding-bottom: 5rem;
+}
+
+.beacon-workspace__scroll-marker {
+  height: 1px;
+  margin-bottom: -1px;
+  pointer-events: none;
+}
+
+.beacon-workspace__sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.beacon-workspace__sticky[data-stuck="true"] {
+  background: var(--color-background);
+}
+
+.beacon-workspace__sticky::after {
+  position: absolute;
+  inset: 100% 0 auto;
+  height: 1.5rem;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-background) 90%, transparent),
+    transparent
+  );
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+}
+
+.beacon-workspace__sticky[data-stuck="true"]::after {
+  opacity: 1;
+}
+
+.beacon-workspace__sticky[data-stuck="true"] .beacon-workspace__summary-frame {
+  padding-inline: 0;
+}
+
+.beacon-workspace__sticky[data-stuck="true"] .beacon-workspace__summary {
+  border-radius: 0;
+}
+
 /* Execution, Registry, Files, Processes, and Shell use the remaining session viewport, with scrolling
    contained inside their navigation and content panes. */
 .session-workspace:is([data-selected-panel="execution"], [data-selected-panel="registry"], [data-selected-panel="files"], [data-selected-panel="processes"], [data-selected-panel="terminal"]) {
@@ -1078,6 +1151,13 @@ html.dark .session-processes-grid.table-root--secondary {
 }
 
 @media (max-width: 640px) {
+  .app-content > .beacon-workspace,
+  .interaction-window__content > .beacon-workspace {
+    --beacon-workspace-gutter: 1rem;
+
+    padding-top: var(--auxiliary-window-content-top, 1.5rem);
+  }
+
   .session-workspace[data-presentation="embedded"] {
     --session-workspace-gutter: 1rem;
 

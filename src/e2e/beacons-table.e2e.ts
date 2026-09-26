@@ -128,11 +128,13 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     assert.equal(await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(), 0, "the beacon workspace must use compact breadcrumbs instead of a large header");
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
     await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
-    await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
+    await page.getByRole("tablist", { name: "Beacon task views", exact: true }).waitFor();
+    assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true");
     assert.equal(await table.count(), 0, "the beacon interaction must replace the catalog");
     assert.equal(await page.getByRole("region", { name: "Managed Shells", exact: true }).count(), 0);
     await assertBeaconWorkspaceHeader(application, page, screenshotDirectory, "beacon-header", 960);
     await assertBeaconBreadcrumbSwitching(application, page, screenshotDirectory);
+    await assertBeaconTaskViews(application, page, screenshotDirectory);
     await assertBeaconPopoutSwitching(application, page, screenshotDirectory, rendererErrors);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-interaction.png") });
 
@@ -246,10 +248,15 @@ async function assertBeaconBreadcrumbSwitching(
   assert.deepEqual(await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]), beforeCurrent,
     "choosing the current beacon must leave the backend selection untouched");
 
+  await page.getByRole("button", { name: "Beacon details", exact: true }).click();
+  await page.getByRole("complementary", { name: "Beacon details", exact: true }).waitFor();
+  await page.screenshot({ animations: "disabled" });
   await trigger.click();
+  await scrollBeaconWorkspaceToBottom(page);
   await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).click();
   await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "m2-beacon", exact: true }).waitFor();
+  await assertBeaconWorkspaceScrollReset(page);
   await queue.getByText("No tasks queued", { exact: true }).waitFor();
   assert.equal(await page.getByRole("heading", { name: "m1-beacon", exact: true }).count(), 0,
     "switching must replace the beacon detail as well as the breadcrumb");
@@ -273,6 +280,12 @@ async function assertBeaconBreadcrumbSwitching(
   assert.equal(queuedTasks.length, 1);
   assert.equal(queuedTasks[0]?.beaconId, "m2_beacon", "task submission must use the newly selected beacon");
   assert.equal(queuedTasks[0]?.state, "pending");
+  assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true",
+    "newly queued pending tasks must leave the queue tab selected");
+  await queue.getByRole("row").filter({ hasText: queuedTasks[0]!.id }).click();
+  assert.equal(await page.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true",
+    "choosing a pending task must jump to its status in output history");
+  await assertBeaconOutputFocus(page, queuedTasks[0]!.id);
   await page.getByText("Waiting for the beacon", { exact: true }).waitFor();
 
   await trigger.click();
@@ -280,7 +293,11 @@ async function assertBeaconBreadcrumbSwitching(
   await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
   await queue.getByText("No tasks queued", { exact: true }).waitFor();
-  await page.getByRole("heading", { name: "Select a task", exact: true }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true",
+    "switching the exact beacon must restore the default queue tab");
+  await page.getByRole("tab", { name: "Task output", exact: true }).click();
+  await page.getByRole("heading", { name: "No task output", exact: true }).waitFor();
+  await page.getByRole("tab", { name: "Task queue", exact: true }).click();
   assert.equal(await queue.getByText(queuedTasks[0]!.id, { exact: true }).count(), 0,
     "switching back must clear the other beacon's task queue and completion selection");
 }
@@ -309,12 +326,32 @@ async function assertBeaconPopoutSwitching(
     const nativeWindow = await application.browserWindow(popout);
     assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m1-beacon");
     await assertBeaconWorkspaceHeader(application, popout, screenshotDirectory, "beacon-popout-header", 840);
+    const taskTabs = popout.getByRole("tablist", { name: "Beacon task views", exact: true });
+    const pwdTask = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks
+      .find((task) => task.beaconId === "m1_beacon" && task.description === "PwdReq" && task.state === "completed"));
+    assert.ok(pwdTask);
+    await popout.getByRole("grid", { name: "Beacon task queue", exact: true })
+      .getByRole("row").filter({ hasText: pwdTask.id }).click();
+    const output = popout.getByRole("tabpanel", { name: "Task output", exact: true });
+    await assertBeaconOutputFocus(popout, pwdTask.id);
+    await output.getByRole("article", { name: `Task output ${pwdTask.id}`, exact: true })
+      .getByText("/Users/e2e/workspace", { exact: true }).waitFor();
+    assert.equal(await output.locator("article[data-task-id]").count(), 3, "popouts must load the full completed output history");
+    assert.equal(await taskTabs.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true");
+    await popout.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-popout-task-output.png") });
+    await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).click();
+    await popout.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-popout-task-queue.png") });
 
+    await popout.getByRole("button", { name: "Beacon details", exact: true }).click();
+    await popout.getByRole("complementary", { name: "Beacon details", exact: true }).waitFor();
+    await popout.screenshot({ animations: "disabled" });
     await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await scrollBeaconWorkspaceToBottom(popout);
     const menu = popout.getByRole("menu", { name: "Beacons, switch beacon", exact: true });
     await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).click();
     await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
     await popout.getByRole("heading", { name: "m2-beacon", exact: true }).waitFor();
+    await assertBeaconWorkspaceScrollReset(popout);
     assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m2-beacon",
       "switching the popout beacon must update its native window title");
     await popout.getByRole("grid", { name: "Beacon task queue", exact: true }).getByText("Pending", { exact: true }).waitFor();
@@ -333,6 +370,244 @@ async function assertBeaconPopoutSwitching(
   }
 }
 
+async function assertBeaconTaskViews(
+  application: ElectronApplication,
+  page: Page,
+  screenshotDirectory: string,
+): Promise<void> {
+  const tabs = page.getByRole("tablist", { name: "Beacon task views", exact: true });
+  const queueTab = tabs.getByRole("tab", { name: "Task queue", exact: true });
+  const outputTab = tabs.getByRole("tab", { name: "Task output", exact: true });
+  const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+  const existingIds = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+  await application.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  await page.getByRole("button", { name: "Queue task", exact: true }).click();
+  await queue.getByText("Pending", { exact: true }).waitFor();
+  const newTask = await application.evaluate((_electron, previousIds) => (
+    globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((task) => !previousIds.includes(task.id))
+  ), existingIds);
+  assert.ok(newTask && newTask.beaconId === "m1_beacon" && newTask.state === "pending");
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true", "submission must preserve the queue tab");
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-queue-pending.png") });
+
+  await outputTab.click();
+  const output = page.getByRole("tabpanel", { name: "Task output", exact: true });
+  await output.getByText("Waiting for the beacon", { exact: true }).waitFor();
+  await output.getByRole("button", { name: "Cancel task", exact: true }).waitFor();
+  await queueTab.click();
+  await application.evaluate((_electron, taskId) => {
+    globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, true);
+  }, newTask.id);
+  const completedRow = queue.getByRole("row").filter({ hasText: newTask.id });
+  await completedRow.getByText("Completed", { exact: true }).waitFor();
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true",
+    "a task finishing in the background must keep the queue tab selected");
+  for (const label of ["Origin", "Created"]) {
+    await queue.getByRole("columnheader", { name: label, exact: true }).waitFor();
+  }
+  await assertBeaconTaskColumns(page);
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-queue-completed.png") });
+
+  await completedRow.click();
+  await output.waitFor();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "clicking a completed task must open its output tab");
+  await assertBeaconOutputFocus(page, newTask.id);
+  const pwdOutput = output.getByRole("article", { name: `Task output ${newTask.id}`, exact: true });
+  await pwdOutput.getByText("/Users/e2e/workspace", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Task completion", exact: true }).count(), 0);
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-output.png") });
+
+  await queueTab.click();
+  await completedRow.click();
+  await output.waitFor();
+  await assertBeaconOutputFocus(page, newTask.id);
+  await queueTab.click();
+
+  const completedIds = [newTask.id];
+  for (const commandName of ["List directory", "Network interfaces"]) {
+    await page.locator('[data-slot="autocomplete-trigger"]:visible').click();
+    await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill(commandName);
+    await page.getByRole("option", { name: new RegExp(commandName, "iu") }).click();
+    const previousIds = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+    await application.evaluate(() => {
+      globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+    });
+    await page.getByRole("button", { name: "Queue task", exact: true }).click();
+    await queue.getByText("Pending", { exact: true }).waitFor();
+    const task = await application.evaluate((_electron, ids) => (
+      globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => !ids.includes(candidate.id))
+    ), previousIds);
+    assert.ok(task && task.beaconId === "m1_beacon");
+    completedIds.push(task.id);
+    await application.evaluate((_electron, taskId) => {
+      globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId, true);
+    }, task.id);
+    await queue.getByRole("row").filter({ hasText: task.id }).getByText("Completed", { exact: true }).waitFor();
+    assert.equal(await queueTab.getAttribute("aria-selected"), "true");
+  }
+
+  // Open the history manually: completed outputs must load together without
+  // requiring a queue click for each result.
+  await outputTab.click();
+  for (const taskId of completedIds) {
+    await output.getByRole("article", { name: `Task output ${taskId}`, exact: true }).waitFor();
+  }
+  await pwdOutput.getByText("/Users/e2e/workspace", { exact: true }).waitFor();
+  await output.getByRole("article", { name: `Task output ${completedIds[1]}`, exact: true })
+    .getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
+  await output.getByRole("article", { name: `Task output ${completedIds[2]}`, exact: true })
+    .getByText("en0", { exact: true }).waitFor();
+  assert.equal(await output.locator("article[data-task-id]").count(), 3, "the output tab must retain every completed result");
+  assert.equal(await output.locator("dt").filter({ hasText: /^(Origin|Created|Sent|Completed)$/u }).count(), 0,
+    "output history must omit the old task metadata block");
+  const history = output.locator('[aria-label="Beacon task outputs"]');
+  assert.equal(await history.getAttribute("data-slot"), "scroll-shadow");
+  const scrollRange = await history.evaluate((element) => ({
+    maximum: element.scrollHeight - element.clientHeight,
+    overflowY: element.ownerDocument.defaultView!.getComputedStyle(element).overflowY,
+  }));
+  assert.ok(scrollRange.maximum > 0 && scrollRange.overflowY === "auto",
+    "the completed result list must scroll within its bounded output history");
+  await history.evaluate((element) => { element.scrollTop = 0; });
+  const visibleOutputs = await history.evaluate((element) => {
+    const viewport = element.getBoundingClientRect();
+    return Array.from(element.querySelectorAll("article[data-task-id]") as ArrayLike<typeof element>)
+      .filter((article) => {
+        const bounds = article.getBoundingClientRect();
+        return bounds.top < viewport.bottom && bounds.bottom > viewport.top;
+      }).length;
+  });
+  assert.ok(visibleOutputs >= 2, "the output history must show multiple completed results together");
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-output-history.png") });
+
+  const historyIds = await history.locator("article[data-task-id]")
+    .evaluateAll((articles) => articles.map((article) => article.getAttribute("data-task-id")!));
+  const firstId = historyIds[0]!;
+  const lastId = historyIds.at(-1)!;
+  assert.notEqual(firstId, lastId);
+  const positions: number[] = [];
+  for (const taskId of [firstId, lastId]) {
+    await queueTab.click();
+    await queue.getByRole("row").filter({ hasText: taskId }).click();
+    await assertBeaconOutputFocus(page, taskId);
+    positions.push(await history.evaluate((element) => element.scrollTop));
+  }
+  assert.ok(positions[1]! > positions[0]!, "queue clicks must scroll to the matching early or late history entry");
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-output-history-jump.png") });
+  await queueTab.click();
+  await assertNarrowBeaconOutputJump(application, page, newTask.id, join(screenshotDirectory, "beacon-task-output-narrow-jump.png"));
+}
+
+async function assertNarrowBeaconOutputJump(
+  application: ElectronApplication,
+  page: Page,
+  taskId: string,
+  screenshotPath: string,
+): Promise<void> {
+  const nativeWindow = await application.browserWindow(page);
+  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  const viewport = page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)");
+  const queueTab = page.getByRole("tab", { name: "Task queue", exact: true });
+  try {
+    await nativeWindow.evaluate((window) => window.setSize(960, 768));
+    await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth === 960);
+    const row = page.getByRole("grid", { name: "Beacon task queue", exact: true })
+      .getByRole("row").filter({ hasText: taskId });
+    const focused = await row.evaluate((element) => {
+      element.focus({ preventScroll: true });
+      return element.ownerDocument.activeElement === element;
+    });
+    assert.equal(focused, true, "the queue entry must support keyboard activation");
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+    const [rowBefore, viewportBefore] = await Promise.all([row.boundingBox(), viewport.boundingBox()]);
+    assert.ok(rowBefore && viewportBefore && rowBefore.y >= viewportBefore.y + viewportBefore.height,
+      "the narrow fixture must place the focused queue entry below the outer viewport");
+
+    // Native keyboard activation leaves scrolling to the workspace; an automated
+    // pointer click would scroll the queue row into view before the action.
+    await page.keyboard.press("Enter");
+    await assertBeaconOutputFocus(page, taskId);
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+    const path = page.getByRole("article", { name: `Task output ${taskId}`, exact: true })
+      .getByText("/Users/e2e/workspace", { exact: true });
+    const pathBounds = await path.boundingBox();
+    const visibleBounds = await viewport.evaluate((element) => {
+      const viewportBounds = element.getBoundingClientRect();
+      const summaryBounds = element.querySelector('header[aria-label="Beacon summary"]')!.getBoundingClientRect();
+      const history = element.querySelector('[aria-label="Beacon task outputs"]')!;
+      const historyBounds = history.getBoundingClientRect();
+      return {
+        top: Math.max(viewportBounds.top, summaryBounds.bottom),
+        bottom: viewportBounds.top + element.clientHeight,
+        scrollTop: element.scrollTop,
+        maximumScroll: element.scrollHeight - element.clientHeight,
+        history: { top: historyBounds.top, bottom: historyBounds.bottom, scrollTop: history.scrollTop },
+      };
+    });
+    assert.ok(pathBounds && pathBounds.y >= visibleBounds.top - 1 &&
+      pathBounds.y + pathBounds.height <= visibleBounds.bottom + 1,
+    `a narrow queue jump must show the matching result below the summary inside the window: ${JSON.stringify({ pathBounds, visibleBounds })}`);
+    await assertBeaconTaskColumns(page);
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+  } finally {
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((width) => (globalThis as unknown as { innerWidth: number }).innerWidth === width, originalSize[0]);
+    await queueTab.click();
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+  }
+}
+
+async function assertBeaconOutputFocus(page: Page, taskId: string): Promise<void> {
+  const article = page.getByRole("article", { name: `Task output ${taskId}`, exact: true });
+  await article.waitFor();
+  await page.waitForFunction((expectedId) => (
+    globalThis as unknown as {
+      document: { activeElement: { getAttribute(name: string): string | null } | null };
+    }
+  ).document.activeElement?.getAttribute("data-task-id") === expectedId, taskId, { timeout: 5_000 });
+  const visible = await article.evaluate((element) => {
+    const history = element.closest('[aria-label="Beacon task outputs"]')!;
+    const bounds = element.getBoundingClientRect();
+    const viewport = history.getBoundingClientRect();
+    return bounds.top < viewport.bottom && bounds.bottom > viewport.top;
+  });
+  assert.equal(visible, true, "the focused task output must be visible inside the history scrollport");
+}
+
+async function assertBeaconTaskColumns(page: Page): Promise<void> {
+  const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+  const card = page.locator(".beacon-task-views");
+  assert.equal(await card.count(), 1, "beacon queue and output must share one card");
+  assert.equal(await card.getByRole("tablist", { name: "Beacon task views", exact: true }).count(), 1);
+  const [composerBounds, cardBounds] = await Promise.all([composer.boundingBox(), card.boundingBox()]);
+  assert.ok(composerBounds && cardBounds, "beacon composer and task views must have measurable layouts");
+  const layout = await card.evaluate((element) => ({
+    viewportWidth: element.ownerDocument.defaultView!.innerWidth,
+    cardOverflow: element.scrollWidth - element.clientWidth,
+    workspaceOverflow: element.closest(".beacon-workspace")!.scrollWidth - element.closest(".beacon-workspace")!.clientWidth,
+  }));
+  if (layout.viewportWidth >= 1280) {
+    assert.ok(cardBounds.x >= composerBounds.x + composerBounds.width && Math.abs(cardBounds.y - composerBounds.y) <= 1,
+      "the task queue/output card must sit in the right column beside the composer");
+  } else {
+    assert.ok(cardBounds.y >= composerBounds.y + composerBounds.height && Math.abs(cardBounds.x - composerBounds.x) <= 1 &&
+      Math.abs(cardBounds.width - composerBounds.width) <= 1,
+    "narrow beacon layouts must stack the task views beneath the composer");
+  }
+  assert.ok(layout.cardOverflow <= 1 && layout.workspaceOverflow <= 1,
+    `the unified task views must remain inside the available width: ${JSON.stringify(layout)}`);
+}
+
 async function assertBeaconWorkspaceHeader(
   application: ElectronApplication,
   page: Page,
@@ -344,6 +619,7 @@ async function assertBeaconWorkspaceHeader(
   const trigger = summary.getByRole("button", { name: "Beacon details", exact: true });
   const details = page.getByRole("complementary", { name: "Beacon details", exact: true });
   await summary.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
+  await assertBeaconTaskColumns(page);
   await summary.getByText("On time", { exact: true }).waitFor();
   await summary.getByText("e2e-user on m1-beacon-host", { exact: true }).waitFor();
   await summary.getByText("m1_beacon", { exact: true }).waitFor();
@@ -390,20 +666,26 @@ async function assertBeaconWorkspaceHeader(
   await trigger.click();
   await details.waitFor({ state: "hidden" });
   assert.equal(await trigger.getAttribute("aria-expanded"), "false");
-
   const nativeWindow = await application.browserWindow(page);
   const originalSize = await nativeWindow.evaluate((window) => window.getSize());
   try {
+    await nativeWindow.evaluate((window, width) => window.setSize(width, 768), originalSize[0]);
+    await page.waitForFunction(() => (globalThis as unknown as { innerHeight: number }).innerHeight === 768);
+    await assertBeaconHeaderScrollLayout(page, join(screenshotDirectory, `${screenshotPrefix}-scrolled.png`));
     await nativeWindow.evaluate((window, width) => window.setSize(width, 768), narrowWidth);
     await page.waitForFunction((expectedWidth) => (
       globalThis as unknown as { innerWidth: number }
     ).innerWidth === expectedWidth, narrowWidth);
     await assertBeaconHeaderLayout(page);
+    await assertBeaconTaskColumns(page);
     const overflow = await summary.evaluate((header) => {
       const bounds = header.getBoundingClientRect();
+      const paddingRight = Number.parseFloat(header.ownerDocument.defaultView!.getComputedStyle(header).paddingRight);
       return {
         clientWidth: header.clientWidth,
         scrollWidth: header.scrollWidth,
+        triggerRight: header.querySelector('button[aria-label="Beacon details"]')!.getBoundingClientRect().right,
+        contentRight: bounds.right - paddingRight,
         outsideChildren: Array.from(header.querySelectorAll("h1, p, dt, dd, button") as ArrayLike<typeof header>)
           .filter((child) => {
             const childBounds = child.getBoundingClientRect();
@@ -413,7 +695,10 @@ async function assertBeaconWorkspaceHeader(
     });
     assert.ok(overflow.scrollWidth <= overflow.clientWidth + 1 && overflow.outsideChildren.length === 0,
       `the beacon summary must fit the narrow viewport: ${JSON.stringify(overflow)}`);
+    assert.ok(Math.abs(overflow.triggerRight - overflow.contentRight) <= 1,
+      "the beacon detail chevron must remain aligned right when narrow header content wraps");
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}-narrow.png`) });
+    await assertBeaconHeaderScrollLayout(page, join(screenshotDirectory, `${screenshotPrefix}-narrow-scrolled.png`));
   } finally {
     await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
     await page.waitForFunction((expectedWidth) => (
@@ -424,8 +709,9 @@ async function assertBeaconWorkspaceHeader(
 
 async function assertBeaconHeaderLayout(page: Page): Promise<void> {
   const layout = await page.locator('header[aria-label="Beacon summary"]').evaluate((header) => {
-    const summaryBounds = header.parentElement!.getBoundingClientRect();
-    const container = header.parentElement!.parentElement!;
+    const summaryBounds = header.getBoundingClientRect();
+    const workspace = header.closest(".beacon-workspace")!;
+    const container = workspace.querySelector(".beacon-workspace__body-frame")!;
     const containerBounds = container.getBoundingClientRect();
     const style = container.ownerDocument.defaultView!.getComputedStyle(container);
     const taskBounds = container.querySelector('[aria-labelledby="beacon-command-heading"]')!.getBoundingClientRect();
@@ -443,6 +729,140 @@ async function assertBeaconHeaderLayout(page: Page): Promise<void> {
   `the beacon summary must fill the workspace width: ${JSON.stringify(layout)}`);
   assert.ok(layout.summary.bottom <= layout.taskTop,
     "the beacon summary must sit above the task workspace");
+}
+
+async function assertBeaconHeaderScrollLayout(page: Page, screenshotPath: string): Promise<void> {
+  const viewport = page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)");
+  const sticky = page.locator(".beacon-workspace__sticky");
+  const summary = page.locator('header[aria-label="Beacon summary"]');
+  const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+  const task = page.locator('[aria-labelledby="beacon-command-heading"]');
+  const details = page.getByRole("complementary", { name: "Beacon details", exact: true });
+  const trigger = summary.getByRole("button", { name: "Beacon details", exact: true });
+  const readLayout = async () => summary.evaluate((header) => {
+    const scrollport = header.closest(".app-content, .interaction-window__content")!;
+    const stickyElement = header.closest(".beacon-workspace__sticky")!;
+    const viewportBounds = scrollport.getBoundingClientRect();
+    const summaryBounds = header.getBoundingClientRect();
+    const view = header.ownerDocument.defaultView!;
+    const shadow = view.getComputedStyle(stickyElement, "::after");
+    return {
+      viewport: {
+        top: viewportBounds.top + scrollport.clientTop,
+        left: viewportBounds.left + scrollport.clientLeft,
+        right: viewportBounds.left + scrollport.clientLeft + scrollport.clientWidth,
+        bottom: viewportBounds.top + scrollport.clientTop + scrollport.clientHeight,
+      },
+      summary: { top: summaryBounds.top, left: summaryBounds.left, right: summaryBounds.right, bottom: summaryBounds.bottom },
+      radius: Number.parseFloat(view.getComputedStyle(header).borderTopLeftRadius),
+      shadow: { opacity: Number.parseFloat(shadow.opacity), background: shadow.backgroundImage },
+      scrollTop: scrollport.scrollTop,
+      maximumScroll: scrollport.scrollHeight - scrollport.clientHeight,
+    };
+  });
+
+  await viewport.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+  await trigger.click();
+  await details.waitFor();
+  // Finish the disclosure animation before comparing document-flow geometry.
+  await page.screenshot({ animations: "disabled" });
+  const before = await readLayout();
+  const taskBefore = await task.boundingBox();
+  assert.ok(taskBefore && before.summary.top > before.viewport.top && before.radius > 0,
+    "the resting beacon header must have rounded corners below the breadcrumbs");
+  assert.ok(before.summary.left > before.viewport.left && before.summary.right < before.viewport.right,
+    "the resting beacon header must retain the workspace gutters");
+  assert.equal(before.shadow.opacity, 0, "the beacon header shadow must be hidden before scrolling");
+  assert.equal(await sticky.getByRole("complementary", { name: "Beacon details", exact: true }).count(), 0,
+    "expanded details must belong to the scrolling body instead of the sticky summary");
+  const firstScroll = Math.ceil(before.summary.top - before.viewport.top + 120);
+  assert.ok(before.maximumScroll > firstScroll + 40, "the beacon fixture must scroll beyond the header");
+
+  try {
+    await viewport.evaluate((element, nextTop) => {
+      element.scrollTop = nextTop;
+      element.dispatchEvent(new Event("scroll"));
+    }, firstScroll);
+    await page.locator('.beacon-workspace__sticky[data-stuck="true"]').waitFor();
+    const pinned = await readLayout();
+    const taskPinned = await task.boundingBox();
+    const breadcrumbsPinned = await breadcrumbs.boundingBox();
+    assert.ok(Math.abs(pinned.summary.top - pinned.viewport.top) <= 1,
+      "the beacon summary must stick to the actual scrollport top");
+    assert.ok(Math.abs(pinned.summary.left - pinned.viewport.left) <= 1 &&
+      Math.abs(pinned.summary.right - pinned.viewport.right) <= 1,
+    `the pinned beacon summary must span the scrollport width: ${JSON.stringify(pinned)}`);
+    assert.equal(pinned.radius, 0, "the pinned beacon summary must have square corners");
+    assert.match(pinned.shadow.background, /linear-gradient/u, "the pinned beacon header must fade the scrolling content");
+    assert.equal(pinned.shadow.opacity, 1, "the pinned beacon header must show its scroll shadow");
+    const headerHeightChange = (before.summary.bottom - before.summary.top) - (pinned.summary.bottom - pinned.summary.top);
+    assert.ok(taskPinned && Math.abs(taskBefore.y - taskPinned.y - pinned.scrollTop - headerHeightChange) <= 2,
+      `the beacon task body must scroll beneath the summary: ${JSON.stringify({ before, pinned, taskBefore, taskPinned })}`);
+    assert.ok(breadcrumbsPinned && breadcrumbsPinned.y + breadcrumbsPinned.height <= pinned.viewport.top,
+      "beacon breadcrumbs must scroll away above the pinned summary");
+
+    await viewport.evaluate((element, nextTop) => {
+      element.scrollTop = nextTop;
+      element.dispatchEvent(new Event("scroll"));
+    }, firstScroll + 40);
+    const further = await readLayout();
+    const taskFurther = await task.boundingBox();
+    assert.ok(Math.abs(further.summary.top - pinned.summary.top) <= 1 &&
+      taskFurther && taskPinned && taskFurther.y < taskPinned.y,
+    "further scrolling must move the task body while keeping the beacon summary fixed");
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+
+    for (const control of [
+      details.getByRole("switch", { name: "Watch active beacon", exact: true }),
+      details.getByRole("button", { name: "Remove beacon", exact: true }),
+    ]) {
+      await control.evaluate((element) => {
+        const scrollport = element.closest(".app-content, .interaction-window__content")!;
+        const header = scrollport.querySelector('header[aria-label="Beacon summary"]')!;
+        scrollport.scrollTop += element.getBoundingClientRect().top - header.getBoundingClientRect().bottom - 20;
+        scrollport.dispatchEvent(new Event("scroll"));
+      });
+      const expanded = await readLayout();
+      const controlBounds = await control.boundingBox();
+      assert.ok(Math.abs(expanded.summary.top - expanded.viewport.top) <= 1 && controlBounds &&
+        controlBounds.y >= expanded.summary.bottom && controlBounds.y + controlBounds.height <= expanded.viewport.bottom,
+      "expanded beacon controls must remain reachable beneath the compact pinned summary");
+    }
+    await page.screenshot({ animations: "disabled", path: screenshotPath.replace(/\.png$/u, "-expanded.png") });
+    await trigger.click();
+    await details.waitFor({ state: "hidden" });
+  } finally {
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+  }
+  const restored = await readLayout();
+  assert.ok(Math.abs(restored.summary.top - before.summary.top) <= 1 &&
+    Math.abs(restored.summary.left - before.summary.left) <= 1 &&
+    Math.abs(restored.summary.right - before.summary.right) <= 1 && restored.radius === before.radius,
+  "scrolling to the top must restore the beacon header position, gutters, and rounded corners");
+  assert.equal(restored.shadow.opacity, 0, "scrolling to the top must hide the beacon header shadow");
+}
+
+async function scrollBeaconWorkspaceToBottom(page: Page): Promise<void> {
+  await page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)").evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await page.locator('.beacon-workspace__sticky[data-stuck="true"]').waitFor();
+}
+
+async function assertBeaconWorkspaceScrollReset(page: Page): Promise<void> {
+  await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+  const scrollTop = await page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)")
+    .evaluate((element) => element.scrollTop);
+  assert.equal(scrollTop, 0, "switching the exact beacon must restore the workspace scroll position");
 }
 
 async function assertResponsiveStatus(page: Page, screenshotDirectory: string): Promise<void> {
