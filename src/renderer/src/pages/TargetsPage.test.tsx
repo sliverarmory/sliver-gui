@@ -19,6 +19,7 @@ import type {
   ExecutionCatalog,
 } from "../../../shared/execution-contracts";
 import { SessionWorkspacePage } from "./SessionWorkspacePage";
+import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 import { TargetsPage } from "./TargetsPage";
 import { formatTimestamp } from "./target-page-model";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
@@ -885,9 +886,9 @@ describe("TargetsPage", () => {
     expect(screen.queryByRole("button", { name: "Pop out interaction" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Execution" })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Show advanced execution" }));
-    expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
-    expect(listExecutionCatalog).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("heading", { name: "Advanced execution" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show advanced execution" })).not.toBeInTheDocument();
+    expect(listExecutionCatalog).not.toHaveBeenCalled();
   });
 
   it.each(["embedded", "popout"] as const)("shows a compact beacon summary in the %s interaction", (surface) => {
@@ -1236,18 +1237,42 @@ describe("TargetsPage", () => {
     expect(intersectionObserverRecords).toHaveLength(0);
   });
 
-  it("opens dedicated advanced execution and discards its reviewed plan on exact-target quarantine", async () => {
+  it("keeps beacon command controls beside task views without advanced execution", async () => {
+    const user = userEvent.setup();
+    const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
+    installAPI({ listExecutionCatalog });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onBack={vi.fn()} onSnapshot={vi.fn()} />);
+    await act(async () => {});
+
+    const composer = screen.getByRole("region", { name: "Queue a beacon task" });
+    const tasks = screen.getByRole("region", { name: "Beacon tasks" });
+    const leftColumn = composer.parentElement;
+    if (!leftColumn) throw new Error("The beacon composer column is incomplete");
+    expect(tasks.parentElement).toBe(leftColumn.parentElement);
+    expect(leftColumn).not.toContainElement(tasks);
+    expect(within(tasks).getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    expect(within(tasks).getByRole("grid", { name: "Beacon task queue" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Advanced execution" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Show advanced execution" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Beacon details" }));
+    expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
+    expect(listExecutionCatalog).not.toHaveBeenCalled();
+  });
+
+  it("keeps shared beacon execution available and discards its review when the exact identity changes", async () => {
     const user = userEvent.setup();
     const reviewedPlan = beaconExecutionPlan();
-    const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: beaconExecutionCatalog() });
+    const replacementRef: TargetRef = { ...beaconRef, fingerprint: "e".repeat(64) };
+    const listExecutionCatalog = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: beaconExecutionCatalog() })
+      .mockResolvedValue({ ok: true, value: beaconExecutionCatalog(replacementRef) });
     const prepareExecutionAction = vi.fn().mockResolvedValue({ ok: true, value: reviewedPlan });
     const discardExecutionPlan = vi.fn().mockResolvedValue({ ok: true });
     installAPI({ discardExecutionPlan, listExecutionCatalog, prepareExecutionAction });
     const { rerender } = render(
-      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
+      <TargetExecutionWorkbench expectedTarget={beaconRef} targetIdentity={`shared-beacon:${beaconRef.fingerprint}`} />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Show advanced execution" }));
     expect(await screen.findByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
     await user.click(screen.getByRole("radio", { name: "Identity" }));
     await user.click(screen.getByRole("button", { name: "Open: Revert identity" }));
@@ -1257,17 +1282,12 @@ describe("TargetsPage", () => {
       draft: { operationId: "privilege.revert", timeoutSeconds: 30 },
     });
 
-    const replacement = targetSnapshot("beacon");
-    const replacementRef: TargetRef = { ...beaconRef, fingerprint: "e".repeat(64) };
-    replacement.targetContext.activeTarget = replacementRef;
-    replacement.targetContext.selectableTargets = [sessionRef, replacementRef];
-    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={replacement} onSnapshot={vi.fn()} />);
+    rerender(<TargetExecutionWorkbench expectedTarget={replacementRef} targetIdentity={`shared-beacon:${replacementRef.fingerprint}`} />);
 
-    expect(screen.getByRole("heading", { name: "Beacon interaction unavailable" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
     expect(screen.queryByRole("alertdialog", { name: "Execute this reviewed action?" })).not.toBeInTheDocument();
     await waitFor(() => expect(discardExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: reviewedPlan.token }));
-    expect(listExecutionCatalog).toHaveBeenCalledOnce();
+    await waitFor(() => expect(listExecutionCatalog).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
   });
 
   it("queues a common beacon command and refreshes the selected completion after check-in", async () => {

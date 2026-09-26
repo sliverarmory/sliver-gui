@@ -404,9 +404,11 @@ async function assertBeaconTaskViews(
   await completedRow.getByText("Completed", { exact: true }).waitFor();
   assert.equal(await queueTab.getAttribute("aria-selected"), "true",
     "a task finishing in the background must keep the queue tab selected");
-  for (const label of ["Origin", "Created"]) {
+  for (const label of ["Task", "State", "Created"]) {
     await queue.getByRole("columnheader", { name: label, exact: true }).waitFor();
   }
+  assert.deepEqual((await queue.getByRole("columnheader").allTextContents()).map((label) => label.trim()),
+    ["Task", "State", "Created"], "the dedicated task queue must show only task, state, and creation time");
   await assertBeaconTaskColumns(page);
   await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-queue-completed.png") });
 
@@ -498,6 +500,85 @@ async function assertBeaconTaskViews(
   await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-output-history-jump.png") });
   await queueTab.click();
   await assertNarrowBeaconOutputJump(application, page, newTask.id, join(screenshotDirectory, "beacon-task-output-narrow-jump.png"));
+  await assertBeaconTaskVerticalLayout(application, page, screenshotDirectory);
+}
+
+async function assertBeaconTaskVerticalLayout(
+  application: ElectronApplication,
+  page: Page,
+  screenshotDirectory: string,
+): Promise<void> {
+  const nativeWindow = await application.browserWindow(page);
+  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  const viewport = page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)");
+  const card = page.locator(".beacon-task-views");
+  const queueTab = page.getByRole("tab", { name: "Task queue", exact: true });
+  const outputTab = page.getByRole("tab", { name: "Task output", exact: true });
+  const readLayout = async () => card.evaluate((element) => {
+    const scrollport = element.closest(".app-content, .interaction-window__content")!;
+    const workspace = element.closest(".beacon-workspace")!;
+    const cardBounds = element.getBoundingClientRect();
+    const composerBounds = workspace.querySelector('[aria-labelledby="beacon-command-heading"]')!.getBoundingClientRect();
+    const viewportBounds = scrollport.getBoundingClientRect();
+    const body = workspace.querySelector(".beacon-workspace__body-frame")!;
+    const gutter = Number.parseFloat(body.ownerDocument.defaultView!.getComputedStyle(body).paddingBottom);
+    const panel = element.querySelector('[role="tabpanel"]:not([hidden])')!;
+    const panelBounds = panel.getBoundingClientRect();
+    const scroll = panel.querySelector('[data-slot="table-scroll-container"], [aria-label="Beacon task outputs"]')!;
+    const scrollBounds = scroll.getBoundingClientRect();
+    return {
+      card: { top: cardBounds.top, bottom: cardBounds.bottom, height: cardBounds.height },
+      composerBottom: composerBounds.bottom,
+      viewportBottom: viewportBounds.top + scrollport.clientHeight,
+      gutter,
+      panelBottom: panelBounds.bottom,
+      scroll: { top: scrollBounds.top, bottom: scrollBounds.bottom, height: scrollBounds.height },
+      footerTop: panel.querySelector('[aria-live="polite"]')?.parentElement?.getBoundingClientRect().top,
+    };
+  });
+  try {
+    const heights: { queue: number; output: number; card: number }[] = [];
+    for (const height of [950, 1250]) {
+      await nativeWindow.evaluate((window, nextHeight) => window.setSize(1440, nextHeight), height);
+      await page.waitForFunction((expectedHeight) => (
+        globalThis as unknown as { innerHeight: number; innerWidth: number }
+      ).innerHeight === expectedHeight && (globalThis as unknown as { innerWidth: number }).innerWidth === 1440, height);
+      await viewport.evaluate((element) => { element.scrollTop = 0; });
+      await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+      await queueTab.click();
+      await page.screenshot({ animations: "disabled" });
+      await assertBeaconTaskColumns(page);
+      const queue = await readLayout();
+      const expectedBottom = Math.max(queue.composerBottom, queue.viewportBottom - queue.gutter);
+      assert.ok(Math.abs(queue.card.bottom - expectedBottom) <= 2,
+        `the right task card must fill the command form or remaining window height: ${JSON.stringify(queue)}`);
+      assert.ok(Math.abs(queue.panelBottom - queue.card.bottom) <= 2 && queue.footerTop !== undefined &&
+        Math.abs(queue.scroll.bottom - queue.footerTop) <= 2,
+      `the task queue must fill the card below its controls and above its footer: ${JSON.stringify(queue)}`);
+      await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `beacon-task-queue-fill-${height}.png`) });
+
+      await outputTab.click();
+      const output = await readLayout();
+      assert.ok(Math.abs(output.card.height - queue.card.height) <= 1 &&
+        Math.abs(output.scroll.bottom - output.panelBottom) <= 2 &&
+        Math.abs(output.panelBottom - output.card.bottom) <= 2,
+      `output history must fill the same right card below its tabs: ${JSON.stringify(output)}`);
+      heights.push({ queue: queue.scroll.height, output: output.scroll.height, card: output.card.height });
+      await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `beacon-task-output-fill-${height}.png`) });
+    }
+    assert.ok(heights[1]!.queue > heights[0]!.queue + 200 &&
+      heights[1]!.output > heights[0]!.output + 200 && heights[1]!.card > heights[0]!.card + 200,
+    `both task views must grow with a taller native window instead of retaining a fixed height: ${JSON.stringify(heights)}`);
+  } finally {
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((size) => {
+      const viewportSize = globalThis as unknown as { innerWidth: number; innerHeight: number };
+      return viewportSize.innerWidth === size[0] && viewportSize.innerHeight === size[1];
+    }, originalSize);
+    await queueTab.click();
+    await viewport.evaluate((element) => { element.scrollTop = 0; });
+    await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
+  }
 }
 
 async function assertNarrowBeaconOutputJump(
@@ -587,22 +668,40 @@ async function assertBeaconOutputFocus(page: Page, taskId: string): Promise<void
 async function assertBeaconTaskColumns(page: Page): Promise<void> {
   const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
   const card = page.locator(".beacon-task-views");
+  assert.equal(await page.getByRole("heading", { name: "Advanced execution", exact: true }).count(), 0,
+    "dedicated beacon workspaces must omit advanced execution");
+  assert.equal(await page.getByRole("button", { name: /^(Show|Hide) advanced execution$/u }).count(), 0);
+  assert.equal(await page.getByRole("heading", { name: "Execution workbench", exact: true }).count(), 0);
   assert.equal(await card.count(), 1, "beacon queue and output must share one card");
   assert.equal(await card.getByRole("tablist", { name: "Beacon task views", exact: true }).count(), 1);
-  const [composerBounds, cardBounds] = await Promise.all([composer.boundingBox(), card.boundingBox()]);
+  const [composerBounds, cardBounds] = await Promise.all([
+    composer.boundingBox(), card.boundingBox(),
+  ]);
   assert.ok(composerBounds && cardBounds, "beacon composer and task views must have measurable layouts");
-  const layout = await card.evaluate((element) => ({
-    viewportWidth: element.ownerDocument.defaultView!.innerWidth,
-    cardOverflow: element.scrollWidth - element.clientWidth,
-    workspaceOverflow: element.closest(".beacon-workspace")!.scrollWidth - element.closest(".beacon-workspace")!.clientWidth,
-  }));
+  const layout = await card.evaluate((element) => {
+    const workspace = element.closest(".beacon-workspace")!;
+    const viewport = element.closest(".app-content, .interaction-window__content")!;
+    const body = workspace.querySelector(".beacon-workspace__body-frame")!;
+    const gutter = Number.parseFloat(body.ownerDocument.defaultView!.getComputedStyle(body).paddingBottom);
+    return {
+      viewportWidth: element.ownerDocument.defaultView!.innerWidth,
+      cardOverflow: element.scrollWidth - element.clientWidth,
+      workspaceOverflow: workspace.scrollWidth - workspace.clientWidth,
+      remainingBottom: viewport.getBoundingClientRect().top + viewport.clientHeight - gutter - viewport.scrollTop,
+    };
+  });
   if (layout.viewportWidth >= 1280) {
+    const commandWidthRatio = composerBounds.width / (composerBounds.width + cardBounds.width);
+    assert.ok(Math.abs(commandWidthRatio - 0.4) <= 0.002,
+      `wide beacon workspaces must split command/task columns 40/60 excluding their gap: ${JSON.stringify({ composerBounds, cardBounds, commandWidthRatio })}`);
     assert.ok(cardBounds.x >= composerBounds.x + composerBounds.width && Math.abs(cardBounds.y - composerBounds.y) <= 1,
       "the task queue/output card must sit in the right column beside the composer");
+    assert.ok(Math.abs(cardBounds.y + cardBounds.height - Math.max(composerBounds.y + composerBounds.height, layout.remainingBottom)) <= 2,
+      `the right task card must fill the command form or remaining window height in main and popout workspaces: ${JSON.stringify({ cardBounds, composerBounds, layout })}`);
   } else {
     assert.ok(cardBounds.y >= composerBounds.y + composerBounds.height && Math.abs(cardBounds.x - composerBounds.x) <= 1 &&
       Math.abs(cardBounds.width - composerBounds.width) <= 1,
-    "narrow beacon layouts must stack the task views beneath the composer");
+    "narrow beacon layouts must stack the task views beneath the command form");
   }
   assert.ok(layout.cardOverflow <= 1 && layout.workspaceOverflow <= 1,
     `the unified task views must remain inside the available width: ${JSON.stringify(layout)}`);

@@ -98,7 +98,6 @@ import {
 import type { TargetModeFilter } from "./target-page-model";
 import { BeaconInteractionWorkspace } from "./BeaconInteractionWorkspace";
 import { BeaconWorkspaceHeader } from "./BeaconWorkspaceHeader";
-import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 export interface TargetsPageProps {
   mode: TargetMode;
@@ -205,7 +204,6 @@ export function TargetsPage({
   const [actionResult, setActionResult] = useState<TargetActionExecutionResult>();
   const [isPreparingAction, setIsPreparingAction] = useState(false);
   const [isExecutingAction, setIsExecutingAction] = useState(false);
-  const [showDedicatedExecution, setShowDedicatedExecution] = useState(false);
   const [renameSessionTarget, setRenameSessionTarget] = useState<SelectedTargetIdentity>();
   const backendIncarnation = targetBackendIncarnation(snapshot);
   const targetInventoryIdentity = targetCatalogIdentity(snapshot, mode);
@@ -704,7 +702,6 @@ export function TargetsPage({
     setSelectedTaskIdentity(undefined);
     setReviewPlan(undefined);
     setActionResult(undefined);
-    setShowDedicatedExecution(false);
     if (snapshot.connection.epoch !== undefined) void loadOperations();
   }, [backendIncarnation, loadOperations, snapshot.connection.epoch]);
 
@@ -1383,25 +1380,6 @@ export function TargetsPage({
                 return true;
               }}
             />
-            <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="advanced-execution-heading">
-              <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
-                <div className="min-w-0">
-                  <h2 className="text-sm font-semibold text-foreground" id="advanced-execution-heading">Advanced execution</h2>
-                  <p className="mt-0.5 text-xs text-muted">Process, payload, remote, and identity actions remain available when needed.</p>
-                </div>
-                <Button size="sm" variant="secondary" onPress={() => setShowDedicatedExecution((current) => !current)}>
-                  <FontAwesomeIcon aria-hidden icon={faBolt} /> {showDedicatedExecution ? "Hide advanced execution" : "Show advanced execution"}
-                </Button>
-              </div>
-              {showDedicatedExecution ? (
-                <div className="border-t border-separator p-4 sm:p-6">
-                  <TargetExecutionWorkbench
-                    expectedTarget={activeRef}
-                    targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
-                  />
-                </div>
-              ) : null}
-            </section>
           </BeaconWorkspaceHeader>
         </>
       ) : targetDetail}

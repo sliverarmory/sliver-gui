@@ -3595,41 +3595,59 @@ async function verifyM4BeaconExecution(
   electronApplication: ElectronApplication,
   page: Page,
 ): Promise<void> {
-  await page.getByRole("button", { name: "Show advanced execution", exact: true }).click();
-  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
-  await page.getByRole("button", { name: "Open: Execute process", exact: true }).click();
+  assert.equal(await page.getByRole("heading", { name: "Advanced execution", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Show advanced execution", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("heading", { name: "Execution workbench", exact: true }).count(), 0);
 
-  const configuration = page.getByRole("dialog", { name: "Execute process", exact: true });
-  await configuration.getByLabel("Executable path").fill("/usr/bin/printf");
-  await configuration.getByLabel("Arguments").fill("beacon-m4-submitted");
-  await configuration.getByRole("button", { name: "Review", exact: true }).click();
-  const review = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
-  await review.waitFor();
-  const reviewText = await review.innerText();
-  assert.ok(reviewText.includes("m1-beacon"));
-  assert.ok(reviewText.includes("beacon:m1_beacon"));
-  assert.match(reviewText, /m0-e2e-operator@127\.0\.0\.1:31337/u);
-  assert.ok(!reviewText.includes(TARGET_SECRET));
+  // Beacon interaction exposes its common task composer. Preserve coverage of
+  // the advanced beacon execution contract through the existing typed bridge;
+  // the session execution scenario above exercises configuration and review UI.
+  const catalog = await invokeSliver(page, "listExecutionCatalog");
+  assert.ok(catalog.ok && catalog.value, catalog.error ?? "listing beacon execution capabilities failed");
+  assert.equal(catalog.value.targetRef.mode, "beacon");
+  assert.equal(catalog.value.targetRef.id, "m1_beacon");
+  assert.equal(catalog.value.capabilities.find((capability) => capability.operationId === "execution.process")?.available, true);
+  const prepared = await invokeSliver(page, "prepareExecutionAction", {
+    draft: {
+      operationId: "execution.process",
+      path: "/usr/bin/printf",
+      args: ["beacon-m4-submitted"],
+      captureOutput: true,
+      background: false,
+      inheritEnvironment: false,
+      environment: [],
+      useToken: false,
+      hideWindow: false,
+      timeoutSeconds: 60,
+    },
+  });
+  assert.ok(prepared.ok && prepared.value, prepared.error ?? "preparing beacon execution failed");
+  const review = prepared.value;
+  assert.equal(review.operationId, "execution.process");
+  assert.equal(review.target.target.mode, "beacon");
+  assert.equal(review.target.target.id, "m1_beacon");
+  assert.equal(review.target.target.name, "m1-beacon");
+  assert.equal(review.target.fingerprint, catalog.value.targetRef.fingerprint);
+  assert.equal(review.target.backend.operator, "m0-e2e-operator");
+  assert.equal(review.target.backend.server, "127.0.0.1:31337");
+  assert.ok(!JSON.stringify(review).includes(TARGET_SECRET));
 
   await electronApplication.evaluate(() => {
     globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
   });
   const beaconExecuteCalls = fakeMethodCount(await readFakeState(electronApplication), "executeBeacon");
-  await review.getByRole("button", { name: "Execute", exact: true }).click();
-  const latestExecution = page.getByRole("region", { name: "Latest execution", exact: true });
-  await latestExecution.waitFor();
-  await latestExecution.getByText("Submitted", { exact: true }).waitFor();
-  await latestExecution.getByText("The reviewed operation was submitted to the selected target.", { exact: true }).waitFor();
+  const executed = await invokeSliver(page, "executeExecutionPlan", { token: review.token });
+  assert.ok(executed.ok && executed.value, executed.error ?? "executing the reviewed beacon action failed");
+  assert.equal(executed.value.operationId, "execution.process");
+  assert.equal(executed.value.state, "submitted");
+  assert.equal(executed.value.message, "The reviewed operation was submitted to the selected target.");
   await waitForFakeMethodCount(electronApplication, "executeBeacon", beaconExecuteCalls + 1);
   const afterBeacon = await readFakeState(electronApplication);
-  const submittedTask = afterBeacon.tasks.at(-1);
+  const submittedTask = afterBeacon.tasks.find((task) => task.id === executed.value!.taskId);
   assert.equal(submittedTask?.beaconId, "m1_beacon");
   assert.equal(submittedTask?.description, "ExecuteReq");
   assert.equal(submittedTask?.state, "pending");
   assert.equal(afterBeacon.m4Audit.retainedSensitiveInputs, 0);
-
-  await page.getByRole("button", { name: "Hide advanced execution", exact: true }).click();
-  await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor({ state: "hidden" });
 }
 
 async function activateDataGridRow(

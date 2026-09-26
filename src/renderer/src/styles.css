@@ -1011,6 +1011,7 @@
   --beacon-workspace-gutter: 1.25rem;
 
   max-width: none;
+  min-height: 100%;
   margin-inline: 0;
   gap: 0;
   padding-top: var(--auxiliary-window-content-top, 2rem);
@@ -1023,11 +1024,33 @@
 
 .beacon-workspace__trail-frame,
 .beacon-workspace__sticky {
+  flex: none;
   margin-bottom: 1.5rem;
 }
 
+.beacon-workspace__interaction {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
 .beacon-workspace__body-frame {
-  padding-bottom: 5rem;
+  flex: 1;
+  padding-bottom: var(--beacon-workspace-gutter);
+}
+
+.beacon-workspace__body-frame > .disclosure__content {
+  flex: none;
+}
+
+.beacon-interaction-workspace {
+  flex: 1;
+}
+
+.beacon-task-views {
+  position: relative;
+  min-height: 28rem;
 }
 
 .beacon-workspace__scroll-marker {

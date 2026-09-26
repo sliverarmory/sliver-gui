@@ -232,123 +232,125 @@ export function BeaconInteractionWorkspace({
   };
 
   return (
-    <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.9fr)]">
-      <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="beacon-command-heading">
-        <div className="flex items-start gap-3 px-5 py-4">
-          <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faSatellite} /></span>
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-foreground" id="beacon-command-heading">Queue a beacon task</h2>
-            <p className="mt-0.5 text-xs leading-relaxed text-muted">Choose a command, configure it, and follow its result after the beacon checks in.</p>
+    <div className="beacon-interaction-workspace grid min-w-0 items-stretch gap-4 xl:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+      <div className="beacon-interaction-workspace__controls flex min-w-0 flex-col gap-4">
+        <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="beacon-command-heading">
+          <div className="flex items-start gap-3 px-5 py-4">
+            <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faSatellite} /></span>
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-foreground" id="beacon-command-heading">Queue a beacon task</h2>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted">Choose a command, configure it, and follow its result after the beacon checks in.</p>
+            </div>
           </div>
-        </div>
 
-        <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
-          <Autocomplete
-            fullWidth
-            placeholder="Search filesystem, process, or network tasks"
-            selectionMode="single"
-            value={commandId}
-            variant="secondary"
-            onChange={(key: Key | Key[] | null) => {
-              if (key === null || Array.isArray(key)) return;
-              const nextId = String(key);
-              if (!isBeaconInteractionCommandId(nextId)) return;
-              setCommandId(nextId);
-              setSubmitError(undefined);
-            }}
-          >
-            <Label>Command</Label>
-            <Autocomplete.Trigger>
-              <Autocomplete.Value />
-              <Autocomplete.ClearButton />
-              <Autocomplete.Indicator />
-            </Autocomplete.Trigger>
-            <Description>Type a command name or browse the common beacon tasks.</Description>
-            <Autocomplete.Popover>
-              <Autocomplete.Filter filter={contains}>
-                <SearchField autoFocus aria-label="Search beacon commands" name="beacon-command-search" variant="secondary">
-                  <SearchField.Group>
-                    <SearchField.SearchIcon />
-                    <SearchField.Input placeholder="Search commands…" />
-                    <SearchField.ClearButton />
-                  </SearchField.Group>
-                </SearchField>
-                <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching beacon commands.</p>}>
-                  {BEACON_COMMANDS.map((item) => (
-                    <ListBox.Item
-                      id={item.id}
-                      key={item.id}
-                      textValue={`${item.label} ${item.group} ${item.keywords.join(" ")}`}
-                    >
-                      <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-muted" icon={item.icon} />
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span className="text-sm font-medium text-foreground">{item.label}</span>
-                        <span className="truncate text-xs text-muted">{item.group} · {item.description}</span>
-                      </span>
-                      <ListBox.ItemIndicator />
-                    </ListBox.Item>
-                  ))}
-                </ListBox>
-              </Autocomplete.Filter>
-            </Autocomplete.Popover>
-          </Autocomplete>
+          <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
+            <Button fullWidth isDisabled={!canQueue} isPending={isSubmitting} onPress={() => void submit()}>
+              <FontAwesomeIcon aria-hidden icon={faListCheck} /> Queue task
+            </Button>
+            <Autocomplete
+              fullWidth
+              placeholder="Search filesystem, process, or network tasks"
+              selectionMode="single"
+              value={commandId}
+              variant="secondary"
+              onChange={(key: Key | Key[] | null) => {
+                if (key === null || Array.isArray(key)) return;
+                const nextId = String(key);
+                if (!isBeaconInteractionCommandId(nextId)) return;
+                setCommandId(nextId);
+                setSubmitError(undefined);
+              }}
+            >
+              <Label>Command</Label>
+              <Autocomplete.Trigger>
+                <Autocomplete.Value />
+                <Autocomplete.ClearButton />
+                <Autocomplete.Indicator />
+              </Autocomplete.Trigger>
+              <Description>Type a command name or browse the common beacon tasks.</Description>
+              <Autocomplete.Popover>
+                <Autocomplete.Filter filter={contains}>
+                  <SearchField autoFocus aria-label="Search beacon commands" name="beacon-command-search" variant="secondary">
+                    <SearchField.Group>
+                      <SearchField.SearchIcon />
+                      <SearchField.Input placeholder="Search commands…" />
+                      <SearchField.ClearButton />
+                    </SearchField.Group>
+                  </SearchField>
+                  <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching beacon commands.</p>}>
+                    {BEACON_COMMANDS.map((item) => (
+                      <ListBox.Item
+                        id={item.id}
+                        key={item.id}
+                        textValue={`${item.label} ${item.group} ${item.keywords.join(" ")}`}
+                      >
+                        <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-muted" icon={item.icon} />
+                        <span className="flex min-w-0 flex-1 flex-col">
+                          <span className="text-sm font-medium text-foreground">{item.label}</span>
+                          <span className="truncate text-xs text-muted">{item.group} · {item.description}</span>
+                        </span>
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Autocomplete.Filter>
+              </Autocomplete.Popover>
+            </Autocomplete>
 
-          <div className="rounded-2xl bg-default p-4">
-            <div className="flex items-start gap-3">
-              <FontAwesomeIcon aria-hidden className="mt-0.5 size-4 text-accent" icon={command.icon} />
-              <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-foreground">{command.label}</h3>
-                <p className="mt-1 text-xs leading-relaxed text-muted">{command.description}</p>
+            <div className="rounded-2xl bg-default p-4">
+              <div className="flex items-start gap-3">
+                <FontAwesomeIcon aria-hidden className="mt-0.5 size-4 text-accent" icon={command.icon} />
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-foreground">{command.label}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-muted">{command.description}</p>
+                </div>
+              </div>
+
+              <div className="mt-4">
+                {commandId === "beacon.filesystem.ls" ? (
+                  <Field
+                    description="Absolute paths and paths relative to the beacon's working directory are accepted."
+                    label="Path"
+                    mono
+                    required
+                    value={path}
+                    onChange={setPath}
+                  />
+                ) : null}
+                {commandId === "beacon.process.list" ? (
+                  <Switch aria-label="Include full process details" isSelected={fullInfo} onChange={setFullInfo}>
+                    <Switch.Content className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium text-foreground">Include full process details</span>
+                      <span className="mt-0.5 block text-xs leading-relaxed text-muted">Request owner, architecture, session, and command-line metadata when available.</span>
+                    </Switch.Content>
+                    <Switch.Control><Switch.Thumb /></Switch.Control>
+                  </Switch>
+                ) : null}
+                {commandId === "beacon.filesystem.pwd" || commandId === "beacon.network.interfaces" ? (
+                  <p className="text-xs leading-relaxed text-muted">This task has no additional options.</p>
+                ) : null}
               </div>
             </div>
 
-            <div className="mt-4">
-              {commandId === "beacon.filesystem.ls" ? (
-                <Field
-                  description="Absolute paths and paths relative to the beacon's working directory are accepted."
-                  label="Path"
-                  mono
-                  required
-                  value={path}
-                  onChange={setPath}
-                />
-              ) : null}
-              {commandId === "beacon.process.list" ? (
-                <Switch aria-label="Include full process details" isSelected={fullInfo} onChange={setFullInfo}>
-                  <Switch.Content className="min-w-0 flex-1">
-                    <span className="block text-sm font-medium text-foreground">Include full process details</span>
-                    <span className="mt-0.5 block text-xs leading-relaxed text-muted">Request owner, architecture, session, and command-line metadata when available.</span>
-                  </Switch.Content>
-                  <Switch.Control><Switch.Thumb /></Switch.Control>
-                </Switch>
-              ) : null}
-              {commandId === "beacon.filesystem.pwd" || commandId === "beacon.network.interfaces" ? (
-                <p className="text-xs leading-relaxed text-muted">This task has no additional options.</p>
-              ) : null}
-            </div>
+            {!canQueue ? (
+              <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
+                {unavailableReason ?? "Task execution is unavailable for this beacon."}
+              </p>
+            ) : null}
+            {submitError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger-soft-foreground" role="alert">{submitError}</p> : null}
           </div>
-
-          {!canQueue ? (
-            <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
-              {unavailableReason ?? "Task execution is unavailable for this beacon."}
-            </p>
-          ) : null}
-          {submitError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger-soft-foreground" role="alert">{submitError}</p> : null}
-          <Button fullWidth isDisabled={!canQueue} isPending={isSubmitting} onPress={() => void submit()}>
-            <FontAwesomeIcon aria-hidden icon={faListCheck} /> Queue task
-          </Button>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <section aria-label="Beacon tasks" className="beacon-task-views min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface">
-        <Tabs className="min-w-0 gap-0" selectedKey={taskView} onSelectionChange={(key) => setTaskView(String(key))}>
-          <Tabs.ListContainer className="mx-5 my-4 w-fit max-w-full">
+        <Tabs className="absolute inset-0 min-h-0 min-w-0 gap-0" selectedKey={taskView} onSelectionChange={(key) => setTaskView(String(key))}>
+          <Tabs.ListContainer className="mx-5 my-4 w-fit max-w-full shrink-0">
             <Tabs.List aria-label="Beacon task views">
               <Tabs.Tab className="whitespace-nowrap" id="queue">Task queue<Tabs.Indicator /></Tabs.Tab>
               <Tabs.Tab className="whitespace-nowrap" id="output">Task output<Tabs.Indicator /></Tabs.Tab>
             </Tabs.List>
           </Tabs.ListContainer>
-          <Tabs.Panel className="min-w-0 p-0" id="queue">
+          <Tabs.Panel className="flex min-h-0 min-w-0 flex-1 flex-col p-0" id="queue">
             <BeaconTaskQueue
               error={error}
               isLoading={isLoading}
@@ -361,7 +363,7 @@ export function BeaconInteractionWorkspace({
               onSelectTask={selectTask}
             />
           </Tabs.Panel>
-          <Tabs.Panel className="min-w-0 p-0" id="output">
+          <Tabs.Panel className="flex min-h-0 min-w-0 flex-1 flex-col p-0" id="output">
             <BeaconTaskOutputList
               cancelingTaskIds={cancelingTaskIds}
               error={error}
@@ -422,12 +424,6 @@ function BeaconTaskQueue({
       cell: (task) => <Chip color={taskStateColor(task.state)} size="sm" variant="soft">{stateLabel(task.state)}</Chip>,
     },
     {
-      id: "origin",
-      header: "Origin",
-      minWidth: 116,
-      cell: (task) => <span className="text-xs text-muted">{ownershipLabel(task)}</span>,
-    },
-    {
       id: "created",
       header: "Created",
       accessorKey: "createdAt",
@@ -440,8 +436,8 @@ function BeaconTaskQueue({
   const total = Math.max(page?.total ?? tasks.length, tasks.length);
 
   return (
-    <div className="border-t border-separator">
-      <div className="flex items-center justify-between gap-3 px-5 py-4">
+    <div className="flex min-h-0 flex-1 flex-col border-t border-separator">
+      <div className="flex shrink-0 items-center justify-between gap-3 px-5 py-4">
         <div className="min-w-0">
           <p className="text-xs text-muted">Pending and completed tasks for this beacon.</p>
           {watchEnabled ? <Chip className="mt-2" color="accent" size="sm" variant="soft">Watching</Chip> : null}
@@ -456,11 +452,12 @@ function BeaconTaskQueue({
       {error ? <InlineMessage tone="danger">{error}</InlineMessage> : null}
       <DataGrid
         aria-label="Beacon task queue"
+        className="flex min-h-0 flex-1 flex-col"
         columns={columns}
-        contentClassName="min-w-[650px]"
+        contentClassName="min-w-[520px]"
         data={tasks}
         getRowId={(task) => task.taskId}
-        scrollContainerClassName="max-h-[360px] overflow-auto"
+        scrollContainerClassName="min-h-0 flex-1 overflow-auto"
         variant="secondary"
         onRowAction={(key) => {
           const task = tasks.find((item) => item.taskId === String(key));
@@ -477,7 +474,7 @@ function BeaconTaskQueue({
         )}
       />
       {page ? (
-        <div className="flex min-h-12 items-center justify-between gap-3 border-t border-separator px-5 py-2.5">
+        <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-t border-separator px-5 py-2.5">
           <p className="text-xs tabular-nums text-muted" aria-live="polite">Showing {tasks.length} of {total} tasks</p>
           {nextCursor ? (
             <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore(nextCursor)}>
@@ -548,10 +545,10 @@ function BeaconTaskOutputList({
   }, [jump, jumpIsLoading]);
 
   return (
-    <div className="border-t border-separator">
+    <div className="flex min-h-0 flex-1 flex-col border-t border-separator">
       {error ? <InlineMessage tone="danger">{error}</InlineMessage> : null}
       {outputs.length === 0 ? (
-        <EmptyState className="min-h-64 px-6 py-12" size="sm">
+        <EmptyState className="min-h-0 flex-1 px-6 py-12" size="sm">
           <EmptyState.Media><FontAwesomeIcon aria-hidden icon={faListCheck} /></EmptyState.Media>
           <EmptyState.Content>
             <EmptyState.Title>No task output</EmptyState.Title>
@@ -559,7 +556,7 @@ function BeaconTaskOutputList({
           </EmptyState.Content>
         </EmptyState>
       ) : (
-        <ScrollShadow aria-label="Beacon task outputs" className="max-h-[520px] overflow-y-auto px-5 py-5" ref={viewportRef} role="region">
+        <ScrollShadow aria-label="Beacon task outputs" className="min-h-0 flex-1 overflow-y-auto px-5 py-5" ref={viewportRef} role="region">
           <div className="flex min-w-0 flex-col gap-5">
             {outputs.map((output) => (
               <article
@@ -585,7 +582,7 @@ function BeaconTaskOutputList({
         </ScrollShadow>
       )}
       {nextCursor ? (
-        <div className="flex justify-end border-t border-separator px-5 py-3">
+        <div className="flex shrink-0 justify-end border-t border-separator px-5 py-3">
           <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => onLoadMore(nextCursor)}>
             Load more tasks
           </Button>
@@ -857,12 +854,6 @@ function operationResultTitle(task: BeaconTaskDetail): string {
 
 function stateLabel(state: BeaconTaskSummary["state"]): string {
   return state.split("-").map((part) => part.charAt(0).toLocaleUpperCase() + part.slice(1)).join(" ");
-}
-
-function ownershipLabel(task: BeaconTaskSummary): string {
-  if (task.ownership.origin === "local") return "This window";
-  if (task.ownership.actor.attribution === "verified") return task.ownership.actor.name;
-  return task.ownership.origin === "external" ? "External operator" : "Unknown origin";
 }
 
 function errorMessage(error: unknown): string {
