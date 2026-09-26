@@ -8,6 +8,7 @@ import {
   Label,
   ListBox,
   SearchField,
+  Select,
   Switch,
   TextField,
   Tooltip,
@@ -15,7 +16,6 @@ import {
   useFilter,
 } from "@heroui/react";
 import { Segment } from "@heroui-pro/react";
-import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -32,6 +32,7 @@ import {
   faTrashCan,
 } from "@fortawesome/free-solid-svg-icons";
 
+import { DEFAULT_APPLICATION_TERMINAL_SETTINGS } from "../../../shared/application-settings-contracts";
 import type { DotNetCatalog } from "../../../shared/dotnet-contracts";
 import type {
   AssemblySource,
@@ -43,8 +44,10 @@ import type {
 } from "../../../shared/execution-contracts";
 import { EXECUTION_LIMITS } from "../../../shared/execution-contracts";
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
+import { useApplicationSettings } from "../components/ApplicationSettingsProvider";
 import { ExecutionHistorySidebar } from "../components/ExecutionHistorySidebar";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
+import { consoleTerminalFontFamily } from "../components/console-terminal-settings";
 import { parseProcessArgv } from "./process-argv";
 
 const FORM_ID = "execution-dotnet-form";
@@ -80,6 +83,8 @@ export function DotNetExecutionView({
   result,
   onPrepare,
 }: DotNetExecutionViewProps): React.JSX.Element {
+  const terminalFontId = useApplicationSettings()?.settings.terminal.fontId ?? DEFAULT_APPLICATION_TERMINAL_SETTINGS.fontId;
+  const terminalFontFamily = consoleTerminalFontFamily(terminalFontId);
   const identity = JSON.stringify([targetRef.mode, targetRef.id, targetRef.backendEpoch, targetRef.fingerprint]);
   const [catalogState, setCatalogState] = useState<CatalogState>({ status: "loading" });
   const [historyState, setHistoryState] = useState<HistoryState>({ identityKey: identity, revision: -1, records: EMPTY_HISTORY });
@@ -467,7 +472,7 @@ export function DotNetExecutionView({
 
           <TextField fullWidth isDisabled={isBusy} variant="secondary" value={argumentsText} onChange={setArgumentsText}>
             <Label>Assembly arguments</Label>
-            <Input placeholder="--flag 'value with spaces'" />
+            <Input placeholder="--flag 'value with spaces'" style={{ fontFamily: terminalFontFamily }} />
           </TextField>
           {!inProcess && joinedArgumentBytes !== undefined && joinedArgumentBytes > 256 ? (
             <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">
@@ -475,17 +480,24 @@ export function DotNetExecutionView({
             </p>
           ) : null}
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-1">
-              <span className="text-sm font-medium text-foreground">Assembly architecture</span>
-              <NativeSelect className="w-full"><NativeSelect.Trigger aria-label="Assembly architecture" disabled={isBusy} value={architecture} onChange={(event) => setArchitecture(event.target.value as ExecuteAssemblyDraft["architecture"])}>
-                <NativeSelect.Option value="x84">AnyCPU (x84)</NativeSelect.Option>
-                <NativeSelect.Option value="x64">x64</NativeSelect.Option>
-                <NativeSelect.Option value="x86">x86</NativeSelect.Option>
-                <NativeSelect.Indicator />
-              </NativeSelect.Trigger></NativeSelect>
-            </div>
+            <Select fullWidth isDisabled={isBusy} value={architecture} variant="secondary" onChange={(value) => {
+              if (value === "x84" || value === "x64" || value === "x86") setArchitecture(value);
+            }}>
+              <Label>Assembly architecture</Label>
+              <Select.Trigger>
+                <Select.Value>{architecture === "x84" ? "AnyCPU (x84)" : architecture}</Select.Value>
+                <Select.Indicator />
+              </Select.Trigger>
+              <Select.Popover>
+                <ListBox>
+                  <ListBox.Item id="x84" textValue="AnyCPU (x84)">AnyCPU (x84)<ListBox.ItemIndicator /></ListBox.Item>
+                  <ListBox.Item id="x64" textValue="x64">x64<ListBox.ItemIndicator /></ListBox.Item>
+                  <ListBox.Item id="x86" textValue="x86">x86<ListBox.ItemIndicator /></ListBox.Item>
+                </ListBox>
+              </Select.Popover>
+            </Select>
             <TextField fullWidth isDisabled={isBusy} isRequired variant="secondary" value={process} onChange={setProcess}>
-              <Label>Host process</Label><Input />
+              <Label>Host process</Label><Input style={{ fontFamily: terminalFontFamily }} />
             </TextField>
           </div>
           {isDll ? (

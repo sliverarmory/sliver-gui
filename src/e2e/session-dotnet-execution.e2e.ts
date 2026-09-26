@@ -70,6 +70,11 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dotnet-selected-assembly.png") });
     await form.getByRole("textbox", { name: "Assembly arguments", exact: true })
       .fill('alpha "two words" --literal=\'x y\'');
+    const architecture = form.getByRole("button", { name: /Assembly architecture$/u });
+    assert.match(await architecture.innerText(), /AnyCPU \(x84\)/u);
+    await architecture.click();
+    await page.getByRole("option", { name: "x64", exact: true }).click();
+    assert.match(await architecture.innerText(), /x64/u);
     await executeAssembly(page, form);
     await assertAssemblyOutput(workspace);
     assert.equal(await page.getByText("Assembly execution completed.", { exact: true }).count(), 0);
@@ -89,6 +94,7 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
       targetId: "m1_session",
       assemblySha256: digest(ARMORY_ASSEMBLY),
       arguments: ["alpha", "two words", "--literal=x y"],
+      arch: "x64",
     }]);
 
     await history.getByRole("row", { name: "New Execution", exact: true }).click();
@@ -99,6 +105,8 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
     await form.getByRole("button", { name: "Open assembly file", exact: true }).click();
     await form.getByRole("textbox", { name: "Assembly arguments", exact: true })
       .fill('--path "C:\\Program Files\\dotnet" "" --count=7');
+    await form.getByRole("button", { name: /Assembly architecture$/u }).click();
+    await page.getByRole("option", { name: "AnyCPU (x84)", exact: true }).click();
     await executeAssembly(page, form);
     await assertAssemblyOutput(workspace);
     assert.equal(await page.getByText("Assembly execution completed.", { exact: true }).count(), 0);
@@ -114,12 +122,14 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
         targetId: "m1_session",
         assemblySha256: digest(ARMORY_ASSEMBLY),
         arguments: ["alpha", "two words", "--literal=x y"],
+        arch: "x64",
       },
       {
         targetMode: "session",
         targetId: "m1_session",
         assemblySha256: digest(LOCAL_ASSEMBLY),
         arguments: ["--path", "C:\\Program Files\\dotnet", "", "--count=7"],
+        arch: "x84",
       },
     ]);
 
@@ -213,12 +223,14 @@ async function assemblyCalls(application: ElectronApplication): Promise<Array<{
   targetId: string;
   assemblySha256: string;
   arguments: string[];
+  arch: string | undefined;
 }>> {
   return application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.assemblyCalls.map((call) => ({
     targetMode: call.targetMode,
     targetId: call.targetId,
     assemblySha256: call.assemblySha256,
     arguments: call.options?.arguments ?? [],
+    arch: call.options?.arch,
   })));
 }
 

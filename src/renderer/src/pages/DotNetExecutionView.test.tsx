@@ -1,12 +1,14 @@
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState } from "../../../shared/application-settings-contracts";
 import type { DotNetCatalog } from "../../../shared/dotnet-contracts";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { AssemblySource, DotNetExecutionRecord, ExecuteAssemblyDraft, ExecutionActionResult, ExecutionCapability } from "../../../shared/execution-contracts";
 import type { SessionSummary, TargetRef } from "../../../shared/target-contracts";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
+import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../components/ApplicationSettingsProvider";
 import { DotNetExecutionView } from "./DotNetExecutionView";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({
@@ -132,6 +134,42 @@ async function selectAssembly(user: ReturnType<typeof userEvent.setup>, command:
 }
 
 describe(".NET execution view", () => {
+  it("uses the current terminal font for assembly arguments and host process, including later changes", async () => {
+    installApi();
+    const initialSettings: ApplicationSettingsState = {
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 1,
+      terminal: { ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal, fontId: "jetbrains-mono" },
+    };
+    let onSettingsChanged: ((state: ApplicationSettingsState) => void) | undefined;
+    const settingsApi: ApplicationSettingsAPI = {
+      getApplicationSettings: vi.fn(async () => initialSettings),
+      onApplicationSettingsChanged: vi.fn((listener) => {
+        onSettingsChanged = listener;
+        return () => undefined;
+      }),
+    };
+    render(
+      <ApplicationSettingsProvider api={settingsApi}>
+        <DotNetExecutionView capability={capability} isExecuting={false} isPreparing={false} isRefreshing={false} target={target} targetRef={targetRef} onPrepare={async () => undefined} />
+      </ApplicationSettingsProvider>,
+    );
+
+    const argumentsField = screen.getByRole("textbox", { name: "Assembly arguments" });
+    const hostProcessField = screen.getByRole("textbox", { name: /^Host process$/u });
+    await waitFor(() => {
+      expect(argumentsField).toHaveStyle({ fontFamily: '"JetBrains Mono", monospace' });
+      expect(hostProcessField).toHaveStyle({ fontFamily: '"JetBrains Mono", monospace' });
+    });
+    act(() => onSettingsChanged?.({
+      ...initialSettings,
+      revision: 2,
+      terminal: { ...initialSettings.terminal, fontId: "cascadia-mono" },
+    }));
+    expect(argumentsField).toHaveStyle({ fontFamily: '"Cascadia Mono", monospace' });
+    expect(hostProcessField).toHaveStyle({ fontFamily: '"Cascadia Mono", monospace' });
+  });
+
   it("selects an Armory assembly and submits quoted CLI arguments as argv", async () => {
     const user = userEvent.setup();
     const api = installApi();
@@ -155,6 +193,23 @@ describe(".NET execution view", () => {
       isDll: false,
       timeoutSeconds: 60,
     }), { kind: "armory", id: "aliases/seatbelt" });
+  });
+
+  it("uses a HeroUI architecture selector and submits the selected architecture", async () => {
+    const user = userEvent.setup();
+    installApi();
+    const onPrepare = vi.fn<(draft: ExecuteAssemblyDraft, source: AssemblySource) => Promise<void>>(async () => undefined);
+    render(<DotNetExecutionView capability={capability} isExecuting={false} isPreparing={false} isRefreshing={false} target={target} targetRef={targetRef} onPrepare={onPrepare} />);
+
+    const architectureTrigger = screen.getByRole("button", { name: /Assembly architecture$/u });
+    expect(architectureTrigger).toHaveTextContent("AnyCPU (x84)");
+    await user.click(architectureTrigger);
+    await user.click(await screen.findByRole("option", { name: "x64" }));
+    expect(architectureTrigger).toHaveTextContent("x64");
+
+    await selectAssembly(user, "seatbelt");
+    await user.click(screen.getByRole("button", { name: "Execute" }));
+    expect(onPrepare).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ architecture: "x64" }), { kind: "armory", id: "aliases/seatbelt" });
   });
 
   it("opens a local DLL, requires its entrypoint, and forwards in-process options", async () => {
