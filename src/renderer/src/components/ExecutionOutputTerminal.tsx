@@ -78,12 +78,12 @@ export function ExecutionOutputTerminal({
       {error ? (
         <p role="alert" className="p-4 text-sm text-danger">{error}</p>
       ) : runtime ? (
-        <div className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col">
           <GhosttyTerminal
             key={resetKey}
             appearance={appearance}
             ariaLabel="Execution output terminal"
-            className="h-full min-h-0 w-full overflow-hidden rounded-lg border border-default"
+            className="min-h-0 flex-1 w-full overflow-hidden rounded-lg border border-default"
             disableInput
             enableClipboard
             onError={(reason) => setError(reason.message)}

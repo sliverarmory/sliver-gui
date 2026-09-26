@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-import { assertExecutionOutputLayout } from "./execution-layout-assertions.js";
+import { assertExecutionComposerScrollLayout, assertExecutionOutputLayout } from "./execution-layout-assertions.js";
 
 test("session and beacon BOFs render Armory arguments, dispatch packed invocations, and capture output", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -84,6 +84,9 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     assert.equal(await workspace.getByRole("row", { name: "New Execution", exact: true }).count(), 1);
 
     await selectInstalledBof(page, form, "sa-dir");
+    await assertExecutionComposerScrollLayout(form, "Execute an Armory BOF", "BOF execution content", [
+      "Refresh BOFs", "Open BOF directory", "Execute",
+    ]);
     assert.equal(await form.getByRole("textbox", { name: /targetdir/u }).inputValue(), ".");
     assert.equal(await form.getByRole("spinbutton", { name: /subdirs/u }).inputValue(), "0");
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-bof-new-execution.png") });

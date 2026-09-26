@@ -136,6 +136,8 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
       let streamClosed = false;
       let terminal: Terminal | undefined;
       let fitAddon: FitAddon | undefined;
+      let fitResizeObserver: ResizeObserver | undefined;
+      let fitResizeTimer: ReturnType<typeof setTimeout> | undefined;
       let inputSubscription: IDisposable | undefined;
       let resizeSubscription: IDisposable | undefined;
       let resizeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -359,7 +361,18 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         // workspace tab/trigger until the operator explicitly focuses here.
         terminal.blur();
         fitAddon.fit();
-        fitAddon.observeResize();
+        // ghostty-web drops ResizeObserver notifications while its fit() call
+        // holds a short resize guard. A pane can grow during that window and
+        // leave the canvas (including its painted scrollbar) at the old size.
+        // Observe the host ourselves so every size change gets a trailing fit.
+        fitResizeObserver = new ResizeObserver(() => {
+          if (fitResizeTimer) clearTimeout(fitResizeTimer);
+          fitResizeTimer = setTimeout(() => {
+            fitResizeTimer = undefined;
+            if (!disposed) fitAddon?.fit();
+          }, RESIZE_DEBOUNCE_MS);
+        });
+        fitResizeObserver.observe(host);
 
         for (const pending of pendingOutput.splice(0)) {
           pendingOutputBytes -= pending.byteLength;
@@ -374,6 +387,8 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
 
       void initialize().catch((error: unknown) => {
         if (disposed) return;
+        fitResizeObserver?.disconnect();
+        if (fitResizeTimer) clearTimeout(fitResizeTimer);
         inputSubscription?.dispose();
         resizeSubscription?.dispose();
         terminalRef.current = undefined;
@@ -389,6 +404,8 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         windowsInput?.reset();
         unsubscribeTransport();
         if (resizeTimer) clearTimeout(resizeTimer);
+        fitResizeObserver?.disconnect();
+        if (fitResizeTimer) clearTimeout(fitResizeTimer);
         inputSubscription?.dispose();
         resizeSubscription?.dispose();
         terminalRef.current = undefined;
@@ -478,7 +495,7 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
           ref={hostRef}
           aria-busy={terminalState === "loading"}
           aria-label={ariaLabel}
-          className="h-full min-h-0 w-full overflow-hidden"
+          className="absolute inset-0 min-h-0 overflow-hidden"
           data-application-context-menu-policy="inspect-only"
           style={{
             backgroundColor: appearance?.theme?.background ?? "#1e1e1e",

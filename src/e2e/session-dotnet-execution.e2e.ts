@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
+import { assertExecutionComposerScrollLayout, assertExecutionOutputLayout, assertExecutionTerminalCanvasTracksResize } from "./execution-layout-assertions.js";
 
 const ARMORY_ASSEMBLY = Buffer.from("inert-armory-dotnet-assembly", "utf8");
 const LOCAL_ASSEMBLY = Buffer.from("inert-local-dotnet-assembly", "utf8");
@@ -65,6 +66,9 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
     await workspace.getByText("History · 0", { exact: true }).waitFor();
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dotnet-new-execution.png") });
     await selectInstalledAssembly(page, form, "args-demo");
+    await assertExecutionComposerScrollLayout(form, "Execute a .NET assembly", ".NET execution content", [
+      "Refresh assemblies", "Open assembly file", "Execute",
+    ]);
     await form.getByText("Deterministic .NET assembly arguments fixture", { exact: true }).waitFor();
     assert.equal(await form.getByText("1 assemblies for windows/amd64. Type to search or browse.", { exact: true }).count(), 0);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "session-dotnet-selected-assembly.png") });
@@ -77,6 +81,8 @@ test(".NET executes installed and opened assemblies with exact CLI arguments and
     assert.match(await architecture.innerText(), /x64/u);
     await executeAssembly(page, form);
     await assertAssemblyOutput(workspace);
+    await assertExecutionOutputLayout(workspace, history, workspace.locator('[aria-label="Execution output terminal"]'), ".NET");
+    await assertExecutionTerminalCanvasTracksResize(workspace.locator('[aria-label="Execution output terminal"]'), ".NET");
     assert.equal(await page.getByText("Assembly execution completed.", { exact: true }).count(), 0);
     await history.getByRole("row", { name: /args-demo/iu }).waitFor();
     assert.equal(await history.getByRole("row").count(), 2);

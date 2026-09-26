@@ -163,6 +163,11 @@ import {
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const resizeObservers: Array<{
+  callback: ResizeObserverCallback;
+  observe: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+}> = [];
 
 beforeEach(() => {
   ghosttyMocks.fitAddons.length = 0;
@@ -170,6 +175,14 @@ beforeEach(() => {
   ghosttyMocks.ghosttyInstances.length = 0;
   ghosttyMocks.responsesPerWrite.length = 0;
   ghosttyMocks.terminals.length = 0;
+  resizeObservers.length = 0;
+  vi.stubGlobal("ResizeObserver", class {
+    readonly observe = vi.fn();
+    readonly disconnect = vi.fn();
+    constructor(readonly callback: ResizeObserverCallback) {
+      resizeObservers.push(this);
+    }
+  });
 });
 
 afterEach(() => {
@@ -509,7 +522,10 @@ describe("GhosttyTerminal", () => {
 
     await waitFor(() => expect(transport.resize).toHaveBeenCalledWith(120, 40), { timeout: 1_000 });
     expect(ghosttyMocks.fitAddons[0]?.fit).toHaveBeenCalledOnce();
-    expect(ghosttyMocks.fitAddons[0]?.observeResize).toHaveBeenCalledOnce();
+    expect(ghosttyMocks.fitAddons[0]?.observeResize).not.toHaveBeenCalled();
+    expect(resizeObservers[0]?.observe).toHaveBeenCalledWith(
+      screen.getByRole("textbox", { name: "Interactive session terminal" }),
+    );
 
     const resizeCalls = transport.resize.mock.calls.length;
     act(() => {
@@ -521,6 +537,33 @@ describe("GhosttyTerminal", () => {
 
     act(() => requireTerminal().emitResize(0, 100_000));
     await waitFor(() => expect(transport.resize).toHaveBeenLastCalledWith(1, 1_000));
+  });
+
+  it("refits after a burst of host resizes and cancels pending fits on unmount", async () => {
+    installWebAssemblyMocks();
+    const transport = fakeTransport();
+    const rendered = render(
+      <GhosttyTerminal
+        transport={transport.api}
+        wasmBytes={new Uint8Array([0x00])}
+      />,
+    );
+    await waitFor(() => expect(ghosttyMocks.fitAddons[0]?.fit).toHaveBeenCalledOnce());
+    const observer = resizeObservers[0]!;
+    const addon = ghosttyMocks.fitAddons[0]!;
+
+    act(() => {
+      observer.callback([], observer as unknown as ResizeObserver);
+      observer.callback([], observer as unknown as ResizeObserver);
+    });
+    expect(addon.fit).toHaveBeenCalledOnce();
+    await waitFor(() => expect(addon.fit).toHaveBeenCalledTimes(2));
+
+    act(() => observer.callback([], observer as unknown as ResizeObserver));
+    rendered.unmount();
+    expect(observer.disconnect).toHaveBeenCalledOnce();
+    await delay(140);
+    expect(addon.fit).toHaveBeenCalledTimes(2);
   });
 
   it("uses Fira Code by default and applies live appearance changes without remounting", async () => {

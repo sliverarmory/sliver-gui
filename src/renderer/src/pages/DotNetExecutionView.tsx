@@ -8,6 +8,7 @@ import {
   Label,
   ListBox,
   SearchField,
+  ScrollShadow,
   Select,
   Switch,
   TextField,
@@ -110,6 +111,8 @@ export function DotNetExecutionView({
   const catalogSequence = useRef(0);
   const historySequence = useRef(0);
   const fileSequence = useRef(0);
+  const contentViewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
   const identityRef = useRef(identity);
   identityRef.current = identity;
@@ -227,6 +230,22 @@ export function DotNetExecutionView({
   const isDll = file?.isDll ?? assembly?.isDll ?? false;
   const canExecute = !!source && !!capability?.available && (file !== undefined || !!assembly?.available) && !isBusy;
   const joinedArgumentBytes = parsedArgumentBytes(argumentsText);
+
+  useEffect(() => {
+    const viewport = contentViewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    const observer = new ResizeObserver(() => viewport.dispatchEvent(new Event("scroll")));
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const viewport = contentViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = 0;
+    viewport.dispatchEvent(new Event("scroll"));
+  }, [selected?.id, showingNew]);
 
   const chooseFile = async (): Promise<void> => {
     const sequence = ++fileSequence.current;
@@ -389,171 +408,33 @@ export function DotNetExecutionView({
         onSelect={setSelectedId}
       />
 
-      <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
-      {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
-      {showingNew ? <section aria-label="Execute a .NET assembly" className="min-w-0">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <h3 className="text-base font-semibold text-foreground">Execute a .NET assembly</h3>
-          <div className="flex items-center gap-2">
-            <Tooltip delay={250}>
-              <Button aria-label="Refresh assemblies" isDisabled={isBusy || catalogState.status === "loading"} isIconOnly size="sm" variant="ghost" onPress={() => void loadCatalog()}>
-                <FontAwesomeIcon aria-hidden className="size-3" icon={faRotate} />
+      <section
+        aria-label={showingNew ? "Execute a .NET assembly" : ".NET execution details"}
+        className="flex min-h-0 min-w-0 flex-col"
+      >
+        {showingNew ? (
+          <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-separator bg-surface px-4 py-3 sm:px-5">
+            <h3 className="text-base font-semibold text-foreground">Execute a .NET assembly</h3>
+            <div className="flex items-center gap-2">
+              <Tooltip delay={250}>
+                <Button aria-label="Refresh assemblies" isDisabled={isBusy || catalogState.status === "loading"} isIconOnly size="sm" variant="ghost" onPress={() => void loadCatalog()}>
+                  <FontAwesomeIcon aria-hidden className="size-3" icon={faRotate} />
+                </Button>
+                <Tooltip.Content>Refresh assemblies</Tooltip.Content>
+              </Tooltip>
+              <Tooltip delay={250}>
+                <Button aria-label="Open assembly file" isDisabled={isBusy} isIconOnly isPending={isChoosingFile} size="sm" variant="ghost" onPress={() => void chooseFile()}>
+                  <FontAwesomeIcon aria-hidden className="size-3.5" icon={faFolderOpen} />
+                </Button>
+                <Tooltip.Content>Open an assembly file</Tooltip.Content>
+              </Tooltip>
+              <Button form={FORM_ID} isDisabled={!canExecute} isPending={isPreparing || isExecuting} type="submit" variant="primary">
+                <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
               </Button>
-              <Tooltip.Content>Refresh assemblies</Tooltip.Content>
-            </Tooltip>
-            <Tooltip delay={250}>
-              <Button aria-label="Open assembly file" isDisabled={isBusy} isIconOnly isPending={isChoosingFile} size="sm" variant="ghost" onPress={() => void chooseFile()}>
-                <FontAwesomeIcon aria-hidden className="size-3.5" icon={faFolderOpen} />
-              </Button>
-              <Tooltip.Content>Open an assembly file</Tooltip.Content>
-            </Tooltip>
-            <Button form={FORM_ID} isDisabled={!canExecute} isPending={isPreparing || isExecuting} type="submit" variant="primary">
-              <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
-            </Button>
-          </div>
-        </div>
-
-        {!capability ? <p className="mb-4 rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">.NET execution is unavailable for this target.</p> : !capability.available ? (
-          <p className="mb-4 rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">{capability.reason?.message ?? ".NET execution is unavailable for this target."}</p>
-        ) : null}
-        {catalogState.status === "loading" ? <p className="mb-4 text-sm text-muted" role="status">Loading Armory assemblies…</p> : null}
-        {catalogError ? <p className="mb-4 rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
-
-        <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
-          <Autocomplete
-            allowsEmptyCollection
-            fullWidth
-            placeholder="Select an Armory assembly"
-            selectionMode="single"
-            value={assemblyId || null}
-            variant="secondary"
-            onChange={(key) => selectAssembly(key === null || Array.isArray(key) ? "" : String(key))}
-          >
-            <Label>Armory assembly</Label>
-            <Autocomplete.Trigger>
-              <Autocomplete.Value>
-                {({ defaultChildren }) => file?.fileName ??
-                  (assembly ? `${assembly.commandName} · ${assembly.packageName}` : defaultChildren)}
-              </Autocomplete.Value>
-              <Autocomplete.ClearButton />
-              <Autocomplete.Indicator />
-            </Autocomplete.Trigger>
-            <Description>{file
-              ? `Local file · ${formatBytes(file.size)}`
-              : assembly
-                ? assembly.description || assembly.packageName
-                : `${catalog?.assemblies.length ?? 0} assemblies for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
-            <Autocomplete.Popover>
-              <Autocomplete.Filter filter={contains}>
-                <SearchField autoFocus aria-label="Search assemblies" variant="secondary">
-                  <SearchField.Group>
-                    <SearchField.SearchIcon />
-                    <SearchField.Input placeholder="Search assemblies…" />
-                    <SearchField.ClearButton />
-                  </SearchField.Group>
-                </SearchField>
-                <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching assemblies.</p>}>
-                  {(catalog?.assemblies ?? []).map((item) => (
-                    <ListBox.Item id={item.id} key={item.id} textValue={`${item.commandName} ${item.packageName} ${item.description}`}>
-                      <span className="flex min-w-0 flex-1 flex-col">
-                        <span className="text-sm font-medium text-foreground">{item.commandName}</span>
-                        <span className="truncate text-xs text-muted">{item.packageName}{item.available ? "" : " · Unavailable"}</span>
-                      </span>
-                      <ListBox.ItemIndicator />
-                    </ListBox.Item>
-                  ))}
-                </ListBox>
-              </Autocomplete.Filter>
-            </Autocomplete.Popover>
-          </Autocomplete>
-
-          {assembly && !assembly.available ? <p className="text-xs text-warning" role="alert">{assembly.reason ?? "This assembly is unavailable for the selected target."}</p> : null}
-          {catalog && catalog.assemblies.length === 0 && !file ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No Armory assemblies are installed for this target. Open a local assembly file or install one from Armory.</p> : null}
-
-          <TextField fullWidth isDisabled={isBusy} variant="secondary" value={argumentsText} onChange={setArgumentsText}>
-            <Label>Assembly arguments</Label>
-            <Input placeholder="--flag 'value with spaces'" style={{ fontFamily: terminalFontFamily }} />
-          </TextField>
-          {!inProcess && joinedArgumentBytes !== undefined && joinedArgumentBytes > 256 ? (
-            <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">
-              The default child-process loader limits joined assembly arguments to 256 bytes. These {joinedArgumentBytes} bytes may be truncated on the target. Review the arguments or use in-process execution.
-            </p>
-          ) : null}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Select fullWidth isDisabled={isBusy} value={architecture} variant="secondary" onChange={(value) => {
-              if (value === "x84" || value === "x64" || value === "x86") setArchitecture(value);
-            }}>
-              <Label>Assembly architecture</Label>
-              <Select.Trigger>
-                <Select.Value>{architecture === "x84" ? "AnyCPU (x84)" : architecture}</Select.Value>
-                <Select.Indicator />
-              </Select.Trigger>
-              <Select.Popover>
-                <ListBox>
-                  <ListBox.Item id="x84" textValue="AnyCPU (x84)">AnyCPU (x84)<ListBox.ItemIndicator /></ListBox.Item>
-                  <ListBox.Item id="x64" textValue="x64">x64<ListBox.ItemIndicator /></ListBox.Item>
-                  <ListBox.Item id="x86" textValue="x86">x86<ListBox.ItemIndicator /></ListBox.Item>
-                </ListBox>
-              </Select.Popover>
-            </Select>
-            <TextField fullWidth isDisabled={isBusy} isRequired variant="secondary" value={process} onChange={setProcess}>
-              <Label>Host process</Label><Input style={{ fontFamily: terminalFontFamily }} />
-            </TextField>
-          </div>
-          {isDll ? (
-            <div className="grid gap-4 sm:grid-cols-2">
-              <TextField fullWidth isDisabled={isBusy} variant="secondary" value={className} onChange={setClassName}>
-                <Label>Class name</Label><Input placeholder="Namespace.Class" />
-              </TextField>
-              <TextField fullWidth isDisabled={isBusy} variant="secondary" value={method} onChange={setMethod}>
-                <Label>Method name</Label><Input />
-              </TextField>
             </div>
-          ) : null}
-          <Switch className="flex w-full items-center rounded-xl bg-surface-secondary px-3 py-2.5" isDisabled={isBusy} isSelected={inProcess} style={{ flexDirection: "row" }} onChange={(selected) => {
-            setInProcess(selected);
-            if (!selected) { setRuntime(""); setAmsiBypass(false); setEtwBypass(false); }
-          }}>
-            <Switch.Content className="flex min-w-0 flex-1 flex-col items-start">
-              <span className="text-sm font-medium text-foreground">Run in process</span>
-              <span className="mt-0.5 text-xs text-muted">Run inside the implant instead of a child host process.</span>
-            </Switch.Content>
-            <Switch.Control className="ml-3 shrink-0"><Switch.Thumb /></Switch.Control>
-          </Switch>
-          {inProcess ? (
-            <div className="grid gap-4 sm:grid-cols-3">
-              <TextField fullWidth isDisabled={isBusy} variant="secondary" value={runtime} onChange={setRuntime}>
-                <Label>.NET runtime</Label><Input placeholder="Optional runtime" />
-              </TextField>
-              <Switch className="flex items-center gap-2" isDisabled={isBusy} isSelected={amsiBypass} onChange={setAmsiBypass}>
-                <Switch.Content>AMSI bypass</Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>
-              </Switch>
-              <Switch className="flex items-center gap-2" isDisabled={isBusy} isSelected={etwBypass} onChange={setEtwBypass}>
-                <Switch.Content>ETW bypass</Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>
-              </Switch>
-            </div>
-          ) : null}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <TextField fullWidth isDisabled={isBusy} variant="secondary" value={appDomain} onChange={setAppDomain}>
-              <Label>AppDomain</Label><Input placeholder="Generated when omitted" />
-            </TextField>
-            <TextField fullWidth isDisabled={isBusy} variant="secondary" value={parentPid} onChange={setParentPid}>
-              <Label>Parent process ID</Label><Input max={EXECUTION_LIMITS.pid} min={0} type="number" />
-            </TextField>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <TextField fullWidth isDisabled={isBusy} variant="secondary" value={processArgumentsText} onChange={setProcessArgumentsText}>
-              <Label>Host process arguments</Label><Input placeholder="Optional host arguments" />
-            </TextField>
-            <TextField fullWidth isDisabled={isBusy} isRequired variant="secondary" value={timeoutSeconds} onChange={setTimeoutSeconds}>
-              <Label>Timeout seconds</Label><Input max={3600} min={1} type="number" />
-            </TextField>
-          </div>
-          {formError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{formError}</p> : null}
-        </form>
-      </section> : selected ? (
-        <section aria-label=".NET execution details" className="flex min-h-full min-w-0 flex-1 flex-col">
-          <div className="flex flex-wrap items-start justify-between gap-2">
+          </header>
+        ) : selected ? (
+          <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-start justify-between gap-2 border-b border-separator bg-surface px-4 py-3 sm:px-5">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="break-all font-mono text-sm font-medium text-foreground">{selected.assemblyName}</h3>
@@ -567,24 +448,183 @@ export function DotNetExecutionView({
               </Button>
               <Tooltip.Content>Clear selected</Tooltip.Content>
             </Tooltip>
+          </header>
+        ) : null}
+
+        <ScrollShadow
+          ref={contentViewportRef}
+          aria-label=".NET execution content"
+          className={`min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-5${showingNew ? " py-4 sm:py-5" : " pt-4 sm:pt-5"}`}
+          hideScrollBar={false}
+          orientation="vertical"
+          role="region"
+          size={28}
+          tabIndex={0}
+        >
+          <div ref={contentRef} className="flex min-h-full min-w-0 flex-col">
+            {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
+            {showingNew ? (
+              <div className="min-w-0">
+                {!capability ? <p className="mb-4 rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">.NET execution is unavailable for this target.</p> : !capability.available ? (
+                  <p className="mb-4 rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">{capability.reason?.message ?? ".NET execution is unavailable for this target."}</p>
+                ) : null}
+                {catalogState.status === "loading" ? <p className="mb-4 text-sm text-muted" role="status">Loading Armory assemblies…</p> : null}
+                {catalogError ? <p className="mb-4 rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
+
+                <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
+                  <Autocomplete
+                    allowsEmptyCollection
+                    fullWidth
+                    placeholder="Select an Armory assembly"
+                    selectionMode="single"
+                    value={assemblyId || null}
+                    variant="secondary"
+                    onChange={(key) => selectAssembly(key === null || Array.isArray(key) ? "" : String(key))}
+                  >
+                    <Label>Armory assembly</Label>
+                    <Autocomplete.Trigger>
+                      <Autocomplete.Value>
+                        {({ defaultChildren }) => file?.fileName ??
+                          (assembly ? `${assembly.commandName} · ${assembly.packageName}` : defaultChildren)}
+                      </Autocomplete.Value>
+                      <Autocomplete.ClearButton />
+                      <Autocomplete.Indicator />
+                    </Autocomplete.Trigger>
+                    <Description>{file
+                      ? `Local file · ${formatBytes(file.size)}`
+                      : assembly
+                        ? assembly.description || assembly.packageName
+                        : `${catalog?.assemblies.length ?? 0} assemblies for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
+                    <Autocomplete.Popover>
+                      <Autocomplete.Filter filter={contains}>
+                        <SearchField autoFocus aria-label="Search assemblies" variant="secondary">
+                          <SearchField.Group>
+                            <SearchField.SearchIcon />
+                            <SearchField.Input placeholder="Search assemblies…" />
+                            <SearchField.ClearButton />
+                          </SearchField.Group>
+                        </SearchField>
+                        <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching assemblies.</p>}>
+                          {(catalog?.assemblies ?? []).map((item) => (
+                            <ListBox.Item id={item.id} key={item.id} textValue={`${item.commandName} ${item.packageName} ${item.description}`}>
+                              <span className="flex min-w-0 flex-1 flex-col">
+                                <span className="text-sm font-medium text-foreground">{item.commandName}</span>
+                                <span className="truncate text-xs text-muted">{item.packageName}{item.available ? "" : " · Unavailable"}</span>
+                              </span>
+                              <ListBox.ItemIndicator />
+                            </ListBox.Item>
+                          ))}
+                        </ListBox>
+                      </Autocomplete.Filter>
+                    </Autocomplete.Popover>
+                  </Autocomplete>
+
+                  {assembly && !assembly.available ? <p className="text-xs text-warning" role="alert">{assembly.reason ?? "This assembly is unavailable for the selected target."}</p> : null}
+                  {catalog && catalog.assemblies.length === 0 && !file ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No Armory assemblies are installed for this target. Open a local assembly file or install one from Armory.</p> : null}
+
+                  <TextField fullWidth isDisabled={isBusy} variant="secondary" value={argumentsText} onChange={setArgumentsText}>
+                    <Label>Assembly arguments</Label>
+                    <Input placeholder="--flag 'value with spaces'" style={{ fontFamily: terminalFontFamily }} />
+                  </TextField>
+                  {!inProcess && joinedArgumentBytes !== undefined && joinedArgumentBytes > 256 ? (
+                    <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">
+                      The default child-process loader limits joined assembly arguments to 256 bytes. These {joinedArgumentBytes} bytes may be truncated on the target. Review the arguments or use in-process execution.
+                    </p>
+                  ) : null}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Select fullWidth isDisabled={isBusy} value={architecture} variant="secondary" onChange={(value) => {
+                      if (value === "x84" || value === "x64" || value === "x86") setArchitecture(value);
+                    }}>
+                      <Label>Assembly architecture</Label>
+                      <Select.Trigger>
+                        <Select.Value>{architecture === "x84" ? "AnyCPU (x84)" : architecture}</Select.Value>
+                        <Select.Indicator />
+                      </Select.Trigger>
+                      <Select.Popover>
+                        <ListBox>
+                          <ListBox.Item id="x84" textValue="AnyCPU (x84)">AnyCPU (x84)<ListBox.ItemIndicator /></ListBox.Item>
+                          <ListBox.Item id="x64" textValue="x64">x64<ListBox.ItemIndicator /></ListBox.Item>
+                          <ListBox.Item id="x86" textValue="x86">x86<ListBox.ItemIndicator /></ListBox.Item>
+                        </ListBox>
+                      </Select.Popover>
+                    </Select>
+                    <TextField fullWidth isDisabled={isBusy} isRequired variant="secondary" value={process} onChange={setProcess}>
+                      <Label>Host process</Label><Input style={{ fontFamily: terminalFontFamily }} />
+                    </TextField>
+                  </div>
+                  {isDll ? (
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <TextField fullWidth isDisabled={isBusy} variant="secondary" value={className} onChange={setClassName}>
+                        <Label>Class name</Label><Input placeholder="Namespace.Class" />
+                      </TextField>
+                      <TextField fullWidth isDisabled={isBusy} variant="secondary" value={method} onChange={setMethod}>
+                        <Label>Method name</Label><Input />
+                      </TextField>
+                    </div>
+                  ) : null}
+                  <Switch className="flex w-full items-center rounded-xl bg-surface-secondary px-3 py-2.5" isDisabled={isBusy} isSelected={inProcess} style={{ flexDirection: "row" }} onChange={(selected) => {
+                    setInProcess(selected);
+                    if (!selected) { setRuntime(""); setAmsiBypass(false); setEtwBypass(false); }
+                  }}>
+                    <Switch.Content className="flex min-w-0 flex-1 flex-col items-start">
+                      <span className="text-sm font-medium text-foreground">Run in process</span>
+                      <span className="mt-0.5 text-xs text-muted">Run inside the implant instead of a child host process.</span>
+                    </Switch.Content>
+                    <Switch.Control className="ml-3 shrink-0"><Switch.Thumb /></Switch.Control>
+                  </Switch>
+                  {inProcess ? (
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      <TextField fullWidth isDisabled={isBusy} variant="secondary" value={runtime} onChange={setRuntime}>
+                        <Label>.NET runtime</Label><Input placeholder="Optional runtime" />
+                      </TextField>
+                      <Switch className="flex items-center gap-2" isDisabled={isBusy} isSelected={amsiBypass} onChange={setAmsiBypass}>
+                        <Switch.Content>AMSI bypass</Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>
+                      </Switch>
+                      <Switch className="flex items-center gap-2" isDisabled={isBusy} isSelected={etwBypass} onChange={setEtwBypass}>
+                        <Switch.Content>ETW bypass</Switch.Content><Switch.Control><Switch.Thumb /></Switch.Control>
+                      </Switch>
+                    </div>
+                  ) : null}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <TextField fullWidth isDisabled={isBusy} variant="secondary" value={appDomain} onChange={setAppDomain}>
+                      <Label>AppDomain</Label><Input placeholder="Generated when omitted" />
+                    </TextField>
+                    <TextField fullWidth isDisabled={isBusy} variant="secondary" value={parentPid} onChange={setParentPid}>
+                      <Label>Parent process ID</Label><Input max={EXECUTION_LIMITS.pid} min={0} type="number" />
+                    </TextField>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <TextField fullWidth isDisabled={isBusy} variant="secondary" value={processArgumentsText} onChange={setProcessArgumentsText}>
+                      <Label>Host process arguments</Label><Input placeholder="Optional host arguments" />
+                    </TextField>
+                    <TextField fullWidth isDisabled={isBusy} isRequired variant="secondary" value={timeoutSeconds} onChange={setTimeoutSeconds}>
+                      <Label>Timeout seconds</Label><Input max={3600} min={1} type="number" />
+                    </TextField>
+                  </div>
+                  {formError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{formError}</p> : null}
+                </form>
+              </div>
+            ) : selected ? (
+              <div className="flex min-h-full min-w-0 flex-1 flex-col">
+                <dl aria-label="Execution details" className="grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-2">
+                  <Detail label="Assembly" value={selected.assemblyName} />
+                  <Detail label="Arguments" value={formatArgv(selected.args) || "None"} />
+                </dl>
+                {selected.error || selected.outputError ? (
+                  <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">{selected.error ?? selected.outputError}</p>
+                ) : null}
+                <DotNetOutputPanel
+                  key={selected.id}
+                  addingToLoot={addingToLoot}
+                  record={selected}
+                  onAddToLoot={addOutputToLoot}
+                  onHistoryChanged={loadHistory}
+                />
+              </div>
+            ) : null}
           </div>
-          <dl aria-label="Execution details" className="mt-3 grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-2">
-            <Detail label="Assembly" value={selected.assemblyName} />
-            <Detail label="Arguments" value={formatArgv(selected.args) || "None"} />
-          </dl>
-          {selected.error || selected.outputError ? (
-            <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">{selected.error ?? selected.outputError}</p>
-          ) : null}
-          <DotNetOutputPanel
-            key={selected.id}
-            addingToLoot={addingToLoot}
-            record={selected}
-            onAddToLoot={addOutputToLoot}
-            onHistoryChanged={loadHistory}
-          />
-        </section>
-      ) : null}
-      </div>
+        </ScrollShadow>
+      </section>
     </section>
   );
 }
@@ -740,18 +780,18 @@ function DotNetOutputPanel({
       </div>
       {output?.data.byteLength && !canSave ? <p className="mt-2 text-xs text-muted">Saving and Loot are unavailable after the output expires. The retained transcript can still be copied.</p> : null}
       {autoRefreshPausedId === record.id ? <p className="mt-2 text-xs text-muted">Automatic refresh paused. Use Refresh result to check again.</p> : null}
-      <div className={["-mr-4 mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5", output?.truncated ? "" : "-mb-4 sm:-mb-5"].join(" ")}>
+      <div className="-mr-4 mt-2 flex min-h-40 flex-1 flex-col overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5">
         {output?.data.byteLength ? (
-          <ExecutionOutputTerminal bytes={output.data} className="h-full min-h-0" resetKey={`${record.id}:${stream}`} />
+          <ExecutionOutputTerminal bytes={output.data} className="min-h-0 flex-1" resetKey={`${record.id}:${stream}`} />
         ) : (
-          <div className="flex h-full min-h-40 items-center justify-center px-5 text-center text-sm text-muted" role="status">
+          <div className="flex min-h-40 flex-1 items-center justify-center px-5 text-center text-sm text-muted" role="status">
             {record.state === "running" || record.state === "submitted"
               ? "Waiting for the assembly result."
               : `No ${stream} was returned for this invocation.`}
           </div>
         )}
       </div>
-      {output?.truncated ? <p className="mt-2 text-xs text-warning">The captured {stream} was truncated at the output limit.</p> : null}
+      {output?.truncated ? <p className="mt-2 pb-4 text-xs text-warning sm:pb-5">The captured {stream} was truncated at the output limit.</p> : null}
     </section>
   );
 }

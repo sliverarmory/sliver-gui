@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Autocomplete, Button, Chip, Description, Input, Label, ListBox, SearchField, Switch, TextField, Tooltip, toast, useFilter } from "@heroui/react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Autocomplete, Button, Chip, Description, Input, Label, ListBox, ScrollShadow, SearchField, Switch, TextField, Tooltip, toast, useFilter } from "@heroui/react";
 import { Segment } from "@heroui-pro/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
@@ -486,11 +486,10 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
         onSelect={setSelectedId}
       />
 
-      <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
-        {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
+      <div className="flex min-h-0 min-w-0 flex-col">
         {showingNew ? (
-          <section aria-label="Execute an Armory BOF" className="min-w-0">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <section aria-label="Execute an Armory BOF" className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 bg-surface px-4 pb-4 pt-4 sm:px-5 sm:pt-5">
               <h3 className="text-base font-semibold text-foreground">Execute an Armory BOF</h3>
               <div className="flex items-center gap-2">
                 <Tooltip delay={250}>
@@ -510,95 +509,98 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                 </Button>
               </div>
             </div>
-            {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading BOFs…</p> : null}
-            {catalogError !== undefined ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
-            {catalog ? (
-              <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
-                <Autocomplete
-                  allowsEmptyCollection
-                  fullWidth
-                  placeholder="Select a BOF"
-                  selectionMode="single"
-                  value={commandId || null}
-                  variant="secondary"
-                  onChange={(key) => selectCommand(key === null || Array.isArray(key) ? "" : String(key))}
-                >
-                  <Label>BOF</Label>
-                  <Autocomplete.Trigger>
-                    <Autocomplete.Value>
-                      {({ defaultChildren, isPlaceholder }) => isPlaceholder || !command
-                        ? defaultChildren
-                        : `${command.commandName} · ${command.packageName}`}
-                    </Autocomplete.Value>
-                    <Autocomplete.ClearButton />
-                    <Autocomplete.Indicator />
-                  </Autocomplete.Trigger>
-                  <Description>{command
-                    ? command.description || command.packageName
-                    : `${selectableCommands.length} BOFs for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
-                  <Autocomplete.Popover>
-                    <Autocomplete.Filter filter={contains}>
-                      <SearchField autoFocus aria-label="Search BOFs" variant="secondary">
-                        <SearchField.Group>
-                          <SearchField.SearchIcon />
-                          <SearchField.Input placeholder="Search BOFs…" />
-                          <SearchField.ClearButton />
-                        </SearchField.Group>
-                      </SearchField>
-                      <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching BOFs.</p>}>
-                        {selectableCommands.map((item) => (
-                          <ListBox.Item
-                            id={item.id}
-                            key={item.id}
-                            textValue={`${item.commandName} ${item.packageName} ${item.description}`}
-                          >
-                            <span className="flex min-w-0 flex-1 flex-col">
-                              <span className="text-sm font-medium text-foreground">{item.commandName}</span>
-                              <span className="truncate text-xs text-muted">{item.packageName}{item.available ? "" : " · Unavailable"}</span>
-                            </span>
-                            <ListBox.ItemIndicator />
-                          </ListBox.Item>
-                        ))}
-                      </ListBox>
-                    </Autocomplete.Filter>
-                  </Autocomplete.Popover>
-                </Autocomplete>
-                {selectableCommands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs match {target.os}/{target.arch}. Refresh the Armory catalog or open a BOF directory.</p> : null}
-                {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
-                {command ? (
-                  <>
-                    {!command.available ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">{command.reason ?? "This BOF is unavailable for the selected target."}</p> : null}
-                    {command.arguments.length ? (
-                      <section aria-label="BOF arguments" className="space-y-4">
-                        <h4 className="text-sm font-semibold text-foreground">Arguments</h4>
-                        <div className="grid gap-4 md:grid-cols-2">
-                          {command.arguments.map((definition, index) => (
-                            <BofArgumentField
-                              definition={definition}
-                              disabled={isExecuting || !command.available}
-                              isChoosingFile={choosingFileIndex === index}
-                              key={`${command.id}:${index}`}
-                              value={argumentValues[index]}
-                              onChange={(value) => setArgumentValues((current) => current.map((existing, currentIndex) => currentIndex === index ? value : existing))}
-                              onChooseFile={() => void chooseFile(index)}
-                            />
+            <BofExecutionScrollBody>
+              {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
+              {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading BOFs…</p> : null}
+              {catalogError !== undefined ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
+              {catalog ? (
+                <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
+                  <Autocomplete
+                    allowsEmptyCollection
+                    fullWidth
+                    placeholder="Select a BOF"
+                    selectionMode="single"
+                    value={commandId || null}
+                    variant="secondary"
+                    onChange={(key) => selectCommand(key === null || Array.isArray(key) ? "" : String(key))}
+                  >
+                    <Label>BOF</Label>
+                    <Autocomplete.Trigger>
+                      <Autocomplete.Value>
+                        {({ defaultChildren, isPlaceholder }) => isPlaceholder || !command
+                          ? defaultChildren
+                          : `${command.commandName} · ${command.packageName}`}
+                      </Autocomplete.Value>
+                      <Autocomplete.ClearButton />
+                      <Autocomplete.Indicator />
+                    </Autocomplete.Trigger>
+                    <Description>{command
+                      ? command.description || command.packageName
+                      : `${selectableCommands.length} BOFs for ${target.os}/${target.arch}. Type to search or browse.`}</Description>
+                    <Autocomplete.Popover>
+                      <Autocomplete.Filter filter={contains}>
+                        <SearchField autoFocus aria-label="Search BOFs" variant="secondary">
+                          <SearchField.Group>
+                            <SearchField.SearchIcon />
+                            <SearchField.Input placeholder="Search BOFs…" />
+                            <SearchField.ClearButton />
+                          </SearchField.Group>
+                        </SearchField>
+                        <ListBox renderEmptyState={() => <p className="px-3 py-6 text-center text-sm text-muted">No matching BOFs.</p>}>
+                          {selectableCommands.map((item) => (
+                            <ListBox.Item
+                              id={item.id}
+                              key={item.id}
+                              textValue={`${item.commandName} ${item.packageName} ${item.description}`}
+                            >
+                              <span className="flex min-w-0 flex-1 flex-col">
+                                <span className="text-sm font-medium text-foreground">{item.commandName}</span>
+                                <span className="truncate text-xs text-muted">{item.packageName}{item.available ? "" : " · Unavailable"}</span>
+                              </span>
+                              <ListBox.ItemIndicator />
+                            </ListBox.Item>
                           ))}
-                        </div>
-                      </section>
-                    ) : <p className="text-sm text-muted">This BOF takes no arguments.</p>}
-                    <TextField className="max-w-xs" fullWidth isRequired variant="secondary" value={timeoutSeconds} onChange={setTimeoutSeconds}>
-                      <Label>Timeout seconds</Label><Input max={3600} min={1} type="number" />
-                      <Description>Wait up to 3600 seconds for the BOF result.</Description>
-                    </TextField>
-                  </>
-                ) : null}
-                {formError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{formError}</p> : null}
-              </form>
-            ) : null}
+                        </ListBox>
+                      </Autocomplete.Filter>
+                    </Autocomplete.Popover>
+                  </Autocomplete>
+                  {selectableCommands.length === 0 ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground">No BOFs match {target.os}/{target.arch}. Refresh the Armory catalog or open a BOF directory.</p> : null}
+                  {catalog.warnings.map((warning) => <p className="text-xs text-warning" key={warning}>{warning}</p>)}
+                  {command ? (
+                    <>
+                      {!command.available ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-sm text-warning-soft-foreground" role="alert">{command.reason ?? "This BOF is unavailable for the selected target."}</p> : null}
+                      {command.arguments.length ? (
+                        <section aria-label="BOF arguments" className="space-y-4">
+                          <h4 className="text-sm font-semibold text-foreground">Arguments</h4>
+                          <div className="grid gap-4 md:grid-cols-2">
+                            {command.arguments.map((definition, index) => (
+                              <BofArgumentField
+                                definition={definition}
+                                disabled={isExecuting || !command.available}
+                                isChoosingFile={choosingFileIndex === index}
+                                key={`${command.id}:${index}`}
+                                value={argumentValues[index]}
+                                onChange={(value) => setArgumentValues((current) => current.map((existing, currentIndex) => currentIndex === index ? value : existing))}
+                                onChooseFile={() => void chooseFile(index)}
+                              />
+                            ))}
+                          </div>
+                        </section>
+                      ) : <p className="text-sm text-muted">This BOF takes no arguments.</p>}
+                      <TextField className="max-w-xs" fullWidth isRequired variant="secondary" value={timeoutSeconds} onChange={setTimeoutSeconds}>
+                        <Label>Timeout seconds</Label><Input max={3600} min={1} type="number" />
+                        <Description>Wait up to 3600 seconds for the BOF result.</Description>
+                      </TextField>
+                    </>
+                  ) : null}
+                  {formError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{formError}</p> : null}
+                </form>
+              ) : null}
+            </BofExecutionScrollBody>
           </section>
         ) : selected ? (
-          <div className="flex min-h-full min-w-0 flex-1 flex-col">
-            <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="sticky top-0 z-10 flex shrink-0 flex-wrap items-start justify-between gap-2 bg-surface px-4 pb-4 pt-4 sm:px-5 sm:pt-5">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="break-all font-mono text-sm font-medium text-foreground">{selected.commandName}</h3>
@@ -613,58 +615,94 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                 <Tooltip.Content>Clear selected</Tooltip.Content>
               </Tooltip>
             </div>
-            <dl aria-label="Execution details" className="mt-3 grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-2">
-              <Detail label="BOF" value={selected.commandName} />
-              <Detail label="Task" value={selected.taskId ?? "Not reported"} />
-            </dl>
-            {selected.error ? <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">{selected.error}</p> : null}
-            {autoRefreshPausedId === selected.id ? <p className="mt-2 text-xs text-muted">Automatic refresh paused. Use Refresh result to check again.</p> : null}
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <Segment aria-label="Captured output stream" selectedKey={stream} size="sm" variant="ghost" onSelectionChange={(key) => setStream(String(key) as OutputStream)}>
-                  <Segment.Item id="stdout">Stdout</Segment.Item>
-                  {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
-                </Segment>
-                <div aria-label="Output actions" className="flex flex-wrap items-center gap-2" role="group">
-                  <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
-                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />Copy output
-                  </Button>
-                  <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => void saveOutput(selected, stream)}>
-                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />Save {stream}
-                  </Button>
-                  {output?.data.byteLength ? (
-                    <Button className="h-7 px-2.5 text-xs" isPending={addingToLoot} size="sm" variant="outline" onPress={() => void addOutputToLoot(selected, stream)}>
-                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />Add {stream} to Loot
+            <BofExecutionScrollBody fillHeight>
+              {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
+              <dl aria-label="Execution details" className="mt-3 grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-2">
+                <Detail label="BOF" value={selected.commandName} />
+                <Detail label="Task" value={selected.taskId ?? "Not reported"} />
+              </dl>
+              {selected.error ? <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">{selected.error}</p> : null}
+              {autoRefreshPausedId === selected.id ? <p className="mt-2 text-xs text-muted">Automatic refresh paused. Use Refresh result to check again.</p> : null}
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <Segment aria-label="Captured output stream" selectedKey={stream} size="sm" variant="ghost" onSelectionChange={(key) => setStream(String(key) as OutputStream)}>
+                    <Segment.Item id="stdout">Stdout</Segment.Item>
+                    {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
+                  </Segment>
+                  <div aria-label="Output actions" className="flex flex-wrap items-center gap-2" role="group">
+                    <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
+                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />Copy output
                     </Button>
-                  ) : null}
-                  {selected.state === "submitted" || selected.state === "outcome-unknown" ? (
-                    <Button className="h-7 px-2.5 text-xs" size="sm" variant="outline" onPress={() => void refreshResult(selected.id)}>
-                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />Refresh result
+                    <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => void saveOutput(selected, stream)}>
+                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />Save {stream}
                     </Button>
-                  ) : null}
+                    {output?.data.byteLength ? (
+                      <Button className="h-7 px-2.5 text-xs" isPending={addingToLoot} size="sm" variant="outline" onPress={() => void addOutputToLoot(selected, stream)}>
+                        <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />Add {stream} to Loot
+                      </Button>
+                    ) : null}
+                    {selected.state === "submitted" || selected.state === "outcome-unknown" ? (
+                      <Button className="h-7 px-2.5 text-xs" size="sm" variant="outline" onPress={() => void refreshResult(selected.id)}>
+                        <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />Refresh result
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
+                <Switch className="flex items-center gap-2" isSelected={ignoreStderr} style={{ flexDirection: "row" }} onChange={setIgnoreStderr}>
+                  <Switch.Content className="text-xs text-muted">Ignore stderr</Switch.Content>
+                  <Switch.Control><Switch.Thumb /></Switch.Control>
+                </Switch>
               </div>
-              <Switch className="flex items-center gap-2" isSelected={ignoreStderr} style={{ flexDirection: "row" }} onChange={setIgnoreStderr}>
-                <Switch.Content className="text-xs text-muted">Ignore stderr</Switch.Content>
-                <Switch.Control><Switch.Thumb /></Switch.Control>
-              </Switch>
-            </div>
-            <div className={["-mr-4 mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5", output?.truncated ? "" : "-mb-4 sm:-mb-5"].join(" ")}>
-              {output?.data.byteLength ? (
-                <ExecutionOutputTerminal bytes={output.data} className="h-full min-h-0" resetKey={`${selected.id}:${stream}`} />
-              ) : (
-                <div className="flex h-full min-h-40 items-center justify-center px-5 text-center text-sm text-muted">
-                  {selected.state === "running" || selected.state === "submitted"
-                    ? "Waiting for the BOF result."
-                    : `No ${stream} was returned for this invocation.`}
-                </div>
-              )}
-            </div>
-            {output?.truncated ? <p className="mt-2 text-xs text-warning">The captured {stream} was truncated at the output limit.</p> : null}
+              <div className="-mr-4 mt-2 flex min-h-40 flex-1 flex-col overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5">
+                {output?.data.byteLength ? (
+                  <ExecutionOutputTerminal bytes={output.data} className="min-h-0 flex-1" resetKey={`${selected.id}:${stream}`} />
+                ) : (
+                  <div className="flex min-h-40 flex-1 items-center justify-center px-5 text-center text-sm text-muted">
+                    {selected.state === "running" || selected.state === "submitted"
+                      ? "Waiting for the BOF result."
+                      : `No ${stream} was returned for this invocation.`}
+                  </div>
+                )}
+              </div>
+              {output?.truncated ? <p className="mt-2 pb-4 text-xs text-warning sm:pb-5">The captured {stream} was truncated at the output limit.</p> : null}
+            </BofExecutionScrollBody>
           </div>
         ) : null}
       </div>
     </section>
+  );
+}
+
+function BofExecutionScrollBody({ children, fillHeight = false }: {
+  children: ReactNode;
+  fillHeight?: boolean;
+}): React.JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    // The form and output can grow without changing the viewport's size.
+    const observer = new ResizeObserver(() => viewport.dispatchEvent(new Event("scroll")));
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <ScrollShadow
+      ref={viewportRef}
+      aria-label="BOF execution content"
+      className={`min-h-0 flex-1 overflow-y-auto px-4 sm:px-5${fillHeight ? "" : " pb-4 sm:pb-5"}`}
+      hideScrollBar={false}
+      orientation="vertical"
+      role="region"
+      size={28}
+      tabIndex={0}
+    >
+      <div ref={contentRef} className={fillHeight ? "flex min-h-full min-w-0 flex-col" : "min-w-0"}>{children}</div>
+    </ScrollShadow>
   );
 }
 

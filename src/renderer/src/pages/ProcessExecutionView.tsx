@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Chip, Switch, Tooltip, toast } from "@heroui/react";
+import { Button, Chip, ScrollShadow, Switch, Tooltip, toast } from "@heroui/react";
 import { Segment } from "@heroui-pro/react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -80,11 +80,21 @@ export function ProcessExecutionView({
   const output = stream === "stdout" ? selected?.stdout : selected?.stderr;
   const outputMetadata = selected?.result?.output?.find((item) => item.stream === stream);
   const canSave = Boolean(outputMetadata && Date.parse(outputMetadata.expiresAt) > Date.now());
+  const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const scrollContentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setStream("stdout");
   }, [selected?.id]);
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
+  useEffect(() => {
+    const viewport = scrollViewportRef.current;
+    const content = scrollContentRef.current;
+    if (!viewport || !content) return;
+    const observer = new ResizeObserver(() => viewport.dispatchEvent(new Event("scroll")));
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [showingNew, selected?.id]);
 
   const copyBytes = async (bytes: Uint8Array | undefined): Promise<void> => {
     if (!bytes?.byteLength) return;
@@ -146,10 +156,10 @@ export function ProcessExecutionView({
         onSelect={onSelect}
       />
 
-      <div className="flex min-h-0 min-w-0 flex-col overflow-y-auto p-4 sm:p-5">
+      <div className="flex min-h-0 min-w-0 flex-col overflow-visible sm:overflow-hidden">
         {showingNew ? (
-          <section aria-label="Execute a subprocess" className="min-w-0">
-            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <section aria-label="Execute a subprocess" className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 bg-surface p-4 sm:p-5">
               <h3 className="text-base font-semibold text-foreground">Execute a subprocess</h3>
               {capability?.available ? (
                 <Button
@@ -163,33 +173,44 @@ export function ProcessExecutionView({
                   Execute
                 </Button>
               ) : null}
-            </div>
-            {!capability ? (
-              <p className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
-                Process execution is unavailable for this target.
-              </p>
-            ) : !capability.available ? (
-              <p className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
-                {capability.reason?.message ?? "Process execution is unavailable for this target."}
-              </p>
-            ) : (
-              <>
-                <ExecutionActionForm
-                  key={`${target.mode}:${target.id}`}
-                  capability={capability}
-                  compactProcess
-                  formId={PROCESS_FORM_ID}
-                  isPreparing={isPreparing || isExecuting}
-                  operationId="execution.process"
-                  target={target}
-                  onPrepare={onPrepare}
-                />
-              </>
-            )}
+            </header>
+            <ScrollShadow
+              ref={scrollViewportRef}
+              aria-label="Process execution content"
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 pb-4 sm:px-5 sm:pb-5"
+              hideScrollBar={false}
+              orientation="vertical"
+              role="region"
+              size={24}
+              tabIndex={0}
+            >
+              <div ref={scrollContentRef}>
+                {!capability ? (
+                  <p className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
+                    Process execution is unavailable for this target.
+                  </p>
+                ) : !capability.available ? (
+                  <p className="rounded-xl bg-warning-soft px-4 py-3 text-sm text-warning-soft-foreground">
+                    {capability.reason?.message ?? "Process execution is unavailable for this target."}
+                  </p>
+                ) : (
+                  <ExecutionActionForm
+                    key={`${target.mode}:${target.id}`}
+                    capability={capability}
+                    compactProcess
+                    formId={PROCESS_FORM_ID}
+                    isPreparing={isPreparing || isExecuting}
+                    operationId="execution.process"
+                    target={target}
+                    onPrepare={onPrepare}
+                  />
+                )}
+              </div>
+            </ScrollShadow>
           </section>
         ) : selected ? (
-          <div className="flex min-h-full min-w-0 flex-1 flex-col">
-            <div className="flex flex-wrap items-start justify-between gap-2">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-start justify-between gap-2 bg-surface p-4 pb-3 sm:p-5 sm:pb-4">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="break-all font-mono text-sm font-medium text-foreground">{commandLabel(selected)}</h3>
@@ -203,89 +224,102 @@ export function ProcessExecutionView({
                 </Button>
                 <Tooltip.Content>Clear selected</Tooltip.Content>
               </Tooltip>
-            </div>
+            </header>
 
-            <dl aria-label="Execution details" className="mt-3 grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-[minmax(0,7rem)_minmax(0,8rem)_minmax(0,1fr)]">
-              <Detail label="Exit code" value={selected.result?.exitCode === undefined ? "Not reported" : String(selected.result.exitCode)} />
-              <Detail label="Process ID" value={selected.result?.pid === undefined ? "Not reported" : String(selected.result.pid)} />
-              <Detail label="Request" value={selected.result?.requestId ?? "Pending"} />
-            </dl>
-            {selected.error || selected.outputError ? (
-              <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">
-                {selected.error ?? selected.outputError}
-              </p>
-            ) : null}
-            {selected.result?.message && !(selected.state === "completed" && selected.result.message === "Process execution completed.") ? (
-              <p className="mt-2 text-xs text-muted">{selected.result.message}</p>
-            ) : null}
+            <ScrollShadow
+              ref={scrollViewportRef}
+              aria-label="Process execution content"
+              className="min-h-0 min-w-0 flex-1 overflow-y-auto px-4 sm:px-5"
+              hideScrollBar={false}
+              orientation="vertical"
+              role="region"
+              size={24}
+              tabIndex={0}
+            >
+              <div ref={scrollContentRef} className="flex min-h-full min-w-0 flex-col">
+                <dl aria-label="Execution details" className="grid gap-3 rounded-xl bg-surface-secondary p-3 text-xs sm:grid-cols-[minmax(0,7rem)_minmax(0,8rem)_minmax(0,1fr)]">
+                  <Detail label="Exit code" value={selected.result?.exitCode === undefined ? "Not reported" : String(selected.result.exitCode)} />
+                  <Detail label="Process ID" value={selected.result?.pid === undefined ? "Not reported" : String(selected.result.pid)} />
+                  <Detail label="Request" value={selected.result?.requestId ?? "Pending"} />
+                </dl>
+                {selected.error || selected.outputError ? (
+                  <p className="mt-3 rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="alert">
+                    {selected.error ?? selected.outputError}
+                  </p>
+                ) : null}
+                {selected.result?.message && !(selected.state === "completed" && selected.result.message === "Process execution completed.") ? (
+                  <p className="mt-2 text-xs text-muted">{selected.result.message}</p>
+                ) : null}
 
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-                <Segment
-                  aria-label="Captured output stream"
-                  selectedKey={stream}
-                  size="sm"
-                  variant="ghost"
-                  onSelectionChange={(key) => setStream(String(key) as OutputStream)}
-                >
-                  <Segment.Item id="stdout">Stdout</Segment.Item>
-                  {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
-                </Segment>
-                <div aria-label="Output actions" className="flex flex-wrap items-center gap-2" role="group">
-                  <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
-                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />
-                    Copy output
-                  </Button>
-                  <Button className="h-7 px-2.5 text-xs" isDisabled={!canSave} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => selected.result && onSave(selected.result, stream)}>
-                    <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />
-                    Save {stream}
-                  </Button>
-                  {output?.data.byteLength ? (
-                    <Button
-                      className="h-7 px-2.5 text-xs"
-                      isDisabled={!canSave}
-                      isPending={addingToLoot}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                    <Segment
+                      aria-label="Captured output stream"
+                      selectedKey={stream}
                       size="sm"
-                      variant="outline"
-                      onPress={() => selected.result && onAddToLoot(selected.result, stream, "")}
+                      variant="ghost"
+                      onSelectionChange={(key) => setStream(String(key) as OutputStream)}
                     >
-                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />
-                      Add {stream} to Loot
-                    </Button>
-                  ) : null}
-                  {selected.result && (selected.state === "outcome-unknown" || selected.state === "submitted") ? (
-                    <Button className="h-7 px-2.5 text-xs" size="sm" variant="outline" onPress={() => onRefresh(selected)}>
-                      <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />
-                      Refresh result
-                    </Button>
-                  ) : null}
+                      <Segment.Item id="stdout">Stdout</Segment.Item>
+                      {!ignoreStderr ? <Segment.Item id="stderr">Stderr</Segment.Item> : null}
+                    </Segment>
+                    <div aria-label="Output actions" className="flex flex-wrap items-center gap-2" role="group">
+                      <Button className="h-7 px-2.5 text-xs" isDisabled={!output?.data.byteLength} size="sm" variant="tertiary" onPress={() => void copyOutput()}>
+                        <FontAwesomeIcon aria-hidden className="size-3.5" icon={faCopy} />
+                        Copy output
+                      </Button>
+                      <Button className="h-7 px-2.5 text-xs" isDisabled={!canSave} isPending={savingStream === stream} size="sm" variant="tertiary" onPress={() => selected.result && onSave(selected.result, stream)}>
+                        <FontAwesomeIcon aria-hidden className="size-3.5" icon={faDownload} />
+                        Save {stream}
+                      </Button>
+                      {output?.data.byteLength ? (
+                        <Button
+                          className="h-7 px-2.5 text-xs"
+                          isDisabled={!canSave}
+                          isPending={addingToLoot}
+                          size="sm"
+                          variant="outline"
+                          onPress={() => selected.result && onAddToLoot(selected.result, stream, "")}
+                        >
+                          <FontAwesomeIcon aria-hidden className="size-3.5" icon={faBoxOpen} />
+                          Add {stream} to Loot
+                        </Button>
+                      ) : null}
+                      {selected.result && (selected.state === "outcome-unknown" || selected.state === "submitted") ? (
+                        <Button className="h-7 px-2.5 text-xs" size="sm" variant="outline" onPress={() => onRefresh(selected)}>
+                          <FontAwesomeIcon aria-hidden className="size-3.5" icon={faRotate} />
+                          Refresh result
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                  <Switch className="flex items-center gap-2" isSelected={ignoreStderr} style={{ flexDirection: "row" }} onChange={setIgnoreStderr}>
+                    <Switch.Content className="text-xs text-muted">Ignore stderr</Switch.Content>
+                    <Switch.Control><Switch.Thumb /></Switch.Control>
+                  </Switch>
                 </div>
+                <div className="-mr-4 mt-2 flex min-h-40 flex-1 flex-col overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5">
+                  {output?.data.byteLength ? (
+                    <ExecutionOutputTerminal
+                      bytes={output.data}
+                      className="min-h-0 flex-1"
+                      resetKey={`${selected.id}:${stream}`}
+                    />
+                  ) : (
+                    <div className="flex min-h-40 flex-1 items-center justify-center px-5 text-center text-sm text-muted">
+                      {selected.state === "running" || selected.state === "submitted"
+                        ? "Waiting for the process result."
+                        : outputMetadata && !output && !selected.outputError
+                          ? `Loading captured ${stream}…`
+                        : selected.result && !selected.result.output?.length
+                          ? "This invocation returned no captured output."
+                          : `No ${stream} was returned for this invocation.`}
+                    </div>
+                  )}
+                </div>
+                {output?.truncated ? <p className="mt-2 pb-4 text-xs text-warning sm:pb-5">The captured {stream} was truncated at the output limit.</p> : null}
               </div>
-              <Switch className="flex items-center gap-2" isSelected={ignoreStderr} style={{ flexDirection: "row" }} onChange={setIgnoreStderr}>
-                <Switch.Content className="text-xs text-muted">Ignore stderr</Switch.Content>
-                <Switch.Control><Switch.Thumb /></Switch.Control>
-              </Switch>
-            </div>
-            <div className={["-mr-4 mt-2 min-h-40 flex-1 overflow-hidden rounded-xl bg-surface-secondary sm:-mr-5", output?.truncated ? "" : "-mb-4 sm:-mb-5"].join(" ")}>
-              {output?.data.byteLength ? (
-                <ExecutionOutputTerminal
-                  bytes={output.data}
-                  className="h-full min-h-0"
-                  resetKey={`${selected.id}:${stream}`}
-                />
-              ) : (
-                <div className="flex h-full min-h-40 items-center justify-center px-5 text-center text-sm text-muted">
-                  {selected.state === "running" || selected.state === "submitted"
-                    ? "Waiting for the process result."
-                    : outputMetadata && !output && !selected.outputError
-                      ? `Loading captured ${stream}…`
-                    : selected.result && !selected.result.output?.length
-                      ? "This invocation returned no captured output."
-                      : `No ${stream} was returned for this invocation.`}
-                </div>
-              )}
-            </div>
-            {output?.truncated ? <p className="mt-2 text-xs text-warning">The captured {stream} was truncated at the output limit.</p> : null}
+            </ScrollShadow>
           </div>
         ) : null}
       </div>

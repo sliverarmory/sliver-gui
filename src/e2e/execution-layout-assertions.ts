@@ -2,6 +2,77 @@ import assert from "node:assert/strict";
 
 import type { Locator } from "playwright-core";
 
+/** Verify the composer keeps its heading and primary actions above a fading scrollport. */
+export async function assertExecutionComposerScrollLayout(
+  composer: Locator,
+  headingName: string,
+  contentName: string,
+  actionNames: readonly string[],
+): Promise<void> {
+  const heading = composer.getByRole("heading", { name: headingName, exact: true });
+  const content = composer.getByRole("region", { name: contentName, exact: true });
+  assert.equal(await content.count(), 1, `${contentName} must have one scrollport`);
+  assert.equal(await content.getAttribute("data-slot"), "scroll-shadow");
+  assert.equal(await content.getAttribute("data-orientation"), "vertical");
+  assert.equal(await content.getAttribute("tabindex"), "0");
+  assert.equal(await content.getByRole("heading", { name: headingName, exact: true }).count(), 0,
+    `${headingName} must sit outside the scrollport`);
+
+  const actions = actionNames.map((name) => composer.getByRole("button", { name, exact: true }));
+  for (let index = 0; index < actionNames.length; index += 1) {
+    const name = actionNames[index]!;
+    assert.equal(await actions[index]!.count(), 1, `${name} must appear in the composer header`);
+    assert.equal(await content.getByRole("button", { name, exact: true }).count(), 0,
+      `${name} must sit outside the scrollport`);
+  }
+
+  // Constrain the form body so even a short fixture exercises both fade edges.
+  const originalStyle = await content.evaluate((element) => {
+    const original = { height: element.style.height, flex: element.style.flex };
+    element.style.height = "96px";
+    element.style.flex = "none";
+    element.dispatchEvent(new Event("scroll"));
+    return original;
+  });
+  try {
+    await composer.locator('[data-slot="scroll-shadow"][data-bottom-scroll="true"]').waitFor();
+    const topState = await content.evaluate((element) => ({
+      overflow: element.scrollHeight > element.clientHeight,
+      mask: element.ownerDocument.defaultView!.getComputedStyle(element).maskImage,
+    }));
+    assert.equal(topState.overflow, true, `${contentName} must scroll when constrained`);
+    assert.match(topState.mask, /linear-gradient/u, `${contentName} must fade at the bottom`);
+
+    const headingBounds = await heading.boundingBox();
+    const actionBounds = await Promise.all(actions.map((action) => action.boundingBox()));
+    assert.ok(headingBounds && actionBounds.every(Boolean), "Composer header must be measurable");
+    await content.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await composer.locator('[data-slot="scroll-shadow"][data-top-scroll="true"]').waitFor();
+    const bottomMask = await content.evaluate((element) =>
+      element.ownerDocument.defaultView!.getComputedStyle(element).maskImage);
+    assert.match(bottomMask, /linear-gradient/u, `${contentName} must fade at the top`);
+    assert.equal(await heading.isVisible(), true, `${headingName} must stay visible while the form scrolls`);
+    const scrolledHeadingBounds = await heading.boundingBox();
+    assert.ok(scrolledHeadingBounds && Math.abs(scrolledHeadingBounds.y - headingBounds.y) <= 1,
+      `${headingName} must stay fixed while the form scrolls`);
+    for (let index = 0; index < actions.length; index += 1) {
+      const bounds = await actions[index]!.boundingBox();
+      assert.ok(bounds && Math.abs(bounds.y - actionBounds[index]!.y) <= 1,
+        `${actionNames[index]} must stay fixed while the form scrolls`);
+    }
+  } finally {
+    await content.evaluate((element, original) => {
+      element.style.height = original.height;
+      element.style.flex = original.flex;
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    }, originalStyle);
+  }
+}
+
 /** Check the shared Process and BOF output layout in an actual Electron renderer. */
 export async function assertExecutionOutputLayout(
   workspace: Locator,
@@ -96,4 +167,118 @@ export async function assertExecutionOutputLayout(
       element.dispatchEvent(new Event("scroll"));
     }, originalMaxHeight);
   }
+}
+
+interface TerminalCanvasGeometry {
+  frameHeight: number;
+  hostHeight: number;
+  canvasHeight: number;
+  frameToHostBottomGap: number;
+  hostToCanvasBottomGap: number;
+}
+
+/** Ghostty paints its text viewport and scrollbar in the same canvas. */
+export async function assertExecutionTerminalCanvasTracksResize(
+  terminal: Locator,
+  label: string,
+): Promise<void> {
+  const initial = await waitForTerminalCanvasGeometry(terminal, canvasFillsHost, `${label} initial canvas to fit`);
+  const originalStyle = await terminal.evaluate((host, height) => {
+    const frame = host.parentElement!;
+    const original = { height: frame.style.height, flex: frame.style.flex };
+    frame.style.flex = "none";
+    frame.style.height = `${height}px`;
+    return original;
+  }, initial.frameHeight);
+  try {
+    // Resize again in the microtask that observes the first canvas fit. This
+    // exercises the addon guard that used to discard a resize within 50 ms.
+    await resizeFrameDuringFirstFit(terminal, initial.frameHeight + 80, initial.frameHeight + 160);
+    const grown = await waitForTerminalCanvasGeometry(terminal,
+      (geometry) => geometry.frameHeight >= initial.frameHeight + 159 &&
+        geometry.canvasHeight >= initial.canvasHeight + 100 && canvasFillsHost(geometry),
+      `${label} canvas to fit after consecutive pane growth`);
+    assertCanvasFillsHost(grown, label);
+
+    await resizeFrameDuringFirstFit(terminal, initial.frameHeight + 80, initial.frameHeight);
+    const shrunk = await waitForTerminalCanvasGeometry(terminal,
+      (geometry) => Math.abs(geometry.frameHeight - initial.frameHeight) <= 1 &&
+        geometry.canvasHeight <= grown.canvasHeight - 100 && canvasFillsHost(geometry),
+      `${label} canvas to fit after consecutive pane shrink`);
+    assertCanvasFillsHost(shrunk, label);
+  } finally {
+    await terminal.evaluate((host, original) => {
+      const frame = host.parentElement!;
+      frame.style.height = original.height;
+      frame.style.flex = original.flex;
+    }, originalStyle);
+  }
+}
+
+async function resizeFrameDuringFirstFit(terminal: Locator, firstHeight: number, nextHeight: number): Promise<void> {
+  await terminal.evaluate((host, heights) => new Promise<void>((resolve, reject) => {
+    const frame = host.parentElement!;
+    const canvas = host.querySelector("canvas")!;
+    const initialCanvasHeight = canvas.getBoundingClientRect().height;
+    const BrowserMutationObserver = (host.ownerDocument.defaultView as unknown as {
+      MutationObserver: new (callback: () => void) => {
+        disconnect: () => void;
+        observe: (target: unknown, options: { attributes: boolean; attributeFilter: string[] }) => void;
+      };
+    }).MutationObserver;
+    const observer = new BrowserMutationObserver(() => {
+      if (Math.abs(canvas.getBoundingClientRect().height - initialCanvasHeight) < 40) return;
+      observer.disconnect();
+      clearTimeout(timer);
+      frame.style.height = `${heights.nextHeight}px`;
+      resolve();
+    });
+    const timer = setTimeout(() => {
+      observer.disconnect();
+      reject(new Error(`Ghostty canvas did not fit the first pane height ${heights.firstHeight}`));
+    }, 5_000);
+    observer.observe(canvas, { attributes: true, attributeFilter: ["height", "style"] });
+    frame.style.height = `${heights.firstHeight}px`;
+  }), { firstHeight, nextHeight });
+}
+
+async function waitForTerminalCanvasGeometry(
+  terminal: Locator,
+  accepts: (geometry: TerminalCanvasGeometry) => boolean,
+  description: string,
+): Promise<TerminalCanvasGeometry> {
+  const deadline = Date.now() + 10_000;
+  let geometry: TerminalCanvasGeometry | null = null;
+  do {
+    geometry = await terminal.evaluate((host): TerminalCanvasGeometry | null => {
+      const frame = host.parentElement;
+      const canvas = host.querySelector("canvas");
+      if (!frame || !canvas) return null;
+      const frameBounds = frame.getBoundingClientRect();
+      const hostBounds = host.getBoundingClientRect();
+      const canvasBounds = canvas.getBoundingClientRect();
+      return {
+        frameHeight: frameBounds.height,
+        hostHeight: hostBounds.height,
+        canvasHeight: canvasBounds.height,
+        frameToHostBottomGap: frameBounds.bottom - hostBounds.bottom,
+        hostToCanvasBottomGap: hostBounds.bottom - canvasBounds.bottom,
+      };
+    });
+    if (geometry && accepts(geometry)) return geometry;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } while (Date.now() < deadline);
+  assert.fail(`${description}; last geometry=${JSON.stringify(geometry)}`);
+}
+
+function canvasFillsHost(geometry: TerminalCanvasGeometry): boolean {
+  // Ghostty fits whole character rows, leaving at most one partial row.
+  return Math.abs(geometry.frameHeight - geometry.hostHeight) <= 3 &&
+    geometry.frameToHostBottomGap >= 0 && geometry.frameToHostBottomGap <= 3 &&
+    geometry.hostToCanvasBottomGap >= -1 && geometry.hostToCanvasBottomGap <= 32;
+}
+
+function assertCanvasFillsHost(geometry: TerminalCanvasGeometry, label: string): void {
+  assert.ok(canvasFillsHost(geometry),
+    `${label} Ghostty canvas must fill its host within one character row; geometry=${JSON.stringify(geometry)}`);
 }

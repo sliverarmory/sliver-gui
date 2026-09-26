@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
-import { assertExecutionOutputLayout } from "./execution-layout-assertions.js";
+import { assertExecutionComposerScrollLayout, assertExecutionOutputLayout } from "./execution-layout-assertions.js";
 
 const PROCESS_STDOUT = "deterministic M4 process stdout";
 
@@ -72,6 +72,7 @@ test("session Process executes into Ghostty and retains navigable in-memory hist
     const newExecution = history.getByRole("row", { name: "New Execution", exact: true });
     await form.waitFor();
     await history.waitFor();
+    await assertExecutionComposerScrollLayout(form, "Execute a subprocess", "Process execution content", ["Execute"]);
     await assertProcessRailBesideContent(outputPanel, history, form);
     assert.equal(await newExecution.count(), 1, "New Execution must always head the history rail");
     assert.equal(await history.getByRole("row").count(), 1,

@@ -12,8 +12,8 @@ import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../com
 import { DotNetExecutionView } from "./DotNetExecutionView";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({
-  ExecutionOutputTerminal: ({ bytes }: { bytes: Uint8Array }) => (
-    <pre aria-label="Execution output transcript">{new TextDecoder().decode(bytes)}</pre>
+  ExecutionOutputTerminal: ({ bytes, className }: { bytes: Uint8Array; className?: string }) => (
+    <pre aria-label="Execution output transcript" className={className}>{new TextDecoder().decode(bytes)}</pre>
   ),
 }));
 
@@ -261,6 +261,47 @@ describe(".NET execution view", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("These 258 bytes may be truncated");
     await user.click(screen.getByRole("switch", { name: /Run in process/u }));
     expect(screen.queryByText(/limits joined assembly arguments to 256 bytes/u)).not.toBeInTheDocument();
+  });
+
+  it("keeps the composer and selected-result headers above the scroll-shadowed content", async () => {
+    const user = userEvent.setup();
+    installApi([historyRecord("first-request", "seatbelt.exe", ["alpha"], "captured output")]);
+    render(<DotNetExecutionView capability={capability} isExecuting={false} isPreparing={false} isRefreshing={false} target={target} targetRef={targetRef} onPrepare={async () => undefined} />);
+
+    const rail = await screen.findByRole("navigation", { name: ".NET execution history" });
+    const historyRow = await within(rail).findByRole("row", { name: /seatbelt\.exe/u });
+    await user.click(within(rail).getByRole("row", { name: "New Execution" }));
+
+    const composer = screen.getByRole("region", { name: "Execute a .NET assembly" });
+    const content = within(composer).getByRole("region", { name: ".NET execution content" });
+    const composerHeader = within(composer).getByRole("heading", { name: "Execute a .NET assembly" }).closest("header");
+    expect(content).toHaveAttribute("data-slot", "scroll-shadow");
+    expect(content).toHaveAttribute("data-scroll-shadow-size", "28");
+    expect(content).toHaveAttribute("tabindex", "0");
+    expect(content).toHaveClass("min-h-0", "flex-1", "overflow-y-auto", "overscroll-contain");
+    expect(composerHeader).not.toBeNull();
+    expect(composerHeader?.parentElement).toBe(composer);
+    expect(composerHeader).toHaveClass("sticky", "top-0", "z-10", "bg-surface");
+    expect(composerHeader).toContainElement(within(composer).getByRole("button", { name: "Execute" }));
+    expect(content).not.toContainElement(composerHeader);
+    expect(content).toContainElement(within(composer).getByRole("textbox", { name: "Assembly arguments" }));
+
+    content.scrollTop = 64;
+    await user.click(historyRow);
+    const details = screen.getByRole("region", { name: ".NET execution details" });
+    const resultHeader = within(details).getByRole("heading", { name: "seatbelt.exe" }).closest("header");
+    expect(resultHeader?.parentElement).toBe(details);
+    expect(resultHeader).toHaveClass("sticky", "top-0", "z-10", "bg-surface");
+    expect(resultHeader).toContainElement(within(details).getByRole("button", { name: "Clear selected" }));
+    expect(content).not.toContainElement(resultHeader);
+    expect(content).toContainElement(within(details).getByLabelText("Execution details"));
+    expect(content).not.toHaveClass("pb-4", "sm:pb-5");
+    const transcript = within(details).getByLabelText("Execution output transcript");
+    expect(transcript.parentElement).toHaveClass("flex", "flex-1", "flex-col");
+    expect(transcript).toHaveClass("min-h-0", "flex-1");
+    await user.click(within(details).getByRole("radio", { name: "Stderr" }));
+    expect(within(details).getByRole("status", { name: "" })).toHaveClass("min-h-40", "flex-1");
+    expect(content.scrollTop).toBe(0);
   });
 
   it("shows the BOF-style history rail, restores earlier arguments and output, and clears history", async () => {

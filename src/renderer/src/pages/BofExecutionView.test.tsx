@@ -180,6 +180,38 @@ async function historyContextMenu(view: ApplicationContextMenuTestRender, comman
 }
 
 describe("BOF execution view", () => {
+  it("keeps the composer title and actions outside the scroll-shadow content", async () => {
+    installApi();
+    renderView();
+
+    const composer = await screen.findByRole("region", { name: "Execute an Armory BOF" });
+    const content = within(composer).getByRole("region", { name: "BOF execution content" });
+    expect(content).toHaveAttribute("data-slot", "scroll-shadow");
+    expect(content).toHaveClass("overflow-y-auto");
+    expect(content).toHaveAttribute("tabindex", "0");
+    expect(content).toContainElement(composer.querySelector("form"));
+    expect(content).not.toContainElement(within(composer).getByRole("heading", { name: "Execute an Armory BOF" }));
+    expect(content).not.toContainElement(within(composer).getByRole("button", { name: "Refresh BOFs" }));
+    expect(content).not.toContainElement(within(composer).getByRole("button", { name: "Open BOF directory" }));
+    expect(content).not.toContainElement(within(composer).getByRole("button", { name: "Execute" }));
+  });
+
+  it("keeps the selected result title and clear action outside its scroll-shadow content", async () => {
+    installApi([{
+      id: "selected-run", startedAt: "2026-09-25T11:00:00.000Z",
+      commandId: "sa-dir/sa-dir", commandName: "sa-dir", state: "completed",
+      stdout: { data: new TextEncoder().encode("BOF stdout\n"), truncated: false },
+    }]);
+    renderView();
+
+    const actions = await screen.findByRole("group", { name: "Output actions" });
+    const content = screen.getByRole("region", { name: "BOF execution content" });
+    expect(content).toHaveAttribute("data-slot", "scroll-shadow");
+    expect(content).toContainElement(actions);
+    expect(content).not.toContainElement(screen.getByRole("heading", { name: "sa-dir" }));
+    expect(content).not.toContainElement(screen.getByRole("button", { name: "Clear selected" }));
+  });
+
   it("shows the selected BOF description beneath the autocomplete without a separate summary card", async () => {
     const user = userEvent.setup();
     installApi();
