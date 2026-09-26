@@ -1086,7 +1086,7 @@ export function TargetsPage({
 
   return (
     <section className="page-stack targets-page" data-presentation={presentation}>
-      {presentation === "catalog" ? <header className="page-heading">
+      {presentation === "catalog" ? <header className="page-heading targets-page__header">
         <div className="min-w-0">
           <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={pageIcon} /> {mode === "session" ? "Session" : "Beacon"} workspace</div>
           <h1>{pageLabel}</h1>
@@ -1103,6 +1103,7 @@ export function TargetsPage({
         </div>
       </header> : null}
 
+      <TargetsPageContent pageLabel={pageLabel} presentation={presentation}>
       {presentation === "catalog" ? <div className="min-h-0">
         <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="target-inventory-heading">
           <div className="flex flex-col gap-4 px-4 py-4 lg:flex-row lg:items-center lg:justify-between">
@@ -1424,6 +1425,7 @@ export function TargetsPage({
           onRefresh={() => void loadTasks()}
         />
       ) : null}
+      </TargetsPageContent>
 
       {renameSessionIsCurrent && active?.mode === "session" ? (
         <RenameSessionModal
@@ -1491,6 +1493,45 @@ export function TargetsPage({
         }}
       />
     </section>
+  );
+}
+
+function TargetsPageContent({
+  children,
+  pageLabel,
+  presentation,
+}: {
+  children: ReactNode;
+  pageLabel: string;
+  presentation: "catalog" | "dedicated";
+}): React.JSX.Element {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    const content = contentRef.current;
+    if (!viewport || !content) return;
+    // Live updates can resize the content without changing the scrollport.
+    const observer = new ResizeObserver(() => viewport.dispatchEvent(new Event("scroll")));
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [presentation]);
+
+  if (presentation !== "catalog") return <>{children}</>;
+
+  return (
+    <ScrollShadow
+      ref={viewportRef}
+      aria-label={`${pageLabel} content`}
+      className="targets-page__viewport min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      hideScrollBar={false}
+      orientation="vertical"
+      role="region"
+      size={28}
+    >
+      <div ref={contentRef} className="page-stack targets-page__content">{children}</div>
+    </ScrollShadow>
   );
 }
 

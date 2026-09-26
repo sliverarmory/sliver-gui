@@ -656,6 +656,26 @@
     gap: 1.5rem;
   }
 
+  .app-content:has(> .targets-page[data-presentation="catalog"]) {
+    overflow: hidden;
+    padding-block: 0;
+  }
+
+  .targets-page[data-presentation="catalog"] {
+    height: 100%;
+    min-height: 0;
+    gap: 0;
+  }
+
+  .targets-page[data-presentation="catalog"] > .targets-page__header {
+    flex: none;
+    padding-block: 2rem;
+  }
+
+  .targets-page__content {
+    padding-bottom: 5rem;
+  }
+
   .app-content:has(> .settings-page) {
     padding-top: 0;
   }
@@ -1066,6 +1086,10 @@ html.dark .session-processes-grid.table-root--secondary {
 
   .app-content {
     padding-inline: 1rem;
+    padding-top: 1.5rem;
+  }
+
+  .targets-page[data-presentation="catalog"] > .targets-page__header {
     padding-top: 1.5rem;
   }
 

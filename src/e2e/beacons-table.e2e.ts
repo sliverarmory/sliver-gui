@@ -52,8 +52,26 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await nativeWindow.evaluate((window) => window.setSize(2000, 950));
     await page.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
     await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Sessions"]:visible').click();
+    await page.getByRole("heading", { name: "Sessions", exact: true }).waitFor();
+    for (const width of [1440, 1024]) {
+      await nativeWindow.evaluate((window, nextWidth) => window.setSize(nextWidth, 768), width);
+      await page.waitForFunction((expectedWidth) => (
+        globalThis as unknown as { innerWidth: number }
+      ).innerWidth === expectedWidth, width);
+      await assertTargetCatalogScrollLayout(page, "Sessions", join(screenshotDirectory, `sessions-scrolled-${width}.png`));
+    }
     await page.locator('[aria-label="Beacons"]:visible').click();
     await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
+    for (const width of [1440, 1024]) {
+      await nativeWindow.evaluate((window, nextWidth) => window.setSize(nextWidth, 768), width);
+      await page.waitForFunction((expectedWidth) => (
+        globalThis as unknown as { innerWidth: number }
+      ).innerWidth === expectedWidth, width);
+      await assertTargetCatalogScrollLayout(page, "Beacons", join(screenshotDirectory, `beacons-scrolled-${width}.png`));
+    }
+    await nativeWindow.evaluate((window) => window.setSize(2000, 950));
+    await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth === 2000);
 
     const catalog = page.locator('.targets-page[data-presentation="catalog"]');
     const inventoryFrame = catalog.locator('[aria-labelledby="target-inventory-heading"]').locator("..");
@@ -129,6 +147,78 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function assertTargetCatalogScrollLayout(
+  page: Page,
+  label: "Sessions" | "Beacons",
+  screenshotPath: string,
+): Promise<void> {
+  const catalog = page.locator('.targets-page[data-presentation="catalog"]');
+  const header = catalog.locator("header.targets-page__header");
+  const content = catalog.getByRole("region", { name: `${label} content`, exact: true });
+  const inventory = content.locator('[aria-labelledby="target-inventory-heading"]');
+  await content.waitFor();
+  assert.equal(await content.getAttribute("data-slot"), "scroll-shadow", `${label} content must use HeroUI ScrollShadow`);
+  assert.equal(await content.getAttribute("data-orientation"), "vertical");
+  assert.equal(await content.locator("header.targets-page__header").count(), 0, `${label} header must sit outside the scrollport`);
+  await content.getByRole("heading", { name: "All target operations", exact: true }).waitFor();
+  await content.getByRole("heading", { name: "Operator presence", exact: true }).waitFor();
+
+  const fixedElements = [
+    header.locator(".eyebrow"),
+    header.getByRole("heading", { name: label, exact: true }),
+    header.locator("p"),
+    header.getByText(new RegExp(`^\\d+ ${label.toLowerCase()}$`, "u")),
+    header.getByText(/^\d+ online operators$/u),
+    header.getByRole("button", { name: "Maintenance", exact: true }),
+  ];
+  await content.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll"));
+  });
+  await catalog.locator('[aria-label="' + label + ' content"][data-bottom-scroll="true"]').waitFor();
+  const before = await Promise.all(fixedElements.map((element) => element.boundingBox()));
+  const inventoryBefore = await inventory.boundingBox();
+  const contentBounds = await content.boundingBox();
+  assert.ok(before.every(Boolean) && inventoryBefore && contentBounds, `${label} layout must be measurable`);
+  assert.ok(before.every((bounds) => bounds!.y + bounds!.height <= contentBounds.y + 1),
+    `${label} header must remain above the scrolling content`);
+  const top = await content.evaluate((element) => ({
+    overflow: element.scrollHeight > element.clientHeight,
+    mask: element.ownerDocument.defaultView!.getComputedStyle(element).maskImage,
+  }));
+  assert.equal(top.overflow, true, `${label} fixture must overflow the actual window viewport`);
+  assert.match(top.mask, /linear-gradient/u, `${label} content must fade at the bottom before scrolling`);
+  try {
+    const scrollTop = await content.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+      return element.scrollTop;
+    });
+    assert.ok(scrollTop > 0, `${label} content must scroll`);
+    await catalog.locator('[aria-label="' + label + ' content"][data-top-scroll="true"]').waitFor();
+    const mask = await content.evaluate((element) => element.ownerDocument.defaultView!.getComputedStyle(element).maskImage);
+    assert.match(mask, /linear-gradient/u, `${label} content must fade beneath the fixed header after scrolling`);
+    assert.notEqual(mask, top.mask, `${label} fade must change to reflect the scrolled edge`);
+    const after = await Promise.all(fixedElements.map((element) => element.boundingBox()));
+    for (let index = 0; index < fixedElements.length; index += 1) {
+      assert.equal(await fixedElements[index]!.isVisible(), true, `${label} header element ${index} must remain visible`);
+      assert.ok(after[index] && Math.abs(after[index]!.y - before[index]!.y) <= 1,
+        `${label} header element ${index} must stay fixed while the content scrolls`);
+    }
+    const inventoryAfter = await inventory.boundingBox();
+    assert.ok(inventoryAfter && Math.abs(inventoryBefore.y - inventoryAfter.y - scrollTop) <= 1,
+      `${label} inventory must move with the scrolling content`);
+    assert.equal(await page.locator(".app-content").evaluate((element) => element.scrollTop), 0,
+      `${label} body must scroll independently of the surrounding app content`);
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+  } finally {
+    await content.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+  }
+}
 
 async function assertBeaconBreadcrumbSwitching(
   application: ElectronApplication,
@@ -340,7 +430,7 @@ async function assertCatalogWidth(page: Page, viewportWidth: number): Promise<vo
     return {
       available: content(catalog.parentElement!),
       catalog: { left: catalogBounds.left, width: catalogBounds.width },
-      inventoryAvailable: content(catalog),
+      inventoryAvailable: content(catalog.querySelector(".targets-page__viewport")!),
       inventory: { left: inventoryBounds.left, width: inventoryBounds.width },
     };
   });
@@ -351,7 +441,7 @@ async function assertCatalogWidth(page: Page, viewportWidth: number): Promise<vo
   `Beacons must use the centered catalog width at ${viewportWidth}px: ${JSON.stringify(layout)}`);
   assert.ok(Math.abs(layout.inventory.left - layout.inventoryAvailable.left) <= 1 &&
     Math.abs(layout.inventory.width - layout.inventoryAvailable.width) <= 1,
-  `Beacons table must fill the catalog width at ${viewportWidth}px: ${JSON.stringify(layout)}`);
+  `Beacons table must fill the scrollport width at ${viewportWidth}px: ${JSON.stringify(layout)}`);
 }
 
 function fakeOperatorConfig(): string {
