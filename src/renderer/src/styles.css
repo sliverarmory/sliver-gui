@@ -124,6 +124,48 @@
 }
 
 @layer components {
+  .target-status-cell {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+    height: 1.25rem;
+    contain: inline-size;
+    overflow: hidden;
+  }
+
+  .target-status-cell__badge {
+    width: max-content;
+    white-space: nowrap;
+  }
+
+  .target-status-cell[data-compact="true"] .target-status-cell__badge {
+    position: absolute;
+    visibility: hidden;
+    pointer-events: none;
+  }
+
+  .target-status-cell__dot {
+    width: 0.625rem;
+    height: 0.625rem;
+    flex: none;
+    border-radius: 50%;
+    background-color: var(--color-muted);
+  }
+
+  .target-status-cell__dot[data-color="success"] {
+    background-color: var(--color-success);
+  }
+
+  .target-status-cell__dot[data-color="warning"] {
+    background-color: var(--color-warning);
+  }
+
+  .target-status-cell__dot[data-color="danger"] {
+    background-color: var(--color-danger);
+  }
+
   .beacons-inventory-grid.table-root--secondary .table__row {
     --beacon-row-background: var(--color-surface);
   }

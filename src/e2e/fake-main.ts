@@ -260,6 +260,7 @@ const overviewSoftwareFixture = process.argv.includes("--overview-software-fixtu
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
+const beaconsTableFixture = process.argv.includes("--beacons-table-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
 }
@@ -801,6 +802,17 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       UUID: "overview-egress-beacon-host-id",
       RemoteAddress: "198.51.100.10:43001",
     }] : [seedBeacon(testState.beaconName)];
+  if (beaconsTableFixture) {
+    beacons.push(clientpb.Beacon.create({
+      ...seedBeacon("m2-beacon"),
+      ID: "m2_beacon",
+      Hostname: "m2-beacon-host",
+      UUID: "m2-beacon-host-id",
+      RemoteAddress: "127.0.0.1:41003",
+      PID: 41003,
+      Filename: "/private/tmp/m2-beacon",
+    }));
+  }
   let lootStore: clientpb.Loot[] = [
     clientpb.Loot.create({
       ID: "591a16d2-e138-4a21-b38f-f166aa23e044",

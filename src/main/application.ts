@@ -1574,13 +1574,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         return { ok: false, error: "The interaction window changed before the target could be selected" };
       }
       if (!record.claimedBy || !sameWindowIdentity(record.claimedBy, destination)) {
-        return { ok: false, error: "Claim this interaction window before changing its session" };
+        return { ok: false, error: "Claim this interaction window before changing its target" };
       }
       if ((registry.snapshot(destination.contentsId).connection.incarnation ?? 0) !== record.connectionIncarnation) {
-        return { ok: false, error: "The interaction window connection changed before its session could be selected" };
+        return { ok: false, error: "The interaction window connection changed before its target could be selected" };
       }
-      if (record.target.mode !== "session" || target.mode !== "session") {
-        return { ok: false, error: "A dedicated interaction window cannot change target modes or retarget a beacon" };
+      if (record.target.mode !== target.mode) {
+        return { ok: false, error: "A dedicated interaction window cannot change target modes" };
       }
 
       const selected = await registry.selectTarget(destination.contentsId, target);
@@ -1590,21 +1590,21 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         interactionWindowsByContentsId.get(destination.contentsId),
         generation,
       )) {
-        return { ok: false, error: "The interaction window changed while its session was being selected" };
+        return { ok: false, error: "The interaction window changed while its target was being selected" };
       }
       if (!selected.ok || !selected.value) return selected;
       if ((selected.value.connection.incarnation ?? 0) !== record.connectionIncarnation) {
-        return { ok: false, error: "The interaction window connection changed while its session was being selected" };
+        return { ok: false, error: "The interaction window connection changed while its target was being selected" };
       }
       const selectedTarget = selected.value.targetContext.activeTarget;
       const selectedSummary = selected.value.targetContext.activeTargetSummary;
       if (
-        selectedTarget?.mode !== "session" ||
+        selectedTarget?.mode !== target.mode ||
         !sameTargetIdentity(selectedTarget, target) ||
-        selectedSummary?.mode !== "session" ||
+        selectedSummary?.mode !== target.mode ||
         selectedSummary.id !== target.id
       ) {
-        return { ok: false, error: "The backend did not confirm the selected session" };
+        return { ok: false, error: "The backend did not confirm the selected target" };
       }
 
       record.target = selectedTarget;
@@ -1613,7 +1613,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       return selected;
     }).catch((): OperationResult<SliverSnapshot> => ({
       ok: false,
-      error: "The interaction session could not be selected",
+      error: "The interaction target could not be selected",
     }));
   }
 

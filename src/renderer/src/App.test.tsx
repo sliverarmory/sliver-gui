@@ -1845,7 +1845,13 @@ describe("Sidebar navigation", () => {
     expect(within(inventoryFrame).queryByRole("complementary")).not.toBeInTheDocument();
     await user.click(within(beaconsTable).getByRole("button", { name: "Interact with warehouse" }));
 
-    expect(await screen.findByRole("heading", { name: "Async task workspace" })).toBeInTheDocument();
+    const breadcrumbs = await screen.findByRole("navigation", { name: "Beacon workspace breadcrumbs" });
+    expect(within(breadcrumbs).getByText("Beacons")).toBeInTheDocument();
+    expect(within(breadcrumbs).getByText("warehouse")).toBeInTheDocument();
+    const workspaceNavigation = breadcrumbs.closest("header")!;
+    expect(workspaceNavigation).toHaveAttribute("aria-label", "Beacon workspace navigation");
+    expect(within(workspaceNavigation).getByRole("button", { name: "Back to live beacons" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
     expect(api.selectTarget).toHaveBeenCalledWith(ref);
     expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
@@ -1855,7 +1861,7 @@ describe("Sidebar navigation", () => {
     expect(await screen.findByRole("heading", { name: "Live beacons" })).toBeInTheDocument();
     const restoredTable = screen.getByRole("grid", { name: "Sliver beacons" });
     expect(within(restoredTable).getByRole("button", { name: "Interact with warehouse" })).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Beacon workspace breadcrumbs" })).not.toBeInTheDocument();
     const restoredInventoryFrame = restoredTable.closest('[aria-labelledby="target-inventory-heading"]')!.parentElement!;
     expect(within(restoredInventoryFrame).queryByRole("complementary")).not.toBeInTheDocument();
   });

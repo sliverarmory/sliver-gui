@@ -5,6 +5,7 @@ import { ipcMain } from "electron";
 
 import type { ApplicationCloudDeploymentController } from "./application.js";
 import { IPC, type ManagedServerReference } from "../shared/contracts.js";
+import type { TargetMode, TargetRef } from "../shared/target-contracts.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
 import { WORKSPACE_ZOOM_CHANGED_CHANNEL } from "../shared/application-zoom-contracts.js";
@@ -733,6 +734,133 @@ describe("application protocol lifecycle", () => {
   });
 });
 
+describe("Interaction application window lifecycle", () => {
+  it.each(["session", "beacon"] as const)("switches a claimed %s window and restores its new target on the next claim", async (mode) => {
+    const fixture = await createInteractionLifecycleFixture(mode);
+    const { application, actions, interactionWindow, workspaceWindow, first, second, registry, snapshots, snapshotForTarget } = fixture;
+    const destination = identityFor(interactionWindow);
+    try {
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: first } });
+      expect(await actions.selectTarget(destination, second)).toMatchObject({
+        ok: true,
+        value: { targetContext: { activeTarget: second, activeTargetSummary: { id: second.id, mode } } },
+      });
+      expect(interactionWindow.setTitle).toHaveBeenLastCalledWith(`Interact — ${second.id}`);
+      expect(registry.snapshot(workspaceWindow.webContents.id).targetContext.activeTarget).toEqual(first);
+
+      // Reclaim must restore the updated main-owned target, even if the
+      // registry's current selection changed independently of this controller.
+      snapshots.set(destination.contentsId, snapshotForTarget(first));
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: second } });
+      expect(registry.selectTarget).toHaveBeenLastCalledWith(destination.contentsId, second);
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it.each(["session", "beacon"] as const)("denies cross-mode selection from a claimed %s window", async (mode) => {
+    const { application, actions, interactionWindow, first, crossMode, registry } = await createInteractionLifecycleFixture(mode);
+    const destination = identityFor(interactionWindow);
+    try {
+      expect(await actions.claim(destination)).toMatchObject({ ok: true });
+      registry.selectTarget.mockClear();
+      expect(await actions.selectTarget(destination, crossMode)).toEqual({
+        ok: false,
+        error: "A dedicated interaction window cannot change target modes",
+      });
+      expect(registry.selectTarget).not.toHaveBeenCalled();
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: first } });
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it("requires a beacon window claim before switching targets", async () => {
+    const { application, actions, interactionWindow, second, registry } = await createInteractionLifecycleFixture("beacon");
+    try {
+      registry.selectTarget.mockClear();
+      expect(await actions.selectTarget(identityFor(interactionWindow), second)).toEqual({
+        ok: false,
+        error: "Claim this interaction window before changing its target",
+      });
+      expect(registry.selectTarget).not.toHaveBeenCalled();
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it("does not update a beacon window's claimed target or title when the backend confirms a different identity", async () => {
+    const { application, actions, interactionWindow, first, second, registry, snapshotForTarget } = await createInteractionLifecycleFixture("beacon");
+    const destination = identityFor(interactionWindow);
+    try {
+      expect(await actions.claim(destination)).toMatchObject({ ok: true });
+      interactionWindow.setTitle.mockClear();
+      registry.selectTarget.mockResolvedValueOnce({
+        ok: true,
+        value: snapshotForTarget({ ...second, fingerprint: "d".repeat(64) }),
+      });
+      expect(await actions.selectTarget(destination, second)).toEqual({
+        ok: false,
+        error: "The backend did not confirm the selected target",
+      });
+      expect(interactionWindow.setTitle).not.toHaveBeenCalled();
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: first } });
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it("rejects a beacon selection if the connection incarnation changes before or during selection", async () => {
+    const { application, actions, interactionWindow, first, second, registry, snapshots, snapshotForTarget } = await createInteractionLifecycleFixture("beacon");
+    const destination = identityFor(interactionWindow);
+    try {
+      expect(await actions.claim(destination)).toMatchObject({ ok: true });
+      registry.selectTarget.mockClear();
+      interactionWindow.setTitle.mockClear();
+      snapshots.set(destination.contentsId, snapshotForTarget(first, 2));
+      expect(await actions.selectTarget(destination, second)).toEqual({
+        ok: false,
+        error: "The interaction window connection changed before its target could be selected",
+      });
+      expect(registry.selectTarget).not.toHaveBeenCalled();
+
+      snapshots.set(destination.contentsId, snapshotForTarget(first));
+      registry.selectTarget.mockResolvedValueOnce({ ok: true, value: snapshotForTarget(second, 2) });
+      expect(await actions.selectTarget(destination, second)).toEqual({
+        ok: false,
+        error: "The interaction window connection changed while its target was being selected",
+      });
+      expect(interactionWindow.setTitle).not.toHaveBeenCalled();
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: first } });
+    } finally {
+      await application.stop();
+    }
+  });
+
+  it("rejects a delayed beacon selection after renderer navigation revokes its claim", async () => {
+    const { application, actions, interactionWindow, first, second, registry, snapshotForTarget } = await createInteractionLifecycleFixture("beacon");
+    const destination = identityFor(interactionWindow);
+    try {
+      expect(await actions.claim(destination)).toMatchObject({ ok: true });
+      const pending = deferred<ReturnType<typeof snapshotForTarget>>();
+      registry.selectTarget.mockImplementationOnce(async () => ({ ok: true, value: await pending.promise }));
+      interactionWindow.setTitle.mockClear();
+      const selection = actions.selectTarget(destination, second);
+      await settleLifecycle();
+      interactionWindow.webContents.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+      pending.resolve(snapshotForTarget(second));
+      expect(await selection).toEqual({
+        ok: false,
+        error: "The interaction window changed while its target was being selected",
+      });
+      expect(interactionWindow.setTitle).not.toHaveBeenCalled();
+      expect(await actions.claim(destination)).toMatchObject({ ok: true, value: { target: first } });
+    } finally {
+      await application.stop();
+    }
+  });
+});
+
 describe("Console application window lifecycle", () => {
   it("retains tabs in a hidden window until explicit tab close or application shutdown", async () => {
     const fixture = await createConsoleLifecycleFixture();
@@ -1307,6 +1435,51 @@ function findTemplateMenuItemByLabel(template: readonly any[], label: string): a
     }
   }
   return undefined;
+}
+
+async function createInteractionLifecycleFixture(mode: TargetMode) {
+  const ref = (targetMode: TargetMode, name: string, fingerprint: string): TargetRef => ({
+    mode: targetMode,
+    id: `${name}-${targetMode}`,
+    backendEpoch: 7,
+    domainRevision: 1,
+    fingerprint: fingerprint.repeat(64),
+  });
+  const first = ref(mode, "first", "a");
+  const second = ref(mode, "second", "b");
+  const crossMode = ref(mode === "beacon" ? "session" : "beacon", "other", "c");
+  const snapshotForTarget = (target: TargetRef, incarnation = 1) => ({
+    connection: { status: "connected" as const, epoch: 7, incarnation },
+    targetContext: {
+      status: "selected" as const,
+      activeTarget: target,
+      activeTargetSummary: { mode: target.mode, id: target.id, name: target.id, hostname: "fixture-host" },
+      selectableTargets: [first, second, crossMode],
+    },
+  });
+  const snapshots = new Map<number, ReturnType<typeof snapshotForTarget>>();
+  const registry = {
+    ...fakeConnectionRegistry(),
+    snapshot: vi.fn((contentsId: number) => snapshots.get(contentsId) ?? snapshotForTarget(first)),
+    selectTarget: vi.fn(async (contentsId: number, target: TargetRef) => {
+      const next = snapshotForTarget(target);
+      snapshots.set(contentsId, next);
+      return { ok: true as const, value: next };
+    }),
+  };
+  const controller = {
+    getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+    getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+    dispose: vi.fn(),
+  } as unknown as ApplicationCloudDeploymentController;
+  const { startApplication } = await import("./application.js");
+  const { registerIpcHandlers } = await import("./ipc.js");
+  const application = await startApplication({ cloudDeploymentController: controller, registry: registry as never });
+  const workspaceWindow = harness.windows.at(-1)!;
+  const actions = vi.mocked(registerIpcHandlers).mock.calls.at(-1)![5]!;
+  expect(await actions.open(identityFor(workspaceWindow))).toEqual({ ok: true });
+  const interactionWindow = harness.windows.at(-1)!;
+  return { application, actions, workspaceWindow, interactionWindow, first, second, crossMode, registry, snapshots, snapshotForTarget };
 }
 
 async function createConsoleLifecycleFixture(

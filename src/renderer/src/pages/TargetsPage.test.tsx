@@ -105,6 +105,21 @@ const beaconRef: TargetRef = {
   fingerprint: "b".repeat(64),
 };
 
+const secondBeacon: BeaconSummary = {
+  ...beacon,
+  id: "beacon-2",
+  name: "nightly",
+  hostname: "nightly-linux",
+  username: "carol",
+  checkinStatus: "overdue",
+};
+
+const secondBeaconRef: TargetRef = {
+  ...beaconRef,
+  id: secondBeacon.id,
+  fingerprint: "c".repeat(64),
+};
+
 const rowInteractionCases = [
   { mode: "session", label: "Interact", destination: "current" },
   { mode: "session", label: "Interact in new window", destination: "popout" },
@@ -219,6 +234,19 @@ function targetSnapshot(active: "session" | "beacon" | "none" = "none"): SliverS
     capabilities: active === "none" ? [] : capabilities,
     beaconWatch: false,
   };
+  return snapshot;
+}
+
+function switchableBeaconSnapshot(active: "first" | "second" = "first"): SliverSnapshot {
+  const snapshot = targetSnapshot("beacon");
+  snapshot.beacons = [beacon];
+  snapshot.domains.beacons.items = [beacon, secondBeacon];
+  snapshot.domains.beacons.page = { limit: 500, total: 2, truncated: false };
+  snapshot.targetContext.selectableTargets = [sessionRef, beaconRef, secondBeaconRef];
+  if (active === "second") {
+    snapshot.targetContext.activeTarget = secondBeaconRef;
+    snapshot.targetContext.activeTargetSummary = secondBeacon;
+  }
   return snapshot;
 }
 
@@ -484,6 +512,170 @@ describe("TargetsPage", () => {
     expect(onSnapshot).not.toHaveBeenCalled();
   });
 
+  it("switches from the Beacons breadcrumb using the exact main-issued reference and confirmed summary", async () => {
+    const user = userEvent.setup();
+    const confirmed = switchableBeaconSnapshot("second");
+    const confirmedBeacon = { ...secondBeacon, name: "confirmed-nightly" };
+    confirmed.targetContext.activeTargetSummary = confirmedBeacon;
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: confirmed });
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+
+    const trigger = screen.getByRole("button", { name: "Beacons, switch beacon" });
+    expect(trigger.closest("a")).toBeNull();
+    await user.click(trigger);
+    const menu = await screen.findByRole("menu", { name: "Beacons, switch beacon" });
+    const current = within(menu).getByRole("menuitemradio", { name: /warehouse.*Current/ });
+    expect(current).toHaveAttribute("aria-checked", "true");
+    expect(current).toHaveTextContent("edge-linux");
+    expect(current).toHaveTextContent("bob");
+    expect(current).toHaveTextContent("On time");
+    const next = within(menu).getByRole("menuitemradio", { name: /nightly/ });
+    expect(next).toHaveAttribute("aria-checked", "false");
+    expect(next).toHaveTextContent("nightly-linux");
+    expect(next).toHaveTextContent("carol");
+    expect(next).toHaveTextContent("Overdue");
+    expect(screen.queryByRole("button", { name: /View all beacons/ })).not.toBeInTheDocument();
+    await user.click(next);
+
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondBeaconRef));
+    expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(confirmed);
+    expect(onOpenBeacon).toHaveBeenCalledExactlyOnceWith(confirmedBeacon, secondBeaconRef);
+  });
+
+  it("keeps the current beacon selected without making another selection request", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /warehouse.*Current/ }));
+
+    expect(api.selectTarget).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "warehouse" })).toBeInTheDocument();
+  });
+
+  it("omits beacon choices without a current-epoch exact reference", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const snapshot = switchableBeaconSnapshot();
+    const stale = { ...secondBeacon, id: "stale-beacon", name: "stale-nightly" };
+    const unreferenced = { ...secondBeacon, id: "unreferenced-beacon", name: "unreferenced-nightly" };
+    snapshot.beacons = [...snapshot.beacons, stale, unreferenced];
+    snapshot.targetContext.selectableTargets = [...snapshot.targetContext.selectableTargets, { ...secondBeaconRef, id: stale.id, backendEpoch: 6 }];
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} onOpenBeacon={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    const menu = await screen.findByRole("menu", { name: "Beacons, switch beacon" });
+    expect(within(menu).getAllByRole("menuitemradio")).toHaveLength(2);
+    expect(within(menu).queryByText("stale-nightly")).not.toBeInTheDocument();
+    expect(within(menu).queryByText("unreferenced-nightly")).not.toBeInTheDocument();
+  });
+
+  it("rejects a breadcrumb switch when the server confirms another fingerprint", async () => {
+    const user = userEvent.setup();
+    const confirmed = switchableBeaconSnapshot("second");
+    confirmed.targetContext.activeTarget = { ...secondBeaconRef, fingerprint: "f".repeat(64) };
+    const selectTarget = vi.fn().mockResolvedValue({ ok: true, value: confirmed });
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /nightly/ }));
+
+    expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondBeaconRef);
+    expect(onSnapshot).not.toHaveBeenCalled();
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: "warehouse" })).toBeInTheDocument();
+  });
+
+  it("ignores a pending breadcrumb switch after a reconnect", async () => {
+    const user = userEvent.setup();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    const selectTarget = vi.fn().mockReturnValue(selection.promise);
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    const initial = switchableBeaconSnapshot();
+    const rendered = render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={initial} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /nightly/ }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondBeaconRef));
+
+    const reconnected = switchableBeaconSnapshot();
+    reconnected.connection.incarnation = 1;
+    rendered.rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={reconnected} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+    await act(async () => selection.resolve({ ok: true, value: switchableBeaconSnapshot("second") }));
+
+    expect(onOpenBeacon).not.toHaveBeenCalled();
+    expect(onSnapshot).not.toHaveBeenCalled();
+  });
+
+  it.each(["requested", "unrelated"] as const)("handles a %s active-target event while a breadcrumb selection is pending", async (eventTarget) => {
+    const user = userEvent.setup();
+    const selection = deferred<Awaited<ReturnType<SliverDesktopAPI["selectTarget"]>>>();
+    const selectTarget = vi.fn().mockReturnValue(selection.promise);
+    const onOpenBeacon = vi.fn();
+    const onSnapshot = vi.fn();
+    installAPI({ selectTarget });
+    const rendered = render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: /nightly/ }));
+    await waitFor(() => expect(selectTarget).toHaveBeenCalledExactlyOnceWith(secondBeaconRef));
+
+    const next = switchableBeaconSnapshot("second");
+    const eventSnapshot = switchableBeaconSnapshot("second");
+    if (eventTarget === "unrelated") {
+      eventSnapshot.targetContext.activeTarget = { ...secondBeaconRef, id: "beacon-3", fingerprint: "d".repeat(64) };
+      eventSnapshot.targetContext.activeTargetSummary = { ...secondBeacon, id: "beacon-3", name: "unrelated-beacon" };
+    }
+    rendered.rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={eventSnapshot} onSnapshot={onSnapshot} onOpenBeacon={onOpenBeacon} />);
+    await act(async () => selection.resolve({ ok: true, value: next }));
+
+    if (eventTarget === "requested") {
+      expect(onSnapshot).toHaveBeenCalledExactlyOnceWith(next);
+      expect(onOpenBeacon).toHaveBeenCalledExactlyOnceWith(secondBeacon, secondBeaconRef);
+    } else {
+      expect(onSnapshot).not.toHaveBeenCalled();
+      expect(onOpenBeacon).not.toHaveBeenCalled();
+    }
+  });
+
+  it("offers the full beacon catalog when the breadcrumb inventory is partial", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const snapshot = switchableBeaconSnapshot();
+    snapshot.domains.beacons.page = { limit: 2, total: 5, truncated: true };
+    const onBack = vi.fn();
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} onOpenBeacon={vi.fn()} onBack={onBack} />);
+
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    const viewAll = await screen.findByRole("button", { name: /View all beacons/ });
+    expect(viewAll).toHaveTextContent("Showing 2 of 5 available beacons");
+    await user.click(viewAll);
+    expect(onBack).toHaveBeenCalledOnce();
+  });
+
+  it("discloses a partial beacon inventory without a catalog button in a popout", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const snapshot = switchableBeaconSnapshot();
+    snapshot.domains.beacons.page = { limit: 2, total: 5, truncated: true };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} onOpenBeacon={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "Beacons, switch beacon" }));
+    expect(await screen.findByText(/^Showing 2 of 5 available beacons\./)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View all beacons/ })).not.toBeInTheDocument();
+  });
+
   it("updates check-in countdowns and overdue status locally, resets on check-in, and releases its timer", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     const setInterval = vi.spyOn(window, "setInterval");
@@ -599,7 +791,12 @@ describe("TargetsPage", () => {
     );
 
     expect(screen.getByRole("heading", { name: "warehouse" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Async task workspace" })).toBeInTheDocument();
+    const breadcrumbs = screen.getByRole("navigation", { name: "Beacon workspace breadcrumbs" });
+    expect(within(breadcrumbs).getByText("Beacons")).toBeInTheDocument();
+    expect(within(breadcrumbs).getByText("warehouse")).toBeInTheDocument();
+    expect(within(breadcrumbs).queryByRole("button", { name: "Beacons, switch beacon" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Back to live beacons" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Task completion" })).toBeInTheDocument();

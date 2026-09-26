@@ -969,6 +969,7 @@ export function App() {
                     presentation="dedicated"
                     snapshot={snapshot}
                     onBack={() => setBeaconWorkspaceRoute(undefined)}
+                    onOpenBeacon={openBeaconWorkspace}
                     onSnapshot={setSnapshot}
                   />
                 ) : (

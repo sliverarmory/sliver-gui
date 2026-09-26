@@ -24,6 +24,8 @@ interface TestSessionRoute {
 const childMocks = vi.hoisted(() => ({
   nextSessionSnapshot: undefined as SliverSnapshot | undefined,
   nextSessionRoute: undefined as TestSessionRoute | undefined,
+  nextBeaconSnapshot: undefined as SliverSnapshot | undefined,
+  nextBeaconTarget: undefined as TargetRef | undefined,
 }));
 
 vi.mock("./pages/SessionWorkspacePage", () => ({
@@ -72,6 +74,8 @@ vi.mock("./pages/TargetsPage", () => ({
     mode: string;
     presentation?: string;
     snapshot: SliverSnapshot;
+    onSnapshot?: (snapshot: SliverSnapshot) => void;
+    onOpenBeacon?: (beacon: BeaconSummary, target: TargetRef) => void;
   }) => {
     const active = props.snapshot.targetContext.activeTarget;
     const summary = props.snapshot.targetContext.activeTargetSummary;
@@ -87,11 +91,26 @@ vi.mock("./pages/TargetsPage", () => ({
       <section
         aria-label="Mock beacon interaction"
         data-expected-target={expected?.id}
+        data-target-fingerprint={expected?.fingerprint}
         data-mode={props.mode}
         data-presentation={props.presentation}
         data-quarantined={String(quarantined)}
       >
-        {summary?.name ?? "Beacon quarantined"}
+        <span>{summary?.name ?? "Beacon quarantined"}</span>
+        <button
+          onClick={() => {
+            const next = childMocks.nextBeaconSnapshot;
+            const target = childMocks.nextBeaconTarget;
+            const beacon = next?.targetContext.activeTargetSummary;
+            if (next && target && beacon?.mode === "beacon") {
+              props.onSnapshot?.(next);
+              props.onOpenBeacon?.(beacon, target);
+            }
+          }}
+          type="button"
+        >
+          Switch mock beacon
+        </button>
       </section>
     );
   },
@@ -176,6 +195,18 @@ const beaconRef: TargetRef = {
   fingerprint: "b".repeat(64),
 };
 
+const secondBeacon: BeaconSummary = {
+  ...beacon,
+  id: "beacon-2",
+  name: "Warehouse beacon",
+};
+
+const secondBeaconRef: TargetRef = {
+  ...beaconRef,
+  id: secondBeacon.id,
+  fingerprint: "d".repeat(64),
+};
+
 beforeEach(() => {
   resetInteractionWindowClaimForTest();
 });
@@ -184,6 +215,8 @@ afterEach(() => {
   cleanup();
   childMocks.nextSessionSnapshot = undefined;
   childMocks.nextSessionRoute = undefined;
+  childMocks.nextBeaconSnapshot = undefined;
+  childMocks.nextBeaconTarget = undefined;
   document.title = "";
 });
 
@@ -265,6 +298,41 @@ describe("InteractionWindowApp", () => {
       expect(workspace).toHaveAttribute("data-quarantined", "false");
     });
     expect(screen.getByText(secondSession.name)).toBeInTheDocument();
+  });
+
+  it("updates the pinned target through the beacon-switch callback and quarantines later mismatches", async () => {
+    const initialSnapshot = connectedSnapshot(beacon, beaconRef);
+    const nextSnapshot = connectedSnapshot(secondBeacon, secondBeaconRef);
+    childMocks.nextBeaconSnapshot = nextSnapshot;
+    childMocks.nextBeaconTarget = secondBeaconRef;
+    const api = installAPI(Promise.resolve({
+      ok: true,
+      value: interactionContext(initialSnapshot, beaconRef),
+    }));
+    render(<InteractionWindowApp />);
+    const workspace = await screen.findByRole("region", { name: "Mock beacon interaction" });
+    expect(workspace).toHaveAttribute("data-expected-target", beacon.id);
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch mock beacon" }));
+
+    await waitFor(() => {
+      const switchedWorkspace = screen.getByRole("region", { name: "Mock beacon interaction" });
+      expect(switchedWorkspace).toHaveAttribute("data-expected-target", secondBeacon.id);
+      expect(switchedWorkspace).toHaveAttribute("data-target-fingerprint", secondBeaconRef.fingerprint);
+      expect(switchedWorkspace).toHaveAttribute("data-quarantined", "false");
+      expect(document.title).toBe(`Interact — ${secondBeacon.name}`);
+    });
+    expect(screen.getByText(secondBeacon.name)).toBeInTheDocument();
+    const switchedWorkspace = screen.getByRole("region", { name: "Mock beacon interaction" });
+
+    act(() => api.emit(initialSnapshot));
+    await waitFor(() => expect(switchedWorkspace).toHaveAttribute("data-quarantined", "true"));
+    expect(switchedWorkspace).toHaveAttribute("data-expected-target", secondBeacon.id);
+    expect(switchedWorkspace).toHaveAttribute("data-target-fingerprint", secondBeaconRef.fingerprint);
+    expect(document.title).toBe(`Interact — ${secondBeacon.name}`);
+
+    act(() => api.emit(nextSnapshot));
+    await waitFor(() => expect(switchedWorkspace).toHaveAttribute("data-quarantined", "false"));
   });
 
   it("quarantines a vanished session and a mismatched beacon without retargeting the window", async () => {

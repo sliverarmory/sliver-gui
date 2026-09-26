@@ -94,10 +94,12 @@ export function InteractionWindowApp(): React.JSX.Element {
   } else if (launchTarget?.mode === "beacon") {
     content = (
       <TargetsPage
+        key={`beacon-workspace:${launchTarget.target.backendEpoch}:${launchTarget.target.id}:${launchTarget.target.fingerprint}`}
         expectedTarget={launchTarget.target}
         mode="beacon"
         presentation="dedicated"
         snapshot={snapshot}
+        onOpenBeacon={(_beacon, target) => setLaunchTarget({ mode: "beacon", target })}
         onSnapshot={setSnapshot}
       />
     );

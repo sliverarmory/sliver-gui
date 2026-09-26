@@ -922,7 +922,9 @@ async function assertInteractionWorkspace(page: Page, mode: "session" | "beacon"
     await page.getByRole("tablist", { name: "Session interaction sections", exact: true }).waitFor();
     assert.equal(await page.getByRole("tab", { name: "Overview", exact: true }).getAttribute("aria-selected"), "true");
   } else {
-    await page.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
+    await breadcrumbs.getByText(name, { exact: true }).waitFor();
     await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
     await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
   }

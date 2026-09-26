@@ -39,6 +39,7 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
         `--managed-config-directory=${managedConfigDirectory}`,
         `--user-data-directory=${userDataDirectory}`,
         `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--beacons-table-fixture",
       ],
       bypassCSP: false,
       chromiumSandbox: true,
@@ -98,19 +99,29 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
       return cell !== undefined && cell.innerText !== initial;
     }, { columnIndex: nextCheckinColumnIndex, initial: initialCountdown }, { timeout: 5_000 });
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacons-table.png") });
+    await assertResponsiveStatus(page, screenshotDirectory);
 
     await row.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
-    await page.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
+    await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
+    const workspaceNavigation = page.locator('header[aria-label="Beacon workspace navigation"]');
+    await workspaceNavigation.getByRole("button", { name: "Back to live beacons", exact: true }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(), 0, "the beacon workspace must use compact breadcrumbs instead of a large header");
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
     await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
     await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
     assert.equal(await table.count(), 0, "the beacon interaction must replace the catalog");
     assert.equal(await page.getByRole("region", { name: "Managed Shells", exact: true }).count(), 0);
+    await assertBeaconBreadcrumbSwitching(application, page, screenshotDirectory);
+    await assertBeaconPopoutSwitching(application, page, screenshotDirectory, rendererErrors);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-interaction.png") });
 
     await page.getByRole("button", { name: "Back to live beacons", exact: true }).click();
     await table.getByRole("button", { name: "Interact with m1-beacon", exact: true }).waitFor();
+    await table.getByRole("button", { name: "Interact with m2-beacon", exact: true }).waitFor();
     assert.equal(await inventoryFrame.getByRole("complementary").count(), 0, "returning from Interact must keep the catalog sidebar absent");
-    assert.equal(await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(), 0);
+    assert.equal(await breadcrumbs.count(), 0);
     await assertCatalogWidth(page, 1440);
     assert.deepEqual(rendererErrors, []);
   } finally {
@@ -118,6 +129,200 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+async function assertBeaconBreadcrumbSwitching(
+  application: ElectronApplication,
+  page: Page,
+  screenshotDirectory: string,
+): Promise<void> {
+  const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+  const trigger = breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true });
+  const menu = page.getByRole("menu", { name: "Beacons, switch beacon", exact: true });
+  const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+  await queue.getByText("No tasks queued", { exact: true }).waitFor();
+
+  await trigger.click();
+  const current = menu.getByRole("menuitemradio", { name: /m1-beacon/u });
+  await current.waitFor();
+  assert.equal(await current.getAttribute("aria-checked"), "true", "the active beacon must be selected in the breadcrumb menu");
+  await current.getByText("m1-beacon — Current", { exact: true }).waitFor();
+  await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).waitFor();
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-breadcrumb-menu.png") });
+  const beforeCurrent = await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]);
+  await current.click();
+  await menu.waitFor({ state: "hidden" });
+  await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
+  assert.deepEqual(await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]), beforeCurrent,
+    "choosing the current beacon must leave the backend selection untouched");
+
+  await trigger.click();
+  await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).click();
+  await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "m2-beacon", exact: true }).waitFor();
+  await queue.getByText("No tasks queued", { exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "m1-beacon", exact: true }).count(), 0,
+    "switching must replace the beacon detail as well as the breadcrumb");
+
+  await trigger.click();
+  const secondCurrent = menu.getByRole("menuitemradio", { name: /m2-beacon/u });
+  await secondCurrent.waitFor();
+  assert.equal(await secondCurrent.getAttribute("aria-checked"), "true");
+  await secondCurrent.getByText("m2-beacon — Current", { exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await menu.waitFor({ state: "hidden" });
+
+  // Queue only against the isolated fake adapter and confirm the exact beacon
+  // identity follows the breadcrumb selection into the async task workspace.
+  await application.evaluate(() => {
+    globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
+  });
+  await page.getByRole("button", { name: "Queue task", exact: true }).click();
+  await queue.getByText("Pending", { exact: true }).waitFor();
+  const queuedTasks = await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.tasks]);
+  assert.equal(queuedTasks.length, 1);
+  assert.equal(queuedTasks[0]?.beaconId, "m2_beacon", "task submission must use the newly selected beacon");
+  assert.equal(queuedTasks[0]?.state, "pending");
+  await page.getByText("Waiting for the beacon", { exact: true }).waitFor();
+
+  await trigger.click();
+  await menu.getByRole("menuitemradio", { name: /m1-beacon/u }).click();
+  await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
+  await queue.getByText("No tasks queued", { exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Select a task", exact: true }).waitFor();
+  assert.equal(await queue.getByText(queuedTasks[0]!.id, { exact: true }).count(), 0,
+    "switching back must clear the other beacon's task queue and completion selection");
+}
+
+async function assertBeaconPopoutSwitching(
+  application: ElectronApplication,
+  sourcePage: Page,
+  screenshotDirectory: string,
+  rendererErrors: string[],
+): Promise<void> {
+  const observeWindow = (candidate: Page): void => {
+    candidate.on("pageerror", (error) => rendererErrors.push(error.message));
+  };
+  application.on("window", observeWindow);
+  let popout: Page | undefined;
+  try {
+    [popout] = await Promise.all([
+      application.waitForEvent("window", { timeout: 15_000 }),
+      sourcePage.getByRole("button", { name: "Pop out interaction", exact: true }).click(),
+    ]);
+    popout.setDefaultTimeout(20_000);
+    await popout.locator('[aria-label="Dedicated interaction window"]').waitFor();
+    const breadcrumbs = popout.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
+    await popout.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
+    const nativeWindow = await application.browserWindow(popout);
+    assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m1-beacon");
+
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    const menu = popout.getByRole("menu", { name: "Beacons, switch beacon", exact: true });
+    await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).click();
+    await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
+    await popout.getByRole("heading", { name: "m2-beacon", exact: true }).waitFor();
+    assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m2-beacon",
+      "switching the popout beacon must update its native window title");
+    await popout.getByRole("grid", { name: "Beacon task queue", exact: true }).getByText("Pending", { exact: true }).waitFor();
+    await sourcePage.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true })
+      .getByText("m1-beacon", { exact: true }).waitFor();
+    await sourcePage.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
+    assert.equal(await sourcePage.getByRole("heading", { name: "m2-beacon", exact: true }).count(), 0,
+      "retargeting the popout must leave the main window on its original beacon");
+    assert.equal(await popout.getByRole("button", { name: "Pop out interaction", exact: true }).count(), 0,
+      "the popout must keep its beacon selector without offering another popout");
+    await popout.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-popout-switch.png") });
+  } finally {
+    application.off("window", observeWindow);
+    await popout?.close().catch(() => undefined);
+    await sourcePage.bringToFront();
+  }
+}
+
+async function assertResponsiveStatus(page: Page, screenshotDirectory: string): Promise<void> {
+  const table = page.getByRole("grid", { name: "Sliver beacons", exact: true });
+  const row = table.getByRole("row").filter({ hasText: "m1-beacon" });
+  const badge = row.locator(".target-status-cell__badge");
+  await badge.waitFor({ state: "attached" });
+  const statusLabel = (await badge.textContent())!.trim();
+  const savedStyles = await table.evaluate((grid) => {
+    const headers = Array.from(grid.querySelectorAll('[role="columnheader"]') as ArrayLike<typeof grid>);
+    const statusIndex = headers.findIndex((header) => header.textContent?.trim() === "Status");
+    const widths = headers.map((header) => header.getBoundingClientRect().width);
+    return {
+      grid: grid.getAttribute("style"),
+      gridWidth: grid.getBoundingClientRect().width,
+      statusIndex,
+      widths,
+      cells: Array.from(grid.querySelectorAll('[role="columnheader"], [role="gridcell"], [role="rowheader"]') as ArrayLike<typeof grid>)
+        .map((cell) => cell.getAttribute("style")),
+    };
+  });
+  const setStatusWidth = async (columnWidth: number): Promise<void> => {
+    await table.evaluate((grid, { original, width: nextWidth }) => {
+      // Fix the actual table columns at their measured widths, then vary
+      // Status to exercise the same available-space constraint as zooming.
+      const statusWidth = original.widths[original.statusIndex]!;
+      grid.style.setProperty("table-layout", "fixed", "important");
+      grid.style.setProperty("min-width", "0", "important");
+      grid.style.setProperty("width", `${original.gridWidth - statusWidth + nextWidth}px`, "important");
+      for (const gridRow of grid.querySelectorAll('[role="row"]')) {
+        const cells = Array.from(gridRow.querySelectorAll('[role="columnheader"], [role="gridcell"], [role="rowheader"]'));
+        cells.forEach((cell, index) => {
+          const style = (cell as typeof grid).style;
+          const width = index === original.statusIndex ? nextWidth : original.widths[index]!;
+          style.setProperty("width", `${width}px`, "important");
+          style.setProperty("min-width", "0", "important");
+          style.setProperty("max-width", `${width}px`, "important");
+          if (index === original.statusIndex) {
+            style.setProperty("padding-inline", "12px", "important");
+            style.setProperty("overflow", "hidden", "important");
+          }
+        });
+      }
+    }, { original: savedStyles, width: columnWidth });
+  };
+  try {
+    await setStatusWidth(180);
+    await badge.waitFor({ state: "visible" });
+    assert.equal(await row.getByRole("img", { name: statusLabel, exact: true }).count(), 0, "a wide column must show the full status badge");
+
+    await setStatusWidth(52);
+    const dot = row.getByRole("img", { name: statusLabel, exact: true });
+    await dot.waitFor({ state: "visible" });
+    assert.equal(await dot.getAttribute("data-color"), "success", "compact On time status must retain its success color");
+    assert.equal(await dot.getAttribute("title"), statusLabel, "the dot must expose its full status on hover");
+    assert.equal(await badge.isVisible(), false, "the full badge must hide when it would not fit");
+    const measurement = await badge.evaluate((element) => {
+      const view = element.ownerDocument.defaultView!;
+      return {
+        whiteSpace: view.getComputedStyle(element).whiteSpace,
+        badgeWidth: element.getBoundingClientRect().width,
+        availableWidth: element.parentElement!.getBoundingClientRect().width,
+      };
+    });
+    assert.equal(measurement.whiteSpace, "nowrap", "status text must never wrap");
+    assert.ok(measurement.badgeWidth > measurement.availableWidth, "the dot must be caused by the available cell width");
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacons-status-compact.png") });
+
+    await setStatusWidth(180);
+    await badge.waitFor({ state: "visible" });
+    assert.equal(await row.getByRole("img", { name: statusLabel, exact: true }).count(), 0, "widening the column must restore the full status badge");
+  } finally {
+    await table.evaluate((grid, original) => {
+      if (original.grid === null) grid.removeAttribute("style");
+      else grid.setAttribute("style", original.grid);
+      Array.from(grid.querySelectorAll('[role="columnheader"], [role="gridcell"], [role="rowheader"]') as ArrayLike<typeof grid>)
+        .forEach((cell, index) => {
+          const style = original.cells[index];
+          if (style === null || style === undefined) cell.removeAttribute("style");
+          else cell.setAttribute("style", style);
+        });
+    }, savedStyles);
+  }
+}
 
 async function assertCatalogWidth(page: Page, viewportWidth: number): Promise<void> {
   const layout = await page.locator('.targets-page[data-presentation="catalog"]').evaluate((catalog) => {

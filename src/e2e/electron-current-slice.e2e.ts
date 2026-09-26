@@ -2858,7 +2858,9 @@ async function verifyInteractionWindowPopout(
       assert.equal(dedicatedLayout.overflowY, "auto");
       assert.equal(dedicatedLayout.bottomPadding, "10px");
     } else {
-      await popout.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+      const breadcrumbs = popout.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+      await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
+      await breadcrumbs.getByText(expectedName, { exact: true }).waitFor();
       await popout.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
       await popout.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
       await popout.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
@@ -3064,7 +3066,9 @@ async function verifyBeaconAsyncTaskWorkspace(
   page: Page,
   beaconRef: TargetRef,
 ): Promise<void> {
-  await page.getByRole("heading", { name: "Async task workspace", exact: true }).waitFor();
+  const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+  await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
+  await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
   await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
   await page.getByRole("heading", { name: "Task completion", exact: true }).waitFor();
@@ -3113,7 +3117,7 @@ async function verifyBeaconAsyncTaskWorkspace(
   const beaconsGrid = page.locator('[aria-label="Sliver beacons"]');
   await beaconsGrid.getByText("m1-beacon", { exact: true }).waitFor();
   assert.equal(
-    await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(),
+    await breadcrumbs.count(),
     0,
     "Back from Beacon Interact must return to the live beacon catalog",
   );
@@ -3121,7 +3125,7 @@ async function verifyBeaconAsyncTaskWorkspace(
   await activateDataGridRow(
     page.getByRole("row", { name: /m1-beacon/iu }),
     "m1-beacon",
-    page.getByRole("heading", { name: "Async task workspace", exact: true }),
+    breadcrumbs,
   );
 }
 

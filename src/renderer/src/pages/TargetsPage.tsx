@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Key } from "react-aria-components";
 import {
+  Breadcrumbs,
   Button,
   Chip,
+  Description,
   Dropdown,
   Label,
   Modal,
@@ -23,12 +25,14 @@ import {
   faBolt,
   faBroom,
   faChevronDown,
+  faChevronRight,
   faCircleInfo,
   faCircleNotch,
   faClockRotateLeft,
   faCodeBranch,
   faComputer,
   faFileCode,
+  faList,
   faListCheck,
   faMagnifyingGlass,
   faPen,
@@ -73,6 +77,7 @@ import type {
 import { AreaField, Field } from "../components/FormControls";
 import { useApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { RenameSessionModal } from "../components/RenameSessionModal";
+import { ResponsiveTargetStatus } from "../components/ResponsiveTargetStatus";
 import { sessionContextMenuActions, type SessionContextActionId } from "../components/session-context-menu-actions";
 import {
   beaconCheckinTiming,
@@ -131,6 +136,17 @@ interface TargetSearchState extends TargetInventoryState {
 interface SelectedTargetIdentity {
   ref: TargetRef;
   backendIncarnation: string;
+}
+
+interface BeaconSwitchOption {
+  summary: BeaconSummary;
+  ref: TargetRef;
+}
+
+interface BeaconMenuModel {
+  options: BeaconSwitchOption[];
+  total: number;
+  isTruncated: boolean;
 }
 
 const DEFAULT_OPERATION_DRAFT: OperationDraft = {
@@ -247,6 +263,7 @@ export function TargetsPage({
   const activeRef = snapshot.targetContext.activeTarget?.mode === mode
     ? snapshot.targetContext.activeTarget
     : null;
+  const beaconMenu = useMemo(() => buildBeaconMenu(snapshot), [snapshot]);
   const backendEpochRef = useRef(snapshot.connection.epoch);
   backendEpochRef.current = snapshot.connection.epoch;
   const activeIdentity = targetRefIdentity(activeRef);
@@ -741,13 +758,18 @@ export function TargetsPage({
     actionId: SessionContextActionId,
   ) => {
     const expectedIncarnation = backendIncarnationRef.current;
+    const sourceTargetIdentity = activeIdentityRef.current;
+    const requestedIdentity = targetRefIdentity(ref);
     const requestSequence = ++targetSelectionRequestSequence.current;
     setIsSelecting(true);
     try {
       const result = await window.sliver.selectTarget(ref);
       if (
         requestSequence !== targetSelectionRequestSequence.current ||
-        expectedIncarnation !== backendIncarnationRef.current
+        expectedIncarnation !== backendIncarnationRef.current ||
+        (presentation === "dedicated" &&
+          activeIdentityRef.current !== sourceTargetIdentity &&
+          activeIdentityRef.current !== requestedIdentity)
       ) return;
       if (!result.ok || !result.value) {
         toast.danger("Could not select target", { description: result.error });
@@ -757,6 +779,7 @@ export function TargetsPage({
       const selectedSummary = result.value.targetContext.activeTargetSummary;
       if (
         targetBackendIncarnation(result.value) !== expectedIncarnation ||
+        result.value.targetContext.status !== "selected" ||
         selectedRef?.mode !== ref.mode ||
         targetRefIdentity(selectedRef) !== targetRefIdentity(ref) ||
         selectedSummary?.mode !== ref.mode ||
@@ -806,7 +829,7 @@ export function TargetsPage({
         expectedIncarnation === backendIncarnationRef.current
       ) setIsSelecting(false);
     }
-  }, [onSnapshot, onOpenSession, onOpenBeacon, prepareAction]);
+  }, [onSnapshot, onOpenSession, onOpenBeacon, prepareAction, presentation]);
 
   const selectTarget = useCallback(async (target: TargetSummary) => {
     const ref = presentedTargetInventory.refs[targetRowKey(target)];
@@ -934,7 +957,7 @@ export function TargetsPage({
       sortFn: (left, right) => targetStatus(left, checkinNow).label.localeCompare(targetStatus(right, checkinNow).label),
       cell: (target) => {
         const status = targetStatus(target, checkinNow);
-        return <Chip color={status.color} size="sm" variant="soft">{status.label}</Chip>;
+        return <ResponsiveTargetStatus color={status.color} label={status.label} />;
       },
     },
     ...(mode === "beacon" ? [
@@ -1041,12 +1064,10 @@ export function TargetsPage({
       isBusy={isSelecting || isPreparingAction}
       isChangingWatch={isChangingWatch}
       isDedicated={presentation === "dedicated"}
-      isOpeningInteractionWindow={isOpeningInteractionWindow}
       watchEnabled={snapshot.targetContext.beaconWatch}
       unavailableReason={snapshot.targetContext.activeTarget?.mode === mode
         ? snapshot.targetContext.unavailableReason
         : undefined}
-      onPopOut={onBack ? () => void openInteractionWindow() : undefined}
       onPrepareAction={(action) => void prepareAction(action)}
       onWatchChange={(enabled) => void setBeaconWatch(enabled)}
       onOperationSubmitted={(operation) => {
@@ -1208,16 +1229,115 @@ export function TargetsPage({
         </section>
       </div> : isDedicatedBeacon ? (
         <>
-          <header className="page-heading">
-            <div className="min-w-0">
-              <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={faSatellite} /> Beacon interact</div>
-              <h1>Async task workspace</h1>
-              <p>Queue work for this exact beacon and inspect each completion as it returns.</p>
+          <header aria-label="Beacon workspace navigation" className="flex min-w-0 items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              {onBack ? (
+                <Tooltip delay={250}>
+                  <Button aria-label="Back to live beacons" isIconOnly size="sm" variant="ghost" onPress={onBack}>
+                    <FontAwesomeIcon aria-hidden icon={faArrowLeft} />
+                  </Button>
+                  <Tooltip.Content>Back to live beacons</Tooltip.Content>
+                </Tooltip>
+              ) : null}
+              <nav aria-label="Beacon workspace breadcrumbs" className="min-w-0">
+                <Breadcrumbs aria-label="Breadcrumb items" className="min-w-0">
+                  {onOpenBeacon ? (
+                    <Breadcrumbs.Item>
+                      {() => (
+                        <>
+                          <Dropdown>
+                            <Button
+                              aria-label="Beacons, switch beacon"
+                              className="-mx-2 px-2 text-muted"
+                              isDisabled={isPreparingAction || isExecutingAction || isOpeningInteractionWindow || Boolean(reviewPlan)}
+                              isPending={isSelecting}
+                              size="sm"
+                              variant="ghost"
+                            >
+                              Beacons
+                              <FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} />
+                            </Button>
+                            <Dropdown.Popover className="max-h-96 min-w-80" placement="bottom start">
+                              <Dropdown.Menu
+                                aria-label="Switch beacon"
+                                selectionMode="single"
+                                selectedKeys={new Set([targetRowKey(active)])}
+                                onAction={(key) => {
+                                  if (isSelecting || isPreparingAction || isExecutingAction || reviewPlan) return;
+                                  const option = beaconMenu.options.find((candidate) => targetRowKey(candidate.ref) === String(key));
+                                  if (!option || targetRefIdentity(option.ref) === activeIdentity) return;
+                                  void runTargetRowAction(option.ref, "target.interact");
+                                }}
+                              >
+                                {beaconMenu.options.map((option) => {
+                                  const name = option.summary.name || option.summary.hostname || option.summary.id;
+                                  const status = targetStatus(option.summary);
+                                  const isCurrent = targetRefIdentity(option.ref) === activeIdentity;
+                                  return (
+                                    <Dropdown.Item
+                                      id={targetRowKey(option.ref)}
+                                      key={targetRowKey(option.ref)}
+                                      textValue={`${name}, ${option.summary.hostname || "unknown host"}, ${status.label}`}
+                                    >
+                                      <Dropdown.ItemIndicator className="shrink-0 text-accent" />
+                                      <div className="min-w-0">
+                                        <Label className="block truncate">{name}{isCurrent ? " — Current" : ""}</Label>
+                                        <Description className="block truncate">
+                                          {option.summary.username || "Unknown user"} · {option.summary.hostname || "unknown host"} · {status.label}
+                                        </Description>
+                                      </div>
+                                    </Dropdown.Item>
+                                  );
+                                })}
+                              </Dropdown.Menu>
+                              {beaconMenu.isTruncated ? (
+                                onBack ? (
+                                  <Button
+                                    className="w-full justify-start rounded-none border-t border-separator px-3 py-2 text-start"
+                                    size="sm"
+                                    variant="ghost"
+                                    onPress={onBack}
+                                  >
+                                    <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faList} />
+                                    <span className="min-w-0">
+                                      <span className="block text-sm font-medium">View all beacons</span>
+                                      <span className="block truncate text-xs font-normal text-muted">Showing {beaconMenu.options.length} of {beaconMenu.total} available beacons</span>
+                                    </span>
+                                  </Button>
+                                ) : (
+                                  <p className="border-t border-separator px-3 py-2 text-xs text-muted">
+                                    Showing {beaconMenu.options.length} of {beaconMenu.total} available beacons. Additional beacons are available in the main window.
+                                  </p>
+                                )
+                              ) : null}
+                            </Dropdown.Popover>
+                          </Dropdown>
+                          <FontAwesomeIcon aria-hidden className="mx-1 size-3 shrink-0 text-muted" data-slot="breadcrumbs-separator" icon={faChevronRight} />
+                        </>
+                      )}
+                    </Breadcrumbs.Item>
+                  ) : (
+                    <Breadcrumbs.Item className="no-underline">Beacons</Breadcrumbs.Item>
+                  )}
+                  <Breadcrumbs.Item className="max-w-72 truncate no-underline">{active.name || active.hostname || active.id}</Breadcrumbs.Item>
+                </Breadcrumbs>
+              </nav>
             </div>
             {onBack ? (
-              <Button variant="secondary" onPress={onBack}>
-                <FontAwesomeIcon aria-hidden icon={faArrowLeft} /> Back to live beacons
-              </Button>
+              <Tooltip delay={250}>
+                <Button
+                  aria-label="Pop out interaction"
+                  isDisabled={isSelecting || isPreparingAction}
+                  isIconOnly
+                  isPending={isOpeningInteractionWindow}
+                  size="sm"
+                  variant="ghost"
+                  onPress={() => void openInteractionWindow()}
+                >
+                  <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
+                </Button>
+                <Tooltip.Content>Pop out interaction into a new window</Tooltip.Content>
+              </Tooltip>
             ) : null}
           </header>
           <div className="grid min-w-0 items-start gap-4 2xl:grid-cols-[360px_minmax(0,1fr)]">
@@ -1381,10 +1501,8 @@ function TargetDetail({
   isBusy,
   isChangingWatch,
   isDedicated,
-  isOpeningInteractionWindow,
   watchEnabled,
   unavailableReason,
-  onPopOut,
   onPrepareAction,
   onWatchChange,
   onOperationSubmitted,
@@ -1396,10 +1514,8 @@ function TargetDetail({
   isBusy: boolean;
   isChangingWatch: boolean;
   isDedicated: boolean;
-  isOpeningInteractionWindow: boolean;
   watchEnabled: boolean;
   unavailableReason: string | undefined;
-  onPopOut: (() => void) | undefined;
   onPrepareAction: (action: DestructiveTargetActionId) => void;
   onWatchChange: (enabled: boolean) => void;
   onOperationSubmitted: (operation: TargetOperationRecord) => boolean;
@@ -1432,28 +1548,10 @@ function TargetDetail({
         <span className="section-icon"><FontAwesomeIcon aria-hidden icon={active.mode === "session" ? faComputer : faSatellite} /></span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="truncate text-sm font-semibold text-foreground">{active.name || active.hostname || "Unnamed target"}</h2>
+            <h1 className="truncate text-sm font-semibold text-foreground">{active.name || active.hostname || "Unnamed target"}</h1>
             <Chip color={status.color} size="sm" variant="soft">{status.label}</Chip>
           </div>
           <p className="mt-1 truncate font-mono text-[11px] text-muted">{active.id}</p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {onPopOut ? (
-            <Tooltip delay={250}>
-              <Button
-                aria-label="Pop out interaction"
-                isDisabled={isBusy}
-                isIconOnly
-                isPending={isOpeningInteractionWindow}
-                size="sm"
-                variant="ghost"
-                onPress={onPopOut}
-              >
-                <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} />
-              </Button>
-              <Tooltip.Content>Pop out interaction into a new window</Tooltip.Content>
-            </Tooltip>
-          ) : null}
         </div>
       </div>
 
@@ -2488,6 +2586,34 @@ function targetCatalogIdentity(snapshot: SliverSnapshot, mode: TargetMode): stri
     mode,
     mode === "session" ? snapshot.domains.sessions.revision : snapshot.domains.beacons.revision,
   ].join(":");
+}
+
+function buildBeaconMenu(snapshot: SliverSnapshot): BeaconMenuModel {
+  const refs = new Map<string, TargetRef>();
+  for (const ref of snapshot.targetContext.selectableTargets) {
+    if (ref.mode === "beacon" && ref.backendEpoch === snapshot.connection.epoch) refs.set(targetRowKey(ref), ref);
+  }
+  const activeRef = snapshot.targetContext.activeTarget;
+  if (activeRef?.mode === "beacon" && activeRef.backendEpoch === snapshot.connection.epoch) {
+    refs.set(targetRowKey(activeRef), activeRef);
+  }
+  const summaries = new Map<string, BeaconSummary>();
+  for (const summary of [...snapshot.beacons, ...snapshot.domains.beacons.items]) {
+    summaries.set(targetRowKey(summary), summary);
+  }
+  const activeSummary = snapshot.targetContext.activeTargetSummary;
+  if (activeSummary?.mode === "beacon") summaries.set(targetRowKey(activeSummary), activeSummary);
+  const options: BeaconSwitchOption[] = [];
+  for (const [key, summary] of summaries) {
+    const ref = refs.get(key);
+    if (ref) options.push({ summary, ref });
+  }
+  const total = Math.max(snapshot.domains.beacons.page.total, summaries.size, refs.size);
+  return {
+    options,
+    total,
+    isTruncated: snapshot.domains.beacons.page.truncated || total > options.length,
+  };
 }
 
 function seedTargetInventory(snapshot: SliverSnapshot, mode: TargetMode): TargetInventoryState {
