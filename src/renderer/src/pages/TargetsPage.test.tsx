@@ -814,6 +814,236 @@ describe("TargetsPage", () => {
     expect(listExecutionCatalog).toHaveBeenCalledOnce();
   });
 
+  it.each(["embedded", "popout"] as const)("shows a compact beacon summary in the %s interaction", (surface) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse("2026-08-09T20:01:58.000Z"));
+    installAPI();
+    render(
+      <TargetsPage
+        expectedTarget={beaconRef}
+        mode="beacon"
+        presentation="dedicated"
+        snapshot={targetSnapshot("beacon")}
+        {...(surface === "embedded" ? { onBack: vi.fn() } : {})}
+        onSnapshot={vi.fn()}
+      />,
+    );
+
+    const heading = screen.getByRole("heading", { name: beacon.name });
+    const summary = heading.closest("header");
+    expect(summary).toHaveAttribute("aria-label", "Beacon summary");
+    if (!summary) throw new Error("The beacon summary header is missing");
+    expect(within(summary).getByText("On time")).toBeInTheDocument();
+    expect(within(summary).getByText("bob on edge-linux")).toBeInTheDocument();
+    expect(within(summary).getByText(beacon.id)).toBeInTheDocument();
+    expect(within(summary).getByText("Platform")).toBeInTheDocument();
+    expect(within(summary).getByText("linux/amd64")).toBeInTheDocument();
+    expect(within(summary).getByText("Process")).toBeInTheDocument();
+    expect(within(summary).getByText("4001")).toBeInTheDocument();
+    expect(within(summary).getByText("Last check-in")).toBeInTheDocument();
+    expect(within(summary).getByText(formatTimestamp(beacon.lastCheckinAt))).toBeInTheDocument();
+    expect(within(summary).getByText("Next check-in")).toBeInTheDocument();
+    expect(within(summary).getByText("2s")).toBeInTheDocument();
+    expect(within(summary).getByRole("button", { name: "Beacon details" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Task queue" })).toBeInTheDocument();
+  });
+
+  it("refreshes the beacon summary from snapshots and handles missing metadata", () => {
+    installAPI();
+    const { rerender } = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />,
+    );
+    const updatedBeacon: BeaconSummary = {
+      ...beacon,
+      name: "renamed-warehouse",
+      hostname: "edge-windows",
+      username: "administrator",
+      os: "windows",
+      arch: "arm64",
+      pid: 5002,
+      lastCheckinAt: "2026-08-09T20:05:00.000Z",
+      checkinStatus: "overdue",
+    };
+    const updated = targetSnapshot("beacon");
+    updated.beacons = [updatedBeacon];
+    updated.domains.beacons.items = [updatedBeacon];
+    updated.targetContext.activeTargetSummary = updatedBeacon;
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={updated} onSnapshot={vi.fn()} />);
+
+    const summary = screen.getByRole("heading", { name: updatedBeacon.name }).closest("header");
+    if (!summary) throw new Error("The refreshed beacon summary header is missing");
+    expect(within(summary).getByText("Overdue")).toBeInTheDocument();
+    expect(within(summary).getByText("administrator on edge-windows")).toBeInTheDocument();
+    expect(within(summary).getByText("windows/arm64")).toBeInTheDocument();
+    expect(within(summary).getByText("5002")).toBeInTheDocument();
+    expect(within(summary).getByText(formatTimestamp(updatedBeacon.lastCheckinAt))).toBeInTheDocument();
+    expect(within(summary).queryByText("bob on edge-linux")).not.toBeInTheDocument();
+
+    const missingBeacon: BeaconSummary = {
+      ...updatedBeacon,
+      name: "",
+      hostname: "",
+      username: "",
+      os: "",
+      arch: "",
+      checkinStatus: "unknown",
+    };
+    delete missingBeacon.pid;
+    delete missingBeacon.lastCheckinAt;
+    delete missingBeacon.nextCheckinAt;
+    const missing = targetSnapshot("beacon");
+    missing.beacons = [missingBeacon];
+    missing.domains.beacons.items = [missingBeacon];
+    missing.targetContext.activeTargetSummary = missingBeacon;
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={missing} onSnapshot={vi.fn()} />);
+
+    const missingSummary = screen.getByRole("heading", { name: "Unnamed beacon" }).closest("header");
+    if (!missingSummary) throw new Error("The fallback beacon summary header is missing");
+    expect(within(missingSummary).getByText("Unknown")).toBeInTheDocument();
+    expect(within(missingSummary).getByText("Unknown user on unknown host")).toBeInTheDocument();
+    expect(within(missingSummary).getByText("unknown/unknown")).toBeInTheDocument();
+    expect(within(missingSummary).getAllByText("Not reported")).toHaveLength(3);
+  });
+
+  it("counts down in the beacon header, resets on check-in and beacon switch, and releases its timer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    const nowMs = Date.parse("2026-08-09T20:02:00.000Z");
+    vi.setSystemTime(nowMs);
+    const imminentBeacon: BeaconSummary = { ...beacon, nextCheckinAt: new Date(nowMs + 2_000).toISOString() };
+    const snapshot = targetSnapshot("beacon");
+    snapshot.beacons = [imminentBeacon];
+    snapshot.domains.beacons.items = [imminentBeacon];
+    snapshot.targetContext.activeTargetSummary = imminentBeacon;
+    const api = installAPI();
+    const { rerender, unmount } = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />,
+    );
+    await act(async () => {});
+    const summary = screen.getByRole("heading", { name: beacon.name }).closest("header");
+    if (!summary) throw new Error("The beacon countdown header is missing");
+    expect(within(summary).getByText("2s")).toHaveAttribute("title", formatTimestamp(imminentBeacon.nextCheckinAt));
+    expect(within(summary).getByText("On time")).toBeInTheDocument();
+    const timerIndex = setInterval.mock.calls.findIndex((call) => call[1] === 1_000);
+    expect(timerIndex).toBeGreaterThanOrEqual(0);
+    const tick = setInterval.mock.calls[timerIndex]?.[0];
+    if (typeof tick !== "function") throw new Error("The beacon header countdown interval was not installed");
+    const timer = setInterval.mock.results[timerIndex]?.value;
+    const operationLoads = vi.mocked(api.listTargetOperations).mock.calls.length;
+    const taskLoads = vi.mocked(api.listBeaconTasks).mock.calls.length;
+
+    await act(async () => { vi.setSystemTime(nowMs + 1_000); tick(); });
+    expect(within(summary).getByText("1s")).toBeInTheDocument();
+    await act(async () => { vi.setSystemTime(nowMs + 2_000); tick(); });
+    expect(within(summary).getByText("Due now")).toBeInTheDocument();
+    expect(within(summary).getByText("On time")).toBeInTheDocument();
+    await act(async () => { vi.setSystemTime(nowMs + 3_000); tick(); });
+    expect(within(summary).getByText("Overdue by 1s")).toBeInTheDocument();
+    expect(within(summary).getByText("Overdue")).toBeInTheDocument();
+    expect(vi.mocked(api.listTargetOperations).mock.calls.length).toBe(operationLoads);
+    expect(vi.mocked(api.listBeaconTasks).mock.calls.length).toBe(taskLoads);
+    expect(api.refresh).not.toHaveBeenCalled();
+    expect(api.getSnapshot).not.toHaveBeenCalled();
+    expect(api.setBeaconWatch).not.toHaveBeenCalled();
+
+    const checkedInBeacon: BeaconSummary = {
+      ...imminentBeacon,
+      lastCheckinAt: new Date(nowMs + 3_000).toISOString(),
+      nextCheckinAt: new Date(nowMs + 33_000).toISOString(),
+    };
+    const checkedIn = targetSnapshot("beacon");
+    checkedIn.beacons = [checkedInBeacon];
+    checkedIn.domains.beacons.items = [checkedInBeacon];
+    checkedIn.targetContext.activeTargetSummary = checkedInBeacon;
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={checkedIn} onSnapshot={vi.fn()} />);
+    expect(within(summary).getByText("30s")).toBeInTheDocument();
+    expect(within(summary).getByText("On time")).toBeInTheDocument();
+    expect(within(summary).getByText(formatTimestamp(checkedInBeacon.lastCheckinAt))).toBeInTheDocument();
+
+    const switchedBeacon: BeaconSummary = { ...secondBeacon, nextCheckinAt: new Date(nowMs + 7_000).toISOString() };
+    const switched = switchableBeaconSnapshot("second");
+    switched.beacons = [checkedInBeacon, switchedBeacon];
+    switched.domains.beacons.items = [checkedInBeacon, switchedBeacon];
+    switched.targetContext.activeTargetSummary = switchedBeacon;
+    rerender(<TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switched} onSnapshot={vi.fn()} />);
+    const switchedSummary = screen.getByRole("heading", { name: secondBeacon.name }).closest("header");
+    if (!switchedSummary) throw new Error("The switched beacon countdown header is missing");
+    expect(within(switchedSummary).getByText("4s")).toBeInTheDocument();
+    expect(within(switchedSummary).getByText("On time")).toBeInTheDocument();
+    expect(setInterval.mock.calls.filter((call) => call[1] === 1_000)).toHaveLength(1);
+    unmount();
+    expect(clearInterval).toHaveBeenCalledWith(timer);
+  });
+
+  it.each(["missing", "invalid"] as const)("shows neutral header timing for a %s next check-in and stops timing on quarantine", async (timestamp) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const setInterval = vi.spyOn(window, "setInterval");
+    const clearInterval = vi.spyOn(window, "clearInterval");
+    const unknownBeacon = { ...beacon };
+    if (timestamp === "missing") delete unknownBeacon.nextCheckinAt;
+    else unknownBeacon.nextCheckinAt = "not-a-timestamp";
+    const snapshot = targetSnapshot("beacon");
+    snapshot.beacons = [unknownBeacon];
+    snapshot.domains.beacons.items = [unknownBeacon];
+    snapshot.targetContext.activeTargetSummary = unknownBeacon;
+    installAPI();
+    const { rerender } = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />,
+    );
+    await act(async () => {});
+    const summary = screen.getByRole("heading", { name: beacon.name }).closest("header");
+    if (!summary) throw new Error("The neutral beacon countdown header is missing");
+    expect(within(summary).getByText("Unknown")).toBeInTheDocument();
+    expect(within(summary).getByText("Not reported")).toBeInTheDocument();
+    const timerIndex = setInterval.mock.calls.findIndex((call) => call[1] === 1_000);
+    expect(timerIndex).toBeGreaterThanOrEqual(0);
+    const timer = setInterval.mock.results[timerIndex]?.value;
+
+    const quarantined = targetSnapshot("beacon");
+    quarantined.targetContext.activeTarget = { ...beaconRef, fingerprint: "f".repeat(64) };
+    rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={quarantined} onSnapshot={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Beacon interaction unavailable" })).toBeInTheDocument();
+    expect(clearInterval).toHaveBeenCalledWith(timer);
+    expect(screen.queryByText("Next check-in")).not.toBeInTheDocument();
+
+    rerender(<TargetsPage mode="session" snapshot={targetSnapshot("session")} onSnapshot={vi.fn()} />);
+    expect(setInterval.mock.calls.filter((call) => call[1] === 1_000)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Interact with payments" })).toBeInTheDocument();
+  });
+
+  it("reveals beacon details on demand and collapses them when switching beacons", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    const { rerender } = render(
+      <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={vi.fn()} />,
+    );
+    const toggle = screen.getByRole("button", { name: "Beacon details" });
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("switch", { name: "Watch active beacon" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove beacon" })).toBeInTheDocument();
+    expect(screen.getAllByRole("heading", { name: beacon.name })).toHaveLength(1);
+    expect(screen.getAllByText("Platform")).toHaveLength(1);
+    expect(screen.getAllByText("Process")).toHaveLength(1);
+    expect(screen.getAllByText("Last check-in")).toHaveLength(1);
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+    rerender(
+      <TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot("second")} onSnapshot={vi.fn()} />,
+    );
+    expect(screen.getByRole("heading", { name: secondBeacon.name })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Beacon details" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
+  });
+
   it("opens dedicated advanced execution and discards its reviewed plan on exact-target quarantine", async () => {
     const user = userEvent.setup();
     const reviewedPlan = beaconExecutionPlan();
@@ -2372,6 +2602,7 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Ping" })).not.toBeInTheDocument());
 
     rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Beacon details" }));
     await user.click(screen.getByRole("switch", { name: "Watch active beacon" }));
     expect(setBeaconWatch).toHaveBeenCalledWith({ enabled: true });
 

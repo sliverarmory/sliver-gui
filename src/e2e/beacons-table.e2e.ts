@@ -131,6 +131,7 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
     assert.equal(await table.count(), 0, "the beacon interaction must replace the catalog");
     assert.equal(await page.getByRole("region", { name: "Managed Shells", exact: true }).count(), 0);
+    await assertBeaconWorkspaceHeader(application, page, screenshotDirectory, "beacon-header", 960);
     await assertBeaconBreadcrumbSwitching(application, page, screenshotDirectory);
     await assertBeaconPopoutSwitching(application, page, screenshotDirectory, rendererErrors);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-interaction.png") });
@@ -307,6 +308,7 @@ async function assertBeaconPopoutSwitching(
     await popout.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
     const nativeWindow = await application.browserWindow(popout);
     assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m1-beacon");
+    await assertBeaconWorkspaceHeader(application, popout, screenshotDirectory, "beacon-popout-header", 840);
 
     await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
     const menu = popout.getByRole("menu", { name: "Beacons, switch beacon", exact: true });
@@ -329,6 +331,118 @@ async function assertBeaconPopoutSwitching(
     await popout?.close().catch(() => undefined);
     await sourcePage.bringToFront();
   }
+}
+
+async function assertBeaconWorkspaceHeader(
+  application: ElectronApplication,
+  page: Page,
+  screenshotDirectory: string,
+  screenshotPrefix: string,
+  narrowWidth: number,
+): Promise<void> {
+  const summary = page.locator('header[aria-label="Beacon summary"]');
+  const trigger = summary.getByRole("button", { name: "Beacon details", exact: true });
+  const details = page.getByRole("complementary", { name: "Beacon details", exact: true });
+  await summary.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
+  await summary.getByText("On time", { exact: true }).waitFor();
+  await summary.getByText("e2e-user on m1-beacon-host", { exact: true }).waitFor();
+  await summary.getByText("m1_beacon", { exact: true }).waitFor();
+  for (const [label, value] of [["Platform", "darwin/arm64"], ["Process", "41002"]] as const) {
+    const field = summary.getByText(label, { exact: true }).locator("..");
+    assert.equal(await field.locator("dd").innerText(), value);
+  }
+  const checkin = summary.getByText("Last check-in", { exact: true }).locator("..");
+  assert.match(await checkin.locator("dd").innerText(), /\d{1,2}:\d{2}/u,
+    "the beacon summary must show its reported last check-in time");
+  const nextCheckin = summary.getByText("Next check-in", { exact: true }).locator("..").locator("dd");
+  const initialCountdown = await nextCheckin.innerText();
+  assert.match(initialCountdown, /^\d/u, "the beacon header must show a realtime countdown without an In prefix");
+  assert.match((await nextCheckin.getAttribute("title")) ?? "", /\d{1,2}:\d{2}/u,
+    "the beacon header countdown must retain the next check-in timestamp on hover");
+  await page.waitForFunction((initial) => {
+    const documentObject = (globalThis as unknown as {
+      document: {
+        querySelectorAll(selector: string): ArrayLike<{
+          querySelector(selector: string): { textContent: string | null } | null;
+        }>;
+      };
+    }).document;
+    const field = Array.from(documentObject.querySelectorAll('header[aria-label="Beacon summary"] dl > div'))
+      .find((candidate) => candidate.querySelector("dt")?.textContent === "Next check-in");
+    const countdown = field?.querySelector("dd")?.textContent?.trim();
+    return countdown !== undefined && countdown !== initial;
+  }, initialCountdown, { timeout: 5_000 });
+  assert.equal(await trigger.getAttribute("aria-expanded"), "false", "beacon details must start collapsed");
+  assert.equal(await details.isVisible(), false);
+  await assertBeaconHeaderLayout(page);
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}.png`) });
+  await summary.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}-summary.png`) });
+
+  await trigger.click();
+  await details.waitFor();
+  assert.equal(await trigger.getAttribute("aria-expanded"), "true");
+  await details.getByText("Transport", { exact: true }).waitFor();
+  await details.getByRole("switch", { name: "Watch active beacon", exact: true }).waitFor();
+  await details.getByRole("button", { name: "Kill target", exact: true }).waitFor();
+  await details.getByRole("button", { name: "Remove beacon", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Queue task", exact: true }).waitFor();
+  await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}-expanded.png`) });
+  await trigger.click();
+  await details.waitFor({ state: "hidden" });
+  assert.equal(await trigger.getAttribute("aria-expanded"), "false");
+
+  const nativeWindow = await application.browserWindow(page);
+  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  try {
+    await nativeWindow.evaluate((window, width) => window.setSize(width, 768), narrowWidth);
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, narrowWidth);
+    await assertBeaconHeaderLayout(page);
+    const overflow = await summary.evaluate((header) => {
+      const bounds = header.getBoundingClientRect();
+      return {
+        clientWidth: header.clientWidth,
+        scrollWidth: header.scrollWidth,
+        outsideChildren: Array.from(header.querySelectorAll("h1, p, dt, dd, button") as ArrayLike<typeof header>)
+          .filter((child) => {
+            const childBounds = child.getBoundingClientRect();
+            return childBounds.left < bounds.left - 1 || childBounds.right > bounds.right + 1;
+          }).map((child) => child.textContent ?? child.getAttribute("aria-label")),
+      };
+    });
+    assert.ok(overflow.scrollWidth <= overflow.clientWidth + 1 && overflow.outsideChildren.length === 0,
+      `the beacon summary must fit the narrow viewport: ${JSON.stringify(overflow)}`);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}-narrow.png`) });
+  } finally {
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((expectedWidth) => (
+      globalThis as unknown as { innerWidth: number }
+    ).innerWidth === expectedWidth, originalSize[0]);
+  }
+}
+
+async function assertBeaconHeaderLayout(page: Page): Promise<void> {
+  const layout = await page.locator('header[aria-label="Beacon summary"]').evaluate((header) => {
+    const summaryBounds = header.parentElement!.getBoundingClientRect();
+    const container = header.parentElement!.parentElement!;
+    const containerBounds = container.getBoundingClientRect();
+    const style = container.ownerDocument.defaultView!.getComputedStyle(container);
+    const taskBounds = container.querySelector('[aria-labelledby="beacon-command-heading"]')!.getBoundingClientRect();
+    return {
+      summary: { left: summaryBounds.left, right: summaryBounds.right, bottom: summaryBounds.bottom },
+      content: {
+        left: containerBounds.left + container.clientLeft + Number.parseFloat(style.paddingLeft),
+        right: containerBounds.left + container.clientLeft + container.clientWidth - Number.parseFloat(style.paddingRight),
+      },
+      taskTop: taskBounds.top,
+    };
+  });
+  assert.ok(Math.abs(layout.summary.left - layout.content.left) <= 1 &&
+    Math.abs(layout.summary.right - layout.content.right) <= 1,
+  `the beacon summary must fill the workspace width: ${JSON.stringify(layout)}`);
+  assert.ok(layout.summary.bottom <= layout.taskTop,
+    "the beacon summary must sit above the task workspace");
 }
 
 async function assertResponsiveStatus(page: Page, screenshotDirectory: string): Promise<void> {

@@ -97,6 +97,7 @@ import {
 } from "./target-page-model";
 import type { TargetModeFilter } from "./target-page-model";
 import { BeaconInteractionWorkspace } from "./BeaconInteractionWorkspace";
+import { BeaconWorkspaceHeader } from "./BeaconWorkspaceHeader";
 import { TargetExecutionWorkbench } from "./TargetExecutionWorkbench";
 
 export interface TargetsPageProps {
@@ -297,14 +298,18 @@ export function TargetsPage({
   const pageLabelLower = mode === "session" ? "sessions" : "beacons";
   const pageIcon = mode === "session" ? faComputer : faSatellite;
   const pageTotal = mode === "session" ? currentTargetInventory.sessionPage.total : currentTargetInventory.beaconPage.total;
-  const hasVisibleBeacons = mode === "beacon" && filteredTargets.length > 0;
+  const hasVisibleBeaconTiming = mode === "beacon" && (
+    presentation === "catalog"
+      ? filteredTargets.length > 0
+      : dedicatedTargetIsCurrent && active?.mode === "beacon"
+  );
 
   useEffect(() => {
-    if (presentation !== "catalog" || !hasVisibleBeacons) return;
+    if (!hasVisibleBeaconTiming) return;
     setCheckinNow(Date.now());
     const timer = window.setInterval(() => setCheckinNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [hasVisibleBeacons, presentation]);
+  }, [hasVisibleBeaconTiming]);
 
   useEffect(() => () => {
     targetSelectionRequestSequence.current += 1;
@@ -1341,31 +1346,31 @@ export function TargetsPage({
               </Tooltip>
             ) : null}
           </header>
-          <div className="grid min-w-0 items-start gap-4 2xl:grid-cols-[360px_minmax(0,1fr)]">
+          <BeaconWorkspaceHeader beacon={active} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
             {targetDetail}
-            <BeaconInteractionWorkspace
-              canQueue={taskExecutionCapability?.available === true}
-              error={tasksError}
-              isLoading={isLoadingTasks}
-              isLoadingMore={isLoadingMoreTasks}
-              page={tasksPage}
-              selectedTask={selectedTask}
-              targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
-              tasks={tasks}
-              unavailableReason={taskExecutionCapability?.reason?.message}
-              watchEnabled={snapshot.targetContext.beaconWatch}
-              onCancelTask={cancelSelectedTask}
-              onLoadMore={(cursor) => void loadTasks(cursor)}
-              onRefresh={() => void loadTasks()}
-              onSelectTask={selectTaskDetail}
-              onSubmitted={(operation) => {
-                const submittedIncarnation = backendIncarnation;
-                if (submittedIncarnation !== backendIncarnationRef.current) return false;
-                mergeOperation(operation);
-                return true;
-              }}
-            />
-          </div>
+          </BeaconWorkspaceHeader>
+          <BeaconInteractionWorkspace
+            canQueue={taskExecutionCapability?.available === true}
+            error={tasksError}
+            isLoading={isLoadingTasks}
+            isLoadingMore={isLoadingMoreTasks}
+            page={tasksPage}
+            selectedTask={selectedTask}
+            targetIdentity={`beacon-dedicated:${backendIncarnation}:${targetRefIdentity(expectedTarget) ?? "missing-route"}`}
+            tasks={tasks}
+            unavailableReason={taskExecutionCapability?.reason?.message}
+            watchEnabled={snapshot.targetContext.beaconWatch}
+            onCancelTask={cancelSelectedTask}
+            onLoadMore={(cursor) => void loadTasks(cursor)}
+            onRefresh={() => void loadTasks()}
+            onSelectTask={selectTaskDetail}
+            onSubmitted={(operation) => {
+              const submittedIncarnation = backendIncarnation;
+              if (submittedIncarnation !== backendIncarnationRef.current) return false;
+              mergeOperation(operation);
+              return true;
+            }}
+          />
           <section className="min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface" aria-labelledby="advanced-execution-heading">
             <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
               <div className="min-w-0">
@@ -1584,8 +1589,8 @@ function TargetDetail({
     : ["target.kill", "beacon.remove"];
 
   return (
-    <aside className={`min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface ${isDedicated ? "" : "self-start 2xl:sticky 2xl:top-0"}`}>
-      <div className="flex items-start gap-3 px-4 py-4">
+    <aside aria-label={isDedicated ? "Beacon details" : undefined} className={`min-w-0 overflow-hidden ${isDedicated ? "" : "rounded-2xl border border-separator bg-surface self-start 2xl:sticky 2xl:top-0"}`}>
+      {!isDedicated ? <div className="flex items-start gap-3 px-4 py-4">
         <span className="section-icon"><FontAwesomeIcon aria-hidden icon={active.mode === "session" ? faComputer : faSatellite} /></span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
@@ -1594,23 +1599,27 @@ function TargetDetail({
           </div>
           <p className="mt-1 truncate font-mono text-[11px] text-muted">{active.id}</p>
         </div>
-      </div>
+      </div> : null}
 
-      <div className="grid grid-cols-2 gap-x-4 gap-y-3 border-y border-separator bg-default px-4 py-4 text-xs">
-        <DetailItem label="Host" value={active.hostname || "Not reported"} />
-        <DetailItem label="User" value={active.username || "Not reported"} />
-        <DetailItem label="Platform" value={`${active.os || "unknown"}/${active.arch || "unknown"}`} mono />
-        <DetailItem label="Process" value={active.pid === undefined ? "Not reported" : String(active.pid)} mono />
+      <dl className={`grid grid-cols-2 gap-x-4 gap-y-3 border-y border-separator px-4 py-4 text-xs ${isDedicated ? "sm:grid-cols-3 xl:grid-cols-4" : "bg-default"}`}>
+        {!isDedicated ? (
+          <>
+            <DetailItem label="Host" value={active.hostname || "Not reported"} />
+            <DetailItem label="User" value={active.username || "Not reported"} />
+            <DetailItem label="Platform" value={`${active.os || "unknown"}/${active.arch || "unknown"}`} mono />
+            <DetailItem label="Process" value={active.pid === undefined ? "Not reported" : String(active.pid)} mono />
+          </>
+        ) : null}
         <DetailItem label="Transport" value={active.transport.toUpperCase()} />
         <DetailItem label="Remote" value={active.remoteAddress || "Not reported"} mono />
-        <div className="col-span-2"><DetailItem label="Active C2" value={active.activeC2 || "Not reported"} mono /></div>
-        <div className="col-span-2"><DetailItem label="Executable" value={active.executable || "Not reported"} mono /></div>
+        <DetailItem className="col-span-2" label="Active C2" value={active.activeC2 || "Not reported"} mono />
+        <DetailItem className="col-span-2" label="Executable" value={active.executable || "Not reported"} mono />
         <DetailItem label="Version" value={active.version || "Not reported"} />
         <DetailItem label="Locale" value={active.locale || "Not reported"} mono />
         <DetailItem label="Integrity" value={active.integrity || "Not reported"} />
         <DetailItem label="Burned" value={active.burned ? "Yes" : "No"} />
         <DetailItem label="First contact" value={formatTimestamp(active.firstContactAt)} />
-        <DetailItem label="Last check-in" value={formatTimestamp(active.lastCheckinAt)} />
+        {!isDedicated ? <DetailItem label="Last check-in" value={formatTimestamp(active.lastCheckinAt)} /> : null}
         {active.mode === "session" ? (
           <DetailItem label="Reconnect" value={formatDuration(active.reconnectIntervalMs)} />
         ) : (
@@ -1620,7 +1629,7 @@ function TargetDetail({
             <DetailItem label="Tasks" value={beaconTaskCountLabel(active)} />
           </>
         )}
-      </div>
+      </dl>
 
       {active.mode === "beacon" ? (
         <div className="border-b border-separator px-4 py-3">
@@ -2736,9 +2745,9 @@ function InlineNotice({
   );
 }
 
-function DetailItem({ label, value, mono = false }: { label: string; value: string; mono?: boolean }): React.JSX.Element {
+function DetailItem({ label, value, mono = false, className = "" }: { label: string; value: string; mono?: boolean; className?: string }): React.JSX.Element {
   return (
-    <div className="min-w-0">
+    <div className={`min-w-0 ${className}`}>
       <dt className="text-[11px] text-muted">{label}</dt>
       <dd className={`mt-0.5 break-words text-xs text-foreground ${mono ? "font-mono" : ""}`}>{value}</dd>
     </div>
