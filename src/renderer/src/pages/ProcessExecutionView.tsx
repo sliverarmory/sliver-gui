@@ -26,11 +26,15 @@ import { ExecutionHistorySidebar } from "../components/ExecutionHistorySidebar";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
 import { ExecutionActionForm } from "./target-execution-forms";
 import type { ProcessExecutionRecord } from "./process-execution-history";
+import type { ExecutionComposerState } from "./execution-composer-state";
 
 const PROCESS_FORM_ID = "execution-process-form";
 type OutputStream = "stdout" | "stderr";
 
 interface ProcessExecutionViewProps {
+  composerOnly?: boolean;
+  formId?: string;
+  onComposerStateChange?: (state: ExecutionComposerState) => void;
   capability: ExecutionCapability | undefined;
   target: TargetSummary;
   isPreparing: boolean;
@@ -51,6 +55,9 @@ interface ProcessExecutionViewProps {
 
 /** The session's execute command, output, and this run's bounded history. */
 export function ProcessExecutionView({
+  composerOnly = false,
+  formId = PROCESS_FORM_ID,
+  onComposerStateChange,
   capability,
   target,
   isPreparing,
@@ -84,6 +91,14 @@ export function ProcessExecutionView({
   const scrollContentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    onComposerStateChange?.({
+      isPending: isPreparing || isExecuting,
+      isAvailable: capability?.available === true && !isRefreshing && !isPreparing && !isExecuting,
+      error: capability?.available ? undefined : capability?.reason?.message ?? "Process execution is unavailable for this target.",
+    });
+  }, [capability?.available, capability?.reason?.message, isPreparing, isExecuting, isRefreshing, onComposerStateChange]);
+
+  useEffect(() => {
     setStream("stdout");
   }, [selected?.id]);
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
@@ -114,6 +129,21 @@ export function ProcessExecutionView({
       onAddToLoot(record.result, "stdout", "");
     }
   };
+
+  if (composerOnly) {
+    return capability?.available ? (
+      <ExecutionActionForm
+        key={`${target.mode}:${target.id}`}
+        capability={capability}
+        compactProcess
+        formId={formId}
+        isPreparing={isPreparing || isExecuting || isRefreshing}
+        operationId="execution.process"
+        target={target}
+        onPrepare={onPrepare}
+      />
+    ) : <p className="text-xs text-warning" role="status">{capability?.reason?.message ?? "Process execution is unavailable for this target."}</p>;
+  }
 
   return (
     <section
@@ -163,7 +193,7 @@ export function ProcessExecutionView({
               <h3 className="text-base font-semibold text-foreground">Execute a subprocess</h3>
               {capability?.available ? (
                 <Button
-                  form={PROCESS_FORM_ID}
+                  form={formId}
                   isPending={isPreparing || isExecuting}
                   isDisabled={isPreparing || isExecuting || isRefreshing}
                   type="submit"
@@ -198,7 +228,7 @@ export function ProcessExecutionView({
                     key={`${target.mode}:${target.id}`}
                     capability={capability}
                     compactProcess
-                    formId={PROCESS_FORM_ID}
+                    formId={formId}
                     isPreparing={isPreparing || isExecuting}
                     operationId="execution.process"
                     target={target}

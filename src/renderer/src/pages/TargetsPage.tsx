@@ -1361,6 +1361,7 @@ export function TargetsPage({
           </header>
           <BeaconWorkspaceHeader beacon={active} details={targetDetail} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
             <BeaconInteractionWorkspace
+              expectedTarget={activeRef!}
               canQueue={taskExecutionCapability?.available === true}
               error={tasksError}
               isLoading={isLoadingTasks}

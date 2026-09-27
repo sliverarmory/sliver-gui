@@ -353,13 +353,30 @@ export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminal
         fitAddon = new FitAddon();
         fitAddonRef.current = fitAddon;
         terminal.loadAddon(fitAddon);
-        terminal.open(host);
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+        // Pinned Ghostty open() calls focus(), which also schedules another
+        // focus for the next tick. Suppress only this initialization call;
+        // blur cannot cancel it. Restore normal explicit focus immediately.
+        const explicitFocus = terminal.focus;
+        terminal.focus = () => undefined;
+        try {
+          terminal.open(host);
+        } finally {
+          terminal.focus = explicitFocus;
+        }
         disablePinnedGhosttyAutoCopy(terminal);
         host.setAttribute("aria-label", ariaLabelRef.current);
         if (disableInput) host.setAttribute("aria-readonly", "true");
-        // Terminal.open focuses its contenteditable host. Return focus to the
-        // workspace tab/trigger until the operator explicitly focuses here.
-        terminal.blur();
+        // Defensively restore workspace focus if open directly displaces it,
+        // while preserving deliberate focus already inside the terminal.
+        if (!host.contains(previousFocus ?? null) && host.contains(document.activeElement)) {
+          terminal.blur();
+          const currentFocus = document.activeElement;
+          if (previousFocus?.isConnected &&
+            (currentFocus === document.body || currentFocus === document.documentElement || host.contains(currentFocus))) {
+            previousFocus.focus({ preventScroll: true });
+          }
+        }
         fitAddon.fit();
         // ghostty-web drops ResizeObserver notifications while its fit() call
         // holds a short resize guard. A pane can grow during that window and

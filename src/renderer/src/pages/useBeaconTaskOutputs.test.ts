@@ -39,6 +39,126 @@ function installAPI(getBeaconTask: SliverDesktopAPI["getBeaconTask"]) {
 }
 
 describe("useBeaconTaskOutputs", () => {
+  it("preserves explicitly opened output while newer background completions exceed the cache budget", async () => {
+    const tasks = Array.from({ length: 33 }, (_, index) => task(`background-${index}`));
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(async ({ taskId }) => ({
+      ok: true, value: executionDetail(tasks.find((summary) => summary.taskId === taskId)!, 1_024 * 1_024),
+    }));
+    installAPI(getBeaconTask);
+    const view = renderHook(({ tasks }) => useBeaconTaskOutputs("exact-one", tasks), { initialProps: { tasks: tasks.slice(0, 16) } });
+    await waitFor(() => expect(view.result.current.entries.every((entry) => entry.detail)).toBe(true));
+    const opened = view.result.current.entries.find((entry) => entry.task.taskId === tasks[0]!.taskId)!.detail!;
+    act(() => view.result.current.loadOutput(tasks[0]!));
+    view.rerender({ tasks });
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(33));
+    await waitFor(() => expect(view.result.current.entries.every((entry) => !entry.isLoading)).toBe(true));
+
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[0]!.taskId)?.detail).toBe(opened);
+    expect(opened.execution?.stdout?.data[0]).toBe(65);
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[32]!.taskId)?.detail).toBeDefined();
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[1]!.taskId)?.error).toContain("released from memory");
+    expect(cachedBytes(view.result.current.entries.map((entry) => entry.detail))).toBe(32 * 1_024 * 1_024);
+    view.rerender({ tasks: tasks.map((summary) => ({ ...summary })) });
+    await act(async () => undefined);
+    expect(getBeaconTask).toHaveBeenCalledTimes(33);
+  });
+
+  it("bounds execution cache to 32 MiB, keeps recently opened output, and reloads only an explicitly retried released entry", async () => {
+    const tasks = Array.from({ length: 17 }, (_, index) => task(`large-${index}`));
+    const returned: BeaconTaskDetail[] = [];
+    const generic = task("generic-history");
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(async ({ taskId }) => {
+      if (taskId === generic.taskId) return { ok: true, value: detail(generic, "unaffected filesystem output") };
+      const decoded = executionDetail(tasks.find((summary) => summary.taskId === taskId)!, 1_024 * 1_024);
+      returned.push(decoded);
+      return { ok: true, value: decoded };
+    });
+    installAPI(getBeaconTask);
+    const view = renderHook(({ tasks }) => useBeaconTaskOutputs("exact-one", tasks), {
+      initialProps: { tasks: [...tasks.slice(0, 16), generic] },
+    });
+    await waitFor(() => expect(view.result.current.entries.every((entry) => entry.detail)).toBe(true));
+    const first = returned.find((value) => value.taskId === tasks[0]!.taskId)!;
+    const oldest = returned.find((value) => value.taskId === tasks[1]!.taskId)!;
+    act(() => view.result.current.loadOutput(tasks[0]!));
+    expect(getBeaconTask).toHaveBeenCalledTimes(17);
+
+    view.rerender({ tasks: [...tasks, generic] });
+    await waitFor(() => expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[1]!.taskId)?.error)
+      .toBe("This output was released from memory. Load it again to view it."));
+    expect(view.result.current.entries).toHaveLength(18);
+    expect(cachedBytes(view.result.current.entries.map((entry) => entry.detail))).toBe(32 * 1_024 * 1_024);
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[0]!.taskId)?.detail).toBe(first);
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[16]!.taskId)?.detail).toBeDefined();
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === generic.taskId)?.detail?.disposition).toMatchObject({ text: "unaffected filesystem output" });
+    expect(oldest.execution?.stdout?.data.every((byte) => byte === 0)).toBe(true);
+    expect(oldest.execution?.stderr?.data.every((byte) => byte === 0)).toBe(true);
+    expect(first.execution?.stdout?.data[0]).toBe(65);
+
+    view.rerender({ tasks: [...tasks.map((summary) => ({ ...summary })), generic] });
+    await act(async () => undefined);
+    expect(getBeaconTask).toHaveBeenCalledTimes(18);
+    act(() => view.result.current.loadOutput(tasks[1]!, true));
+    await waitFor(() => expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[1]!.taskId)?.detail).toBeDefined());
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[1]!.taskId)?.error).toBeUndefined();
+    expect(view.result.current.entries.find((entry) => entry.task.taskId === tasks[2]!.taskId)?.error).toContain("released from memory");
+    expect(cachedBytes(view.result.current.entries.map((entry) => entry.detail))).toBe(32 * 1_024 * 1_024);
+    expect(getBeaconTask).toHaveBeenCalledTimes(19);
+    view.rerender({ tasks: [...tasks, generic] });
+    await act(async () => undefined);
+    expect(getBeaconTask).toHaveBeenCalledTimes(19);
+    view.unmount();
+    await Promise.resolve();
+    expect(returned.every((value) => value.execution?.stdout?.data.every((byte) => byte === 0))).toBe(true);
+  });
+
+  it("zeroizes retired identity output and stale responses while retaining the current identity bytes", async () => {
+    const firstTask = task("same-task");
+    const secondTask = task("same-task", { beaconId: "beacon-two" });
+    const first = executionDetail(firstTask, 16);
+    const stale = executionDetail(firstTask, 16);
+    const current = executionDetail(secondTask, 16);
+    const staleGate = deferred<TaskResult>();
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>()
+      .mockResolvedValueOnce({ ok: true, value: first })
+      .mockReturnValueOnce(staleGate.promise)
+      .mockResolvedValueOnce({ ok: true, value: current });
+    installAPI(getBeaconTask);
+    const view = renderHook(({ identity, tasks }) => useBeaconTaskOutputs(identity, tasks), {
+      initialProps: { identity: "exact-one", tasks: [firstTask] },
+    });
+    await waitFor(() => expect(view.result.current.entries[0]?.detail).toBe(first));
+    act(() => view.result.current.loadOutput(firstTask, true));
+    expect(first.execution?.stdout?.data.every((byte) => byte === 0)).toBe(true);
+    view.rerender({ identity: "exact-two", tasks: [secondTask] });
+    await waitFor(() => expect(view.result.current.entries[0]?.detail).toBe(current));
+    await act(async () => staleGate.resolve({ ok: true, value: stale }));
+    expect(stale.execution?.stdout?.data.every((byte) => byte === 0)).toBe(true);
+    expect(stale.execution?.stderr?.data.every((byte) => byte === 0)).toBe(true);
+    expect(current.execution?.stdout?.data[0]).toBe(65);
+    view.unmount();
+    await Promise.resolve();
+    expect(current.execution?.stdout?.data.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("keeps accepted execution output intact through Strict Mode effect replay and clears it on final unmount", async () => {
+    const summary = task("strict-output");
+    const decoded = executionDetail(summary, 16);
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockResolvedValue({ ok: true, value: decoded });
+    installAPI(getBeaconTask);
+    const view = renderHook(() => useBeaconTaskOutputs("exact-one", [summary]), {
+      wrapper: ({ children }: { children: ReactNode }) => createElement(StrictMode, null, children),
+    });
+    await waitFor(() => expect(view.result.current.entries[0]?.detail).toBe(decoded));
+    await Promise.resolve();
+    expect(decoded.execution?.stdout?.data[0]).toBe(65);
+    expect(getBeaconTask).toHaveBeenCalledOnce();
+    view.unmount();
+    await Promise.resolve();
+    expect(decoded.execution?.stdout?.data.every((byte) => byte === 0)).toBe(true);
+    expect(decoded.execution?.stderr?.data.every((byte) => byte === 0)).toBe(true);
+  });
+
   it("bounds concurrent details, creates placeholders, and prioritizes a clicked queued output", async () => {
     const tasks = Array.from({ length: 7 }, (_, index) => task(`task-${index}`));
     const gates = new Map(tasks.map((summary) => [summary.taskId, deferred<TaskResult>()]));
@@ -181,3 +301,16 @@ describe("useBeaconTaskOutputs", () => {
     expect(getBeaconTask).toHaveBeenCalledTimes(4);
   });
 });
+
+function executionDetail(summary: BeaconTaskSummary, streamBytes: number): BeaconTaskDetail {
+  return { ...summary, execution: {
+    operationId: "execution.process",
+    stdout: { data: new Uint8Array(streamBytes).fill(65), truncated: false },
+    stderr: { data: new Uint8Array(streamBytes).fill(66), truncated: false },
+  } };
+}
+
+function cachedBytes(details: Array<BeaconTaskDetail | undefined>): number {
+  return details.reduce((total, value) => total + (value?.execution?.stdout?.data.byteLength ?? 0)
+    + (value?.execution?.stderr?.data.byteLength ?? 0), 0);
+}

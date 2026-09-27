@@ -4,12 +4,17 @@ import { sliverpb, type clientpb } from "sliver-script";
 
 import type {
   BeaconTaskDetail,
+  BeaconTaskExecutionOutput,
   BeaconTaskPage,
   BeaconTaskState,
   BeaconTaskSummary,
   OperationOwnership,
   TargetOperationId,
 } from "../shared/operation-contracts.js";
+import type { ExecutionOperationId } from "../shared/execution-contracts.js";
+import { decodeBofOutput, decodeBofTask } from "./bof-workbench.js";
+import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS } from "./execution-beacon-task.js";
+import { ExecutionRemoteRejectedError } from "./execution-workbench.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
 const MAX_TASKS = 500;
@@ -107,6 +112,8 @@ export type TaskOwnershipResolver = (taskId: string, beaconId: string) => {
   ownership: OperationOwnership;
   localRequestId?: string;
   operationId?: TargetOperationId;
+  executionOperationId?: ExecutionOperationId | "bof.execute";
+  processWaited?: boolean;
   expectedPingNonce?: number | undefined;
 };
 
@@ -128,6 +135,17 @@ const EXTERNAL_OPERATION_BY_DESCRIPTION = new Map<string, TargetOperationId>(
     operationId as TargetOperationId,
   ]),
 );
+
+const EXTERNAL_EXECUTION_BY_DESCRIPTION = new Map<string, ExecutionOperationId>([
+  ["ExecuteReq", "execution.process"],
+  ["ExecuteWindowsReq", "execution.process"],
+  ["InvokeExecuteAssemblyReq", "execution.assembly"],
+  ["InvokeInProcExecuteAssemblyReq", "execution.assembly"],
+  ["SideloadReq", "execution.sideload"],
+  ["SpawnDllReq", "execution.spawn-dll"],
+  ["InvokeMigrateReq", "execution.migrate"],
+  ["RunAsReq", "privilege.run-as"],
+]);
 
 const UNKNOWN_OWNERSHIP = Object.freeze({
   origin: "unknown",
@@ -250,6 +268,12 @@ export class BeaconTaskStore {
     const task = this.requireTask(beaconId, taskId);
     const attribution = resolveOwnership(task.taskId, task.beaconId);
     const base = projectTask(task, attribution);
+    const executionOperationId = attribution.executionOperationId ?? (
+      attribution.operationId ? undefined : EXTERNAL_EXECUTION_BY_DESCRIPTION.get(task.description)
+    );
+    if (executionOperationId) {
+      return this.executionDetail(task, base, executionOperationId, attribution);
+    }
     if (!task.resultAvailable) return base;
 
     const operationId = attribution.operationId ?? EXTERNAL_OPERATION_BY_DESCRIPTION.get(task.description);
@@ -339,6 +363,86 @@ export class BeaconTaskStore {
     } finally {
       this.detailAdmissions -= 1;
     }
+  }
+
+  private async executionDetail(
+    task: InternalTask,
+    base: BeaconTaskSummary,
+    operationId: BeaconTaskExecutionOutput["operationId"],
+    attribution: ReturnType<TaskOwnershipResolver>,
+  ): Promise<BeaconTaskDetail> {
+    const skeleton = { ...base, execution: { operationId } };
+    const descriptions = operationId === "bof.execute"
+      ? ["CallExtensionReq"]
+      : EXECUTION_BEACON_TASK_DESCRIPTIONS[operationId as keyof typeof EXECUTION_BEACON_TASK_DESCRIPTIONS];
+    if (!descriptions || !(descriptions as readonly string[]).includes(task.description)) {
+      return executionDetailError(base, operationId, "decode-uncertain", "The task description did not match the locally submitted operation");
+    }
+    if (!task.resultAvailable) return skeleton;
+    if (this.detailAdmissions >= MAX_CONCURRENT_TASK_DETAILS) {
+      throw new Error("Too many beacon task details are already being fetched; wait for one to finish");
+    }
+    this.detailAdmissions += 1;
+    try {
+      let content: clientpb.BeaconTask;
+      try { content = await this.client.fetchBeaconTask(task.taskId); }
+      catch { return executionDetailError(base, operationId, "decode-uncertain", "The beacon task result could not be fetched"); }
+      try {
+        if (content.ID !== task.taskId || content.BeaconID !== task.beaconId) {
+          return executionDetailError(base, operationId, "decode-uncertain", "The server returned task content for a different resource");
+        }
+        if (content.State.trim().toLowerCase() !== "completed") {
+          return executionDetailError(base, operationId, "decode-uncertain", "The fetched task did not contain a completed result");
+        }
+        if (content.Description !== task.description) {
+          return executionDetailError(base, operationId, "decode-uncertain", "The fetched task description did not match the task inventory");
+        }
+        try {
+          if (operationId === "bof.execute") {
+            const response = decodeBofTask(content.Response);
+            const encoded = sliverpb.CallExtension.encode(response).finish();
+            try {
+              if (encoded.length !== content.Response.length || encoded.some((byte, index) => byte !== content.Response[index])) {
+                throw new Error("Invalid BOF response encoding");
+              }
+            } finally { encoded.fill(0); }
+            if (response.Response?.Async || response.Response?.BeaconID || response.Response?.TaskID) {
+              throw new Error("BOF response is not a completed envelope");
+            }
+            const captured = decodeBofOutput(response);
+            if (response.Response?.Err) {
+              return executionDetailError(base, operationId, "target-reported", "The beacon task response reported an error", captured);
+            }
+            return { ...base, execution: { operationId, ...captured } };
+          }
+          const decoded = decodeExecutionBeaconTask({
+            operationId, description: task.description, response: content.Response,
+            processWaited: attribution.executionOperationId === "execution.process" && attribution.processWaited === true,
+          });
+          if (decoded.kind !== "action") throw new Error("The execution result did not contain an action result");
+          const result = decoded.value;
+          return {
+            ...base,
+            execution: {
+              operationId,
+              ...(result.pid === undefined ? {} : { pid: result.pid }),
+              ...(result.exitCode === undefined ? {} : { exitCode: result.exitCode }),
+              ...(result.stdout === undefined ? {} : { stdout: { data: result.stdout, truncated: result.stdoutTruncated ?? false } }),
+              ...(result.stderr === undefined ? {} : { stderr: { data: result.stderr, truncated: result.stderrTruncated ?? false } }),
+            },
+          };
+        } catch (error) {
+          const targetReported = error instanceof ExecutionRemoteRejectedError;
+          return executionDetailError(base, operationId, targetReported ? "target-reported" : "decode-uncertain",
+            targetReported ? "The beacon task response reported an error" : "The beacon task result could not be decoded safely");
+        }
+      } finally {
+        // Artifact-bearing requests may exceed the generic preview limit. They
+        // are never decoded or exposed, and are destroyed on every path.
+        content.Request.fill(0);
+        content.Response.fill(0);
+      }
+    } finally { this.detailAdmissions -= 1; }
   }
 
   async cancel(
@@ -867,6 +971,16 @@ function detailError(
     errorKind,
     error: boundedText(error, MAX_DESCRIPTION),
   };
+}
+
+function executionDetailError(
+  base: BeaconTaskSummary,
+  operationId: BeaconTaskExecutionOutput["operationId"],
+  errorKind: NonNullable<BeaconTaskDetail["errorKind"]>,
+  error: string,
+  captured: Pick<BeaconTaskExecutionOutput, "stdout" | "stderr"> = {},
+): BeaconTaskDetail {
+  return { ...base, execution: { operationId, ...captured, outputError: error }, errorKind, error };
 }
 
 function taskState(state: string): BeaconTaskState {

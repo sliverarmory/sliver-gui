@@ -562,6 +562,89 @@ describe("BOF execution records", () => {
     await expect(registry.listBofExecutionHistory(2)).resolves.toMatchObject({ ok: true, value: { records: [] } });
   });
 
+  it("retains exact pooled BOF task provenance after clearing history and rejects unrelated or replaced resources", async () => {
+    const directory = join(root, "beacon-output-bof");
+    await writeLocalBof(directory);
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [clientpb.Beacon.create({
+      ...beacon("beacon_bof_output", "bof-output"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    client.adapter.callBofBeacon = vi.fn(async () => sliverpb.CallExtension.create({
+      Response: { Async: true, BeaconID: "beacon_bof_output", TaskID: "bof-output-task" },
+    }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const selected = await registry.chooseBofDirectory(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected local BOF");
+    await expect(registry.runBof(1, { commandId: selected.value.selectedCommandId, arguments: ["example", 1], timeoutSeconds: 60 }))
+      .resolves.toMatchObject({ ok: true, value: { taskId: "bof-output-task" } });
+    await expect(registry.clearBofExecutionHistory(1, {})).resolves.toEqual({ ok: true });
+    await expect(registry.listBofExecutionHistory(1)).resolves.toMatchObject({ ok: true, value: { records: [] } });
+    const output = Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({
+      BOFOutputs: [{ Type: 0, Data: Buffer.from("bof stdout") }, { Type: 0x0d, Data: Buffer.from("bof stderr") }], Response: {},
+    })).finish());
+    client.taskState.set("beacon_bof_output", [
+      clientpb.BeaconTask.create({ ID: "bof-output-task", BeaconID: "beacon_bof_output", Description: "CallExtensionReq", State: "completed", Response: output }),
+      clientpb.BeaconTask.create({ ID: "other-extension-task", BeaconID: "beacon_bof_output", Description: "CallExtensionReq", State: "completed", Response: output }),
+    ]);
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await selectOnlyBeacon(registry, 2);
+    await expect(registry.getBeaconTask(2, "bof-output-task")).resolves.toMatchObject({
+      ok: true, value: { ownership: { origin: "unknown" }, execution: {
+        operationId: "bof.execute",
+        stdout: { data: Buffer.from("bof stdout") }, stderr: { data: Buffer.from("bof stderr") },
+      } },
+    });
+    const unrelated = await registry.getBeaconTask(2, "other-extension-task");
+    if (!unrelated.ok) throw new Error(unrelated.error);
+    expect(unrelated.value.execution).toBeUndefined();
+    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+
+    client.beaconState.Beacons = [clientpb.Beacon.create({ ...client.beaconState.Beacons[0]!, UUID: "replacement-host" })];
+    await registry.refresh(2);
+    await selectOnlyBeacon(registry, 2);
+    const replaced = await registry.getBeaconTask(2, "bof-output-task");
+    if (!replaced.ok) throw new Error(replaced.error);
+    expect(replaced.value.execution).toBeUndefined();
+    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replace BOF provenance when the server reuses its task ID for a process", async () => {
+    const directory = join(root, "beacon-ambiguous-bof");
+    await writeLocalBof(directory);
+    const client = new FakeSliverClient();
+    const beaconId = "beacon_ambiguous_fact";
+    client.beaconState.Beacons = [clientpb.Beacon.create({ ...beacon(beaconId, "ambiguous"), OS: "windows", Arch: "amd64", Capabilities: "1" })];
+    client.adapter.callBofBeacon = vi.fn(async () => sliverpb.CallExtension.create({ Response: { Async: true, BeaconID: beaconId, TaskID: "duplicate-task" } }));
+    const registry = new ConnectionRegistry({ savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [directory] });
+    const selected = await registry.chooseBofDirectory(sender(1));
+    if (!selected.ok || !selected.value) throw new Error("Expected local BOF");
+    await registry.runBof(1, { commandId: selected.value.selectedCommandId, arguments: ["example", 1], timeoutSeconds: 60 });
+    client.taskState.set(beaconId, [clientpb.BeaconTask.create({ ID: "duplicate-task", BeaconID: beaconId, Description: "CallExtensionReq", State: "completed",
+      Response: Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({ BOFOutputs: [{ Type: 0, Data: Buffer.from("bof stdout") }], Response: {} })).finish()) })]);
+    await expect(registry.getBeaconTask(1, "duplicate-task")).resolves.toMatchObject({ ok: true, value: { execution: { operationId: "bof.execute" } } });
+    client.executeBeacon.mockResolvedValueOnce({ Response: { Async: true, BeaconID: beaconId, TaskID: "duplicate-task", Err: "" } });
+    await submitBeaconProcess(registry, 1);
+    const ambiguous = await registry.getBeaconTask(1, "duplicate-task");
+    if (!ambiguous.ok) throw new Error(ambiguous.error);
+    expect(ambiguous.value.execution).toBeUndefined();
+    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+  });
+
   it("waits for correlated beacon loader registration before dispatching a legacy BOF", async () => {
     const bofDirectory = join(root, "extensions", "legacy-bof");
     const loaderDirectory = join(root, "extensions", "coff-loader");
@@ -8237,6 +8320,69 @@ describe("M3 session shell registry boundary", () => {
       value: { saved: true, fileName: "decoded-beacon-stdout.txt" },
     });
     await expect(readFile(destination, "utf8")).resolves.toBe("decoded-beacon-stdout");
+  });
+
+  it("exposes correlated process streams to beacon task history without settling the reviewed journal", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_task_output", "task-output")];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+    const submitted = await submitBeaconProcess(registry, 1);
+    if (!submitted.taskId) throw new Error("Expected correlated execution task");
+    completeFakeTaskSummary(client, "beacon_task_output", submitted.taskId, "ExecuteReq",
+      Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Pid: 123, Status: 7, Stdout: Buffer.from("\u001b[32mstdout\u001b[0m"), Stderr: Buffer.from("stderr"), Response: {},
+      })).finish()));
+
+    await expect(registry.getBeaconTask(1, submitted.taskId)).resolves.toMatchObject({
+      ok: true,
+      value: { localRequestId: submitted.requestId, execution: {
+        operationId: "execution.process", pid: 123, exitCode: 7,
+        stdout: { data: Buffer.from("\u001b[32mstdout\u001b[0m"), truncated: false },
+        stderr: { data: Buffer.from("stderr"), truncated: false },
+      } },
+    });
+    await expect(registry.getTargetOperation(1, submitted.requestId)).resolves.toMatchObject({ ok: true, value: { state: "running" } });
+
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await selectOnlyBeacon(registry, 2);
+    const peer = await registry.getBeaconTask(2, submitted.taskId);
+    expect(peer).toMatchObject({ ok: true, value: { ownership: { origin: "unknown" }, execution: { operationId: "execution.process", pid: 123, exitCode: 7 } } });
+    if (!peer.ok) throw new Error(peer.error);
+  });
+
+  it("retains waited process provenance when the beacon completes after its execution result expired", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_delayed_process", "delayed-process")];
+    let now = Date.now();
+    const registry = new ConnectionRegistry({ savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientFactory: () => client.adapter, now: () => now });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+    const submitted = await submitBeaconProcess(registry, 1);
+    if (!submitted.taskId) throw new Error("Expected correlated execution task");
+    now += 6 * 60_000;
+    await expect(registry.getExecutionResult(1, { requestId: submitted.requestId })).resolves.toMatchObject({ ok: false });
+    completeFakeTaskSummary(client, "beacon_delayed_process", submitted.taskId, "ExecuteReq",
+      Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 55, Status: 9, Stdout: Buffer.from("late stdout"), Response: {} })).finish()));
+    await expect(registry.getBeaconTask(1, submitted.taskId)).resolves.toMatchObject({ ok: true, value: { execution: {
+      operationId: "execution.process", pid: 55, exitCode: 9, stdout: { data: Buffer.from("late stdout") },
+    } } });
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    await selectOnlyBeacon(registry, 2);
+    await expect(registry.getBeaconTask(2, submitted.taskId)).resolves.toMatchObject({ ok: true, value: {
+      ownership: { origin: "unknown" }, execution: { operationId: "execution.process", exitCode: 9 },
+    } });
+    now += 24 * 60 * 60_000;
+    const expiredFact = await registry.getBeaconTask(2, submitted.taskId);
+    if (!expiredFact.ok) throw new Error(expiredFact.error);
+    expect(expiredFact.value.execution).not.toHaveProperty("exitCode");
   });
 
   it("maps a completed beacon Response.Err to a fixed failed result without remote text", async () => {

@@ -50,6 +50,7 @@ import { ExecutionHistorySidebar } from "../components/ExecutionHistorySidebar";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
 import { consoleTerminalFontFamily } from "../components/console-terminal-settings";
 import { parseProcessArgv } from "./process-argv";
+import type { ExecutionComposerState } from "./execution-composer-state";
 
 const FORM_ID = "execution-dotnet-form";
 const AUTO_REFRESH_INITIAL_DELAY_MS = 3_000;
@@ -63,6 +64,9 @@ type HistoryState = { identityKey: string; revision: number; records: readonly D
 const EMPTY_HISTORY: readonly DotNetExecutionRecord[] = Object.freeze([]);
 
 export interface DotNetExecutionViewProps {
+  composerOnly?: boolean;
+  formId?: string;
+  onComposerStateChange?: (state: ExecutionComposerState) => void;
   capability: ExecutionCapability | undefined;
   isExecuting: boolean;
   isPreparing: boolean;
@@ -75,6 +79,9 @@ export interface DotNetExecutionViewProps {
 
 /** Main owns native file bytes and Armory paths; this form sends only a source handle and argv. */
 export function DotNetExecutionView({
+  composerOnly = false,
+  formId = FORM_ID,
+  onComposerStateChange,
   capability,
   isExecuting,
   isPreparing,
@@ -156,6 +163,7 @@ export function DotNetExecutionView({
   }, [identity, targetRef.backendEpoch, targetRef.domainRevision, targetRef.fingerprint, targetRef.id, targetRef.mode]);
 
   const loadHistory = useCallback(async (): Promise<void> => {
+    if (composerOnly) return;
     const sequence = ++historySequence.current;
     try {
       const response = await window.sliver.listDotNetExecutionHistory();
@@ -190,12 +198,12 @@ export function DotNetExecutionView({
         }));
       }
     }
-  }, [identity, targetRef.backendEpoch, targetRef.domainRevision, targetRef.fingerprint, targetRef.id, targetRef.mode]);
+  }, [composerOnly, identity, targetRef.backendEpoch, targetRef.domainRevision, targetRef.fingerprint, targetRef.id, targetRef.mode]);
 
   useEffect(() => {
     void loadCatalog(true);
     void loadHistory();
-    const unsubscribe = window.sliver.onDotNetExecutionHistoryChanged((changedTarget) => {
+    const unsubscribe = composerOnly ? () => undefined : window.sliver.onDotNetExecutionHistoryChanged((changedTarget) => {
       if (sameTargetIdentity(changedTarget, targetRef)) void loadHistory();
     });
     return () => {
@@ -204,13 +212,13 @@ export function DotNetExecutionView({
       fileSequence.current += 1;
       unsubscribe();
     };
-  }, [loadCatalog, loadHistory]);
+  }, [composerOnly, loadCatalog, loadHistory]);
 
   useEffect(() => {
-    if (!result || result.operationId !== "execution.assembly") return;
+    if (composerOnly || !result || result.operationId !== "execution.assembly") return;
     setSelectedId(result.requestId);
     void loadHistory();
-  }, [result?.requestId]);
+  }, [composerOnly, result?.requestId]);
 
   const catalog = catalogState.status === "ready" && sameTargetIdentity(catalogState.value.target, targetRef)
     ? catalogState.value : undefined;
@@ -219,8 +227,8 @@ export function DotNetExecutionView({
   historyRecordsRef.current = historyRecords;
   const historyError = historyState.identityKey === identity ? historyState.error : undefined;
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
-  const selected = selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
-  const showingNew = selected === undefined;
+  const selected = composerOnly || selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
+  const showingNew = composerOnly || selected === undefined;
   const assembly = catalog?.assemblies.find((item) => item.id === assemblyId);
   const catalogError = catalogState.status === "error" ? catalogState.message : catalogState.status === "ready" ? catalogState.error : undefined;
   const isBusy = isPreparing || isExecuting || isChoosingFile || isRefreshing;
@@ -230,6 +238,14 @@ export function DotNetExecutionView({
   const isDll = file?.isDll ?? assembly?.isDll ?? false;
   const canExecute = !!source && !!capability?.available && (file !== undefined || !!assembly?.available) && !isBusy;
   const joinedArgumentBytes = parsedArgumentBytes(argumentsText);
+
+  useEffect(() => {
+    onComposerStateChange?.({
+      isPending: isPreparing || isExecuting,
+      isAvailable: canExecute,
+      error: formError ?? catalogError ?? (!capability?.available ? capability?.reason?.message : undefined),
+    });
+  }, [canExecute, isPreparing, isExecuting, formError, catalogError, capability?.available, capability?.reason?.message, onComposerStateChange]);
 
   useEffect(() => {
     const viewport = contentViewportRef.current;
@@ -366,9 +382,9 @@ export function DotNetExecutionView({
   return (
     <section
       aria-label=".NET assembly execution"
-      className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
+      className={composerOnly ? "min-w-0" : "mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"}
     >
-      <ExecutionHistorySidebar
+      {!composerOnly ? <ExecutionHistorySidebar
         label=".NET execution history"
         newExecutionKey="new-dotnet-execution"
         executionKeyPrefix="dotnet-execution:"
@@ -406,15 +422,15 @@ export function DotNetExecutionView({
         selectedId={selected?.id}
         onClearAll={() => void clearHistory()}
         onSelect={setSelectedId}
-      />
+      /> : null}
 
       <section
         aria-label={showingNew ? "Execute a .NET assembly" : ".NET execution details"}
         className="flex min-h-0 min-w-0 flex-col"
       >
         {showingNew ? (
-          <header className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-separator bg-surface px-4 py-3 sm:px-5">
-            <h3 className="text-base font-semibold text-foreground">Execute a .NET assembly</h3>
+          <header className={composerOnly ? "mb-3 flex justify-end" : "sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-separator bg-surface px-4 py-3 sm:px-5"}>
+            {!composerOnly ? <h3 className="text-base font-semibold text-foreground">Execute a .NET assembly</h3> : null}
             <div className="flex items-center gap-2">
               <Tooltip delay={250}>
                 <Button aria-label="Refresh assemblies" isDisabled={isBusy || catalogState.status === "loading"} isIconOnly size="sm" variant="ghost" onPress={() => void loadCatalog()}>
@@ -428,9 +444,9 @@ export function DotNetExecutionView({
                 </Button>
                 <Tooltip.Content>Open an assembly file</Tooltip.Content>
               </Tooltip>
-              <Button form={FORM_ID} isDisabled={!canExecute} isPending={isPreparing || isExecuting} type="submit" variant="primary">
+              {!composerOnly ? <Button form={formId} isDisabled={!canExecute} isPending={isPreparing || isExecuting} type="submit" variant="primary">
                 <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
-              </Button>
+              </Button> : null}
             </div>
           </header>
         ) : selected ? (
@@ -454,7 +470,7 @@ export function DotNetExecutionView({
         <ScrollShadow
           ref={contentViewportRef}
           aria-label=".NET execution content"
-          className={`min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-5${showingNew ? " py-4 sm:py-5" : " pt-4 sm:pt-5"}`}
+          className={composerOnly ? "min-w-0" : `min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-5${showingNew ? " py-4 sm:py-5" : " pt-4 sm:pt-5"}`}
           hideScrollBar={false}
           orientation="vertical"
           role="region"
@@ -471,7 +487,7 @@ export function DotNetExecutionView({
                 {catalogState.status === "loading" ? <p className="mb-4 text-sm text-muted" role="status">Loading Armory assemblies…</p> : null}
                 {catalogError ? <p className="mb-4 rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
 
-                <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
+                <form className="flex flex-col gap-5" id={formId} onSubmit={(event) => void submit(event)}>
                   <Autocomplete
                     allowsEmptyCollection
                     fullWidth

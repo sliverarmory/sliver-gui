@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
@@ -34,6 +34,7 @@ import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 
 import type { PageSummary } from "../../../shared/contracts";
+import type { TargetRef } from "../../../shared/target-contracts";
 import type {
   BeaconTaskDetail,
   BeaconTaskSummary,
@@ -43,10 +44,13 @@ import type {
   TargetOperationRecord,
 } from "../../../shared/operation-contracts";
 import { Field } from "../components/FormControls";
+import { BeaconExecutionCommand, type BeaconExecutionCommandState } from "./BeaconExecutionCommand";
+import { BeaconExecutionTaskOutput } from "./BeaconExecutionTaskOutput";
 import { formatTimestamp, taskStateColor } from "./target-page-model";
 import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 
 export const BEACON_INTERACTION_COMMAND_IDS = [
+  "execution",
   "beacon.filesystem.pwd",
   "beacon.filesystem.ls",
   "beacon.process.list",
@@ -57,7 +61,7 @@ export type BeaconInteractionCommandId = (typeof BEACON_INTERACTION_COMMAND_IDS)
 
 interface BeaconCommandPresentation {
   id: BeaconInteractionCommandId;
-  group: "Filesystem" | "Processes" | "Networking";
+  group: "Execution" | "Filesystem" | "Processes" | "Networking";
   label: string;
   description: string;
   keywords: readonly string[];
@@ -65,6 +69,14 @@ interface BeaconCommandPresentation {
 }
 
 const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
+  {
+    id: "execution",
+    group: "Execution",
+    label: "Execution",
+    description: "Run a process, BOF, or payload on this beacon.",
+    keywords: ["execute", "run", "bof", "assembly", ".net", "shellcode", "sideload", "dll"],
+    icon: faTerminal,
+  },
   {
     id: "beacon.filesystem.pwd",
     group: "Filesystem",
@@ -100,6 +112,7 @@ const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
 ];
 
 export interface BeaconInteractionWorkspaceProps {
+  expectedTarget: TargetRef;
   targetIdentity: string;
   canQueue: boolean;
   unavailableReason?: string | undefined;
@@ -116,6 +129,7 @@ export interface BeaconInteractionWorkspaceProps {
 }
 
 export function BeaconInteractionWorkspace({
+  expectedTarget,
   targetIdentity,
   canQueue,
   unavailableReason,
@@ -135,6 +149,8 @@ export function BeaconInteractionWorkspace({
   const [fullInfo, setFullInfo] = useState(false);
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [executionState, setExecutionState] = useState<BeaconExecutionCommandState>({ isPending: false, isAvailable: false });
+  const executionFormId = useId();
   const [cancelingTaskIds, setCancelingTaskIds] = useState<Set<string>>(() => new Set());
   const [queuedTaskId, setQueuedTaskId] = useState<string>();
   const [taskView, setTaskView] = useState("queue");
@@ -152,6 +168,7 @@ export function BeaconInteractionWorkspace({
     setFullInfo(false);
     setSubmitError(undefined);
     setIsSubmitting(false);
+    setExecutionState({ isPending: false, isAvailable: false });
     setCancelingTaskIds(new Set());
     setQueuedTaskId(undefined);
     setTaskView("queue");
@@ -244,12 +261,19 @@ export function BeaconInteractionWorkspace({
           </div>
 
           <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
-            <Button fullWidth isDisabled={!canQueue} isPending={isSubmitting} onPress={() => void submit()}>
+            <Button
+              fullWidth
+              {...(commandId === "execution" ? { form: executionFormId } : {})}
+              type={commandId === "execution" ? "submit" : "button"}
+              isDisabled={commandId === "execution" ? !executionState.isAvailable : !canQueue}
+              isPending={commandId === "execution" ? executionState.isPending : isSubmitting}
+              {...(commandId === "execution" ? {} : { onPress: () => void submit() })}
+            >
               <FontAwesomeIcon aria-hidden icon={faListCheck} /> Queue task
             </Button>
             <Autocomplete
               fullWidth
-              placeholder="Search filesystem, process, or network tasks"
+              placeholder="Search beacon tasks"
               selectionMode="single"
               value={commandId}
               variant="secondary"
@@ -297,7 +321,21 @@ export function BeaconInteractionWorkspace({
               </Autocomplete.Popover>
             </Autocomplete>
 
-            <div className="rounded-2xl bg-default p-4">
+            {commandId === "execution" ? (
+              <BeaconExecutionCommand
+                expectedTarget={expectedTarget}
+                formId={executionFormId}
+                key={targetIdentity}
+                targetIdentity={targetIdentity}
+                onStateChange={setExecutionState}
+                onQueuedTask={(taskId) => {
+                  if (identityRef.current !== targetIdentity) return;
+                  setQueuedTaskId(taskId);
+                  setTaskView("queue");
+                  onRefresh();
+                }}
+              />
+            ) : <div className="rounded-2xl bg-default p-4">
               <div className="flex items-start gap-3">
                 <FontAwesomeIcon aria-hidden className="mt-0.5 size-4 text-accent" icon={command.icon} />
                 <div className="min-w-0">
@@ -330,9 +368,9 @@ export function BeaconInteractionWorkspace({
                   <p className="text-xs leading-relaxed text-muted">This task has no additional options.</p>
                 ) : null}
               </div>
-            </div>
+            </div>}
 
-            {!canQueue ? (
+            {commandId !== "execution" && !canQueue ? (
               <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
                 {unavailableReason ?? "Task execution is unavailable for this beacon."}
               </p>
@@ -646,6 +684,7 @@ function BeaconTaskOutput({ output, isCanceling, onCancel, onRetry }: {
 }
 
 function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Element {
+  if (task.execution) return <BeaconExecutionTaskOutput key={`${task.beaconId}:${task.taskId}:${task.execution.operationId}`} task={task} />;
   const operationId = task.operationId as string | undefined;
   if (operationId === "beacon.filesystem.pwd") return <WorkingDirectoryResult disposition={task.disposition} />;
   if (operationId === "beacon.filesystem.ls") {
@@ -833,6 +872,8 @@ function isBeaconInteractionCommandId(value: string): value is BeaconInteraction
 
 function beaconCommandInput(commandId: BeaconInteractionCommandId, path: string, fullInfo: boolean): TargetOperationInput {
   switch (commandId) {
+    case "execution":
+      throw new Error("Choose execution options before queueing this task.");
     case "beacon.filesystem.pwd":
       return { operationId: commandId };
     case "beacon.filesystem.ls": {

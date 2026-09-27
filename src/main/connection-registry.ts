@@ -160,6 +160,7 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "../shared/execution-contracts.js";
+import { isExecutionOperationId } from "../shared/execution-contracts.js";
 import type { DotNetCatalog } from "../shared/dotnet-contracts.js";
 import type {
   AddBofOutputToLootInput,
@@ -484,6 +485,15 @@ interface PoolTaskClaim {
   expectedPingNonce?: number;
   requiresResultVerification: boolean;
   recoverable: boolean;
+}
+
+/** Decoder provenance survives output cache eviction without granting ownership. */
+interface PoolExecutionTaskFact {
+  target: TargetRef;
+  operationId: ExecutionOperationId | "bof.execute";
+  processWaited: boolean;
+  recordedAt: number;
+  ambiguous: boolean;
 }
 
 export type { SliverClientAdapter, SliverClientFactory } from "./sliver-client-adapter.js";
@@ -2522,9 +2532,10 @@ export class ConnectionRegistry {
           }
           if (response.Response?.Async) {
             const taskId = response.Response.TaskID;
-            if (!taskId || response.Response.BeaconID !== target.target.id) {
+            if (!/^[A-Za-z0-9_-]{1,128}$/u.test(taskId) || response.Response.BeaconID !== target.target.id) {
               return this.patchBofRecord(pool, selectedRef, record, { state: "outcome-unknown", error: "The BOF was submitted, but its beacon task could not be identified." });
             }
+            pool.recordExecutionTaskFact(taskId, selectedRef, "bof.execute");
             return this.patchBofRecord(pool, selectedRef, record, { state: "submitted", taskId });
           }
           if (target.target.mode === "beacon") throw new Error("The beacon BOF response was missing task correlation");
@@ -3778,7 +3789,11 @@ export class ConnectionRegistry {
           throw new Error("The selected target changed while the reviewed execution was running");
         }
         if (action.taskId) {
-          capturedEngine.markExternalSubmitted(capturedJournal.requestId, action.taskId);
+          const correlated = capturedEngine.markExternalSubmitted(capturedJournal.requestId, action.taskId);
+          if (correlated.taskId === action.taskId) {
+            pool.recordExecutionTaskFact(action.taskId, current.ref, capturedPlan.draft.operationId,
+              capturedPlan.draft.operationId === "execution.process" && capturedPlan.draft.captureOutput && !capturedPlan.draft.background);
+          }
           this.ensureOperationReconciliation(contentsId);
           return this.retainExecutionResult(context, pool, current, {
             requestId: capturedJournal.requestId,
@@ -5958,7 +5973,11 @@ export class ConnectionRegistry {
     const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
     const ownerWindowId = context.contentsId;
     return (taskId, beaconId) => {
-      const operation = engine?.findByTask(taskId, beaconId);
+      const selected = context.activeTarget;
+      const fact = pool && selected?.mode === "beacon" && selected.id === beaconId
+        ? pool.executionTaskFact(taskId, selected) : undefined;
+      const foundOperation = engine?.findByTask(taskId, beaconId);
+      const operation = foundOperation && selected && sameTargetRefIdentity(foundOperation.target, selected) ? foundOperation : undefined;
       if (operation) {
         const requiresResultVerification =
           engine?.requiresTaskResultVerification(taskId, beaconId) === true;
@@ -5966,7 +5985,11 @@ export class ConnectionRegistry {
         return {
           ownership: operation.ownership,
           localRequestId: operation.requestId,
-          ...(requiresResultVerification
+          ...(isExecutionOperationId(operation.operationId)
+            ? fact?.operationId === operation.operationId
+              ? { executionOperationId: fact.operationId, processWaited: fact.processWaited }
+              : {}
+            : requiresResultVerification
             ? {
                 operationId: operation.operationId as TargetOperationId,
                 ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
@@ -5975,7 +5998,7 @@ export class ConnectionRegistry {
         };
       }
       const claim = pool?.taskClaimForWindow(taskId, beaconId, ownerWindowId);
-      if (claim) {
+      if (claim && (!isExecutionOperationId(claim.operationId) || fact?.operationId === claim.operationId)) {
         return {
           ownership: {
             origin: "local",
@@ -5983,7 +6006,9 @@ export class ConnectionRegistry {
             actor: { attribution: "unknown" },
           },
           localRequestId: claim.requestId,
-          ...(claim.requiresResultVerification
+          ...(isExecutionOperationId(claim.operationId)
+            ? { executionOperationId: fact!.operationId, processWaited: fact!.processWaited }
+            : claim.requiresResultVerification
             ? {
                 operationId: claim.operationId as TargetOperationId,
                 ...(claim.expectedPingNonce === undefined
@@ -5991,6 +6016,13 @@ export class ConnectionRegistry {
                   : { expectedPingNonce: claim.expectedPingNonce }),
               }
             : {}),
+        };
+      }
+      if (fact) {
+        return {
+          ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+          executionOperationId: fact.operationId,
+          processWaited: fact.processWaited,
         };
       }
       return { ownership: { origin: "unknown", actor: { attribution: "unknown" } } };
@@ -8052,6 +8084,7 @@ class BackendPool {
   private readonly buildsByName = new Map<string, clientpb.ImplantConfig>();
   private readonly bofCapabilities = new Map<string, boolean>();
   private readonly taskClaims = new Map<string, PoolTaskClaim>();
+  private readonly executionTaskFacts = new Map<string, PoolExecutionTaskFact>();
   private readonly taskClaimReservations = new Set<string>();
   private connectPromise: Promise<void> | undefined;
   private readonly refreshPromises = new Map<DomainName, Promise<void>>();
@@ -8108,6 +8141,43 @@ class BackendPool {
 
   supportsBuiltInBof(mode: TargetMode, id: string): boolean {
     return this.bofCapabilities.get(`${mode}:${id}`) === true;
+  }
+
+  recordExecutionTaskFact(taskId: string, target: TargetRef, operationId: PoolExecutionTaskFact["operationId"], processWaited = false): void {
+    if (this.closed || target.mode !== "beacon" || !/^[A-Za-z0-9_-]{1,128}$/u.test(taskId) ||
+      !this.targetStore.revalidateTargetRef(target, this.epoch)) return;
+    this.pruneExecutionTaskFacts();
+    const existing = this.executionTaskFacts.get(taskId);
+    if (existing) {
+      if (!sameTargetRefIdentity(existing.target, target) || existing.operationId !== operationId || existing.processWaited !== processWaited) {
+        existing.ambiguous = true;
+      }
+      return;
+    }
+    // Metadata only: bound independently from output retention and never admit
+    // another dispatch merely to obtain or repair a fact.
+    while (this.executionTaskFacts.size >= MAX_POOL_TASK_CLAIMS) {
+      const oldest = this.executionTaskFacts.keys().next().value;
+      if (oldest === undefined) break;
+      this.executionTaskFacts.delete(oldest);
+    }
+    this.executionTaskFacts.set(taskId, { target: { ...target }, operationId, processWaited, recordedAt: this.now(), ambiguous: false });
+  }
+
+  executionTaskFact(taskId: string, target: TargetRef): PoolExecutionTaskFact | undefined {
+    this.pruneExecutionTaskFacts();
+    const fact = this.executionTaskFacts.get(taskId);
+    return !this.closed && fact && !fact.ambiguous && sameTargetRefIdentity(fact.target, target) &&
+      this.targetStore.revalidateTargetRef(target, this.epoch) ? { ...fact, target: { ...fact.target } } : undefined;
+  }
+
+  private pruneExecutionTaskFacts(): void {
+    const now = this.now();
+    for (const [taskId, fact] of this.executionTaskFacts) {
+      if (fact.recordedAt + POOL_TASK_CLAIM_TTL_MS <= now || !this.targetStore.revalidateTargetRef(fact.target, this.epoch)) {
+        this.executionTaskFacts.delete(taskId);
+      }
+    }
   }
 
   addWindow(contentsId: number): void {
@@ -8317,6 +8387,7 @@ class BackendPool {
     if (this.watchTimer) clearInterval(this.watchTimer);
     if (this.invalidationTimer) clearTimeout(this.invalidationTimer);
     this.taskClaims.clear();
+    this.executionTaskFacts.clear();
     this.taskClaimReservations.clear();
     this.beaconTasks.clear();
     this.networkForwarding.dispose();
@@ -8502,6 +8573,7 @@ class BackendPool {
           const committed = this.targetStore.replaceBeacons(beacons.Beacons);
           this.replaceTargetDomains();
           if (committed.status === "error") throw new Error(committed.error ?? "Unable to normalize beacons inventory");
+          this.pruneExecutionTaskFacts();
           this.beaconTasks.pruneAbsentBeacons(this.targetStore.catalogIds("beacon"));
           break;
         }

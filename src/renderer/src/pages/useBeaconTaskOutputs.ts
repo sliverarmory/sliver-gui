@@ -15,11 +15,14 @@ interface OutputRecord {
   revision: string;
   attemptedRevision: string | undefined;
   requestSequence: number;
+  lastUsed: number;
+  opened: boolean;
 }
 
 interface OutputStore {
   records: Map<string, OutputRecord>;
   disposed: boolean;
+  clock: number;
 }
 
 interface OutputRequest {
@@ -39,6 +42,8 @@ interface OutputScheduler {
 }
 
 const MAX_CONCURRENT_OUTPUTS = 4;
+const MAX_CACHED_EXECUTION_BYTES = 32 * 1_024 * 1_024;
+const RELEASED_OUTPUT_MESSAGE = "This output was released from memory. Load it again to view it.";
 
 /** Keeps decoded output history local to one exact beacon identity. */
 export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSummary[]): {
@@ -46,7 +51,7 @@ export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSu
   loadOutput: (task: BeaconTaskSummary, retry?: boolean) => void;
 } {
   const [, setVersion] = useState(0);
-  const store = useMemo<OutputStore>(() => ({ records: new Map(), disposed: false }), [targetIdentity]);
+  const store = useMemo<OutputStore>(() => ({ records: new Map(), disposed: false, clock: 0 }), [targetIdentity]);
   const schedulerRef = useRef<OutputScheduler>({
     activeCount: 0,
     queue: [],
@@ -74,6 +79,13 @@ export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSu
         }
         return false;
       });
+      // Strict Mode immediately replays this effect using the same store.
+      // Release bytes only if that store remains retired after the replay.
+      queueMicrotask(() => {
+        if (!store.disposed) return;
+        for (const record of store.records.values()) clearExecutionBytes(record.entry.detail);
+        store.records.clear();
+      });
     };
   }, [scheduler, store]);
 
@@ -94,6 +106,8 @@ export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSu
   const loadOutput = useCallback((task: BeaconTaskSummary, retry = false): void => {
     if (!isCurrentStore(scheduler, store)) return;
     const record = reconcileTask(store, task);
+    record.lastUsed = ++store.clock;
+    record.opened = true;
     enqueue(scheduler, store, record, retry, true);
     notify(scheduler, store);
     pump(scheduler);
@@ -135,9 +149,12 @@ function reconcileTask(store: OutputStore, task: BeaconTaskSummary): OutputRecor
       revision,
       attemptedRevision: undefined,
       requestSequence: 0,
+      lastUsed: 0,
+      opened: false,
     };
     store.records.set(task.taskId, record);
   } else if (record.revision !== revision) {
+    clearExecutionBytes(record.entry.detail);
     record.requestSequence += 1;
     record.revision = revision;
     record.summaryKey = summaryKey;
@@ -167,6 +184,7 @@ function enqueue(
   }
   record.requestSequence += 1;
   record.attemptedRevision = record.revision;
+  clearExecutionBytes(record.entry.detail);
   record.entry = { ...record.entry, detail: undefined, isLoading: true, error: undefined };
   const request: OutputRequest = {
     store,
@@ -205,7 +223,10 @@ function pump(scheduler: OutputScheduler): void {
 async function fetchOutput(scheduler: OutputScheduler, request: OutputRequest): Promise<void> {
   try {
     const result = await window.sliver.getBeaconTask({ taskId: request.task.taskId });
-    if (!isCurrentRequest(scheduler, request)) return;
+    if (!isCurrentRequest(scheduler, request)) {
+      if (result.ok) clearExecutionBytes(result.value);
+      return;
+    }
     if (!result.ok || !result.value) {
       request.record.entry = {
         ...request.record.entry,
@@ -213,13 +234,17 @@ async function fetchOutput(scheduler: OutputScheduler, request: OutputRequest): 
         error: result.error ?? "Could not load task output.",
       };
     } else if (result.value.taskId !== request.task.taskId || result.value.beaconId !== request.task.beaconId) {
+      clearExecutionBytes(result.value);
       request.record.entry = {
         ...request.record.entry,
         isLoading: false,
         error: "The server returned output for a different task.",
       };
     } else {
+      clearExecutionBytes(request.record.entry.detail, result.value);
       request.record.entry = { ...request.record.entry, detail: result.value, isLoading: false, error: undefined };
+      request.record.lastUsed = ++request.store.clock;
+      boundExecutionCache(request.store, request.record);
     }
     notify(scheduler, request.store);
   } catch (error) {
@@ -234,5 +259,33 @@ async function fetchOutput(scheduler: OutputScheduler, request: OutputRequest): 
     // Obsolete requests still occupy their slot until they settle, even after an identity switch.
     scheduler.activeCount -= 1;
     pump(scheduler);
+  }
+}
+
+function clearExecutionBytes(detail: BeaconTaskDetail | undefined, retained?: BeaconTaskDetail): void {
+  const retainedBuffers = [retained?.execution?.stdout?.data, retained?.execution?.stderr?.data];
+  for (const bytes of [detail?.execution?.stdout?.data, detail?.execution?.stderr?.data]) {
+    if (bytes && !retainedBuffers.includes(bytes)) bytes.fill(0);
+  }
+}
+
+function executionBytes(record: OutputRecord): number {
+  const execution = record.entry.detail?.execution;
+  return (execution?.stdout?.data.byteLength ?? 0) + (execution?.stderr?.data.byteLength ?? 0);
+}
+
+function boundExecutionCache(store: OutputStore, accepted: OutputRecord): void {
+  let total = [...store.records.values()].reduce((sum, record) => sum + executionBytes(record), 0);
+  if (total <= MAX_CACHED_EXECUTION_BYTES) return;
+  const candidates = [...store.records.values()]
+    .filter((record) => record !== accepted && executionBytes(record) > 0)
+    .sort((left, right) => Number(left.opened) - Number(right.opened) || left.lastUsed - right.lastUsed);
+  for (const record of candidates) {
+    total -= executionBytes(record);
+    clearExecutionBytes(record.entry.detail);
+    record.entry = { ...record.entry, detail: undefined, error: RELEASED_OUTPUT_MESSAGE };
+    // Keep attemptedRevision so inventory refresh cannot immediately fetch
+    // released bytes again. Queue selection or Retry explicitly reloads them.
+    if (total <= MAX_CACHED_EXECUTION_BYTES) break;
   }
 }

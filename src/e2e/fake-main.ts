@@ -106,6 +106,10 @@ interface FakeMainState {
     options: Parameters<SliverClientAdapter["executeSession"]>[1];
     timeoutSeconds: number | undefined;
   }>;
+  beaconProcessCalls: Array<{
+    beaconId: string;
+    options: Parameters<SliverClientAdapter["executeBeacon"]>[1];
+  }>;
   assemblyCalls: Array<{
     targetMode: "session" | "beacon";
     targetId: string;
@@ -214,6 +218,7 @@ const state: FakeMainState = {
   openSessionRequests: [],
   tasks: [],
   processCalls: [],
+  beaconProcessCalls: [],
   assemblyCalls: [],
   bofCalls: [],
   legacyBofCalls: [],
@@ -261,6 +266,7 @@ const registryLayoutFixture = process.argv.includes("--registry-layout-fixture")
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 const beaconsTableFixture = process.argv.includes("--beacons-table-fixture");
+const beaconExecutionFixture = process.argv.includes("--beacon-execution-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
 }
@@ -812,6 +818,19 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       PID: 41003,
       Filename: "/private/tmp/m2-beacon",
     }));
+  }
+  if (beaconExecutionFixture) {
+    for (const platform of ["windows", "linux"] as const) {
+      beacons.push(clientpb.Beacon.create({
+        ...seedBeacon(`${platform}-execution-beacon`),
+        ID: `${platform}_execution_beacon`,
+        Hostname: `${platform}-execution-host`,
+        UUID: `${platform}-execution-host-id`,
+        OS: platform,
+        Arch: "amd64",
+        Filename: platform === "windows" ? "C:\\ProgramData\\execution-beacon.exe" : "/tmp/execution-beacon",
+      }));
+    }
   }
   let lootStore: clientpb.Loot[] = [
     clientpb.Loot.create({
@@ -1893,20 +1912,28 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     },
     async executeBeacon(beaconId, options) {
       recordM4("executeBeacon");
-      requireBeacon(beaconId);
+      const beacon = requireBeacon(beaconId);
+      if (beaconExecutionFixture) {
+        testState.beaconProcessCalls.push({
+          beaconId,
+          options: { ...options, args: [...(options.args ?? [])], env: { ...options.env } },
+        });
+      }
       const completed = sliverpb.Execute.create({
         Status: 0,
         Stdout: options.background || options.output === false
           ? Buffer.alloc(0)
           : Buffer.from("deterministic M4 process stdout\n", "utf8"),
-        Stderr: Buffer.alloc(0),
+        Stderr: beaconExecutionFixture && !options.background && options.output !== false
+          ? Buffer.from("deterministic beacon process stderr\n", "utf8")
+          : Buffer.alloc(0),
         Pid: 43_002,
         Response: response(false),
       });
       return sliverpb.Execute.create({
         Response: queueTask(
           beaconId,
-          "ExecuteReq",
+          beaconExecutionFixture && beacon.OS === "windows" ? "ExecuteWindowsReq" : "ExecuteReq",
           Buffer.from(sliverpb.Execute.encode(completed).finish()),
         ),
       });

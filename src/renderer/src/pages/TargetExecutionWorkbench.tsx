@@ -925,7 +925,7 @@ function ExecutionConfigurationSheet({
   );
 }
 
-function ExecutionReviewDialog({
+export function ExecutionReviewDialog({
   isExecuting,
   plan,
   onCancel,
@@ -1150,7 +1150,7 @@ function isReadOperation(operationId: ExecutionOperationId): operationId is Exec
   return operationId === "execution.children" || operationId === "privilege.get";
 }
 
-function targetRefsEqual(left: TargetRef, right: TargetRef): boolean {
+export function targetRefsEqual(left: TargetRef, right: TargetRef): boolean {
   return left.mode === right.mode && left.id === right.id && left.backendEpoch === right.backendEpoch && left.domainRevision === right.domainRevision && left.fingerprint === right.fingerprint;
 }
 
@@ -1158,7 +1158,7 @@ function targetRefsSameIdentity(left: TargetRef, right: TargetRef): boolean {
   return left.mode === right.mode && left.id === right.id && left.backendEpoch === right.backendEpoch && left.fingerprint === right.fingerprint;
 }
 
-function targetExecutionIdentity(routeIdentity: string, target: TargetRef): string {
+export function targetExecutionIdentity(routeIdentity: string, target: TargetRef): string {
   return JSON.stringify([
     routeIdentity,
     target.mode,
@@ -1169,7 +1169,7 @@ function targetExecutionIdentity(routeIdentity: string, target: TargetRef): stri
   ]);
 }
 
-function targetSelectionIdentity(routeIdentity: string, target: TargetRef): string {
+export function targetSelectionIdentity(routeIdentity: string, target: TargetRef): string {
   return JSON.stringify([
     routeIdentity,
     target.mode,
@@ -1179,7 +1179,7 @@ function targetSelectionIdentity(routeIdentity: string, target: TargetRef): stri
   ]);
 }
 
-function executionPlanMatchesTarget(
+export function executionPlanMatchesTarget(
   plan: ExecutionActionPlan,
   expected: TargetRef,
   catalogBackend?: ExecutionActionPlan["target"]["backend"],

@@ -297,12 +297,23 @@ export interface BeaconTaskSummary {
   ownership: OperationOwnership;
 }
 
-/** Decoded, bounded metadata only. Raw protobuf request/response bytes are never shared. */
+/** Decoded, bounded result fields and output. Raw protobuf request/response bytes are never shared. */
 export interface BeaconTaskDetail extends BeaconTaskSummary {
   operationId?: TargetOperationId;
+  execution?: BeaconTaskExecutionOutput;
   disposition?: OperationDisposition;
   error?: string;
   errorKind?: "target-reported" | "decode-uncertain";
+}
+
+/** Independent bounded execution streams; encoded task requests and responses stay in main. */
+export interface BeaconTaskExecutionOutput {
+  operationId: ExecutionOperationId | "bof.execute";
+  pid?: number;
+  exitCode?: number;
+  stdout?: { data: Uint8Array; truncated: boolean };
+  stderr?: { data: Uint8Array; truncated: boolean };
+  outputError?: string;
 }
 
 export type ListBeaconTasksInput = OperationPageRequest;

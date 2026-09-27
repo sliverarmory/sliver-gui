@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
-import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
+import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
+import type { SliverDesktopAPI } from "../shared/contracts.js";
 
-test("Beacons fills the catalog with live timing and opens the beacon async workspace", { timeout: 90_000 }, async () => {
+test("Beacons fills the catalog with live timing and opens the beacon async workspace", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-beacons-table-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
@@ -26,6 +27,7 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     fakeOperatorConfig(),
     { mode: 0o600 },
   );
+  await writeBeaconExecutionFixtures(consoleClientRootDirectory);
 
   let application: ElectronApplication | undefined;
   const rendererErrors: string[] = [];
@@ -40,6 +42,8 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
         `--user-data-directory=${userDataDirectory}`,
         `--console-client-root-directory=${consoleClientRootDirectory}`,
         "--beacons-table-fixture",
+        "--beacon-execution-fixture",
+        "--bof-execution-fixture",
       ],
       bypassCSP: false,
       chromiumSandbox: true,
@@ -137,6 +141,7 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await assertBeaconTaskViews(application, page, screenshotDirectory);
     await assertBeaconPopoutSwitching(application, page, screenshotDirectory, rendererErrors);
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-interaction.png") });
+    await assertBeaconExecutionCommands(application, page, screenshotDirectory);
 
     await page.getByRole("button", { name: "Back to live beacons", exact: true }).click();
     await table.getByRole("button", { name: "Interact with m1-beacon", exact: true }).waitFor();
@@ -368,6 +373,253 @@ async function assertBeaconPopoutSwitching(
     await popout?.close().catch(() => undefined);
     await sourcePage.bringToFront();
   }
+}
+
+async function assertBeaconExecutionCommands(
+  application: ElectronApplication,
+  page: Page,
+  screenshotDirectory: string,
+): Promise<void> {
+  const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+  const queueTab = page.getByRole("tab", { name: "Task queue", exact: true });
+  const originalSettings = await page.evaluate(() => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getApplicationSettings());
+  const originalClipboard = await application.evaluate(({ clipboard }) => clipboard.readText());
+  const nativeWindow = await application.browserWindow(page);
+  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  const selectExecution = async (): Promise<Locator> => {
+    await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
+    await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill("Execution");
+    await page.getByRole("option", { name: /^Execution/iu }).click();
+    const tabs = composer.getByRole("tablist", { name: "Execution type", exact: true });
+    await tabs.getByRole("tab", { name: "Process", exact: true }).waitFor();
+    return tabs;
+  };
+  const switchBeacon = async (name: string): Promise<void> => {
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await page.getByRole("menu", { name: "Beacons, switch beacon", exact: true })
+      .getByRole("menuitemradio", { name: new RegExp(name, "u") }).click();
+    await page.getByRole("heading", { name, exact: true }).waitFor();
+    await assertBeaconWorkspaceScrollReset(page);
+  };
+  const queueExecution = async (beaconId: string, description: string, reviewed: boolean): Promise<string> => {
+    await queueTab.click();
+    const before = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+    await application.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+    await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+    if (reviewed) {
+      const review = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
+      await review.waitFor();
+      assert.deepEqual(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id)), before,
+        "a prepared process must not dispatch until its exact-target review is confirmed");
+      await review.getByRole("button", { name: "Execute", exact: true }).click();
+      await review.waitFor({ state: "hidden" });
+    }
+    const deadline = Date.now() + 5_000;
+    let task: { id: string; beaconId: string; description: string; state: string } | undefined;
+    while (!task && Date.now() < deadline) {
+      task = await application.evaluate((_electron, knownIds) => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => !knownIds.includes(candidate.id)), before);
+      if (!task) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(task, "the fake execution adapter must return a new asynchronous task");
+    assert.equal(task.beaconId, beaconId);
+    assert.equal(task.description, description);
+    assert.equal(task.state, "pending");
+    await page.getByRole("grid", { name: "Beacon task queue", exact: true })
+      .getByRole("row").filter({ hasText: task.id }).getByText("Pending", { exact: true }).waitFor();
+    assert.equal(await queueTab.getAttribute("aria-selected"), "true", "execution submission must keep the queue selected");
+    return task.id;
+  };
+  const completeAndOpen = async (taskId: string, stdout: string, stderr?: string): Promise<Locator> => {
+    await application.evaluate((_electron, id) => globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(id, true), taskId);
+    await queueTab.click();
+    const row = page.getByRole("grid", { name: "Beacon task queue", exact: true }).getByRole("row").filter({ hasText: taskId });
+    await row.getByText("Completed", { exact: true }).waitFor();
+    await row.click();
+    await assertBeaconOutputFocus(page, taskId);
+    const article = page.getByRole("article", { name: `Task output ${taskId}`, exact: true });
+    const execution = article.getByRole("region", { name: "Beacon execution output", exact: true });
+    await execution.locator('[data-terminal-state="ready"]').waitFor();
+    assert.equal(await execution.getByLabel("Execution output transcript", { exact: true }).textContent(), stdout);
+    assert.equal(await execution.getByLabel("Execution output terminal", { exact: true }).locator("canvas").count(), 1,
+      "decoded task output must render in the native Ghostty terminal");
+    if (stderr !== undefined) {
+      await execution.getByRole("radio", { name: "Stderr", exact: true }).click();
+      await waitForExecutionStream(execution, "Stderr", stderr);
+      await execution.locator('[data-terminal-state="ready"]').waitFor();
+      assert.equal(await execution.getByLabel("Execution output transcript", { exact: true }).textContent(), stderr);
+      await execution.getByRole("button", { name: "Copy output", exact: true }).click();
+      assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText()), stderr,
+        "copying a task's stderr must use that exact decoded stream");
+      await execution.getByRole("radio", { name: "Stdout", exact: true }).click();
+      await waitForExecutionStream(execution, "Stdout", stdout);
+      await execution.locator('[data-terminal-state="ready"]').waitFor();
+    }
+    return article;
+  };
+  try {
+    let types = await selectExecution();
+    assert.equal(await types.getByRole("tab", { name: ".NET", exact: true }).count(), 0, ".NET must be absent on macOS beacons");
+    assert.equal(await types.getByRole("tab", { name: "Reflective DLL", exact: true }).count(), 0);
+    assert.equal(await composer.getByRole("switch", { name: "Use current token", exact: true }).count(), 0);
+    assert.equal(await composer.getByRole("spinbutton", { name: "Parent process ID", exact: true }).count(), 0);
+    await composer.getByRole("textbox", { name: /^Executable path/u }).fill("/usr/bin/printf");
+    await composer.getByRole("textbox", { name: "Arguments", exact: true }).fill('native "two words"');
+    const processTask = await queueExecution("m1_beacon", "ExecuteReq", true);
+    const macCall = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.beaconProcessCalls.at(-1));
+    assert.equal(macCall?.beaconId, "m1_beacon");
+    assert.deepEqual(macCall?.options.args, ["native", "two words"]);
+    const processArticle = await completeAndOpen(processTask, "deterministic M4 process stdout\n", "deterministic beacon process stderr\n");
+    await assertBeaconTaskColumns(page);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-process-output.png") });
+
+    await types.getByRole("tab", { name: "BOFs", exact: true }).click();
+    await composer.getByRole("region", { name: "Execute an Armory BOF", exact: true })
+      .locator('[data-slot="autocomplete-trigger"]').click();
+    await page.getByRole("searchbox", { name: "Search BOFs", exact: true }).fill("sa-nslookup");
+    await page.getByRole("option", { name: /^sa-nslookup/u }).click();
+    await composer.getByRole("textbox", { name: /^hostname/u }).fill("localhost");
+    const bofTask = await queueExecution("m1_beacon", "CallExtensionReq", false);
+    const bofCall = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls.at(-1));
+    assert.equal(bofCall?.targetMode, "beacon");
+    assert.equal(bofCall?.targetId, "m1_beacon");
+    assert.equal(bofCall?.entrypoint, "go");
+    const bofArticle = await completeAndOpen(bofTask, "deterministic sa-nslookup stdout\n", "deterministic sa-nslookup stderr\n");
+    assert.equal(await page.getByRole("tabpanel", { name: "Task output", exact: true }).locator("article[data-task-id]").count(), 5,
+      "completed process and BOF terminals must coexist with the earlier ordinary task history");
+    await processArticle.scrollIntoViewIfNeeded();
+    await processArticle.locator('[data-terminal-state="ready"]').waitFor();
+    assert.equal(await processArticle.getByLabel("Execution output transcript", { exact: true }).textContent(), "deterministic M4 process stdout\n",
+      "switching another result's stream must preserve the process output");
+    await bofArticle.scrollIntoViewIfNeeded();
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-execution-history.png") });
+
+    await switchBeacon("linux-execution-beacon");
+    types = await selectExecution();
+    assert.equal(await types.getByRole("tab", { name: ".NET", exact: true }).count(), 0, ".NET must be absent on Linux beacons");
+    assert.equal(await types.getByRole("tab", { name: "Reflective DLL", exact: true }).count(), 0);
+    assert.equal(await composer.getByRole("switch", { name: "Hide window", exact: true }).count(), 0);
+    assert.equal(await composer.getByRole("spinbutton", { name: "Parent process ID", exact: true }).count(), 0);
+    assert.equal(await composer.getByRole("textbox", { name: /^Executable path/u }).inputValue(), "/bin/sh",
+      "switching the exact target must reset the process form to its platform default");
+
+    await switchBeacon("windows-execution-beacon");
+    types = await selectExecution();
+    await types.getByRole("tab", { name: ".NET", exact: true }).waitFor();
+    await types.getByRole("tab", { name: "Reflective DLL", exact: true }).waitFor();
+    await composer.getByRole("textbox", { name: /^Executable path/u }).fill("C:\\Windows\\System32\\cmd.exe");
+    await composer.getByRole("textbox", { name: "Arguments", exact: true }).fill('/d /c "echo inert"');
+    await composer.getByText("Use current token", { exact: true }).click();
+    await composer.getByText("Hide window", { exact: true }).click();
+    assert.equal(await composer.getByRole("switch", { name: "Use current token", exact: true }).isChecked(), true);
+    assert.equal(await composer.getByRole("switch", { name: "Hide window", exact: true }).isChecked(), true);
+    await composer.getByRole("spinbutton", { name: "Parent process ID", exact: true }).fill("4242");
+    await composer.getByRole("textbox", { name: "Environment overrides", exact: true }).fill("BEACON_FIXTURE=inert");
+    const beforeInvalidWindowsOptions = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.beaconProcessCalls.length);
+    await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+    await composer.getByRole("alert").getByText("Windows token, hidden, and parent-PID execution cannot include environment overrides", { exact: true }).waitFor();
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.beaconProcessCalls.length), beforeInvalidWindowsOptions,
+      "unsupported Windows execution option combinations must fail before dispatch");
+    await composer.getByRole("textbox", { name: "Environment overrides", exact: true }).fill("");
+    const windowsTask = await queueExecution("windows_execution_beacon", "ExecuteWindowsReq", true);
+    const windowsCall = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.beaconProcessCalls.at(-1));
+    assert.equal(windowsCall?.beaconId, "windows_execution_beacon");
+    assert.deepEqual(windowsCall?.options.args, ["/d", "/c", "echo inert"]);
+    assert.equal(windowsCall?.options.useToken, true);
+    assert.equal(windowsCall?.options.hideWindow, true);
+    assert.equal(windowsCall?.options.parentPid, 4242);
+    assert.deepEqual(windowsCall?.options.env, {});
+    await completeAndOpen(windowsTask, "deterministic M4 process stdout\n", "deterministic beacon process stderr\n");
+    await assertBeaconTaskColumns(page);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-windows-process.png") });
+
+    await types.getByRole("tab", { name: ".NET", exact: true }).click();
+    await composer.getByRole("region", { name: "Execute a .NET assembly", exact: true })
+      .locator('[data-slot="autocomplete-trigger"]').click();
+    await page.getByRole("searchbox", { name: "Search assemblies", exact: true }).fill("args-demo");
+    await page.getByRole("option", { name: /^args-demo/u }).click();
+    await composer.getByRole("textbox", { name: "Assembly arguments", exact: true }).fill('--fixture "two words"');
+    const assemblyTask = await queueExecution("windows_execution_beacon", "InvokeExecuteAssemblyReq", false);
+    const assemblyCall = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.assemblyCalls.at(-1));
+    assert.equal(assemblyCall?.targetMode, "beacon");
+    assert.equal(assemblyCall?.targetId, "windows_execution_beacon");
+    assert.deepEqual(assemblyCall?.options?.arguments, ["--fixture", "two words"]);
+    const assemblyArticle = await completeAndOpen(assemblyTask, "deterministic M4 assembly output\n");
+    const terminal = assemblyArticle.getByLabel("Execution output terminal", { exact: true });
+    for (const theme of ["light", "dark"] as const) {
+      const saved = await page.evaluate(async (nextTheme) => {
+        const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+        const current = await api.getApplicationSettings();
+        return api.updateApplicationSettings({ expectedRevision: current.revision, settings: {
+          theme: nextTheme, appIcon: current.appIcon, reduceMotion: current.reduceMotion,
+          reportScreenshotDirectory: current.reportScreenshotDirectory,
+          commandPaletteShortcut: current.commandPaletteShortcut, keyboardShortcuts: current.keyboardShortcuts,
+          terminal: { ...current.terminal, fontSize: 18 }, overview: current.overview,
+        } });
+      }, theme);
+      assert.equal(saved.ok, true, saved.error ?? "application appearance settings must save");
+      const expectedBackground = theme === "light" ? "rgb(250, 250, 250)" : "rgb(30, 30, 30)";
+      const deadline = Date.now() + 5_000;
+      let background = "";
+      while (background !== expectedBackground && Date.now() < deadline) {
+        background = await terminal.evaluate((element) => element.ownerDocument.defaultView!.getComputedStyle(element).backgroundColor);
+        if (background !== expectedBackground) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert.equal(background, expectedBackground, "beacon task terminals must follow live application appearance settings");
+      await assemblyArticle.locator('[data-terminal-state="ready"]').waitFor();
+      assert.equal(await assemblyArticle.getByLabel("Execution output transcript", { exact: true }).textContent(), "deterministic M4 assembly output\n");
+      await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `beacon-dotnet-output-${theme}.png`) });
+    }
+    await nativeWindow.evaluate((window) => window.setSize(960, 768));
+    await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth === 960);
+    await assertBeaconTaskColumns(page);
+    await queueTab.click();
+    await page.getByRole("grid", { name: "Beacon task queue", exact: true }).getByRole("row").filter({ hasText: assemblyTask }).click();
+    await assertBeaconOutputFocus(page, assemblyTask);
+    await assemblyArticle.locator('[data-terminal-state="ready"]').waitFor();
+    const canvas = await terminal.locator("canvas").boundingBox();
+    const terminalBounds = await terminal.boundingBox();
+    assert.ok(canvas && terminalBounds && canvas.width <= terminalBounds.width + 1,
+      "Ghostty canvas must resize within the narrow task output card");
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-dotnet-output-narrow.png") });
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.m4Audit.retainedSensitiveInputs), 0);
+  } catch (error) {
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-execution-error.png") }).catch(() => undefined);
+    console.error("Beacon execution composer at failure:", await composer.innerText().catch(() => "unavailable"));
+    console.error("Focused element at failure:", await composer.evaluate((element) => {
+      const active = element.ownerDocument.activeElement;
+      return active ? { tag: active.tagName, role: active.getAttribute("role"), label: active.getAttribute("aria-label"),
+        taskId: active.getAttribute("data-task-id"), articleTaskId: active.closest("article")?.getAttribute("data-task-id") } : null;
+    }).catch(() => null));
+    throw error;
+  } finally {
+    await application.evaluate(({ clipboard }, text) => clipboard.writeText(text), originalClipboard);
+    await page.evaluate(async (settings) => {
+      const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+      const current = await api.getApplicationSettings();
+      return api.updateApplicationSettings({ expectedRevision: current.revision, settings });
+    }, { theme: originalSettings.theme, appIcon: originalSettings.appIcon, reduceMotion: originalSettings.reduceMotion,
+      reportScreenshotDirectory: originalSettings.reportScreenshotDirectory,
+      commandPaletteShortcut: originalSettings.commandPaletteShortcut, keyboardShortcuts: originalSettings.keyboardShortcuts,
+      terminal: originalSettings.terminal, overview: originalSettings.overview });
+    await nativeWindow.evaluate((window, size) => window.setSize(size[0], size[1]), originalSize);
+    await page.waitForFunction((width) => (globalThis as unknown as { innerWidth: number }).innerWidth === width, originalSize[0]);
+    if (await page.getByRole("heading", { name: "m1-beacon", exact: true }).count() === 0) {
+      await switchBeacon("m1-beacon");
+    }
+  }
+}
+
+async function waitForExecutionStream(execution: Locator, name: "Stdout" | "Stderr", text: string): Promise<void> {
+  const radio = execution.getByRole("radio", { name, exact: true });
+  const transcript = execution.getByLabel("Execution output transcript", { exact: true });
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (await radio.getAttribute("aria-checked") === "true" && await transcript.textContent() === text) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(await radio.getAttribute("aria-checked"), "true", `${name} must be selected`);
+  assert.equal(await transcript.textContent(), text, `${name} must display the matching decoded stream`);
 }
 
 async function assertBeaconTaskViews(
@@ -1087,4 +1339,40 @@ function fakeOperatorConfig(): string {
     private_key: "FAKE_BEACONS_KEY_DO_NOT_RENDER",
     token: "FAKE_TOKEN_M0_DO_NOT_RENDER",
   });
+}
+
+async function writeBeaconExecutionFixtures(root: string): Promise<void> {
+  const bofDirectory = join(root, "extensions", "sa-nslookup");
+  const platforms = [{ os: "darwin", arch: "arm64" }, { os: "linux", arch: "amd64" }, { os: "windows", arch: "amd64" }];
+  const files = [];
+  for (const platform of platforms) {
+    const directory = join(bofDirectory, "dist", platform.os, platform.arch);
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "nslookup.o"), "inert-sa-nslookup-bof-object", { mode: 0o600 });
+    files.push({ ...platform, path: `/dist/${platform.os}/${platform.arch}/nslookup.o` });
+  }
+  await writeFile(join(bofDirectory, "extension.json"), JSON.stringify({
+    name: "sa-nslookup",
+    package_name: "sa-nslookup",
+    version: "1.0.0",
+    commands: [{
+      command_name: "sa-nslookup",
+      help: "Inert beacon execution argument fixture",
+      entrypoint: "go",
+      bof_executor: "reflektor",
+      files,
+      arguments: [{ name: "hostname", type: "string", desc: "Hostname to query", optional: false }],
+    }],
+  }), { mode: 0o600 });
+  const assemblyDirectory = join(root, "aliases", "args-demo");
+  await mkdir(join(assemblyDirectory, "dist", "windows", "amd64"), { recursive: true });
+  await writeFile(join(assemblyDirectory, "dist", "windows", "amd64", "args-demo.exe"), "inert-armory-dotnet-assembly", { mode: 0o600 });
+  await writeFile(join(assemblyDirectory, "alias.json"), JSON.stringify({
+    name: "Argument Demo",
+    command_name: "args-demo",
+    version: "1.0.0",
+    help: "Inert beacon .NET argument fixture",
+    is_assembly: true,
+    files: [{ os: "windows", arch: "amd64", path: "/dist/windows/amd64/args-demo.exe" }],
+  }), { mode: 0o600 });
 }

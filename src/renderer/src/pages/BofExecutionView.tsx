@@ -29,6 +29,7 @@ import type {
 import type { TargetRef, TargetSummary } from "../../../shared/target-contracts";
 import { ExecutionHistorySidebar } from "../components/ExecutionHistorySidebar";
 import { ExecutionOutputTerminal } from "../components/ExecutionOutputTerminal";
+import type { ExecutionComposerState } from "./execution-composer-state";
 
 type OutputStream = "stdout" | "stderr";
 type CatalogState =
@@ -45,13 +46,17 @@ const AUTO_REFRESH_MAX_DELAY_MS = 15_000;
 const AUTO_REFRESH_MAX_ATTEMPTS = 40;
 
 interface BofExecutionViewProps {
+  composerOnly?: boolean;
+  formId?: string;
+  onComposerStateChange?: (state: ExecutionComposerState) => void;
+  onQueuedTask?: (taskId: string) => void;
   isRefreshing: boolean;
   target: TargetSummary;
   targetRef: TargetRef;
 }
 
 /** Armory BOFs execute through the main-owned catalog, file tokens, and history. */
-export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecutionViewProps): React.JSX.Element {
+export function BofExecutionView({ composerOnly = false, formId = FORM_ID, onComposerStateChange, onQueuedTask, isRefreshing, target, targetRef }: BofExecutionViewProps): React.JSX.Element {
   const targetKey = JSON.stringify([targetRef.mode, targetRef.id, targetRef.backendEpoch, targetRef.domainRevision, targetRef.fingerprint]);
   const identityKey = JSON.stringify([targetRef.mode, targetRef.id, targetRef.backendEpoch, targetRef.fingerprint]);
   const [catalogState, setCatalogState] = useState<CatalogState>({ status: "loading" });
@@ -142,6 +147,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   }, [identityKey, targetKey]);
 
   const loadHistory = useCallback(async (): Promise<void> => {
+    if (composerOnly) return;
     const sequence = ++historySequence.current;
     try {
       const response = await window.sliver.listBofExecutionHistory();
@@ -176,12 +182,12 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
         }));
       }
     }
-  }, [identityKey, targetKey]);
+  }, [composerOnly, identityKey, targetKey]);
 
   useEffect(() => {
     void loadCatalog(true);
     void loadHistory();
-    const unsubscribe = window.sliver.onBofExecutionHistoryChanged((changedTarget) => {
+    const unsubscribe = composerOnly ? () => undefined : window.sliver.onBofExecutionHistoryChanged((changedTarget) => {
       if (sameTargetIdentity(changedTarget, targetRef)) void loadHistory();
     });
     return () => {
@@ -191,7 +197,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       fileSequence.current += 1;
       unsubscribe();
     };
-  }, [loadCatalog, loadHistory]);
+  }, [composerOnly, loadCatalog, loadHistory]);
 
   const catalog = catalogState.status === "ready" && sameTargetIdentity(catalogState.value.target, targetRef)
     ? catalogState.value : undefined;
@@ -205,9 +211,18 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   historyRecordsRef.current = historyRecords;
   const historyError = historyState.identityKey === identityKey ? historyState.error : undefined;
   const selectedIndex = historyRecords.findIndex((record) => record.id === selectedId);
-  const selected = selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
-  const showingNew = selected === undefined;
+  const selected = composerOnly || selectedId === null ? undefined : historyRecords[selectedIndex < 0 ? 0 : selectedIndex];
+  const showingNew = composerOnly || selected === undefined;
   const output = stream === "stdout" ? selected?.stdout : selected?.stderr;
+
+  useEffect(() => {
+    onComposerStateChange?.({
+      isPending: isExecuting,
+      isAvailable: command?.available === true && !isRefreshing && !isCatalogLoading && !isChoosingDirectory &&
+        catalogError === undefined && !isExecuting && choosingFileIndex === undefined,
+      error: formError ?? catalogError ?? (command && !command.available ? command.reason : undefined),
+    });
+  }, [command?.available, command?.reason, isRefreshing, isCatalogLoading, isChoosingDirectory, catalogError, isExecuting, choosingFileIndex, formError, onComposerStateChange]);
 
   useEffect(() => { setStream("stdout"); }, [selected?.id]);
   useEffect(() => { if (ignoreStderr) setStream("stdout"); }, [ignoreStderr]);
@@ -296,6 +311,7 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
       if (!response.ok || !response.value) throw new Error(response.error ?? "BOF execution failed.");
       const record = response.value;
       try {
+        if (record.taskId && expectedIdentity === identityRef.current) onQueuedTask?.(record.taskId);
         setSelectedId(record.id);
         setArgumentValues(command.arguments.map((argument) => argument.default === undefined ? undefined : String(argument.default)));
         void loadHistory();
@@ -447,9 +463,9 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   return (
     <section
       aria-label="BOF execution history and output"
-      className="mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"
+      className={composerOnly ? "min-w-0" : "mt-4 grid min-h-0 min-w-0 flex-1 grid-rows-[auto_minmax(20rem,1fr)] overflow-y-auto rounded-2xl border border-separator bg-surface sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)] sm:grid-rows-1 sm:overflow-hidden"}
     >
-      <ExecutionHistorySidebar
+      {!composerOnly ? <ExecutionHistorySidebar
         label="BOF execution history"
         newExecutionKey="new-bof-execution"
         executionKeyPrefix="bof-execution:"
@@ -484,13 +500,13 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
         selectedId={selected?.id}
         onClearAll={() => void clearHistory()}
         onSelect={setSelectedId}
-      />
+      /> : null}
 
       <div className="flex min-h-0 min-w-0 flex-col">
         {showingNew ? (
           <section aria-label="Execute an Armory BOF" className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div className="sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 bg-surface px-4 pb-4 pt-4 sm:px-5 sm:pt-5">
-              <h3 className="text-base font-semibold text-foreground">Execute an Armory BOF</h3>
+            <div className={composerOnly ? "mb-3 flex justify-end" : "sticky top-0 z-10 flex shrink-0 flex-wrap items-center justify-between gap-3 bg-surface px-4 pb-4 pt-4 sm:px-5 sm:pt-5"}>
+              {!composerOnly ? <h3 className="text-base font-semibold text-foreground">Execute an Armory BOF</h3> : null}
               <div className="flex items-center gap-2">
                 <Tooltip delay={250}>
                   <Button aria-label="Refresh BOFs" isDisabled={isCatalogLoading || isChoosingDirectory || isExecuting} isIconOnly size="sm" variant="ghost" onPress={() => { selectCommand(""); void loadCatalog(); }}>
@@ -504,17 +520,17 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
                   </Button>
                   <Tooltip.Content>Open BOF directory</Tooltip.Content>
                 </Tooltip>
-                <Button form={FORM_ID} isDisabled={!command?.available || isRefreshing || isCatalogLoading || isChoosingDirectory || catalogError !== undefined || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
+                {!composerOnly ? <Button form={formId} isDisabled={!command?.available || isRefreshing || isCatalogLoading || isChoosingDirectory || catalogError !== undefined || isExecuting || choosingFileIndex !== undefined} isPending={isExecuting} type="submit" variant="primary">
                   <FontAwesomeIcon aria-hidden className="size-3.5" icon={faPlay} />Execute
-                </Button>
+                </Button> : null}
               </div>
             </div>
-            <BofExecutionScrollBody>
+            <BofExecutionScrollBody compact={composerOnly}>
               {historyError ? <p className="mb-3 text-xs text-danger" role="alert">{historyError}</p> : null}
               {catalogState.status === "loading" ? <p className="text-sm text-muted" role="status">Loading BOFs…</p> : null}
               {catalogError !== undefined ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger-soft-foreground" role="alert">{catalogError}</p> : null}
               {catalog ? (
-                <form className="flex flex-col gap-5" id={FORM_ID} onSubmit={(event) => void submit(event)}>
+                <form className="flex flex-col gap-5" id={formId} onSubmit={(event) => void submit(event)}>
                   <Autocomplete
                     allowsEmptyCollection
                     fullWidth
@@ -673,9 +689,10 @@ export function BofExecutionView({ isRefreshing, target, targetRef }: BofExecuti
   );
 }
 
-function BofExecutionScrollBody({ children, fillHeight = false }: {
+function BofExecutionScrollBody({ children, fillHeight = false, compact = false }: {
   children: ReactNode;
   fillHeight?: boolean;
+  compact?: boolean;
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -694,7 +711,7 @@ function BofExecutionScrollBody({ children, fillHeight = false }: {
     <ScrollShadow
       ref={viewportRef}
       aria-label="BOF execution content"
-      className={`min-h-0 flex-1 overflow-y-auto px-4 sm:px-5${fillHeight ? "" : " pb-4 sm:pb-5"}`}
+      className={compact ? "min-w-0" : `min-h-0 flex-1 overflow-y-auto px-4 sm:px-5${fillHeight ? "" : " pb-4 sm:pb-5"}`}
       hideScrollBar={false}
       orientation="vertical"
       role="region"

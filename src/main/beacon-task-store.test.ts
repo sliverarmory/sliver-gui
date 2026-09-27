@@ -3,8 +3,11 @@
 import { clientpb, sliverpb } from "sliver-script";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ExecutionOperationId } from "../shared/execution-contracts.js";
 import type { OperationOwnership } from "../shared/operation-contracts.js";
-import { BeaconTaskStore } from "./beacon-task-store.js";
+import { BeaconTaskStore, type TaskOwnershipResolver } from "./beacon-task-store.js";
+import { EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES } from "./execution-beacon-task.js";
+import { EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES } from "./execution-workbench.js";
 
 const beaconId = "beacon_1";
 const localOwnership: OperationOwnership = {
@@ -12,6 +15,233 @@ const localOwnership: OperationOwnership = {
   ownerWindowId: 7,
   actor: { attribution: "verified", name: "operator" },
 };
+
+describe("BeaconTaskStore execution results", () => {
+  it("decodes and independently bounds process stdout and stderr without previewing artifact-bearing requests", async () => {
+    const stdout = Buffer.alloc(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 3, 65);
+    const stderr = Buffer.alloc(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 5, 66);
+    const response = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+      Pid: 404, Status: 23, Stdout: stdout, Stderr: stderr,
+    })).finish());
+    const request = Buffer.alloc(512 * 1_024, 67);
+    const fixture = await executionFixture("ExecuteReq", response, { request });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+      ownership: localOwnership, localRequestId: "process_request",
+      executionOperationId: "execution.process", processWaited: true,
+    }));
+
+    expect(detail.operationId).toBeUndefined();
+    expect(detail.disposition).toBeUndefined();
+    expect(detail.execution).toMatchObject({ operationId: "execution.process", pid: 404, exitCode: 23 });
+    expect(detail.execution?.stdout?.data).toHaveLength(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES);
+    expect(detail.execution?.stderr?.data).toHaveLength(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES);
+    expect(detail.execution?.stdout?.truncated).toBe(true);
+    expect(detail.execution?.stderr?.truncated).toBe(true);
+    expect(detail.execution?.stdout?.data.every((byte) => byte === 65)).toBe(true);
+    expect(detail.execution?.stderr?.data.every((byte) => byte === 66)).toBe(true);
+    expect(detail.execution?.stdout?.data).not.toBe(stdout);
+    expect(detail.errorKind).toBeUndefined();
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+    detail.execution?.stdout?.data.fill(0);
+    expect(detail.execution?.stderr?.data[0]).toBe(66);
+  });
+
+  it("infers only unambiguous external execution descriptions and never invents an external process exit code", async () => {
+    const cases: Array<{ description: string; operationId: ExecutionOperationId; response: Buffer }> = [
+      { description: "ExecuteReq", operationId: "execution.process", response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99, Status: 8, Stdout: Buffer.from("process") })).finish()) },
+      { description: "ExecuteWindowsReq", operationId: "execution.process", response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99, Status: 8 })).finish()) },
+      { description: "InvokeExecuteAssemblyReq", operationId: "execution.assembly", response: Buffer.from(sliverpb.ExecuteAssembly.encode(sliverpb.ExecuteAssembly.create({ Output: Buffer.from("assembly") })).finish()) },
+      { description: "InvokeInProcExecuteAssemblyReq", operationId: "execution.assembly", response: Buffer.from(sliverpb.ExecuteAssembly.encode(sliverpb.ExecuteAssembly.create({ Output: Buffer.from("inproc") })).finish()) },
+      { description: "SideloadReq", operationId: "execution.sideload", response: Buffer.from(sliverpb.Sideload.encode(sliverpb.Sideload.create({ Result: "sideload", Response: {} })).finish()) },
+      { description: "SpawnDllReq", operationId: "execution.spawn-dll", response: Buffer.from(sliverpb.SpawnDll.encode(sliverpb.SpawnDll.create({ Result: "spawn" })).finish()) },
+      { description: "InvokeMigrateReq", operationId: "execution.migrate", response: Buffer.from(sliverpb.Migrate.encode(sliverpb.Migrate.create({ Success: true, Pid: 123 })).finish()) },
+      { description: "RunAsReq", operationId: "privilege.run-as", response: Buffer.from(sliverpb.RunAs.encode(sliverpb.RunAs.create({ Output: "run-as" })).finish()) },
+    ];
+    for (const item of cases) {
+      const fixture = await executionFixture(item.description, item.response);
+      const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+        ownership: { origin: "unknown", actor: { attribution: "unknown" } }, processWaited: true,
+      }));
+      expect(detail.execution?.operationId).toBe(item.operationId);
+      expect(detail.execution?.exitCode).toBeUndefined();
+      expect(detail.ownership.origin).toBe("unknown");
+      expect(detail.error).toBeUndefined();
+      expect(item.response.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("does not infer BOF or ambiguous task execution from an external description", async () => {
+    for (const description of ["CallExtensionReq", "TaskReq", "ExecuteReq suffix", "InvokeExecuteAssembly"]) {
+      const fixture = await executionFixture(description, Buffer.from("untrusted task response"));
+      const detail = await fixture.store.detail(beaconId, "execution_task");
+      expect(detail.execution).toBeUndefined();
+      expect(detail.operationId).toBeUndefined();
+      expect(fixture.client.fetchBeaconTask).not.toHaveBeenCalled();
+    }
+  });
+
+  it("retains a known execution skeleton for pending tasks without fetching task bytes", async () => {
+    const fixture = await executionFixture("CallExtensionReq", Buffer.from("not dispatched"), { state: "pending" });
+    const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+      ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+      executionOperationId: "bof.execute",
+    }));
+    expect(detail.execution).toEqual({ operationId: "bof.execute" });
+    expect(detail.state).toBe("pending");
+    expect(detail.ownership.origin).toBe("unknown");
+    expect(fixture.client.fetchBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it("requires the exact locally correlated execution description before fetching", async () => {
+    const fixture = await executionFixture("CallExtensionReq", Buffer.from("wrong operation"));
+    const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+      ownership: localOwnership, executionOperationId: "execution.process",
+    }));
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.error).toBe("The task description did not match the locally submitted operation");
+    expect(detail.execution?.outputError).toBe(detail.error);
+    expect(fixture.client.fetchBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { ID: "other_task" },
+    { BeaconID: "other_beacon" },
+    { Description: "ExecuteWindowsReq" },
+    { State: "pending" },
+  ])("rejects changed fetched execution identity or metadata %j and zeroizes both buffers", async (fetchedOverrides) => {
+    const response = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99 })).finish());
+    const request = Buffer.from("secret artifact request");
+    const fixture = await executionFixture("ExecuteReq", response, { request, fetchedOverrides });
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.execution?.stdout).toBeUndefined();
+    expect(detail.execution?.pid).toBeUndefined();
+    expect(detail.execution?.outputError).toBe(detail.error);
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("fails closed on malformed, noncanonical, asynchronous, and oversized execution responses", async () => {
+    const valid = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99 })).finish());
+    const cases = [
+      Buffer.from([0x0a, 0x02, 0xff]),
+      Buffer.concat([valid, Buffer.from([0xf8, 0x07, 0x01])]),
+      Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99, Response: { Async: true } })).finish()),
+      Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 99, Response: { TaskID: "another-task" } })).finish()),
+      Buffer.alloc(EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES + 1, 65),
+    ];
+    for (const response of cases) {
+      const request = Buffer.from("SECRET raw request");
+      const fixture = await executionFixture("ExecuteReq", response, { request });
+      const detail = await fixture.store.detail(beaconId, "execution_task");
+      expect(detail.errorKind).toBe("decode-uncertain");
+      expect(detail.error).toBe("The beacon task result could not be decoded safely");
+      expect(detail.execution?.outputError).toBe(detail.error);
+      expect(detail.execution?.stdout).toBeUndefined();
+      expect(request.every((byte) => byte === 0)).toBe(true);
+      expect(response.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("classifies an execution target rejection without exposing remote error text", async () => {
+    const response = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+      Pid: 99, Response: { Err: "remote secret failure" },
+    })).finish());
+    const fixture = await executionFixture("ExecuteReq", response);
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+    expect(detail.errorKind).toBe("target-reported");
+    expect(detail.error).toBe("The beacon task response reported an error");
+    expect(JSON.stringify(detail)).not.toContain("remote secret");
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("requires exact main-issued BOF provenance and retains independent binary output channels", async () => {
+    const response = Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({
+      Output: Buffer.from("ignored legacy duplicate"),
+      BOFOutputs: [
+        { Type: 0, Data: Buffer.from([65, 0, 255]) },
+        { Type: 1, Data: Buffer.from([66]) },
+        { Type: 0x0d, Data: Buffer.alloc(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 1, 69) },
+      ],
+      Response: {},
+    })).finish());
+    const request = Buffer.alloc(256 * 1_024, 70);
+    const fixture = await executionFixture("CallExtensionReq", response, { request });
+    const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+      // Exact pooled BOF history proves the operation without claiming which
+      // operator window originally submitted it.
+      ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+      executionOperationId: "bof.execute",
+    }));
+    expect(detail.ownership.origin).toBe("unknown");
+    expect(detail.execution?.stdout).toEqual({ data: Buffer.from([65, 0, 255, 66]), truncated: false });
+    expect(detail.execution?.stderr?.data).toHaveLength(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES);
+    expect(detail.execution?.stderr?.truncated).toBe(true);
+    expect(detail.error).toBeUndefined();
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("rejects malformed and incomplete BOF envelopes without exposing output", async () => {
+    const valid = Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({ Output: Buffer.from("secret output") })).finish());
+    for (const response of [
+      Buffer.from([0x0a, 0x02, 0xff]),
+      Buffer.concat([valid, Buffer.from([0xf8, 0x07, 0x01])]),
+      Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({ Output: Buffer.from("secret output"), Response: { Async: true } })).finish()),
+      Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({ Output: Buffer.from("secret output"), Response: { BeaconID: beaconId } })).finish()),
+      Buffer.alloc(4 * EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 1, 65),
+    ]) {
+      const fixture = await executionFixture("CallExtensionReq", response);
+      const detail = await fixture.store.detail(beaconId, "execution_task", bofAttribution);
+      expect(detail.errorKind).toBe("decode-uncertain");
+      expect(detail.error).toBe("The beacon task result could not be decoded safely");
+      expect(detail.execution?.stdout).toBeUndefined();
+      expect(response.every((byte) => byte === 0)).toBe(true);
+      expect(fixture.request.every((byte) => byte === 0)).toBe(true);
+    }
+  });
+
+  it("retains valid partial BOF output with a fixed target-reported error", async () => {
+    const response = Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({
+      BOFOutputs: [{ Type: 0, Data: Buffer.from("partial output") }],
+      Response: { Err: "secret BOF rejection" },
+    })).finish());
+    const fixture = await executionFixture("CallExtensionReq", response);
+    const detail = await fixture.store.detail(beaconId, "execution_task", bofAttribution);
+    expect(detail.errorKind).toBe("target-reported");
+    expect(detail.execution?.stdout?.data).toEqual(Buffer.from("partial output"));
+    expect(detail.execution?.outputError).toBe("The beacon task response reported an error");
+    expect(JSON.stringify(detail)).not.toContain("secret BOF");
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("reports a retryable fetch failure with a known execution operation", async () => {
+    const fixture = await executionFixture("ExecuteReq", Buffer.alloc(0));
+    fixture.client.fetchBeaconTask.mockRejectedValueOnce(new Error("private transport error"));
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.execution).toEqual({ operationId: "execution.process", outputError: "The beacon task result could not be fetched" });
+    expect(JSON.stringify(detail)).not.toContain("private transport");
+  });
+});
+
+const bofAttribution: TaskOwnershipResolver = () => ({ ownership: localOwnership, executionOperationId: "bof.execute" });
+
+async function executionFixture(
+  description: string,
+  response: Buffer,
+  options: { request?: Buffer; state?: string; fetchedOverrides?: Partial<clientpb.BeaconTask> } = {},
+) {
+  const metadata = clientpb.BeaconTasks.create({ Tasks: [task("execution_task", options.state ?? "completed", 10, description)] });
+  const request = options.request ?? Buffer.from("raw execution request");
+  const fetched = clientpb.BeaconTask.create({ ...metadata.Tasks[0], Request: request, Response: response, ...options.fetchedOverrides });
+  const client = fakeClient(metadata, fetched);
+  const store = new BeaconTaskStore(client);
+  await store.refresh(beaconId);
+  return { store, client, request, response };
+}
 
 describe("BeaconTaskStore", () => {
   it("keeps bounded metadata only and projects local versus unknown ownership", async () => {

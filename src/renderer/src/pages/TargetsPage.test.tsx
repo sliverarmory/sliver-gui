@@ -24,6 +24,12 @@ import { TargetsPage } from "./TargetsPage";
 import { formatTimestamp } from "./target-page-model";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
 
+vi.mock("../components/ExecutionOutputTerminal", () => ({
+  ExecutionOutputTerminal: ({ bytes, resetKey }: { bytes: Uint8Array; resetKey: string | number }) => (
+    <pre aria-label="Execution output transcript" data-terminal-reset-key={resetKey}>{new TextDecoder().decode(bytes)}</pre>
+  ),
+}));
+
 interface IntersectionObserverRecord {
   readonly callback: IntersectionObserverCallback;
   readonly root: Element | Document | null;
@@ -1257,6 +1263,119 @@ describe("TargetsPage", () => {
     await user.click(screen.getByRole("button", { name: "Beacon details" }));
     expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
     expect(listExecutionCatalog).not.toHaveBeenCalled();
+  });
+
+  it("queues a reviewed process through the Execution command and refreshes its exact task", async () => {
+    const user = userEvent.setup();
+    const capability: ExecutionCapability = {
+      ...beaconExecutionCapability(), operationId: "execution.process", risk: "high-opsec",
+    };
+    const catalog = { ...beaconExecutionCatalog(), capabilities: [capability] };
+    const plan: ExecutionActionPlan = { ...beaconExecutionPlan(), operationId: "execution.process", risk: "high-opsec" };
+    const pending = beaconTaskDetail({
+      taskId: "task-command-process", description: "ExecuteReq", state: "pending", resultAvailable: false,
+      cancellation: { available: true }, execution: { operationId: "execution.process" },
+    });
+    delete pending.operationId;
+    delete pending.disposition;
+    delete pending.completedAt;
+    let queued = false;
+    const prepareExecutionAction = vi.fn().mockResolvedValue({ ok: true, value: plan });
+    const executeExecutionPlan = vi.fn().mockImplementation(async () => {
+      queued = true;
+      return { ok: true, value: { requestId: "execution-command-request", operationId: "execution.process", state: "submitted", taskId: pending.taskId, message: "Process submitted." } };
+    });
+    const listExecutionCatalog = vi.fn().mockResolvedValue({ ok: true, value: catalog });
+    const getBeaconTask = vi.fn().mockResolvedValue({ ok: true, value: pending });
+    installAPI({
+      prepareExecutionAction, executeExecutionPlan, listExecutionCatalog, getBeaconTask,
+      listBeaconTasks: vi.fn().mockImplementation(async () => ({
+        ok: true, value: { items: queued ? [pending] : [], page: { limit: 100, total: queued ? 1 : 0, truncated: false } },
+      })),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    expect(listExecutionCatalog).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /Working directory.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Execution/iu }));
+    const types = await screen.findByRole("tablist", { name: "Execution type" });
+    expect(within(types).getByRole("tab", { name: "Process" })).toHaveAttribute("aria-selected", "true");
+    expect(within(types).queryByRole("tab", { name: ".NET" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: /Use current token/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton", { name: "Parent process ID" })).not.toBeInTheDocument();
+    const path = screen.getByRole("textbox", { name: "Executable path" });
+    await user.clear(path);
+    await user.type(path, "/usr/bin/printf");
+    await user.type(screen.getByRole("textbox", { name: "Arguments" }), 'hello "two words"');
+    await user.click(screen.getByRole("button", { name: "Queue task" }));
+    const review = await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
+    expect(review).toHaveTextContent(beacon.name);
+    expect(executeExecutionPlan).not.toHaveBeenCalled();
+    expect(prepareExecutionAction).toHaveBeenCalledWith({
+      draft: expect.objectContaining({ operationId: "execution.process", path: "/usr/bin/printf", args: ["hello", "two words"], captureOutput: true, useToken: false }),
+    });
+    await user.click(within(review).getByRole("button", { name: "Execute" }));
+    await waitFor(() => expect(executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: plan.token }));
+    expect(await screen.findByRole("row", { name: /task-command-process/u })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: pending.taskId }));
+  });
+
+  it("keeps completed execution streams beside other task outputs and focuses their matching queue entry", async () => {
+    const user = userEvent.setup();
+    const process = beaconTaskDetail({
+      taskId: "task-execution-process",
+      description: "ExecuteReq",
+      execution: {
+        operationId: "execution.process",
+        pid: 4102,
+        exitCode: 0,
+        stdout: { data: new TextEncoder().encode("process stdout\n"), truncated: false },
+        stderr: { data: new TextEncoder().encode("process stderr\n"), truncated: false },
+      },
+    });
+    delete process.operationId;
+    delete process.disposition;
+    const assembly = beaconTaskDetail({
+      taskId: "task-execution-assembly",
+      description: "InvokeExecuteAssemblyReq",
+      execution: {
+        operationId: "execution.assembly",
+        stdout: { data: new TextEncoder().encode("assembly stdout\n"), truncated: false },
+      },
+    });
+    delete assembly.operationId;
+    delete assembly.disposition;
+    const files = beaconTaskDetail();
+    const details = [process, assembly, files];
+    installAPI({
+      getBeaconTask: vi.fn().mockImplementation(async ({ taskId }) => ({
+        ok: true,
+        value: details.find((task) => task.taskId === taskId),
+      })),
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: details, page: { limit: 100, total: details.length, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const processEntry = await screen.findByRole("article", { name: `Task output ${process.taskId}` });
+    expect(await within(processEntry).findByLabelText("Execution output transcript")).toHaveTextContent("process stdout");
+    const assemblyEntry = screen.getByRole("article", { name: `Task output ${assembly.taskId}` });
+    expect(await within(assemblyEntry).findByLabelText("Execution output transcript")).toHaveTextContent("assembly stdout");
+    expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
+    expect(screen.getAllByRole("article")).toHaveLength(3);
+    await user.click(within(processEntry).getByRole("radio", { name: "Stderr" }));
+    expect(within(processEntry).getByLabelText("Execution output transcript")).toHaveTextContent("process stderr");
+    expect(within(assemblyEntry).getByLabelText("Execution output transcript")).toHaveTextContent("assembly stdout");
+
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(screen.getByRole("row", { name: /task-execution-process/u }));
+    const reopened = screen.getByRole("article", { name: `Task output ${process.taskId}` });
+    await waitFor(() => expect(reopened).toHaveFocus());
+    expect(screen.getAllByRole("article")).toHaveLength(3);
+    expect(screen.getByText("/srv/first-output")).toBeInTheDocument();
   });
 
   it("keeps shared beacon execution available and discards its review when the exact identity changes", async () => {

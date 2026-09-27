@@ -13,6 +13,7 @@ const ghosttyMocks = vi.hoisted(() => ({
   fitResize: undefined as { cols: number; rows: number } | undefined,
   ghosttyInstances: [] as unknown[],
   responsesPerWrite: [] as string[][],
+  afterOpen: undefined as ((host: HTMLElement) => void) | undefined,
   terminals: [] as Array<{
     blur: ReturnType<typeof vi.fn>;
     cols: number;
@@ -60,8 +61,12 @@ vi.mock("ghostty-web", () => {
       void this.selectionManager.copyToClipboard("selected output");
     };
 
-    readonly focus = vi.fn();
-    readonly blur = vi.fn();
+    readonly focus = vi.fn(() => {
+      this.element?.focus();
+      // Match pinned Ghostty's deferred second focus; blur does not cancel it.
+      setTimeout(() => this.element?.focus(), 0);
+    });
+    readonly blur = vi.fn(() => this.element?.blur());
     readonly getSelection = vi.fn(() => "selected output");
     readonly write = vi.fn((bytes: Uint8Array) => {
       void bytes;
@@ -74,6 +79,7 @@ vi.mock("ghostty-web", () => {
       this.element?.removeEventListener("click", this.linkClick);
       this.element?.removeEventListener("dblclick", this.selectionDoubleClick);
       document.removeEventListener("mouseup", this.selectionMouseUp);
+      delete this.element;
     });
 
     constructor(readonly options: Record<string, unknown>) {
@@ -105,12 +111,14 @@ vi.mock("ghostty-web", () => {
     open(element: HTMLElement) {
       this.element = element;
       element.setAttribute("contenteditable", "true");
+      element.tabIndex = 0;
       element.setAttribute("role", "textbox");
       element.setAttribute("aria-label", "Terminal input");
       element.addEventListener("click", this.linkClick);
       element.addEventListener("dblclick", this.selectionDoubleClick);
       document.addEventListener("mouseup", this.selectionMouseUp);
       this.focus();
+      ghosttyMocks.afterOpen?.(element);
     }
 
     simulateSelectionMouseUp() {
@@ -174,6 +182,7 @@ beforeEach(() => {
   ghosttyMocks.fitResize = undefined;
   ghosttyMocks.ghosttyInstances.length = 0;
   ghosttyMocks.responsesPerWrite.length = 0;
+  ghosttyMocks.afterOpen = undefined;
   ghosttyMocks.terminals.length = 0;
   resizeObservers.length = 0;
   vi.stubGlobal("ResizeObserver", class {
@@ -493,10 +502,10 @@ describe("GhosttyTerminal", () => {
     await waitFor(() => expect(ghosttyMocks.terminals).toHaveLength(1));
     const terminal = requireTerminal();
 
-    expect(terminal.focus).toHaveBeenCalledOnce();
-    expect(terminal.blur).toHaveBeenCalledOnce();
+    expect(terminal.focus).not.toHaveBeenCalled();
+    expect(terminal.blur).not.toHaveBeenCalled();
     act(() => ref.current?.focus());
-    expect(terminal.focus).toHaveBeenCalledTimes(2);
+    expect(terminal.focus).toHaveBeenCalledOnce();
 
     terminal.getSelection.mockReturnValue("é".repeat(40_000));
     expect(encoder.encode(ref.current?.getSelection() ?? "").byteLength).toBeLessThanOrEqual(65_539);
@@ -506,6 +515,57 @@ describe("GhosttyTerminal", () => {
     act(() => ref.current?.paste("reviewed paste"));
     expect(terminal.paste).toHaveBeenCalledWith("reviewed paste");
     expect(sentFrames(transport.send).at(-1)).toEqual({ data: "reviewed paste", source: "operator" });
+  });
+
+  it.each(["article", "button"] as const)("restores the focused %s after asynchronous terminal initialization", async (tag) => {
+    const { compile } = installWebAssemblyMocks();
+    const pending = deferred<WebAssembly.Module>();
+    compile.mockImplementationOnce(() => pending.promise);
+    const transport = fakeTransport();
+    render(<>
+      {tag === "article" ? <article aria-label="Task output entry" tabIndex={-1}>Output</article> : <button>Output trigger</button>}
+      <GhosttyTerminal transport={transport.api} wasmBytes={new Uint8Array([0x00])} />
+    </>);
+    const prior = tag === "article" ? screen.getByRole("article", { name: "Task output entry" }) : screen.getByRole("button", { name: "Output trigger" });
+    prior.focus();
+    expect(prior).toHaveFocus();
+    await act(async () => pending.resolve({} as WebAssembly.Module));
+    await screen.findByRole("textbox", { name: "Interactive session terminal" });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(prior).toHaveFocus();
+    expect(requireTerminal().focus).not.toHaveBeenCalled();
+  });
+
+  it("keeps deliberate focus on the loading terminal when it opens", async () => {
+    const { compile } = installWebAssemblyMocks();
+    const pending = deferred<WebAssembly.Module>();
+    compile.mockImplementationOnce(() => pending.promise);
+    const transport = fakeTransport();
+    render(<GhosttyTerminal transport={transport.api} wasmBytes={new Uint8Array([0x00])} />);
+    const host = screen.getByLabelText("Interactive session terminal");
+    host.tabIndex = 0;
+    host.focus();
+    expect(host).toHaveFocus();
+    await act(async () => pending.resolve({} as WebAssembly.Module));
+    await screen.findByRole("textbox", { name: "Interactive session terminal" });
+    expect(host).toHaveFocus();
+    expect(requireTerminal().blur).not.toHaveBeenCalled();
+  });
+
+  it("does not override a different control deliberately focused during open", async () => {
+    const { compile } = installWebAssemblyMocks();
+    const pending = deferred<WebAssembly.Module>();
+    compile.mockImplementationOnce(() => pending.promise);
+    const transport = fakeTransport();
+    render(<><button>Original trigger</button><button>New control</button><GhosttyTerminal transport={transport.api} wasmBytes={new Uint8Array([0x00])} /></>);
+    const previous = screen.getByRole("button", { name: "Original trigger" });
+    const next = screen.getByRole("button", { name: "New control" });
+    previous.focus();
+    ghosttyMocks.afterOpen = () => next.focus();
+    await act(async () => pending.resolve({} as WebAssembly.Module));
+    await screen.findByRole("textbox", { name: "Interactive session terminal" });
+    expect(next).toHaveFocus();
+    expect(requireTerminal().blur).not.toHaveBeenCalled();
   });
 
   it("fits, clamps, debounces, and deduplicates terminal resize", async () => {
