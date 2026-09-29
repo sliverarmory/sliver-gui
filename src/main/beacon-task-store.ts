@@ -171,7 +171,8 @@ export class BeaconTaskStore {
   private storeGeneration = 0;
   private catalogClock = 0;
 
-  constructor(private readonly client: Pick<SliverClientAdapter, "getBeaconTasks" | "fetchBeaconTask" | "cancelBeaconTask">) {}
+  constructor(private readonly client: Pick<SliverClientAdapter,
+    "getBeaconTasks" | "fetchBeaconTask" | "fetchBofBeaconTask" | "cancelBeaconTask">) {}
 
   async refresh(
     beaconId: string,
@@ -385,7 +386,11 @@ export class BeaconTaskStore {
     this.detailAdmissions += 1;
     try {
       let content: clientpb.BeaconTask;
-      try { content = await this.client.fetchBeaconTask(task.taskId); }
+      try {
+        content = operationId === "bof.execute"
+          ? await this.client.fetchBofBeaconTask(task.beaconId, task.taskId, "CallExtensionReq")
+          : await this.client.fetchBeaconTask(task.taskId);
+      }
       catch { return executionDetailError(base, operationId, "decode-uncertain", "The beacon task result could not be fetched"); }
       try {
         if (content.ID !== task.taskId || content.BeaconID !== task.beaconId) {

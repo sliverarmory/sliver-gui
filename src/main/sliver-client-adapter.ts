@@ -168,6 +168,8 @@ export type SliverClientAdapter = Pick<
   /** Executes one main-selected Armory object through the fixed BOF RPC. */
   callBofSession(sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
   callBofBeacon(beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  /** Fetches only a correlated BOF task on the SDK's 16 MiB control channel. */
+  fetchBofBeaconTask(beaconId: string, taskId: string, description: BofTaskDescription, timeoutSeconds?: number): Promise<clientpb.BeaconTask>;
   /** Registers a main-selected installed COFF loader for a legacy BOF. */
   registerBofLoaderSession(sessionId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
   registerBofLoaderBeacon(beaconId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
@@ -177,6 +179,33 @@ export type SliverClientAdapter = Pick<
 };
 
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
+
+export type BofTaskDescription = "CallExtensionReq" | "RegisterExtensionReq";
+export const BOF_TASK_REQUEST_MAX_BYTES = 14 * 1024 * 1024;
+export const BOF_TASK_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
+export const BOF_TASK_CONTENT_MAX_BYTES = 15 * 1024 * 1024;
+const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+
+function isByteArray(value: unknown): value is Uint8Array {
+  return ArrayBuffer.isView(value) && (value as Uint8Array).BYTES_PER_ELEMENT === 1 &&
+    typeof (value as Uint8Array).fill === "function";
+}
+
+function verifyBofTaskContent(
+  task: clientpb.BeaconTask,
+  beaconId: string,
+  taskId: string,
+  description: BofTaskDescription,
+): clientpb.BeaconTask {
+  if (task.ID === taskId && task.BeaconID === beaconId && task.Description === description &&
+    isByteArray(task.Request) && isByteArray(task.Response) &&
+    task.Request.length <= BOF_TASK_REQUEST_MAX_BYTES &&
+    task.Response.length <= BOF_TASK_RESPONSE_MAX_BYTES &&
+    task.Request.length + task.Response.length <= BOF_TASK_CONTENT_MAX_BYTES) return task;
+  if (isByteArray(task.Request)) task.Request.fill(0);
+  if (isByteArray(task.Response)) task.Response.fill(0);
+  throw new Error("The BOF task content did not match the bounded request");
+}
 
 /**
  * Adds narrow passive inventory reads and the reviewed beacon-read wrappers.
@@ -229,6 +258,19 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
         ServerStore: false,
         Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
       }, { signal })),
+    // GetBeaconTaskContent includes the original request, which embeds the BOF
+    // object. The SDK's task-content channel permits only 80 KiB total, even
+    // when the BOF response is small. This BOF-only exception uses the control
+    // channel's 16 MiB receive bound, then checks exact identity and byte caps.
+    fetchBofBeaconTask: async (beaconId: string, taskId: string, description: BofTaskDescription, timeoutSeconds = 30) => {
+      if (!TASK_ID.test(beaconId) || !TASK_ID.test(taskId) ||
+        (description !== "CallExtensionReq" && description !== "RegisterExtensionReq")) {
+        throw new Error("Invalid BOF task identity");
+      }
+      const task = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        client.rpc.getBeaconTaskContent({ ID: taskId }, { signal }));
+      return verifyBofTaskContent(task, beaconId, taskId, description);
+    },
     registerBofLoaderSession: (sessionId: string, loader: Buffer, init: string, os: string, timeoutSeconds: number) =>
       withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registerExtension({
         Name: createHash("sha256").update(loader).digest("hex"),

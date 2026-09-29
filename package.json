@@ -35,6 +35,7 @@
     "test:e2e:dotnet": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-dotnet-execution.e2e.js",
     "test:e2e:dotnet-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-dotnet-real-windows.e2e.js",
     "test:e2e:bof-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-bof-live.e2e.js",
+    "test:e2e:bof-existing-beacons": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/beacon-bof-live.e2e.js",
     "test:e2e:navigation": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/application-navigation.e2e.js",
     "test:e2e:window-navigation": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/window-navigation.e2e.js",
     "test:e2e:report-screenshot": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/report-screenshot.e2e.js",

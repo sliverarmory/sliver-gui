@@ -162,18 +162,36 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     await page.getByRole("heading", { name: "Beacons", exact: true }).waitFor();
     await page.getByRole("row", { name: /m1-beacon/iu }).click();
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
-    await page.getByRole("button", { name: "Show advanced execution", exact: true }).click();
-    await page.getByRole("heading", { name: "Execution workbench", exact: true }).waitFor();
-    await page.getByRole("radio", { name: "BOFs", exact: true }).click();
-    const beaconWorkspace = page.getByRole("region", { name: "BOF execution history and output" });
-    const beaconForm = beaconWorkspace.getByRole("region", { name: "Execute an Armory BOF" });
-    assert.equal(await beaconWorkspace.getByRole("navigation", { name: "BOF execution history" }).getByRole("row").count(), 1);
+    const beaconComposer = page.locator('[aria-labelledby="beacon-command-heading"]');
+    await beaconComposer.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+    await beaconComposer.locator('[data-slot="autocomplete-trigger"]').first().click();
+    await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill("Execution");
+    await page.getByRole("option", { name: /^Execution/iu }).click();
+    const executionTypes = beaconComposer.getByRole("tablist", { name: "Execution type", exact: true });
+    await executionTypes.getByRole("tab", { name: "BOFs", exact: true }).click();
+    const beaconForm = beaconComposer.getByRole("region", { name: "Execute an Armory BOF", exact: true });
+    await beaconForm.waitFor();
+    await beaconComposer.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-bof-compact-tabs.png") });
+    const beaconTasks = page.getByRole("region", { name: "Beacon tasks", exact: true });
+    const queueTab = beaconTasks.getByRole("tab", { name: "Task queue", exact: true });
+    const outputTab = beaconTasks.getByRole("tab", { name: "Task output", exact: true });
+    await beaconTasks.getByRole("grid", { name: "Beacon task queue", exact: true }).waitFor();
     await selectInstalledBof(page, beaconForm, "sa-dir");
     await beaconForm.getByRole("textbox", { name: /targetdir/u }).fill("/tmp/beacon-BOF");
-    await beaconForm.getByRole("button", { name: "Execute", exact: true }).click();
-    await beaconWorkspace.getByRole("button", { name: "Refresh result" }).waitFor();
+    await beaconComposer.getByRole("button", { name: "Queue task", exact: true }).click();
     await waitForFakeBofTaskCompletion(application);
-    await assertOutput(beaconWorkspace, "deterministic sa-dir stdout");
+    const beaconTask = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((task) =>
+      task.beaconId === "m1_beacon" && task.description === "CallExtensionReq" && task.state === "completed"));
+    assert.ok(beaconTask, "the beacon BOF must complete as an exact asynchronous task");
+    await queueTab.click();
+    const queueRow = beaconTasks.getByRole("grid", { name: "Beacon task queue", exact: true })
+      .getByRole("row").filter({ hasText: beaconTask.id });
+    await queueRow.getByText("Completed", { exact: true }).waitFor();
+    await queueRow.click();
+    assert.equal(await outputTab.getAttribute("aria-selected"), "true", "a completed BOF row must open its task output");
+    const output = beaconTasks.getByRole("tabpanel", { name: "Task output", exact: true })
+      .getByRole("article", { name: `Task output ${beaconTask.id}`, exact: true });
+    await assertOutput(output, "deterministic sa-dir stdout");
     const beaconCalls = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.bofCalls);
     assert.deepEqual(beaconCalls.at(-1), {
       targetMode: "beacon", targetId: "m1_beacon",

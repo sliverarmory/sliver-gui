@@ -265,10 +265,10 @@ export function BeaconExecutionCommand({
           : <p className="text-xs text-muted" role="status">Loading execution capabilities…</p>
       ) : (
         <>
-          {activeType ? <Tabs className="min-w-0 gap-4" selectedKey={activeType} onSelectionChange={(key) => selectType(String(key))}>
+          {activeType ? <Tabs className="min-w-0 gap-3" selectedKey={activeType} onSelectionChange={(key) => selectType(String(key))}>
             <Tabs.ListContainer className="max-w-full overflow-x-auto">
-              <Tabs.List aria-label="Execution type" className="w-max">
-                {types.map((candidate) => <Tabs.Tab className="whitespace-nowrap" id={candidate.id} isDisabled={isPreparing || isExecuting || composerState.isPending || plan !== undefined} key={candidate.id}>{candidate.label}<Tabs.Indicator /></Tabs.Tab>)}
+              <Tabs.List aria-label="Execution type" className="w-max p-0.5">
+                {types.map((candidate) => <Tabs.Tab className="h-7 whitespace-nowrap px-2.5 text-xs" id={candidate.id} isDisabled={isPreparing || isExecuting || composerState.isPending || plan !== undefined} key={candidate.id}>{candidate.label}<Tabs.Indicator /></Tabs.Tab>)}
               </Tabs.List>
             </Tabs.ListContainer>
             {types.map((candidate) => (

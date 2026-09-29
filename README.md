@@ -171,6 +171,7 @@ validation and review flows. Do not weaken these boundaries for development.
 - [Managed software on cloud servers](docs/cloud-managed-software.md)
 - [Protocol baseline and provenance](protocol/README.md)
 - [Operator parity report](docs/operator-parity.md)
+- [Beacon command coverage roadmap](docs/beacon-command-roadmap.md)
 - [Platform support and release policy](docs/adr/0001-platform-support.md)
 
 ## License

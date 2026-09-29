@@ -39,9 +39,9 @@ Already-installed packages are inventoried from disk; their presence does not im
 
 ## Execute installed BOFs
 
-Open a session's **Execution** workspace, or a beacon's **Advanced execution** section, and select **BOFs**, immediately to the right of **Process**. **New Execution** lists BOF commands from installed `extensions/*/extension.json` manifests under the same Sliver client root used by Armory. Select a command to fill in the manifest's ordered string, wide-string, integer, short, or local-file arguments. Optional values use their manifest defaults. The selected object must match the target OS and architecture. Built-in BOFs require a target that advertises BOF execution. A legacy BOF with a `coff-loader` dependency also requires the matching installed loader artifact for that target.
+Open a session's **Execution** workspace and select **BOFs**, immediately to the right of **Process**. For a beacon, select **Execution** from the interactive command picker, then **BOFs**. The composer lists BOF commands from installed `extensions/*/extension.json` manifests under the same Sliver client root used by Armory. Select a command to fill in the manifest's ordered string, wide-string, integer, short, or local-file arguments. Optional values use their manifest defaults. The selected object must match the target OS and architecture. Built-in BOFs require a target that advertises BOF execution. A legacy BOF with a `coff-loader` dependency also requires the matching installed loader artifact for that target.
 
-The Electron main process reads the manifest and object, packs arguments in Sliver's BOF wire format, and calls the fixed `CallExtension` RPC for the selected target. Legacy BOFs first register their installed loader and pass the BOF object and packed arguments through that loader. The renderer receives neither a general RPC interface nor local artifact paths. Execution history stays in memory for the current window and target. Submitted beacon results are checked automatically while their execution is selected, with a manual refresh option. The output panel shows captured stdout and stderr in the same terminal used for Process results, with copy, save, and Add to Loot actions.
+The Electron main process reads the manifest and object, packs arguments in Sliver's BOF wire format, and calls the fixed `CallExtension` RPC for the selected target. Legacy BOFs first register their installed loader and pass the BOF object and packed arguments through that loader. The renderer receives neither a general RPC interface nor local artifact paths. Session execution history stays in memory for the current window and target. Beacon BOFs appear in the interactive task queue and Task output tab, which renders captured stdout and stderr in the Ghostty terminal.
 
 ## Validation
 
@@ -59,3 +59,19 @@ npm run test:e2e:bof-live
 ```
 
 That test creates an isolated loopback server and one disposable local session, runs both installed BOFs through the production GUI, checks argument-dependent terminal output and Copy output, and removes its exact processes and temporary files.
+
+To probe two **existing** mTLS beacons through the production GUI, provide a private operator config, an installed Armory root, and the exact Windows/amd64 and Linux/amd64 beacon IDs. This opt-in check copies only the needed config and `sa-dir` artifacts to a temporary client root, uses a separate Electron data directory, runs the read-only `sa-dir` command with path `.` and no recursion, and checks the exact completed task and rendered output without logging, saving, or copying the remote listing. It never chooses a target from discovery alone. The config must be a regular file with mode 0600 or stricter.
+
+```sh
+SLIVER_GUI_BOF_EXISTING_BEACONS_E2E=1 \
+SLIVER_GUI_BOF_E2E_OPERATOR_CONFIG=/absolute/private/operator.cfg \
+SLIVER_GUI_BOF_E2E_ARMORY_ROOT=/absolute/path/to/.sliver-client/extensions \
+SLIVER_GUI_BOF_E2E_WINDOWS_BEACON_ID=windows-beacon-uuid \
+SLIVER_GUI_BOF_E2E_LINUX_BEACON_ID=linux-beacon-uuid \
+SLIVER_GUI_BOF_E2E_MAX_WAIT_SECONDS=900 \
+npm run test:e2e:bof-existing-beacons
+```
+
+The optional wait limit accepts 60–5400 seconds and defaults to 900. The separate Windows legacy probe uses the same command with `SLIVER_GUI_BOF_EXISTING_BEACON_LEGACY_E2E=1` instead of the direct flag; it needs only the Windows ID. It rewrites a **temporary copy** of the `sa-dir` manifest to use the installed `coff-loader`, then checks registration and call tasks. Registration leaves that loader in the selected beacon's in-memory extension registry, so run this probe only on a beacon where that side effect is acceptable. The installed Armory packages and operator profile remain untouched.
+
+For a smaller legacy-loader diagnostic, set `SLIVER_GUI_BOF_EXISTING_BEACON_LEGACY_MINIMAL_E2E=1` instead. This separate probe requires `x86_64-w64-mingw32-gcc`, compiles the checked-in C fixture into the private temporary client root, and tasks only the exact Windows beacon ID. The fixture takes no arguments and only emits a fixed `BeaconOutput` marker; it reads no files or network state. The test verifies both the loader registration response and the completed BOF marker in the task response and GUI terminal. It has the same in-memory loader registration side effect as the other legacy probe.

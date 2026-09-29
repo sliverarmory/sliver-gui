@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { SliverClient, sliverpb } from "sliver-script";
-import { adaptSliverClient } from "./sliver-client-adapter.js";
+import { SliverClient, clientpb, sliverpb } from "sliver-script";
+import { adaptSliverClient, BOF_TASK_RESPONSE_MAX_BYTES } from "./sliver-client-adapter.js";
 
 describe("narrow BOF adapter", () => {
   it("forms a fixed built-in BOF request for sessions and beacons", async () => {
@@ -60,5 +60,43 @@ describe("narrow BOF adapter", () => {
       IsBOF: false, WantBOFOutputs: false, ServerStore: false,
       Request: { SessionID: "", BeaconID: "beacon-1", Async: true },
     });
+  });
+
+  it("fetches a correlated BOF task with an object larger than the SDK task-content channel", async () => {
+    const task = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "CallExtensionReq", State: "completed",
+      Request: Buffer.alloc(96 * 1024, 0x42), Response: Buffer.from([1, 2, 3]),
+    });
+    const getBeaconTaskContent = vi.fn(async () => task);
+    const client = adaptSliverClient({ rpc: { getBeaconTaskContent } } as unknown as SliverClient);
+
+    await expect(client.fetchBofBeaconTask("beacon-1", "task-1", "CallExtensionReq"))
+      .resolves.toBe(task);
+    expect(getBeaconTaskContent).toHaveBeenCalledWith({ ID: "task-1" }, { signal: expect.any(AbortSignal) });
+    expect(task.Request.length).toBeGreaterThan(80 * 1024);
+  });
+
+  it("zeroizes mismatched and oversized BOF task content before rejecting it", async () => {
+    const mismatched = clientpb.BeaconTask.create({
+      ID: "other-task", BeaconID: "beacon-1", Description: "CallExtensionReq",
+      Request: Buffer.from("private request"), Response: Buffer.from("private response"),
+    });
+    const oversized = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "CallExtensionReq",
+      Request: Buffer.from("private request"), Response: Buffer.alloc(BOF_TASK_RESPONSE_MAX_BYTES + 1, 0x53),
+    });
+    const getBeaconTaskContent = vi.fn()
+      .mockResolvedValueOnce(mismatched)
+      .mockResolvedValueOnce(oversized);
+    const client = adaptSliverClient({ rpc: { getBeaconTaskContent } } as unknown as SliverClient);
+
+    await expect(client.fetchBofBeaconTask("beacon-1", "task-1", "CallExtensionReq"))
+      .rejects.toThrow("The BOF task content did not match the bounded request");
+    expect(mismatched.Request.every((byte) => byte === 0)).toBe(true);
+    expect(mismatched.Response.every((byte) => byte === 0)).toBe(true);
+    await expect(client.fetchBofBeaconTask("beacon-1", "task-1", "CallExtensionReq"))
+      .rejects.toThrow("The BOF task content did not match the bounded request");
+    expect(oversized.Request.every((byte) => byte === 0)).toBe(true);
+    expect(oversized.Response.every((byte) => byte === 0)).toBe(true);
   });
 });

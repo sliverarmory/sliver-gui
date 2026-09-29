@@ -2514,7 +2514,7 @@ export class ConnectionRegistry {
               ? await pool.client.registerBofLoaderSession(target.target.id, loader, loaderInit, target.target.os, input.timeoutSeconds)
               : await pool.client.registerBofLoaderBeacon(target.target.id, loader, loaderInit, target.target.os, input.timeoutSeconds);
             assertCurrent();
-            await this.awaitBofLoaderRegistration(pool, target, registration, input.timeoutSeconds, assertCurrent);
+            this.assertBofLoaderRegistrationAccepted(target, registration);
             assertCurrent();
           }
           dispatched = true;
@@ -2562,49 +2562,20 @@ export class ConnectionRegistry {
     }
   }
 
-  private async awaitBofLoaderRegistration(
-    pool: BackendPool,
+  private assertBofLoaderRegistrationAccepted(
     target: RevalidatedTarget,
     registration: sliverpb.RegisterExtension,
-    timeoutSeconds: number,
-    assertCurrent: () => void,
-  ): Promise<void> {
+  ): void {
     const envelope = registration.Response;
     if (!envelope || envelope.Err?.trim()) throw new Error("The target rejected the BOF loader registration");
     if (!envelope.Async && target.target.mode === "session") return;
-    if (!envelope.Async || target.target.mode !== "beacon" || !envelope.TaskID || envelope.BeaconID !== target.target.id) {
+    if (!envelope.Async || target.target.mode !== "beacon" ||
+      !/^[A-Za-z0-9_-]{1,128}$/u.test(envelope.TaskID) || envelope.BeaconID !== target.target.id) {
       throw new Error("The BOF loader registration task could not be identified");
     }
-    const deadline = Date.now() + timeoutSeconds * 1_000;
-    while (Date.now() < deadline) {
-      assertCurrent();
-      const task = await pool.client.fetchBeaconTask(envelope.TaskID, Math.min(5, timeoutSeconds));
-      try {
-        assertCurrent();
-        if (task.ID !== envelope.TaskID || task.BeaconID !== target.target.id) {
-          throw new Error("The BOF loader registration task did not match the selected target");
-        }
-        const state = task.State.trim().toLowerCase();
-        if (state === "failed" || state === "canceled" || state === "cancelled") {
-          throw new Error("The BOF loader registration task failed");
-        }
-        if (state === "completed") {
-          if (!task.Response?.length) throw new Error("The BOF loader registration had no response");
-          let result: sliverpb.RegisterExtension;
-          try { result = sliverpb.RegisterExtension.decode(task.Response); }
-          catch { throw new Error("The BOF loader registration response was invalid"); }
-          if (!result.Response || result.Response.Err?.trim()) {
-            throw new Error("The target rejected the BOF loader registration");
-          }
-          return;
-        }
-      } finally {
-        task.Request?.fill(0);
-        task.Response?.fill(0);
-      }
-      await delayMilliseconds(Math.min(250, Math.max(0, deadline - Date.now())));
-    }
-    throw new Error("The BOF loader registration task did not complete before the timeout");
+    // The pinned beacon runner executes registrations before other tasks in
+    // the same fetched batch. Waiting for this task's result requires another
+    // check-in and can exceed the BOF timeout before invocation is even queued.
   }
 
   async listBofExecutionHistory(contentsId: number): Promise<OperationResult<BofExecutionHistorySnapshot>> {
@@ -2636,7 +2607,7 @@ export class ConnectionRegistry {
       const record = history?.records.find((item) => item.id === input.id);
       if (!record) throw new Error("The BOF result is unavailable for the current target");
       if ((record.state !== "submitted" && record.state !== "outcome-unknown") || !record.taskId) return cloneBofRecord(record);
-      const task = await pool.client.fetchBeaconTask(record.taskId);
+      const task = await pool.client.fetchBofBeaconTask(target.target.id, record.taskId, "CallExtensionReq");
       try {
         assertBinding();
         if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, target.ref) ||

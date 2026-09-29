@@ -180,6 +180,8 @@ describe("BeaconTaskStore execution results", () => {
     expect(detail.execution?.stderr?.data).toHaveLength(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES);
     expect(detail.execution?.stderr?.truncated).toBe(true);
     expect(detail.error).toBeUndefined();
+    expect(fixture.client.fetchBofBeaconTask).toHaveBeenCalledWith(beaconId, "execution_task", "CallExtensionReq");
+    expect(fixture.client.fetchBeaconTask).not.toHaveBeenCalled();
     expect(request.every((byte) => byte === 0)).toBe(true);
     expect(response.every((byte) => byte === 0)).toBe(true);
   });
@@ -1157,6 +1159,7 @@ describe("BeaconTaskStore", () => {
         });
       }),
       fetchBeaconTask: vi.fn(),
+      fetchBofBeaconTask: vi.fn(),
       cancelBeaconTask: vi.fn(),
     };
     const store = new BeaconTaskStore(client);
@@ -1260,6 +1263,7 @@ function fakeClient(tasks: clientpb.BeaconTasks, fetched?: clientpb.BeaconTask) 
   return {
     getBeaconTasks: vi.fn(async (_beaconId: string) => tasks),
     fetchBeaconTask: vi.fn(async () => fetched ?? tasks.Tasks[0]!),
+    fetchBofBeaconTask: vi.fn(async () => fetched ?? tasks.Tasks[0]!),
     cancelBeaconTask: vi.fn(async (taskId: string) => clientpb.BeaconTask.create({
       ID: taskId,
       BeaconID: beaconId,

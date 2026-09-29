@@ -606,7 +606,8 @@ describe("BOF execution records", () => {
     const unrelated = await registry.getBeaconTask(2, "other-extension-task");
     if (!unrelated.ok) throw new Error(unrelated.error);
     expect(unrelated.value.execution).toBeUndefined();
-    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+    expect(client.fetchBofBeaconTask).toHaveBeenCalledTimes(1);
+    expect(client.fetchBeaconTask).not.toHaveBeenCalled();
 
     client.beaconState.Beacons = [clientpb.Beacon.create({ ...client.beaconState.Beacons[0]!, UUID: "replacement-host" })];
     await registry.refresh(2);
@@ -614,7 +615,7 @@ describe("BOF execution records", () => {
     const replaced = await registry.getBeaconTask(2, "bof-output-task");
     if (!replaced.ok) throw new Error(replaced.error);
     expect(replaced.value.execution).toBeUndefined();
-    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+    expect(client.fetchBofBeaconTask).toHaveBeenCalledTimes(1);
   });
 
   it("does not replace BOF provenance when the server reuses its task ID for a process", async () => {
@@ -642,10 +643,10 @@ describe("BOF execution records", () => {
     const ambiguous = await registry.getBeaconTask(1, "duplicate-task");
     if (!ambiguous.ok) throw new Error(ambiguous.error);
     expect(ambiguous.value.execution).toBeUndefined();
-    expect(client.fetchBeaconTask).toHaveBeenCalledTimes(1);
+    expect(client.fetchBofBeaconTask).toHaveBeenCalledTimes(1);
   });
 
-  it("waits for correlated beacon loader registration before dispatching a legacy BOF", async () => {
+  it("queues a legacy beacon BOF after loader registration is accepted without waiting for a check-in", async () => {
     const bofDirectory = join(root, "extensions", "legacy-bof");
     const loaderDirectory = join(root, "extensions", "coff-loader");
     await mkdir(bofDirectory, { recursive: true });
@@ -668,22 +669,16 @@ describe("BOF execution records", () => {
     client.adapter.registerBofLoaderBeacon = vi.fn(async () => sliverpb.RegisterExtension.create({
       Response: { Async: true, BeaconID: "beacon_bof_loader", TaskID: "register-task", Err: "" },
     }));
-    const registrationResponse = sliverpb.RegisterExtension.encode(sliverpb.RegisterExtension.create({
-      Response: { Async: false, BeaconID: "", TaskID: "", Err: "" },
-    })).finish();
-    let registrationFetches = 0;
-    client.adapter.fetchBeaconTask = vi.fn(async () => {
-      registrationFetches += 1;
-      return clientpb.BeaconTask.create({
-        ID: "register-task", BeaconID: "beacon_bof_loader",
-        State: registrationFetches === 1 ? "pending" : "completed",
-        Response: registrationFetches === 1 ? Buffer.alloc(0) : Buffer.from(registrationResponse),
-      });
-    });
+    // On a real beacon, registration remains pending until its next check-in,
+    // which can be much later than the BOF's 60-second execution timeout.
+    client.adapter.fetchBeaconTask = vi.fn(async () => clientpb.BeaconTask.create({
+      ID: "register-task", BeaconID: "beacon_bof_loader", State: "pending",
+    }));
+    let invocation = 0;
     client.adapter.callLegacyBofBeacon = vi.fn(async () => {
-      expect(registrationFetches).toBe(2);
+      expect(client.adapter.registerBofLoaderBeacon).toHaveBeenCalledTimes(invocation + 1);
       return sliverpb.CallExtension.create({
-        Response: { Async: true, BeaconID: "beacon_bof_loader", TaskID: "bof-task", Err: "" },
+        Response: { Async: true, BeaconID: "beacon_bof_loader", TaskID: `bof-task-${++invocation}`, Err: "" },
       });
     });
     const registry = new ConnectionRegistry({
@@ -698,16 +693,28 @@ describe("BOF execution records", () => {
     const targetRef = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "beacon_bof_loader");
     if (!targetRef) throw new Error("Expected legacy BOF beacon fixture");
     expect(await registry.selectTarget(1, targetRef)).toMatchObject({ ok: true });
-    const input = { commandId: "legacy-bof/legacy-bof", arguments: [], timeoutSeconds: 5 } as const;
+    const input = { commandId: "legacy-bof/legacy-bof", arguments: [], timeoutSeconds: 60 } as const;
     const executed = await registry.runBof(1, input);
-    expect(executed).toMatchObject({ ok: true, value: { state: "submitted", taskId: "bof-task" } });
+    expect(executed).toMatchObject({ ok: true, value: { state: "submitted", taskId: "bof-task-1" } });
     expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledOnce();
+    expect(client.adapter.fetchBeaconTask).not.toHaveBeenCalled();
+
+    // The real server can mark registration complete yet reject a content
+    // fetch because its response exceeds the client's receive limit.
+    client.adapter.fetchBeaconTask = vi.fn(async () => {
+      throw new Error("RESOURCE_EXHAUSTED: Received message larger than max (242651 vs 81920)");
+    });
+    const afterOversizedRegistration = await registry.runBof(1, input);
+    expect(afterOversizedRegistration).toMatchObject({ ok: true, value: { state: "submitted", taskId: "bof-task-2" } });
+    expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledTimes(2);
+    expect(client.adapter.fetchBeaconTask).not.toHaveBeenCalled();
+
     client.adapter.registerBofLoaderBeacon = vi.fn(async () => sliverpb.RegisterExtension.create({
       Response: { Async: false, BeaconID: "", TaskID: "", Err: "" },
     }));
     const rejected = await registry.runBof(1, input);
     expect(rejected).toMatchObject({ ok: true, value: { state: "request-failed" } });
-    expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledOnce();
+    expect(client.adapter.callLegacyBofBeacon).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -9223,6 +9230,15 @@ class FakeSliverClient {
       Response: Buffer.from(task.Response),
     });
   });
+  readonly fetchBofBeaconTask = vi.fn(async (_beaconId: string, taskId: string, _description: string) => {
+    const task = [...this.taskState.values()].flat().find((candidate) => candidate.ID === taskId);
+    if (!task) throw new Error("unknown fake BOF task");
+    return clientpb.BeaconTask.create({
+      ...task,
+      Request: Buffer.from(task.Request),
+      Response: Buffer.from(task.Response),
+    });
+  });
   readonly cancelBeaconTask = vi.fn(async (taskId: string) => {
     const task = [...this.taskState.values()].flat().find((candidate) => candidate.ID === taskId);
     if (!task) throw new Error("unknown fake task");
@@ -9392,6 +9408,7 @@ class FakeSliverClient {
     closeSession: this.closeSession,
     getBeaconTasks: this.getBeaconTasks,
     fetchBeaconTask: this.fetchBeaconTask,
+    fetchBofBeaconTask: this.fetchBofBeaconTask,
     cancelBeaconTask: this.cancelBeaconTask,
     rmBeacon: this.rmBeacon,
     startMTLSListener: this.startMTLSListener,
