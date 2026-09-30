@@ -646,6 +646,63 @@ describe("BOF execution records", () => {
     expect(client.fetchBofBeaconTask).toHaveBeenCalledTimes(1);
   });
 
+  it("dispatches a capable Reflektor beacon BOF directly despite its loader fallback", async () => {
+    const bofDirectory = join(root, "extensions", "direct-bof");
+    const loaderDirectory = join(root, "extensions", "coff-loader");
+    await mkdir(bofDirectory, { recursive: true });
+    await mkdir(loaderDirectory, { recursive: true });
+    await writeFile(join(bofDirectory, "direct.o"), Buffer.from("DIRECT-BOF"));
+    await writeFile(join(bofDirectory, "extension.json"), JSON.stringify({
+      name: "Direct BOF", command_name: "direct-bof", entrypoint: "go", help: "fixture",
+      bof_executor: "reflektor", depends_on: "coff-loader",
+      files: [{ os: "windows", arch: "amd64", path: "direct.o" }],
+    }));
+    await writeFile(join(loaderDirectory, "loader.dll"), Buffer.from("LEGACY-LOADER"));
+    await writeFile(join(loaderDirectory, "extension.json"), JSON.stringify({
+      name: "COFF Loader", command_name: "coff-loader", entrypoint: "LoadAndRun", help: "fixture",
+      files: [{ os: "windows", arch: "amd64", path: "loader.dll" }],
+    }));
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [clientpb.Beacon.create({
+      ...beacon("beacon_bof_reflektor", "reflektor"), OS: "windows", Arch: "amd64", Capabilities: "1",
+    })];
+    const calls: Array<{ targetId: string; object: Buffer; argumentsBuffer: Buffer; entrypoint: string; timeoutSeconds: number }> = [];
+    client.adapter.callBofBeacon = vi.fn(async (targetId, object, argumentsBuffer, entrypoint, timeoutSeconds) => {
+      calls.push({ targetId, object: Buffer.from(object), argumentsBuffer: Buffer.from(argumentsBuffer), entrypoint, timeoutSeconds });
+      return sliverpb.CallExtension.create({
+        Response: { Async: true, BeaconID: targetId, TaskID: "direct-bof-task", Err: "" },
+      });
+    });
+    client.adapter.registerBofLoaderBeacon = vi.fn(async () => sliverpb.RegisterExtension.create({
+      Response: { Async: true, BeaconID: "beacon_bof_reflektor", TaskID: "register-task", Err: "" },
+    }));
+    client.adapter.callLegacyBofBeacon = vi.fn(async () => sliverpb.CallExtension.create({
+      Response: { Async: true, BeaconID: "beacon_bof_reflektor", TaskID: "legacy-bof-task", Err: "" },
+    }));
+    const registry = new ConnectionRegistry({
+      savedConfigDirectory: externalDirectory, managedConfigDirectory: managedDirectory,
+      clientRootDirectory: root, clientFactory: () => client.adapter,
+    });
+    registries.push(registry);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await selectOnlyBeacon(registry, 1);
+
+    const catalog = await registry.listInstalledBofs(1);
+    expect(catalog).toMatchObject({ ok: true, value: { commands: [expect.objectContaining({
+      id: "direct-bof/direct-bof", available: true,
+    })] } });
+    const executed = await registry.runBof(1, {
+      commandId: "direct-bof/direct-bof", arguments: [], timeoutSeconds: 60,
+    });
+    expect(executed).toMatchObject({ ok: true, value: { state: "submitted", taskId: "direct-bof-task" } });
+    expect(client.adapter.callBofBeacon).toHaveBeenCalledOnce();
+    expect(client.adapter.registerBofLoaderBeacon).not.toHaveBeenCalled();
+    expect(client.adapter.callLegacyBofBeacon).not.toHaveBeenCalled();
+    expect(calls).toEqual([{ targetId: "beacon_bof_reflektor", object: Buffer.from("DIRECT-BOF"),
+      argumentsBuffer: Buffer.alloc(4), entrypoint: "go", timeoutSeconds: 60 }]);
+  });
+
   it("queues a legacy beacon BOF after loader registration is accepted without waiting for a check-in", async () => {
     const bofDirectory = join(root, "extensions", "legacy-bof");
     const loaderDirectory = join(root, "extensions", "coff-loader");

@@ -84,6 +84,17 @@ describe("installed BOF selection", () => {
       .toMatchObject({ available: true, arguments: [{ name: "domain.fqdn", type: "wstring" }] });
     expect(available.entries.find((item) => item.dto.id === "legacy-probe/legacy-probe"))
       .toMatchObject({ mode: "coff-loader", dependencyName: "coff-loader" });
+
+    // The current Sliver client keeps dependency-only manifests on the legacy
+    // route even when the implant advertises built-in BOF execution.
+    await writeFile(join(bofDirectory, "extension.json"), JSON.stringify({
+      name: "Legacy Probe", command_name: "legacy-probe", help: "legacy fixture",
+      depends_on: "coff-loader", entrypoint: "go",
+      files: [{ os: "windows", arch: "amd64", path: "probe.o" }],
+    }));
+    const capable = await installedBofCommands(root, target, ref, true);
+    expect(capable.entries.find((item) => item.dto.id === "legacy-probe/legacy-probe"))
+      .toMatchObject({ mode: "coff-loader", dependencyName: "coff-loader" });
   });
 });
 

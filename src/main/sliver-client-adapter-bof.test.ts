@@ -5,8 +5,9 @@ import { adaptSliverClient, BOF_TASK_RESPONSE_MAX_BYTES } from "./sliver-client-
 
 describe("narrow BOF adapter", () => {
   it("forms a fixed built-in BOF request for sessions and beacons", async () => {
+    const registerExtension = vi.fn(async () => sliverpb.RegisterExtension.create({}));
     const callExtension = vi.fn(async (_request: unknown, _options: unknown) => sliverpb.CallExtension.create({ Output: Buffer.from("ok") }));
-    const client = adaptSliverClient({ rpc: { callExtension } } as unknown as SliverClient);
+    const client = adaptSliverClient({ rpc: { registerExtension, callExtension } } as unknown as SliverClient);
     const object = Buffer.from("fixture BOF object");
     const args = Buffer.from([0, 0, 0, 0]);
     const digest = createHash("sha256").update(object).digest("hex");
@@ -14,6 +15,7 @@ describe("narrow BOF adapter", () => {
     await client.callBofSession("session-1", object, args, "go", 30);
     await client.callBofBeacon("beacon-1", object, args, "go", 45);
 
+    expect(registerExtension).not.toHaveBeenCalled();
     expect(callExtension).toHaveBeenCalledTimes(2);
     expect(callExtension.mock.calls[0]?.[0]).toMatchObject({
       Name: digest, BOFData: object, Args: args, Export: "go", IsBOF: true,

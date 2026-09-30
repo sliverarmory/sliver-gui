@@ -200,6 +200,8 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
       argumentsHex: packedArguments([stringArgument("/tmp/beacon-BOF"), shortArgument(0)]).toString("hex"),
       entrypoint: "go", timeoutSeconds: 60,
     });
+    assert.deepEqual(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.legacyBofCalls), [],
+      "a built-in BOF must not register or invoke the legacy loader");
     assert.deepEqual(rendererErrors, []);
   } finally {
     await application?.close().catch(() => undefined);
@@ -546,6 +548,7 @@ async function writeBofFixture(root: string, name: string, objectName: string, m
       help: `E2E ${name} manifest fixture`,
       entrypoint: "go",
       bof_executor: "reflektor",
+      depends_on: "coff-loader",
       files: [{ os: "darwin", arch: "arm64", path: `/${artifact}` }],
       arguments: args,
     }],
