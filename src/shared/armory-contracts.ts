@@ -74,6 +74,19 @@ export interface ArmorySnapshot {
   readonly warnings: readonly string[];
 }
 
+/** Archive transfer progress for a single Armory install operation. Package totals may grow as signed dependencies are discovered. */
+export interface ArmoryProgress {
+  readonly operation: "install" | "install-bundle" | "update-all";
+  readonly phase: "preparing" | "downloading" | "verifying" | "installing";
+  readonly packageName: string | null;
+  readonly completedPackages: number;
+  readonly totalPackages: number;
+  readonly downloadedBytes: number;
+  readonly currentBytes: number;
+  readonly currentTotalBytes: number | null;
+  readonly bytesPerSecond: number;
+}
+
 export interface ArmoryInstallInput {
   readonly packageId: string;
   readonly replace?: boolean;
@@ -109,6 +122,7 @@ export interface ArmoryAPI {
   getContext(): Promise<OperationResult<{ readonly tab: ArmoryTabId }>>;
   snapshot(): Promise<OperationResult<ArmorySnapshot>>;
   refreshCatalog(): Promise<OperationResult<ArmorySnapshot>>;
+  updateAll(): Promise<OperationResult<ArmorySnapshot>>;
   install(input: ArmoryInstallInput): Promise<OperationResult<ArmorySnapshot>>;
   installBundle(input: ArmoryInstallBundleInput): Promise<OperationResult<ArmorySnapshot>>;
   uninstall(input: ArmoryUninstallInput): Promise<OperationResult<ArmorySnapshot>>;
@@ -119,6 +133,7 @@ export interface ArmoryAPI {
   openRepository(input: ArmoryOpenRepositoryInput): Promise<OperationResult>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   onChanged(listener: () => void): () => void;
+  onProgress(listener: (progress: ArmoryProgress) => void): () => void;
   onNavigationRequested(listener: (tab: ArmoryTabId) => void): () => void;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
 }
@@ -127,6 +142,7 @@ export const ARMORY_IPC_INVOKE = Object.freeze({
   getContext: "sliver:armory:context:get",
   snapshot: "sliver:armory:snapshot",
   refreshCatalog: "sliver:armory:catalog:refresh",
+  updateAll: "sliver:armory:update-all",
   install: "sliver:armory:install",
   installBundle: "sliver:armory:bundle:install",
   uninstall: "sliver:armory:uninstall",
@@ -139,6 +155,7 @@ export const ARMORY_IPC_INVOKE = Object.freeze({
 });
 export const ARMORY_IPC_EVENTS = Object.freeze({
   changed: "sliver:armory:changed",
+  progress: "sliver:armory:progress",
   navigationRequested: "sliver:armory:navigation-requested",
 });
 

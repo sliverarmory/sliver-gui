@@ -7,6 +7,7 @@ import {
   ARMORY_IPC_EVENTS,
   ARMORY_IPC_INVOKE,
   type ArmoryAPI,
+  type ArmoryProgress,
 } from "../shared/armory-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
@@ -40,8 +41,8 @@ describe("Armory preload", () => {
     ]);
     expect(Object.isFrozen(api)).toBe(true);
     expect(Object.keys(api)).toEqual([
-      "getContext", "snapshot", "refreshCatalog", "install", "installBundle", "uninstall", "saveSource",
-      "removeSource", "installLocal", "copyPublicKey", "openRepository", "getApplicationSettings", "onChanged", "onNavigationRequested", "onApplicationSettingsChanged",
+      "getContext", "snapshot", "refreshCatalog", "updateAll", "install", "installBundle", "uninstall", "saveSource",
+      "removeSource", "installLocal", "copyPublicKey", "openRepository", "getApplicationSettings", "onChanged", "onProgress", "onNavigationRequested", "onApplicationSettingsChanged",
     ]);
     for (const key of ["ipcRenderer", "invoke", "send", "rpc", "execute", "session", "beacon", "readFile", "writeFile"]) {
       expect(api).not.toHaveProperty(key);
@@ -61,6 +62,7 @@ describe("Armory preload", () => {
     await api.getContext();
     await api.snapshot();
     await api.refreshCatalog();
+    await api.updateAll();
     await api.install(install);
     await api.installBundle(bundle);
     await api.uninstall(uninstall);
@@ -71,7 +73,7 @@ describe("Armory preload", () => {
     await api.openRepository(repository);
     await api.getApplicationSettings();
     expect(electronMocks.invoke.mock.calls).toEqual([
-      [ARMORY_IPC_INVOKE.getContext], [ARMORY_IPC_INVOKE.snapshot], [ARMORY_IPC_INVOKE.refreshCatalog],
+      [ARMORY_IPC_INVOKE.getContext], [ARMORY_IPC_INVOKE.snapshot], [ARMORY_IPC_INVOKE.refreshCatalog], [ARMORY_IPC_INVOKE.updateAll],
       [ARMORY_IPC_INVOKE.install, install], [ARMORY_IPC_INVOKE.installBundle, bundle], [ARMORY_IPC_INVOKE.uninstall, uninstall],
       [ARMORY_IPC_INVOKE.saveSource, source], [ARMORY_IPC_INVOKE.removeSource, remove],
       [ARMORY_IPC_INVOKE.installLocal, local], [ARMORY_IPC_INVOKE.copyPublicKey, publicKey],
@@ -145,9 +147,31 @@ describe("Armory preload", () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith("sliver:application-settings:changed", settingsChanged);
   });
 
+  it("delivers only bounded, internally consistent progress events and removes its listener", () => {
+    const listener = vi.fn();
+    const unsubscribe = exposedApi().onProgress(listener);
+    const handler = eventHandler(ARMORY_IPC_EVENTS.progress);
+    const valid: ArmoryProgress = { operation: "update-all", phase: "downloading", packageName: "Package", completedPackages: 1,
+      totalPackages: 3, downloadedBytes: 1024, currentBytes: 256, currentTotalBytes: 512, bytesPerSecond: 4096 };
+    handler({}, valid);
+    expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
+    for (const invalid of [
+      { ...valid, operation: "execute" }, { ...valid, phase: "finished" },
+      { ...valid, packageName: "x\nsecret" }, { ...valid, packageName: "x".repeat(257) },
+      { ...valid, completedPackages: 4 }, { ...valid, totalPackages: -1 },
+      { ...valid, downloadedBytes: Number.NaN }, { ...valid, currentBytes: 2048 },
+      { ...valid, currentTotalBytes: 100 }, { ...valid, bytesPerSecond: 1.5 },
+      { ...valid, downloadUrl: "https://private.example" },
+    ]) handler({}, invalid);
+    handler({}, valid, "extra");
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(ARMORY_IPC_EVENTS.progress, handler);
+  });
+
   it("rejects non-function subscription arguments", () => {
     const api = exposedApi();
-    for (const subscribe of [api.onChanged, api.onNavigationRequested, api.onApplicationSettingsChanged]) {
+    for (const subscribe of [api.onChanged, api.onProgress, api.onNavigationRequested, api.onApplicationSettingsChanged]) {
       expect(() => (subscribe as (listener: unknown) => unknown)(null)).toThrow(TypeError);
     }
   });

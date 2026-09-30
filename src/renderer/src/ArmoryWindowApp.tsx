@@ -8,6 +8,7 @@ import {
   Label,
   Link,
   Modal,
+  ProgressBar,
   ScrollShadow,
   SearchField,
   Spinner,
@@ -37,6 +38,7 @@ import type {
   ArmoryPackage,
   ArmoryPackageKind,
   ArmoryPackageTarget,
+  ArmoryProgress,
   ArmorySaveSourceInput,
   ArmorySnapshot,
   ArmorySource,
@@ -48,6 +50,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { Field } from "./components/FormControls";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { ArmoryPlatformBadges } from "./components/ArmoryPlatformBadges";
+import { formatBytes } from "./components/ReleaseDownloadToasts";
 import { armoryArchitectureLabel, armoryOperatingSystemLabel, armoryTargetOptions, matchesArmoryPlatform } from "./armory-platforms";
 
 type PackageFilter = "all" | ArmoryPackageKind | "bundle";
@@ -71,6 +74,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<ArmorySnapshot>();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string>();
+  const [progress, setProgress] = useState<ArmoryProgress | null>(null);
   const [error, setError] = useState<string>();
   const [loadError, setLoadError] = useState<string>();
   const [query, setQuery] = useState("");
@@ -83,6 +87,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const [detail, setDetail] = useState<Detail>();
   const loadGeneration = useRef(0);
   const busyRef = useRef(false);
+  const activeProgressOperation = useRef<ArmoryProgress["operation"] | null>(null);
   const mounted = useRef(false);
   const refreshAfterOperation = useRef(false);
   const autoRefreshed = useRef(false);
@@ -116,11 +121,13 @@ export function ArmoryWindowApp(): React.JSX.Element {
     }
   }, [api]);
 
-  const perform = useCallback(async (label: string, operation: Operation, success?: string): Promise<boolean> => {
+  const perform = useCallback(async (label: string, operation: Operation, success?: string, progressOperation?: ArmoryProgress["operation"]): Promise<boolean> => {
     if (busyRef.current) return false;
     busyRef.current = true;
+    activeProgressOperation.current = progressOperation ?? null;
     ++loadGeneration.current;
     setBusy(label);
+    setProgress(null);
     setError(undefined);
     try {
       const result = await operation();
@@ -142,8 +149,10 @@ export function ArmoryWindowApp(): React.JSX.Element {
       return false;
     } finally {
       busyRef.current = false;
+      activeProgressOperation.current = null;
       if (mounted.current) {
         setBusy(undefined);
+        setProgress(null);
         setLoading(false);
         if (refreshAfterOperation.current) {
           refreshAfterOperation.current = false;
@@ -167,6 +176,9 @@ export function ArmoryWindowApp(): React.JSX.Element {
       setTab(next);
     });
     const unsubscribeChanged = api.onChanged(() => { void refresh(); });
+    const unsubscribeProgress = api.onProgress((event) => {
+      if (mounted.current && busyRef.current && activeProgressOperation.current === event.operation) setProgress(event);
+    });
     const onFocus = (): void => { void refresh(); };
     window.addEventListener("focus", onFocus);
     // The console writes these directories independently of this process.
@@ -184,9 +196,11 @@ export function ArmoryWindowApp(): React.JSX.Element {
     return () => {
       disposed = true;
       mounted.current = false;
+      activeProgressOperation.current = null;
       ++loadGeneration.current;
       unsubscribeNavigation();
       unsubscribeChanged();
+      unsubscribeProgress();
       window.removeEventListener("focus", onFocus);
       window.clearInterval(localRefreshTimer);
     };
@@ -207,6 +221,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
   const bundles = useMemo(() => (snapshot?.bundles ?? []).filter((item) =>
     !osFilter && !archFilter && (filter === "all" || filter === "bundle") &&
     searchMatches(query, item.name, item.sourceName, ...item.packageNames)), [snapshot, query, filter, osFilter, archFilter]);
+  const updatesAvailable = snapshot?.installed.some((item) => item.updateAvailable && item.packageId) ?? false;
   // ScrollShadow observes its viewport size, but result changes can alter only scrollHeight.
   // Remount changed result sets so its initial overflow check and shadow state stay current.
   const installedResultsKey = useMemo(() => JSON.stringify([
@@ -224,7 +239,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
     const updating = Boolean(item.installedId);
     void perform(updating ? `Updating ${item.name}` : `Installing ${item.name}`,
       () => api.install({ packageId: item.id, ...(updating ? { replace: true } : {}) }),
-      `${item.name} ${updating ? "updated" : "installed"}.`);
+      `${item.name} ${updating ? "updated" : "installed"}.`, "install");
   };
 
   const confirmRemoval = async (): Promise<boolean> => {
@@ -281,6 +296,11 @@ export function ArmoryWindowApp(): React.JSX.Element {
             <div className="flex min-h-0 flex-1 flex-col gap-3">
               <div className="shrink-0 space-y-2" data-testid="armory-manage-controls">
                 <SectionHeading title="Installed Packages" description="Aliases, extensions, and BOFs in your console's local package directories.">
+                  {updatesAvailable ? (
+                    <Button variant="primary" isDisabled={!api || Boolean(busy)} isPending={busy === "Updating All Packages"} onPress={() => { if (api) void perform("Updating All Packages", () => api.updateAll(), "Armory packages updated.", "update-all"); }}>
+                      Update All
+                    </Button>
+                  ) : null}
                   <Button variant="outline" isDisabled={!api || Boolean(busy) || !snapshot} onPress={() => { if (api) void perform("Checking for Updates", () => api.refreshCatalog(), "Package catalog refreshed."); }}>
                     Check for Updates
                   </Button>
@@ -340,7 +360,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
                         </Button>
                       </PackageRow>
                     ))}
-                    {bundles.map((item) => <BundleRow key={item.id} item={item} disabled={Boolean(busy)} onInstall={() => { if (api) void perform(`Installing ${item.name}`, () => api.installBundle({ bundleId: item.id }), `${item.name} installed.`); }} />)}
+                    {bundles.map((item) => <BundleRow key={item.id} item={item} disabled={Boolean(busy)} onInstall={() => { if (api) void perform(`Installing ${item.name}`, () => api.installBundle({ bundleId: item.id }), `${item.name} installed.`, "install-bundle"); }} />)}
                   </ul>
                 ) : (
                   <PackageEmpty title={busy ? "Refreshing Package Catalog" : "No Packages Found"} description={busy ? "Fetching package information from your enabled sources." : query || filter !== "all" || osFilter || archFilter ? "Try another search or adjust the filters." : "Refresh the catalog or add an Armory source."}>
@@ -385,7 +405,7 @@ export function ArmoryWindowApp(): React.JSX.Element {
         {snapshot ? <footer className="shrink-0 truncate text-xs text-muted" title={snapshot.rootPath}>Shared directory: <span className="font-mono">{snapshot.rootPath}</span></footer> : null}
       </div>
 
-      {busy ? <div role="status" className="fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-full bg-overlay px-5 py-3 text-sm text-overlay-foreground shadow-overlay"><Spinner size="sm" /><span className="truncate">{busy}…</span></div> : null}
+      {busy ? activeProgressOperation.current ? <ArmoryProgressCard label={busy} progress={progress} /> : <div role="status" className="fixed bottom-5 left-1/2 z-40 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-3 rounded-full bg-overlay px-5 py-3 text-sm text-overlay-foreground shadow-overlay"><Spinner size="sm" /><span className="truncate">{busy}…</span></div> : null}
       {sourceEditor && api ? <SourceEditor key={sourceEditor === "new" ? "new" : sourceEditor.id} source={sourceEditor === "new" ? undefined : sourceEditor} busy={Boolean(busy)} error={error} onClose={() => setSourceEditor(undefined)} onSave={async (input) => {
         const saved = await perform("Saving Source", () => api.saveSource(input), "Armory source saved.");
         if (saved) setSourceEditor(undefined);
@@ -399,6 +419,61 @@ export function ArmoryWindowApp(): React.JSX.Element {
       {detail ? <PackageDetails detail={detail} onClose={() => setDetail(undefined)} /> : null}
       <ConfirmDialog isOpen={Boolean(removal)} title={`Remove ${removal?.value.name ?? "package"}?`} description={`${removalDescription}${error ? ` ${error}` : ""}`} confirmLabel="Remove" isPending={Boolean(busy)} onOpenChange={(open) => { if (!open && !busyRef.current) setRemoval(undefined); }} onConfirm={confirmRemoval} />
     </AuxiliaryWindowFrame>
+  );
+}
+
+function ArmoryProgressCard({ label, progress }: { readonly label: string; readonly progress: ArmoryProgress | null }): React.JSX.Element {
+  const phaseLabel = progress?.phase === "downloading" ? "Downloading"
+    : progress?.phase === "verifying" ? "Verifying package"
+      : progress?.phase === "installing" ? "Installing" : "Preparing";
+  const packageCount = progress && progress.totalPackages > 0
+    ? `${progress.completedPackages} of ${progress.totalPackages}`
+    : "Finding packages";
+  const downloading = progress?.phase === "downloading";
+  const knownTotal = downloading && progress.currentTotalBytes !== null && progress.currentTotalBytes > 0
+    ? progress.currentTotalBytes : null;
+  const downloadIndeterminate = downloading && knownTotal === null;
+  const downloadPercentage = progress?.phase === "verifying" ? 100
+    : knownTotal === null || !progress ? 0 : Math.min(100, (progress.currentBytes / knownTotal) * 100);
+  const downloadDetail = downloading && progress
+    ? knownTotal === null ? `${formatBytes(progress.currentBytes)} · total unknown`
+      : `${formatBytes(progress.currentBytes)} / ${formatBytes(knownTotal)} · ${Math.round(downloadPercentage)}%`
+    : progress?.phase === "verifying"
+      ? progress.currentTotalBytes === null ? `${formatBytes(progress.currentBytes)} · complete`
+        : `${formatBytes(progress.currentBytes)} / ${formatBytes(progress.currentTotalBytes)} · 100%`
+      : progress?.phase === "installing" ? "No active download" : "Waiting for download";
+
+  return (
+    <div aria-label={`${label} progress`} className="fixed bottom-5 left-1/2 z-40 h-48 w-[28rem] max-w-[calc(100%-2rem)] -translate-x-1/2 rounded-2xl bg-overlay px-5 py-4 text-sm text-overlay-foreground shadow-overlay" role="region">
+      <p className="truncate font-medium">{label}…</p>
+      <p aria-atomic="true" aria-live="polite" className="mt-1 truncate text-xs" role="status">
+        {phaseLabel}{progress?.packageName ? ` ${progress.packageName}` : ""}
+      </p>
+      <div className="mt-3 space-y-3">
+        <div className="space-y-1">
+          <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs">
+            <span className="truncate">Packages processed</span>
+            <span aria-atomic="true" aria-live="polite" className="tabular-nums">{packageCount}</span>
+          </div>
+          <ProgressBar aria-label={`${label} packages processed`} maxValue={Math.max(progress?.totalPackages ?? 0, 1)} size="sm" value={progress?.completedPackages ?? 0}>
+            <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
+          </ProgressBar>
+        </div>
+        <div className="space-y-1">
+          <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-3 text-xs">
+            <span>Current download</span>
+            <span className="truncate text-right tabular-nums" title={downloadDetail}>{downloadDetail}</span>
+          </div>
+          <ProgressBar aria-label={`${label} current download`} isIndeterminate={downloadIndeterminate} maxValue={100} size="sm" value={downloadPercentage}>
+            <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
+          </ProgressBar>
+        </div>
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs tabular-nums">
+          <span className="truncate" title={`Archive bytes downloaded: ${formatBytes(progress?.downloadedBytes ?? 0)}`}>Archive bytes downloaded: {formatBytes(progress?.downloadedBytes ?? 0)}</span>
+          <span className="w-24 text-right">{downloading && progress ? `${formatBytes(progress.bytesPerSecond)}/s` : "—"}</span>
+        </div>
+      </div>
+    </div>
   );
 }
 

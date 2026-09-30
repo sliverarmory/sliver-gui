@@ -4,7 +4,7 @@ import type { BrowserWindow, IpcMainInvokeEvent, WebContents, WebFrameMain } fro
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
-import { ARMORY_IPC_INVOKE, type ArmorySnapshot } from "../shared/armory-contracts.js";
+import { ARMORY_IPC_EVENTS, ARMORY_IPC_INVOKE, type ArmoryProgress, type ArmorySnapshot } from "../shared/armory-contracts.js";
 import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers, type ArmoryIpcServices } from "./armory-ipc.js";
 import type { TrustedWindowIdentity } from "./ipc.js";
 
@@ -27,9 +27,11 @@ const SNAPSHOT: ArmorySnapshot = {
   rootPath: "/operator/.sliver-client", sources: [], installed: [], packages: [], bundles: [],
   refreshedAt: null, warnings: [],
 };
-const currentWindow = { isDestroyed: vi.fn(() => false) } as unknown as BrowserWindow;
+const currentWindow = { isDestroyed: vi.fn(() => false), webContents: { isDestroyed: vi.fn(() => false), send: vi.fn() } } as unknown as BrowserWindow;
 const IDENTITY: TrustedWindowIdentity = { contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" };
 const CANONICAL_PUBLIC_KEY = Buffer.concat([Buffer.from("Ed", "ascii"), Buffer.alloc(40, 0x2a)]).toString("base64");
+const PROGRESS: ArmoryProgress = { operation: "install", phase: "downloading", packageName: "Package", completedPackages: 0,
+  totalPackages: 1, downloadedBytes: 32, currentBytes: 32, currentTotalBytes: null, bytesPerSecond: 128 };
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -40,6 +42,7 @@ beforeEach(() => {
   electronMocks.removeHandler.mockImplementation((channel: string) => electronMocks.handlers.delete(channel));
   electronMocks.fromWebContents.mockReturnValue(currentWindow);
   vi.mocked(currentWindow.isDestroyed).mockReturnValue(false);
+  vi.mocked(currentWindow.webContents.isDestroyed).mockReturnValue(false);
 });
 
 afterEach(() => unregisterArmoryIpcHandlers());
@@ -61,6 +64,7 @@ describe("Armory IPC boundary", () => {
     const { event } = invokeEvent();
     const requests = [
       [ARMORY_IPC_INVOKE.refreshCatalog, []],
+      [ARMORY_IPC_INVOKE.updateAll, []],
       [ARMORY_IPC_INVOKE.install, [{ packageId: "package", replace: false }]],
       [ARMORY_IPC_INVOKE.installBundle, [{ bundleId: "bundle", replace: true }]],
       [ARMORY_IPC_INVOKE.uninstall, [{ installedId: "installed" }]],
@@ -71,13 +75,58 @@ describe("Armory IPC boundary", () => {
     await expect(invoke(ARMORY_IPC_INVOKE.snapshot, event)).resolves.toEqual({ ok: true, value: SNAPSHOT });
     await expect(invoke(ARMORY_IPC_INVOKE.getApplicationSettings, event)).resolves.toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
     for (const [channel, args] of requests) await expect(invoke(channel, event, ...args)).resolves.toEqual({ ok: true, value: SNAPSHOT });
-    expect(services.manager.install).toHaveBeenCalledExactlyOnceWith({ packageId: "package", replace: false });
-    expect(services.manager.installBundle).toHaveBeenCalledExactlyOnceWith({ bundleId: "bundle", replace: true });
+    expect(services.manager.updateAll).toHaveBeenCalledExactlyOnceWith(expect.any(Function));
+    expect(services.manager.install).toHaveBeenCalledExactlyOnceWith({ packageId: "package", replace: false }, expect.any(Function));
+    expect(services.manager.installBundle).toHaveBeenCalledExactlyOnceWith({ bundleId: "bundle", replace: true }, expect.any(Function));
     expect(services.manager.uninstall).toHaveBeenCalledExactlyOnceWith({ installedId: "installed" });
-    expect(services.manager.saveSource).toHaveBeenCalledExactlyOnceWith(requests[4][1][0]);
+    expect(services.manager.saveSource).toHaveBeenCalledExactlyOnceWith(requests[5][1][0]);
     expect(services.manager.removeSource).toHaveBeenCalledExactlyOnceWith({ sourceId: "source" });
-    expect(services.changed).toHaveBeenCalledTimes(6);
+    expect(services.changed).toHaveBeenCalledTimes(7);
     expect(authorize).toHaveBeenCalledWith(IDENTITY, currentWindow);
+  });
+
+  it("sends progress only to the invoking trusted Armory window while its operation is active", async () => {
+    const services = servicesMock();
+    let notify: ((event: ArmoryProgress) => void) | undefined;
+    services.manager.install.mockImplementationOnce(async (_input, progress) => {
+      notify = progress;
+      progress?.(PROGRESS);
+      return SNAPSHOT;
+    });
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    await expect(invoke(ARMORY_IPC_INVOKE.install, invokeEvent().event, { packageId: "package" }))
+      .resolves.toMatchObject({ ok: true });
+    expect(currentWindow.webContents.send).toHaveBeenCalledExactlyOnceWith(ARMORY_IPC_EVENTS.progress, PROGRESS);
+    notify?.(PROGRESS);
+    expect(currentWindow.webContents.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops progress after trust revocation, navigation, or window closure without failing the download", async () => {
+    const services = servicesMock();
+    const authorize = vi.fn(authorizeCurrentWindow);
+    const pending = deferred<ArmorySnapshot>();
+    let notify: ((event: ArmoryProgress) => void) | undefined;
+    services.manager.updateAll.mockImplementationOnce(async (progress) => {
+      notify = progress;
+      return pending.promise;
+    });
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorize);
+    const fixture = invokeEvent();
+    const running = invoke(ARMORY_IPC_INVOKE.updateAll, fixture.event);
+    const event = { ...PROGRESS, operation: "update-all" as const };
+    notify?.(event);
+    expect(currentWindow.webContents.send).toHaveBeenCalledExactlyOnceWith(ARMORY_IPC_EVENTS.progress, event);
+    authorize.mockReturnValue(false);
+    notify?.(event);
+    authorize.mockImplementation(authorizeCurrentWindow);
+    fixture.sender.getURL = () => "sliver://app/index.html?surface=other";
+    notify?.(event);
+    fixture.sender.getURL = () => RENDERER_URL;
+    vi.mocked(currentWindow.webContents.isDestroyed).mockReturnValue(true);
+    notify?.(event);
+    expect(currentWindow.webContents.send).toHaveBeenCalledTimes(1);
+    pending.resolve(SNAPSHOT);
+    await expect(running).resolves.toMatchObject({ ok: true });
   });
 
   it("copies a validated public key from the trusted Armory main frame without publishing a mutation", async () => {
@@ -247,6 +296,7 @@ describe("Armory IPC boundary", () => {
     const malformed: ReadonlyArray<readonly [string, readonly unknown[]]> = [
       [ARMORY_IPC_INVOKE.getContext, [null]], [ARMORY_IPC_INVOKE.snapshot, [{}]],
       [ARMORY_IPC_INVOKE.refreshCatalog, [{ ignoreSignatures: true }]],
+      [ARMORY_IPC_INVOKE.updateAll, [{ packageIds: ["package"] }]],
       [ARMORY_IPC_INVOKE.install, []], [ARMORY_IPC_INVOKE.install, [{ packageId: "package" }, "extra"]],
       [ARMORY_IPC_INVOKE.install, [{ packageId: "package", sessionId: "session" }]],
       [ARMORY_IPC_INVOKE.installBundle, [{ bundleId: "bundle", replace: "true" }]],
@@ -360,6 +410,8 @@ describe("Armory IPC boundary", () => {
       .resolves.toEqual({ ok: false, error: "Another Armory operation is in progress" });
     await expect(invoke(ARMORY_IPC_INVOKE.refreshCatalog, event))
       .resolves.toEqual({ ok: false, error: "Another Armory operation is in progress" });
+    await expect(invoke(ARMORY_IPC_INVOKE.updateAll, event))
+      .resolves.toEqual({ ok: false, error: "Another Armory operation is in progress" });
     await expect(invoke(ARMORY_IPC_INVOKE.snapshot, event)).resolves.toMatchObject({ ok: true });
     expect(services.manager.uninstall).not.toHaveBeenCalled();
     pending.reject(new Error("The package signature is invalid"));
@@ -375,7 +427,9 @@ function servicesMock() {
   return {
     manager: {
       snapshot: vi.fn(async () => SNAPSHOT), refreshCatalog: vi.fn(async () => SNAPSHOT),
-      install: vi.fn(async (_input: unknown) => SNAPSHOT), installBundle: vi.fn(async (_input: unknown) => SNAPSHOT),
+      updateAll: vi.fn(async (_progress?: (event: ArmoryProgress) => void) => SNAPSHOT),
+      install: vi.fn(async (_input: unknown, _progress?: (event: ArmoryProgress) => void) => SNAPSHOT),
+      installBundle: vi.fn(async (_input: unknown, _progress?: (event: ArmoryProgress) => void) => SNAPSHOT),
       uninstall: vi.fn(async (_input: unknown) => SNAPSHOT), saveSource: vi.fn(async (_input: unknown) => SNAPSHOT),
       removeSource: vi.fn(async (_input: unknown) => SNAPSHOT), installLocal: vi.fn(async (_input: unknown) => SNAPSHOT),
     },

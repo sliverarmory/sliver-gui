@@ -1,6 +1,7 @@
 import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import {
+  ARMORY_IPC_EVENTS,
   ARMORY_IPC_INVOKE,
   parseArmoryChooseLocalInput,
   parseArmoryCopyPublicKeyInput,
@@ -11,6 +12,7 @@ import {
   parseArmorySaveSourceInput,
   parseArmoryUninstallInput,
   type ArmoryTabId,
+  type ArmoryProgress,
 } from "../shared/armory-contracts.js";
 import type { ArmoryService } from "./armory-service.js";
 import { normalizeArmoryPublicKey } from "./armory-signature.js";
@@ -19,7 +21,7 @@ import { isSameRendererDocument } from "./security.js";
 import { externalWebHref } from "./external-web-url.js";
 
 export interface ArmoryIpcServices {
-  readonly manager: Pick<ArmoryService, "snapshot" | "refreshCatalog" | "install" | "installBundle" | "uninstall" | "saveSource" | "removeSource" | "installLocal">;
+  readonly manager: Pick<ArmoryService, "snapshot" | "refreshCatalog" | "updateAll" | "install" | "installBundle" | "uninstall" | "saveSource" | "removeSource" | "installLocal">;
   readonly getTab: () => ArmoryTabId;
   readonly getApplicationSettings: () => ApplicationSettingsState;
   readonly changed: () => void;
@@ -43,6 +45,19 @@ export function registerArmoryIpcHandlers(
       throw new Error("Untrusted Armory renderer");
     }
     return window;
+  }
+  async function withProgress<T>(window: BrowserWindow, event: IpcMainInvokeEvent,
+    action: (notify: (progress: ArmoryProgress) => void) => Promise<T>): Promise<T> {
+    let active = true;
+    try {
+      return await action((progress) => {
+        if (!active) return;
+        try {
+          if (trustedWindow(event) !== window || window.webContents.isDestroyed()) return;
+          window.webContents.send(ARMORY_IPC_EVENTS.progress, progress);
+        } catch { /* A closed or navigated renderer does not affect the install. */ }
+      });
+    } finally { active = false; }
   }
   function handle<T>(channel: string, parse: (args: unknown[]) => T, action: (input: T, window: BrowserWindow, event: IpcMainInvokeEvent) => unknown, mutation = false, emptyResult = false): void {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -68,8 +83,9 @@ export function registerArmoryIpcHandlers(
   handle(ARMORY_IPC_INVOKE.getContext, none, () => ({ tab: services.getTab() }));
   handle(ARMORY_IPC_INVOKE.snapshot, none, () => services.manager.snapshot());
   handle(ARMORY_IPC_INVOKE.refreshCatalog, none, () => services.manager.refreshCatalog(), true);
-  handle(ARMORY_IPC_INVOKE.install, one(parseArmoryInstallInput), (input) => services.manager.install(input), true);
-  handle(ARMORY_IPC_INVOKE.installBundle, one(parseArmoryInstallBundleInput), (input) => services.manager.installBundle(input), true);
+  handle(ARMORY_IPC_INVOKE.updateAll, none, (_input, window, event) => withProgress(window, event, (notify) => services.manager.updateAll(notify)), true);
+  handle(ARMORY_IPC_INVOKE.install, one(parseArmoryInstallInput), (input, window, event) => withProgress(window, event, (notify) => services.manager.install(input, notify)), true);
+  handle(ARMORY_IPC_INVOKE.installBundle, one(parseArmoryInstallBundleInput), (input, window, event) => withProgress(window, event, (notify) => services.manager.installBundle(input, notify)), true);
   handle(ARMORY_IPC_INVOKE.uninstall, one(parseArmoryUninstallInput), (input) => services.manager.uninstall(input), true);
   handle(ARMORY_IPC_INVOKE.saveSource, one(parseArmorySaveSourceInput), (input) => services.manager.saveSource(input), true);
   handle(ARMORY_IPC_INVOKE.removeSource, one(parseArmoryRemoveSourceInput), (input) => services.manager.removeSource(input), true);

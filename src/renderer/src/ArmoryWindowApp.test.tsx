@@ -4,7 +4,7 @@ import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
-import type { ArmoryAPI, ArmoryInstalledPackage, ArmoryPackage, ArmorySnapshot, ArmorySource, ArmoryTabId } from "../../shared/armory-contracts";
+import type { ArmoryAPI, ArmoryInstalledPackage, ArmoryPackage, ArmoryProgress, ArmorySnapshot, ArmorySource, ArmoryTabId } from "../../shared/armory-contracts";
 import type { OperationResult } from "../../shared/contracts";
 import { ArmoryWindowApp } from "./ArmoryWindowApp";
 
@@ -37,18 +37,21 @@ let currentSnapshot: ArmorySnapshot;
 let currentTab: ArmoryTabId;
 let changedListener: (() => void) | undefined;
 let navigationListener: ((tab: ArmoryTabId) => void) | undefined;
+let progressListener: ((progress: ArmoryProgress) => void) | undefined;
 const unsubscribeChanged = vi.fn();
 const unsubscribeNavigation = vi.fn();
+const unsubscribeProgress = vi.fn();
 const success = (): Promise<OperationResult<ArmorySnapshot>> => Promise.resolve({ ok: true, value: currentSnapshot });
 const api: ArmoryAPI = {
   getContext: vi.fn(async () => ({ ok: true as const, value: { tab: currentTab } })),
-  snapshot: vi.fn(success), refreshCatalog: vi.fn(success), install: vi.fn(success), installBundle: vi.fn(success),
+  snapshot: vi.fn(success), refreshCatalog: vi.fn(success), install: vi.fn(success), updateAll: vi.fn(success), installBundle: vi.fn(success),
   uninstall: vi.fn(success), saveSource: vi.fn(success), removeSource: vi.fn(success), installLocal: vi.fn(success),
   openRepository: vi.fn(async () => ({ ok: true as const })),
   copyPublicKey: vi.fn(async () => ({ ok: true as const })),
   getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
   onChanged: vi.fn((listener) => { changedListener = listener; return unsubscribeChanged; }),
   onNavigationRequested: vi.fn((listener) => { navigationListener = listener; return unsubscribeNavigation; }),
+  onProgress: vi.fn((listener) => { progressListener = listener; return unsubscribeProgress; }),
   onApplicationSettingsChanged: vi.fn(() => () => undefined),
 };
 
@@ -68,9 +71,10 @@ beforeEach(() => {
   currentTab = "manage";
   changedListener = undefined;
   navigationListener = undefined;
+  progressListener = undefined;
   vi.clearAllMocks();
   toast.clear();
-  for (const method of [api.snapshot, api.refreshCatalog, api.install, api.installBundle, api.uninstall, api.saveSource, api.removeSource, api.installLocal]) vi.mocked(method).mockImplementation(success);
+  for (const method of [api.snapshot, api.refreshCatalog, api.install, api.updateAll, api.installBundle, api.uninstall, api.saveSource, api.removeSource, api.installLocal]) vi.mocked(method).mockImplementation(success);
   vi.mocked(api.openRepository).mockResolvedValue({ ok: true });
   vi.mocked(api.copyPublicKey).mockResolvedValue({ ok: true });
   vi.mocked(api.getContext).mockImplementation(async () => ({ ok: true, value: { tab: currentTab } }));
@@ -86,6 +90,10 @@ afterEach(() => {
 
 function renderArmoryApp(): ReturnType<typeof render> {
   return render(<><ArmoryWindowApp /><Toast.Provider placement="bottom" maxVisibleToasts={4} /></>);
+}
+
+function emitProgress(progress: ArmoryProgress): void {
+  act(() => progressListener?.(progress));
 }
 
 describe("ArmoryWindowApp", () => {
@@ -339,6 +347,181 @@ describe("ArmoryWindowApp", () => {
     await user.click(await screen.findByRole("button", { name: "Update" }));
     expect(api.install).toHaveBeenCalledWith({ packageId: catalogPackage.id, replace: true });
     expect(await screen.findByText("Inventory updated.")).toBeInTheDocument();
+  });
+
+  it("offers Update All after discovering a linked update, even when filters hide it", async () => {
+    currentSnapshot = { ...baseline, installed: [{ ...installed, updateAvailable: false }] };
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await screen.findByRole("list", { name: "Installed packages" });
+    expect(screen.queryByRole("button", { name: "Update All" })).not.toBeInTheDocument();
+    vi.mocked(api.refreshCatalog).mockResolvedValueOnce({ ok: true, value: baseline });
+    await user.click(screen.getByRole("button", { name: "Check for Updates" }));
+    const updateAll = await screen.findByRole("button", { name: "Update All" });
+    expect(screen.getByTestId("armory-manage-controls")).toContainElement(updateAll);
+    await user.type(screen.getByRole("searchbox", { name: "Search packages" }), "no matching package");
+    expect(screen.getByRole("heading", { name: "No Matching Packages" })).toBeInTheDocument();
+    expect(updateAll).toBeInTheDocument();
+  });
+
+  it("runs one bulk update while disabling other operations and clears the action afterward", async () => {
+    const secondInstalled: ArmoryInstalledPackage = {
+      ...installed, id: "extensions/process-list", name: "Process List", kind: "bof", version: "1.0.0",
+      commandNames: ["process-list"], installPath: "/home/operator/.sliver-client/extensions/process-list",
+      packageId: bofPackage.id, updateAvailable: true,
+    };
+    currentSnapshot = { ...baseline, installed: [installed, secondInstalled], packages: [
+      catalogPackage, { ...bofPackage, installedId: secondInstalled.id, updateAvailable: true },
+    ] };
+    let finishUpdate: ((result: OperationResult<ArmorySnapshot>) => void) | undefined;
+    vi.mocked(api.updateAll).mockImplementationOnce(() => new Promise((resolve) => { finishUpdate = resolve; }));
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await screen.findByRole("list", { name: "Installed packages" });
+    await user.type(screen.getByRole("searchbox", { name: "Search packages" }), "Inventory");
+    await user.click(screen.getByRole("button", { name: "Update All" }));
+    expect(api.updateAll).toHaveBeenCalledOnce();
+    expect(api.install).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Check for Updates" })).toBeDisabled();
+    expect(screen.getByText("Updating All Packages…")).toBeInTheDocument();
+    await act(async () => finishUpdate?.({ ok: true, value: {
+      ...currentSnapshot,
+      installed: currentSnapshot.installed.map((item) => ({ ...item, version: "2.0.0", updateAvailable: false })),
+      packages: currentSnapshot.packages.map((item) => ({ ...item, updateAvailable: false })),
+    } }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Update All" })).not.toBeInTheDocument());
+    expect(await screen.findByText("Armory packages updated.")).toBeInTheDocument();
+    await user.clear(screen.getByRole("searchbox", { name: "Search packages" }));
+    expect(screen.getByRole("list", { name: "Installed packages" })).toHaveTextContent("Process List");
+    expect(screen.getByRole("list", { name: "Installed packages" })).toHaveTextContent("2.0.0");
+  });
+
+  it("streams single-package bytes and speed, then clears progress after installation", async () => {
+    currentTab = "install";
+    let finishInstall: ((result: OperationResult<ArmorySnapshot>) => void) | undefined;
+    vi.mocked(api.install).mockImplementationOnce(() => new Promise((resolve) => { finishInstall = resolve; }));
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Install Process List" }));
+
+    const card = screen.getByRole("region", { name: "Installing Process List progress" });
+    const packagesBar = within(card).getByRole("progressbar", { name: "Installing Process List packages processed" });
+    const downloadBar = within(card).getByRole("progressbar", { name: "Installing Process List current download" });
+    expect(card).toHaveClass("h-48");
+    expect(within(card).getByRole("status")).toHaveTextContent("Preparing");
+    expect(within(card).getByText("Finding packages")).toBeInTheDocument();
+    expect(within(card).getByText("Waiting for download")).toBeInTheDocument();
+    expect(packagesBar).toHaveAttribute("aria-valuenow", "0");
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "0");
+
+    emitProgress({
+      operation: "update-all", phase: "downloading", packageName: "Inventory", completedPackages: 0,
+      totalPackages: 2, downloadedBytes: 500, currentBytes: 500, currentTotalBytes: 1_000, bytesPerSecond: 1_000,
+    });
+    expect(within(card).getByRole("status")).toHaveTextContent("Preparing");
+
+    emitProgress({
+      operation: "install", phase: "downloading", packageName: "Process List", completedPackages: 0,
+      totalPackages: 1, downloadedBytes: 1_024, currentBytes: 1_024, currentTotalBytes: 4_096, bytesPerSecond: 2_048,
+    });
+    expect(within(card).getByRole("status")).toHaveTextContent("Downloading Process List");
+    expect(within(card).getByText("0 of 1")).toBeInTheDocument();
+    expect(within(card).getByText("Archive bytes downloaded: 1.0 KB")).toBeInTheDocument();
+    expect(within(card).getByText("2.0 KB/s")).toBeInTheDocument();
+    expect(within(card).getByText("1.0 KB / 4.0 KB · 25%")).toBeInTheDocument();
+    expect(packagesBar).toHaveAttribute("aria-valuenow", "0");
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "25");
+
+    emitProgress({
+      operation: "install", phase: "verifying", packageName: "Process List", completedPackages: 0,
+      totalPackages: 1, downloadedBytes: 4_096, currentBytes: 4_096, currentTotalBytes: 4_096, bytesPerSecond: 0,
+    });
+    expect(within(card).getByRole("status")).toHaveTextContent("Verifying package Process List");
+    expect(within(card).getByText("4.0 KB / 4.0 KB · 100%")).toBeInTheDocument();
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "100");
+
+    emitProgress({
+      operation: "install", phase: "installing", packageName: null, completedPackages: 1,
+      totalPackages: 1, downloadedBytes: 4_096, currentBytes: 0, currentTotalBytes: null, bytesPerSecond: 0,
+    });
+    expect(within(card).getByRole("status")).toHaveTextContent("Installing");
+    expect(within(card).getByText("1 of 1")).toBeInTheDocument();
+    expect(within(card).getByText("No active download")).toBeInTheDocument();
+    expect(packagesBar).toHaveAttribute("aria-valuenow", "1");
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "0");
+    expect(within(card).getByRole("progressbar", { name: "Installing Process List packages processed" })).toBe(packagesBar);
+    expect(within(card).getByRole("progressbar", { name: "Installing Process List current download" })).toBe(downloadBar);
+
+    await act(async () => finishInstall?.({ ok: true, value: currentSnapshot }));
+    expect(screen.queryByRole("region", { name: "Installing Process List progress" })).not.toBeInTheDocument();
+    emitProgress({
+      operation: "install", phase: "downloading", packageName: "Process List", completedPackages: 0,
+      totalPackages: 1, downloadedBytes: 1_024, currentBytes: 1_024, currentTotalBytes: 4_096, bytesPerSecond: 2_048,
+    });
+    expect(screen.queryByRole("region", { name: "Installing Process List progress" })).not.toBeInTheDocument();
+  });
+
+  it("shows bulk progress with an unknown package size across tabs and unsubscribes on unmount", async () => {
+    let finishUpdate: ((result: OperationResult<ArmorySnapshot>) => void) | undefined;
+    vi.mocked(api.updateAll).mockImplementationOnce(() => new Promise((resolve) => { finishUpdate = resolve; }));
+    const user = userEvent.setup();
+    const view = renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Update All" }));
+
+    emitProgress({
+      operation: "update-all", phase: "downloading", packageName: "Inventory", completedPackages: 1,
+      totalPackages: 2, downloadedBytes: 1_536, currentBytes: 512, currentTotalBytes: null, bytesPerSecond: 1_024,
+    });
+    const card = screen.getByRole("region", { name: "Updating All Packages progress" });
+    const packagesBar = within(card).getByRole("progressbar", { name: "Updating All Packages packages processed" });
+    const downloadBar = within(card).getByRole("progressbar", { name: "Updating All Packages current download" });
+    expect(within(card).getByRole("status")).toHaveTextContent("Downloading Inventory");
+    expect(within(card).getByText("1 of 2")).toBeInTheDocument();
+    expect(within(card).getByText("Archive bytes downloaded: 1.5 KB")).toBeInTheDocument();
+    expect(within(card).getByText("1.0 KB/s")).toBeInTheDocument();
+    expect(within(card).getByText("512 B · total unknown")).toBeInTheDocument();
+    expect(packagesBar).toHaveAttribute("aria-valuenow", "1");
+    expect(packagesBar).toHaveAttribute("aria-valuemax", "2");
+    expect(downloadBar).not.toHaveAttribute("aria-valuenow");
+
+    emitProgress({
+      operation: "update-all", phase: "verifying", packageName: "Inventory", completedPackages: 1,
+      totalPackages: 2, downloadedBytes: 2_048, currentBytes: 1_024, currentTotalBytes: null, bytesPerSecond: 0,
+    });
+    expect(within(card).getByText("1.0 KB · complete")).toBeInTheDocument();
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "100");
+
+    emitProgress({
+      operation: "update-all", phase: "preparing", packageName: "Dependency", completedPackages: 2,
+      totalPackages: 3, downloadedBytes: 2_048, currentBytes: 0, currentTotalBytes: null, bytesPerSecond: 0,
+    });
+    expect(within(card).getByRole("status")).toHaveTextContent("Preparing Dependency");
+    expect(within(card).getByText("2 of 3")).toBeInTheDocument();
+    expect(within(card).getByText("Waiting for download")).toBeInTheDocument();
+    expect(packagesBar).toHaveAttribute("aria-valuenow", "2");
+    expect(packagesBar).toHaveAttribute("aria-valuemax", "3");
+    expect(downloadBar).toHaveAttribute("aria-valuenow", "0");
+    expect(within(card).getByRole("progressbar", { name: "Updating All Packages packages processed" })).toBe(packagesBar);
+    expect(within(card).getByRole("progressbar", { name: "Updating All Packages current download" })).toBe(downloadBar);
+    expect(card).toHaveClass("h-48");
+
+    await user.click(screen.getByRole("tab", { name: "Install" }));
+    expect(card).toBeInTheDocument();
+    await act(async () => finishUpdate?.({ ok: true, value: currentSnapshot }));
+    expect(screen.queryByRole("region", { name: "Updating All Packages progress" })).not.toBeInTheDocument();
+    view.unmount();
+    expect(unsubscribeProgress).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Update All available and reports a failed bulk update", async () => {
+    vi.mocked(api.updateAll).mockResolvedValueOnce({ ok: false, error: "Package signature verification failed" });
+    const user = userEvent.setup();
+    renderArmoryApp();
+    await user.click(await screen.findByRole("button", { name: "Update All" }));
+    expect(await screen.findByText("Package signature verification failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Update All" })).toBeEnabled();
+    expect(screen.queryByText("Armory packages updated.")).not.toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Installed packages" })).toHaveTextContent("1.0.0");
   });
 
   it("shows operation success in a toast that expires after 20 seconds without moving the page layout", async () => {

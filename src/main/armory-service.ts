@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type {
   ArmoryBundle, ArmoryInstallBundleInput, ArmoryInstalledPackage, ArmoryInstallInput, ArmoryInstallLocalInput,
-  ArmoryPackage, ArmoryRemoveSourceInput, ArmorySaveSourceInput, ArmorySnapshot, ArmorySource, ArmoryUninstallInput,
+  ArmoryPackage, ArmoryProgress, ArmoryRemoveSourceInput, ArmorySaveSourceInput, ArmorySnapshot, ArmorySource, ArmoryUninstallInput,
 } from "../shared/armory-contracts.js";
 import {
   ARMORY_ARCHIVE_LIMITS, armoryRecord, armoryText, parseArmoryManifest, safeArmoryName, unpackArmoryArchive, type ArmoryManifest,
@@ -35,11 +35,143 @@ interface PreparedPackage { manifest: ArmoryManifest; files: Map<string, Buffer>
 interface RemotePackage { signature: Buffer; archiveUrl: string }
 interface GitHubAsset { name: string; url: string }
 export interface ArmoryServiceOptions { rootPath?: string; fetch?: typeof globalThis.fetch }
+export type ArmoryProgressListener = (progress: ArmoryProgress) => void;
+
+interface ArchiveProgressSink {
+  start(totalBytes: number | null): void;
+  chunk(bytes: number): void;
+}
+
+/** A best-effort observer. Progress must never affect package verification or installation. */
+class ArmoryProgressReporter implements ArchiveProgressSink {
+  private readonly knownPackages: Set<string>;
+  private phase: ArmoryProgress["phase"] = "preparing";
+  private packageName: string | null = null;
+  private completedPackages = 0;
+  private downloadedBytes = 0;
+  private currentBytes = 0;
+  private currentTotalBytes: number | null = null;
+  private bytesPerSecond = 0;
+  private sampleAt = Date.now();
+  private sampleBytes = 0;
+  private lastEmittedAt = 0;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private closed = false;
+
+  constructor(
+    private readonly operation: ArmoryProgress["operation"],
+    packageIds: readonly string[],
+    private readonly listener?: ArmoryProgressListener,
+  ) {
+    this.knownPackages = new Set(packageIds);
+    this.emit();
+  }
+
+  discover(packageId: string): void {
+    if (this.knownPackages.has(packageId)) return;
+    this.knownPackages.add(packageId);
+    this.emit();
+  }
+
+  preparing(packageName: string): void {
+    this.stopTimer();
+    this.phase = "preparing";
+    this.packageName = progressPackageName(packageName);
+    this.currentBytes = 0;
+    this.currentTotalBytes = null;
+    this.bytesPerSecond = 0;
+    this.emit();
+  }
+
+  start(totalBytes: number | null): void {
+    this.stopTimer();
+    this.phase = "downloading";
+    this.currentBytes = 0;
+    this.currentTotalBytes = totalBytes;
+    this.bytesPerSecond = 0;
+    this.sampleAt = Date.now();
+    this.sampleBytes = this.downloadedBytes;
+    this.emit();
+    if (this.listener) {
+      this.timer = setInterval(() => {
+        this.sample();
+        this.emit();
+      }, 250);
+    }
+  }
+
+  chunk(bytes: number): void {
+    if (this.closed || bytes <= 0) return;
+    this.currentBytes += bytes;
+    this.downloadedBytes += bytes;
+    if (this.currentTotalBytes !== null && this.currentBytes > this.currentTotalBytes) this.currentTotalBytes = null;
+    const now = Date.now();
+    if (now - this.lastEmittedAt >= 100) {
+      this.sample(now);
+      this.emit();
+    }
+  }
+
+  verifying(): void {
+    this.stopTimer();
+    this.phase = "verifying";
+    this.bytesPerSecond = 0;
+    if (this.currentTotalBytes !== null && this.currentBytes !== this.currentTotalBytes) this.currentTotalBytes = null;
+    this.emit();
+  }
+
+  complete(): void {
+    this.completedPackages++;
+    this.emit();
+  }
+
+  installing(): void {
+    this.stopTimer();
+    this.phase = "installing";
+    this.packageName = null;
+    this.currentBytes = 0;
+    this.currentTotalBytes = null;
+    this.bytesPerSecond = 0;
+    this.emit();
+  }
+
+  close(): void {
+    this.closed = true;
+    this.stopTimer();
+  }
+
+  private sample(now = Date.now()): void {
+    const elapsed = now - this.sampleAt;
+    if (elapsed < 100) return;
+    this.bytesPerSecond = Math.max(0, Math.round((this.downloadedBytes - this.sampleBytes) * 1000 / elapsed));
+    this.sampleAt = now;
+    this.sampleBytes = this.downloadedBytes;
+  }
+
+  private stopTimer(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  private emit(): void {
+    if (this.closed || !this.listener) return;
+    this.lastEmittedAt = Date.now();
+    try {
+      this.listener({ operation: this.operation, phase: this.phase, packageName: this.packageName,
+        completedPackages: this.completedPackages, totalPackages: this.knownPackages.size,
+        downloadedBytes: this.downloadedBytes, currentBytes: this.currentBytes,
+        currentTotalBytes: this.currentTotalBytes, bytesPerSecond: this.bytesPerSecond });
+    } catch { /* A renderer listener cannot change the trusted install result. */ }
+  }
+}
 
 function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function sourceId(source: SourceConfig): string { return hash(source.repo_url + source.public_key + source.name); }
 function installedId(manifest: ArmoryManifest): string { return `${manifest.kind === "alias" ? "aliases" : "extensions"}/${manifest.directoryName}`; }
 function errorText(error: unknown): string { return error instanceof Error ? error.message : "Armory operation failed"; }
+function progressPackageName(name: string): string {
+  return name.replace(/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/gu, " ").replace(/\s+/gu, " ").trim().slice(0, 256).trim() || "Package";
+}
 export function armoryVersionIsNewer(candidate: string, installed: string): boolean {
   const version = /^v?(\d+(?:\.\d+)*)(?:-([^+]+))?(?:\+.*)?$/u;
   const left = version.exec(candidate); const right = version.exec(installed);
@@ -137,18 +269,41 @@ export class ArmoryService {
   }
 
   refreshCatalog(): Promise<ArmorySnapshot> { return this.exclusive(async () => { await this.refresh(); return this.snapshot(); }); }
-  install(input: ArmoryInstallInput): Promise<ArmorySnapshot> {
+  updateAll(onProgress?: ArmoryProgressListener): Promise<ArmorySnapshot> {
+    return this.exclusive(async () => {
+      const revision = await this.configRevision();
+      await this.ensureCatalog();
+      const current = await this.snapshot();
+      const entries: CatalogEntry[] = [];
+      for (const item of current.installed) {
+        if (item.updateAvailable && item.packageId) entries.push(await this.currentEntry(item.packageId));
+      }
+      const progress = new ArmoryProgressReporter("update-all", entries.map((entry) => entry.dto.id), onProgress);
+      try {
+        const prepared = await this.prepareEntries(entries, true, false, progress);
+        if (await this.configRevision() !== revision) throw new Error("Console Armory configuration changed during download; refresh and retry");
+        progress.installing();
+        await this.commitPackages(prepared);
+        return this.snapshot();
+      } finally { progress.close(); }
+    });
+  }
+  install(input: ArmoryInstallInput, onProgress?: ArmoryProgressListener): Promise<ArmorySnapshot> {
     return this.exclusive(async () => {
       const revision = await this.configRevision();
       await this.ensureCatalog();
       const entry = await this.currentEntry(input.packageId);
-      const prepared = await this.prepareEntries([entry], input.replace ?? false, false);
-      if (await this.configRevision() !== revision) throw new Error("Console Armory configuration changed during download; refresh and retry");
-      await this.commitPackages(prepared);
-      return this.snapshot();
+      const progress = new ArmoryProgressReporter("install", [entry.dto.id], onProgress);
+      try {
+        const prepared = await this.prepareEntries([entry], input.replace ?? false, false, progress);
+        if (await this.configRevision() !== revision) throw new Error("Console Armory configuration changed during download; refresh and retry");
+        progress.installing();
+        await this.commitPackages(prepared);
+        return this.snapshot();
+      } finally { progress.close(); }
     });
   }
-  installBundle(input: ArmoryInstallBundleInput): Promise<ArmorySnapshot> {
+  installBundle(input: ArmoryInstallBundleInput, onProgress?: ArmoryProgressListener): Promise<ArmorySnapshot> {
     return this.exclusive(async () => {
       const revision = await this.configRevision();
       await this.ensureCatalog();
@@ -156,10 +311,14 @@ export class ArmoryService {
       if (!bundle) throw new Error("Armory bundle is unavailable; refresh the catalog");
       const entries: CatalogEntry[] = [];
       for (const name of bundle.packageNames) entries.push(await this.resolveDependency(name, bundle.sourceId));
-      const prepared = await this.prepareEntries(entries, input.replace ?? false, true);
-      if (await this.configRevision() !== revision) throw new Error("Console Armory configuration changed during download; refresh and retry");
-      await this.commitPackages(prepared);
-      return this.snapshot();
+      const progress = new ArmoryProgressReporter("install-bundle", entries.map((entry) => entry.dto.id), onProgress);
+      try {
+        const prepared = await this.prepareEntries(entries, input.replace ?? false, true, progress);
+        if (await this.configRevision() !== revision) throw new Error("Console Armory configuration changed during download; refresh and retry");
+        progress.installing();
+        await this.commitPackages(prepared);
+        return this.snapshot();
+      } finally { progress.close(); }
     });
   }
   installLocal(input: ArmoryInstallLocalInput): Promise<ArmorySnapshot> {
@@ -392,7 +551,7 @@ export class ArmoryService {
     if (matches.length !== 1) throw new Error(matches.length ? `Armory dependency is ambiguous: ${name}` : `Armory dependency was not found: ${name}`);
     return this.currentEntry(matches[0]!.dto.id);
   }
-  private async prepareEntries(entries: CatalogEntry[], replace: boolean, skipInstalled: boolean): Promise<PreparedPackage[]> {
+  private async prepareEntries(entries: CatalogEntry[], replace: boolean, skipInstalled: boolean, progress?: ArmoryProgressReporter): Promise<PreparedPackage[]> {
     const installed = await this.readInstalled([]);
     const prepared: PreparedPackage[] = [];
     let preparedBytes = 0;
@@ -401,6 +560,8 @@ export class ArmoryService {
     const visit = async (entry: CatalogEntry, dependency: boolean): Promise<void> => {
       if (active.has(entry.dto.id)) throw new Error(`Armory dependency cycle includes ${entry.dto.commandName}`);
       if (visited.has(entry.dto.id)) return;
+      progress?.discover(entry.dto.id);
+      progress?.preparing(entry.dto.name);
       active.add(entry.dto.id);
       if (active.size > 64 || visited.size + active.size > 256 || prepared.length >= 256) throw new Error("Armory installation plan exceeds 256 packages");
       const remote = await this.fetchPackage(entry);
@@ -409,13 +570,15 @@ export class ArmoryService {
       const signedManifest = parseArmoryManifest(trustedBytes, entry.isAlias);
       this.checkIdentity(entry, signedManifest);
       if ((dependency || skipInstalled) && !replace && installed.some((item) => this.samePackage(item.manifest, signedManifest))) {
-        active.delete(entry.dto.id); visited.add(entry.dto.id); return;
+        active.delete(entry.dto.id); visited.add(entry.dto.id); progress?.complete(); return;
       }
       for (const name of signedManifest.dependencies) {
         if (signedManifest.commandNames.includes(name) || installed.some((item) => item.manifest.commandNames.includes(name))) continue;
         await visit(await this.resolveDependency(name, entry.dto.sourceId), true);
       }
-      const archive = await this.request(remote.archiveUrl, entry.source, ARMORY_ARCHIVE_LIMITS.compressedBytes, true);
+      const archive = await this.request(remote.archiveUrl, entry.source, ARMORY_ARCHIVE_LIMITS.compressedBytes, true,
+        progress ? { start: (total) => { progress.preparing(entry.dto.name); progress.start(total); }, chunk: (bytes) => progress.chunk(bytes) } : undefined);
+      progress?.verifying();
       parsed.verifyPayload(archive);
       const files = await unpackArmoryArchive(archive);
       const manifest = this.validatePackage(files, trustedBytes, entry.isAlias);
@@ -426,6 +589,7 @@ export class ArmoryService {
       if (preparedBytes > ARMORY_ARCHIVE_LIMITS.expandedBytes) throw new Error("Armory installation plan exceeds its total size limit");
       prepared.push(next);
       active.delete(entry.dto.id); visited.add(entry.dto.id);
+      progress?.complete();
     };
     for (const entry of entries) await visit(entry, false);
     return prepared;
@@ -577,7 +741,7 @@ export class ArmoryService {
       return validatedURL(new URL(response.headers.get("location")!, url).toString());
     } finally { clearTimeout(timeout); this.controllers.delete(controller); }
   }
-  private async request(rawUrl: string, source: SourceConfig, maxBytes: number, binary = false): Promise<Buffer> {
+  private async request(rawUrl: string, source: SourceConfig, maxBytes: number, binary = false, archiveProgress?: ArchiveProgressSink): Promise<Buffer> {
     const controller = new AbortController(); this.controllers.add(controller);
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -607,6 +771,9 @@ export class ArmoryService {
         const length = response.headers.get("content-length");
         if (length && (!/^[0-9]+$/u.test(length) || Number(length) > maxBytes)) { await response.body?.cancel(); throw new Error("Armory download exceeds its size limit"); }
         if (!response.body) throw new Error("Armory download is empty");
+        const encoded = response.headers.get("content-encoding");
+        const expectedBytes = length && (!encoded || encoded.toLowerCase() === "identity") ? Number(length) : null;
+        archiveProgress?.start(expectedBytes);
         const reader = response.body.getReader();
         const chunks: Uint8Array[] = []; let received = 0;
         try {
@@ -616,6 +783,7 @@ export class ArmoryService {
             received += result.value.length;
             if (received > maxBytes) { await reader.cancel(); throw new Error("Armory download exceeds its size limit"); }
             chunks.push(result.value);
+            archiveProgress?.chunk(result.value.length);
           }
         } finally { reader.releaseLock(); }
         return Buffer.concat(chunks, received);

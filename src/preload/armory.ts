@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from "electron";
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import type {
   ArmoryAPI,
+  ArmoryProgress,
   ArmoryTabId,
 } from "../shared/armory-contracts.js";
 import type {
@@ -23,6 +24,7 @@ const CHANNELS = Object.freeze({
   getContext: "sliver:armory:context:get",
   snapshot: "sliver:armory:snapshot",
   refreshCatalog: "sliver:armory:catalog:refresh",
+  updateAll: "sliver:armory:update-all",
   install: "sliver:armory:install",
   installBundle: "sliver:armory:bundle:install",
   uninstall: "sliver:armory:uninstall",
@@ -33,6 +35,7 @@ const CHANNELS = Object.freeze({
   openRepository: "sliver:armory:repository:open",
   getApplicationSettings: "sliver:armory:application-settings:get",
   changed: "sliver:armory:changed",
+  progress: "sliver:armory:progress",
   navigationRequested: "sliver:armory:navigation-requested",
   applicationSettingsChanged: "sliver:application-settings:changed",
 });
@@ -77,6 +80,41 @@ interface RestrictedMutationObserverConstructor {
 }
 
 const ARMORY_TABS = new Set<ArmoryTabId>(["manage", "install", "sources"]);
+const ARMORY_PROGRESS_KEYS = [
+  "operation", "phase", "packageName", "completedPackages", "totalPackages", "downloadedBytes",
+  "currentBytes", "currentTotalBytes", "bytesPerSecond",
+] as const;
+
+function parseArmoryProgress(value: unknown): ArmoryProgress {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("Invalid Armory progress");
+  const progress = value as Record<string, unknown>;
+  const keys = Object.keys(progress);
+  if (keys.length !== ARMORY_PROGRESS_KEYS.length || keys.some((key) => !(ARMORY_PROGRESS_KEYS as readonly string[]).includes(key))) {
+    throw new TypeError("Invalid Armory progress");
+  }
+  const operation = progress["operation"];
+  const phase = progress["phase"];
+  const packageName = progress["packageName"];
+  const completedPackages = progress["completedPackages"];
+  const totalPackages = progress["totalPackages"];
+  const downloadedBytes = progress["downloadedBytes"];
+  const currentBytes = progress["currentBytes"];
+  const currentTotalBytes = progress["currentTotalBytes"];
+  const bytesPerSecond = progress["bytesPerSecond"];
+  const safeCount = (number: unknown): number is number => typeof number === "number" && Number.isSafeInteger(number) && number >= 0;
+  if ((operation !== "install" && operation !== "install-bundle" && operation !== "update-all") ||
+      (phase !== "preparing" && phase !== "downloading" && phase !== "verifying" && phase !== "installing") ||
+      (packageName !== null && (typeof packageName !== "string" || !packageName.length || packageName.length > 256 ||
+        /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/u.test(packageName))) ||
+      !safeCount(completedPackages) || !safeCount(totalPackages) || completedPackages > totalPackages ||
+      !safeCount(downloadedBytes) || !safeCount(currentBytes) || currentBytes > downloadedBytes ||
+      (currentTotalBytes !== null && (!safeCount(currentTotalBytes) || currentBytes > currentTotalBytes)) ||
+      !safeCount(bytesPerSecond)) {
+    throw new TypeError("Invalid Armory progress");
+  }
+  return { operation, phase, packageName, completedPackages, totalPackages, downloadedBytes,
+    currentBytes, currentTotalBytes, bytesPerSecond };
+}
 
 const navigationListeners = new Set<(tab: ArmoryTabId) => void>();
 let pendingNavigationTab: ArmoryTabId | undefined;
@@ -98,6 +136,7 @@ const api: ArmoryAPI = {
   getContext: () => ipcRenderer.invoke(CHANNELS.getContext),
   snapshot: () => ipcRenderer.invoke(CHANNELS.snapshot),
   refreshCatalog: () => ipcRenderer.invoke(CHANNELS.refreshCatalog),
+  updateAll: () => ipcRenderer.invoke(CHANNELS.updateAll),
   install: (input) => ipcRenderer.invoke(CHANNELS.install, input),
   installBundle: (input) => ipcRenderer.invoke(CHANNELS.installBundle, input),
   uninstall: (input) => ipcRenderer.invoke(CHANNELS.uninstall, input),
@@ -114,6 +153,16 @@ const api: ArmoryAPI = {
     return () => {
       ipcRenderer.removeListener(CHANNELS.changed, handler);
     };
+  },
+  onProgress: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("progress listener must be a function");
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length !== 1) return;
+      try { listener(parseArmoryProgress(payload[0])); }
+      catch { /* Drop malformed main-to-renderer events. */ }
+    };
+    ipcRenderer.on(CHANNELS.progress, handler);
+    return () => ipcRenderer.removeListener(CHANNELS.progress, handler);
   },
   onNavigationRequested: (listener) => {
     if (typeof listener !== "function") throw new TypeError("navigation listener must be a function");

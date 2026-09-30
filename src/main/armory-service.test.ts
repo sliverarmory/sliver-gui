@@ -4,9 +4,10 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { unpackArmoryArchive, parseArmoryManifest, safeArmoryPath, ARMORY_ARCHIVE_LIMITS } from "./armory-archive.js";
 import { ArmoryService, armoryVersionIsNewer, DEFAULT_ARMORY_PUBLIC_KEY, DEFAULT_ARMORY_REPO_URL } from "./armory-service.js";
+import type { ArmoryProgress } from "../shared/armory-contracts.js";
 import { verifyArmoryMinisign, verifyArmorySignatureMetadata } from "./armory-signature.js";
 
 const roots: string[] = [];
@@ -44,7 +45,7 @@ function manifest(name = "test-bof", version = "1.0.0", dependsOn = "") {
     depends_on: dependsOn, bof_executor: "reflektor", files: [{ os: "windows", arch: "amd64", path: "/dist/test.o" }] };
 }
 function packageFixture(name = "test-bof", version = "1.0.0", dependency = "", signatureKind = true,
-  metadata: { original_author?: unknown; extension_author?: unknown; files?: ReturnType<typeof manifest>["files"] } = {}, isAlias = false) {
+  metadata: { name?: string; original_author?: unknown; extension_author?: unknown; files?: ReturnType<typeof manifest>["files"] } = {}, isAlias = false) {
   const signing = signer();
   const raw = { ...manifest(name, version, dependency), ...metadata };
   const manifestBytes = Buffer.from(JSON.stringify(raw));
@@ -70,13 +71,17 @@ async function setupCatalog(fixtures = [packageFixture()]) {
     responses.set(`${fixture.raw.repo_url}.tar.gz`, fixture.archive);
   }
   let requestHook: ((url: string) => Promise<void>) | undefined;
+  let responseHook: ((url: string, bytes: Buffer | undefined) => Response | undefined) | undefined;
   const fetcher: typeof globalThis.fetch = async (url, init) => {
     await requestHook?.(String(url));
     requests.push({ url: String(url), ...(init ? { init } : {}) });
     const response = responses.get(String(url));
-    return new Response(response ? Uint8Array.from(response) : null, { status: response ? 200 : 404 });
+    return responseHook?.(String(url), response) ?? new Response(response ? Uint8Array.from(response) : null, { status: response ? 200 : 404 });
   };
-  return { root, indexSigning, fixtures, config, requests, responses, setRequestHook(hook: (url: string) => Promise<void>) { requestHook = hook; }, service: new ArmoryService({ rootPath: root, fetch: fetcher }) };
+  return { root, indexSigning, fixtures, config, requests, responses,
+    setRequestHook(hook: (url: string) => Promise<void>) { requestHook = hook; },
+    setResponseHook(hook: (url: string, bytes: Buffer | undefined) => Response | undefined) { responseHook = hook; },
+    service: new ArmoryService({ rootPath: root, fetch: fetcher }) };
 }
 
 describe("Armory Minisign signatures", () => {
@@ -267,6 +272,164 @@ describe("Armory local package service", () => {
     setup.responses.set(`${setup.fixtures[0]!.raw.repo_url}.tar.gz`, Buffer.from("tampered update"));
     await expect(setup.service.install({ packageId: id, replace: true })).rejects.toThrow(/signature/u);
     expect(await readFile(join(setup.root, "extensions/test-bof/extension.json"))).toEqual(setup.fixtures[0]!.manifestBytes);
+  });
+  it("updates every uniquely linked outdated package and skips current packages", async () => {
+    const setup = await setupCatalog([
+      packageFixture("first", "2.0.0"), packageFixture("second", "2.0.0"), packageFixture("current", "2.0.0"),
+    ]);
+    const catalog = await setup.service.refreshCatalog();
+    await setup.service.installBundle({ bundleId: catalog.bundles[0]!.id });
+    for (const name of ["first", "second"]) {
+      const path = join(setup.root, `extensions/${name}/extension.json`);
+      const installed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      await writeFile(path, JSON.stringify({ ...installed, version: "1.0.0" }));
+    }
+    expect((await setup.service.snapshot()).installed.filter((item) => item.updateAvailable)).toHaveLength(2);
+    const downloadsBefore = setup.requests.filter((request) => request.url.endsWith(".tar.gz")).length;
+    const progress: ArmoryProgress[] = [];
+    const updated = await setup.service.updateAll((event) => progress.push(event));
+    expect(updated.installed.map((item) => [item.name, item.version, item.updateAvailable])).toEqual([
+      ["current", "2.0.0", false], ["first", "2.0.0", false], ["second", "2.0.0", false],
+    ]);
+    expect(progress[0]).toMatchObject({ operation: "update-all", phase: "preparing", completedPackages: 0, totalPackages: 2 });
+    expect(progress.at(-1)).toMatchObject({ operation: "update-all", phase: "installing", completedPackages: 2,
+      totalPackages: 2, downloadedBytes: setup.fixtures[0]!.archive.length + setup.fixtures[1]!.archive.length });
+    expect(setup.requests.filter((request) => request.url.endsWith(".tar.gz"))).toHaveLength(downloadsBefore + 2);
+    await setup.service.updateAll();
+    expect(setup.requests.filter((request) => request.url.endsWith(".tar.gz"))).toHaveLength(downloadsBefore + 2);
+  });
+  it("reports streamed archive bytes, live speed, and zero speed during a stall without Content-Length", async () => {
+    const setup = await setupCatalog();
+    const catalog = await setup.service.refreshCatalog();
+    const archive = setup.fixtures[0]!.archive;
+    const midpoint = Math.floor(archive.length / 2);
+    let releaseSecond!: () => void;
+    const secondChunkReady = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    setup.setResponseHook((url) => {
+      if (!url.endsWith(".tar.gz")) return undefined;
+      let part = 0;
+      return new Response(new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (part === 0) { controller.enqueue(Uint8Array.from(archive.subarray(0, midpoint))); part++; return; }
+          if (part === 1) {
+            part++;
+            await secondChunkReady;
+            controller.enqueue(Uint8Array.from(archive.subarray(midpoint)));
+            return;
+          }
+          controller.close();
+        },
+      }), { status: 200 });
+    });
+    const progress: ArmoryProgress[] = [];
+    const installing = setup.service.install({ packageId: catalog.packages[0]!.id }, (event) => progress.push(event));
+    try {
+      await vi.waitFor(() => {
+        expect(progress.some((event) => event.phase === "downloading" && event.downloadedBytes === midpoint && event.bytesPerSecond > 0)).toBe(true);
+        expect(progress.some((event) => event.phase === "downloading" && event.downloadedBytes === midpoint && event.bytesPerSecond === 0)).toBe(true);
+      }, { timeout: 2_500, interval: 25 });
+    } finally {
+      releaseSecond();
+      await installing;
+    }
+    expect(progress.some((event) => event.phase === "downloading" && event.downloadedBytes === midpoint && event.bytesPerSecond > 0)).toBe(true);
+    expect(progress.some((event) => event.phase === "downloading" && event.downloadedBytes === midpoint && event.bytesPerSecond === 0)).toBe(true);
+    expect(progress.filter((event) => event.phase === "downloading").every((event) => event.currentTotalBytes === null)).toBe(true);
+    expect(progress.at(-1)).toMatchObject({ operation: "install", phase: "installing", completedPackages: 1,
+      totalPackages: 1, downloadedBytes: archive.length, bytesPerSecond: 0 });
+    const count = progress.length;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(progress).toHaveLength(count);
+  });
+  it("uses a matching identity Content-Length only for the current archive", async () => {
+    const setup = await setupCatalog();
+    const catalog = await setup.service.refreshCatalog();
+    const archive = setup.fixtures[0]!.archive;
+    setup.setResponseHook((url) => url.endsWith(".tar.gz")
+      ? new Response(Uint8Array.from(archive), { status: 200, headers: { "content-length": String(archive.length), "content-encoding": "identity" } })
+      : undefined);
+    const known: ArmoryProgress[] = [];
+    await setup.service.install({ packageId: catalog.packages[0]!.id }, (event) => known.push(event));
+    expect(known.some((event) => event.phase === "downloading" && event.currentTotalBytes === archive.length)).toBe(true);
+    setup.setResponseHook((url) => url.endsWith(".tar.gz")
+      ? new Response(Uint8Array.from(archive), { status: 200, headers: { "content-length": String(archive.length), "content-encoding": "gzip" } })
+      : undefined);
+    const encoded: ArmoryProgress[] = [];
+    await setup.service.install({ packageId: catalog.packages[0]!.id, replace: true }, (event) => encoded.push(event));
+    expect(encoded.filter((event) => event.phase === "downloading").every((event) => event.currentTotalBytes === null)).toBe(true);
+    setup.setResponseHook((url) => url.endsWith(".tar.gz")
+      ? new Response(Uint8Array.from(archive), { status: 200, headers: { "content-length": String(archive.length - 1) } })
+      : undefined);
+    const mismatched: ArmoryProgress[] = [];
+    await setup.service.install({ packageId: catalog.packages[0]!.id, replace: true }, (event) => mismatched.push(event));
+    expect(mismatched.filter((event) => event.currentTotalBytes !== null).every((event) => event.currentBytes <= event.currentTotalBytes!)).toBe(true);
+    expect(mismatched.find((event) => event.phase === "verifying")?.currentTotalBytes).toBeNull();
+  });
+  it("grows the package total when a signed dependency is discovered and counts verified packages", async () => {
+    const setup = await setupCatalog([packageFixture("loader"), packageFixture("dependent", "1", "loader")]);
+    const catalog = await setup.service.refreshCatalog();
+    const dependent = catalog.packages.find((entry) => entry.commandName === "dependent")!;
+    const progress: ArmoryProgress[] = [];
+    await setup.service.install({ packageId: dependent.id }, (event) => progress.push(event));
+    expect(progress[0]).toMatchObject({ phase: "preparing", completedPackages: 0, totalPackages: 1 });
+    expect(progress.some((event) => event.totalPackages === 2 && event.completedPackages === 0)).toBe(true);
+    expect(progress.at(-1)).toMatchObject({ phase: "installing", completedPackages: 2, totalPackages: 2,
+      downloadedBytes: setup.fixtures[0]!.archive.length + setup.fixtures[1]!.archive.length });
+  });
+  it("bounds and cleans signed package names before publishing progress", async () => {
+    const fixture = packageFixture("bounded", "1", "", true, { name: `${"Package".repeat(50)}\nprivate\u202e` });
+    const setup = await setupCatalog([fixture]);
+    const catalog = await setup.service.refreshCatalog();
+    const progress: ArmoryProgress[] = [];
+    await setup.service.install({ packageId: catalog.packages[0]!.id }, (event) => {
+      progress.push(event);
+      throw new Error("Progress observer failed");
+    });
+    expect(progress.some((event) => event.packageName !== null)).toBe(true);
+    expect(progress.every((event) => event.packageName === null ||
+      (event.packageName.length <= 256 && !/[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/u.test(event.packageName)))).toBe(true);
+  });
+  it("preserves every installed package if one bulk update fails verification", async () => {
+    const setup = await setupCatalog([packageFixture("first", "2.0.0"), packageFixture("second", "2.0.0")]);
+    const catalog = await setup.service.refreshCatalog();
+    await setup.service.installBundle({ bundleId: catalog.bundles[0]!.id });
+    for (const name of ["first", "second"]) {
+      const path = join(setup.root, `extensions/${name}/extension.json`);
+      const installed = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+      await writeFile(path, JSON.stringify({ ...installed, version: "1.0.0" }));
+    }
+    setup.responses.set(`${setup.fixtures[1]!.raw.repo_url}.tar.gz`, Buffer.from("tampered update"));
+    const progress: ArmoryProgress[] = [];
+    await expect(setup.service.updateAll((event) => progress.push(event))).rejects.toThrow(/signature/u);
+    expect(progress.some((event) => event.phase === "installing")).toBe(false);
+    expect(progress.at(-1)).toMatchObject({ phase: "verifying", completedPackages: 1, totalPackages: 2 });
+    const count = progress.length;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(progress).toHaveLength(count);
+    expect((await setup.service.snapshot()).installed.map((item) => item.version)).toEqual(["1.0.0", "1.0.0"]);
+    expect((await readdir(setup.root)).some((name) => name.startsWith(".armory-"))).toBe(false);
+  });
+  it("does not bulk update a package claimed by competing sources", async () => {
+    const setup = await setupCatalog();
+    const catalog = await setup.service.refreshCatalog();
+    await setup.service.install({ packageId: catalog.packages[0]!.id });
+    const path = join(setup.root, "extensions/test-bof/extension.json");
+    await writeFile(path, JSON.stringify({ ...setup.fixtures[0]!.raw, version: "0.9.0" }));
+    const otherSigner = signer();
+    const otherSource = { ...setup.config[0]!, name: "Competing", repo_url: "https://other-armory.example/index", public_key: otherSigner.key };
+    await writeFile(join(setup.root, "armories.json"), JSON.stringify([...setup.config, otherSource]));
+    const fixture = setup.fixtures[0]!;
+    const index = Buffer.from(JSON.stringify({ extensions: [{ name: fixture.raw.name, command_name: fixture.raw.command_name,
+      repo_url: fixture.raw.repo_url, public_key: fixture.signing.key }] }));
+    setup.responses.set(otherSource.repo_url, Buffer.from(JSON.stringify({ armory_index: index.toString("base64"),
+      minisig: otherSigner.sign(index, "index").toString("base64") })));
+    const competing = await setup.service.refreshCatalog();
+    expect(competing.packages.filter((item) => item.updateAvailable)).toHaveLength(2);
+    expect(competing.installed[0]).not.toHaveProperty("packageId");
+    const downloadsBefore = setup.requests.filter((request) => request.url.endsWith(".tar.gz")).length;
+    await setup.service.updateAll();
+    expect((await setup.service.snapshot()).installed[0]?.version).toBe("0.9.0");
+    expect(setup.requests.filter((request) => request.url.endsWith(".tar.gz"))).toHaveLength(downloadsBefore);
   });
   it("installs dependencies before packages, skips existing bundle members, and blocks removal of required packages", async () => {
     const setup = await setupCatalog([packageFixture("loader"), packageFixture("dependent", "1", "loader")]);
