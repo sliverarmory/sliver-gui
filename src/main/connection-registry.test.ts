@@ -8759,6 +8759,43 @@ describe("M3 session shell registry boundary", () => {
         truncated: true,
       },
     });
+    await expect(childrenRegistry.getBeaconTask(1, childrenTaskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        taskId: childrenTaskId,
+        executionRead: {
+          operationId: "execution.children",
+          state: "completed",
+          taskId: childrenTaskId,
+          items: expect.arrayContaining([expect.objectContaining({ pid: 101, path: "/usr/bin/one" })]),
+          total: 3,
+        },
+      },
+    });
+    childrenRegistry.registerWindow(3);
+    childrenRegistry.inheritConnection(1, 3);
+    await selectOnlyBeacon(childrenRegistry, 3);
+    await expect(childrenRegistry.getBeaconTask(3, childrenTaskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        ownership: { origin: "unknown" },
+        executionRead: { operationId: "execution.children", taskId: childrenTaskId, total: 3 },
+      },
+    });
+    const crossWindowPage = await childrenRegistry.runExecutionRead(3, {
+      operationId: "execution.children",
+      taskId: childrenTaskId,
+      cursor: `execution-read:v2:execution.children:${childrenTaskId}:1`,
+      limit: 1,
+    });
+    expect(crossWindowPage).toMatchObject({
+      ok: true,
+      value: { state: "completed", taskId: childrenTaskId, items: [{ pid: 102, path: "/usr/bin/two" }], total: 3 },
+    });
+    expect(await childrenRegistry.listTargetOperations(3, {})).toMatchObject({ ok: true, value: { items: [] } });
+    expect(await childrenRegistry.runExecutionRead(3, {
+      operationId: "execution.children", taskId: "foreign_read_task", limit: 1,
+    })).toMatchObject({ ok: false, error: "The execution result is unavailable for the current target" });
     if (!firstChildrenPage.ok || firstChildrenPage.value.operationId !== "execution.children") {
       throw new Error("Expected decoded children page");
     }
@@ -8823,6 +8860,20 @@ describe("M3 session shell registry boundary", () => {
         total: 2,
         nextCursor: `execution-read:v2:privilege.get:${privilegeTaskId}:1`,
         truncated: true,
+      },
+    });
+    await expect(privilegesRegistry.getBeaconTask(2, privilegeTaskId)).resolves.toMatchObject({
+      ok: true,
+      value: {
+        executionRead: {
+          operationId: "privilege.get",
+          state: "completed",
+          taskId: privilegeTaskId,
+          processName: "implant.exe",
+          processIntegrity: "High",
+          privileges: expect.arrayContaining([expect.objectContaining({ name: "SeDebugPrivilege", enabled: true })]),
+          total: 2,
+        },
       },
     });
     if (!firstPrivilegePage.ok || firstPrivilegePage.value.operationId !== "privilege.get") {

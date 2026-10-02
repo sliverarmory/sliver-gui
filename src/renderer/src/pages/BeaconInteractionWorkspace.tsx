@@ -35,6 +35,7 @@ import { EmptyState } from "@heroui-pro/react/empty-state";
 
 import type { PageSummary } from "../../../shared/contracts";
 import type { TargetCapabilityId, TargetCapabilityState, TargetRef } from "../../../shared/target-contracts";
+import type { ExecutionReadResult } from "../../../shared/execution-contracts";
 import type {
   BeaconTaskDetail,
   BeaconTaskSummary,
@@ -44,7 +45,7 @@ import type {
   TargetOperationRecord,
 } from "../../../shared/operation-contracts";
 import { AreaField, Field } from "../components/FormControls";
-import { BeaconExecutionCommand, type BeaconExecutionCommandState } from "./BeaconExecutionCommand";
+import { BeaconExecutionCommand, type BeaconExecutionCommandState, type BeaconExecutionSelection } from "./BeaconExecutionCommand";
 import { BeaconExecutionTaskOutput } from "./BeaconExecutionTaskOutput";
 import { capabilityFor, formatTimestamp, operationStateLabel, taskStateColor } from "./target-page-model";
 import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
@@ -61,6 +62,12 @@ export const BEACON_INTERACTION_COMMAND_IDS = [
   "target.env-unset",
   "beacon.reconfigure",
   "beacon.open-session",
+  "execution.children",
+  "privilege.get",
+  "privilege.run-as",
+  "privilege.make-token",
+  "privilege.impersonate",
+  "privilege.revert",
 ] as const;
 
 export type BeaconInteractionCommandId = (typeof BEACON_INTERACTION_COMMAND_IDS)[number];
@@ -163,6 +170,12 @@ const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
     keywords: ["session", "interactive"],
     icon: faTerminal,
   },
+  { id: "execution.children", group: "Execution", label: "Background children", description: "Read processes started in the background by this beacon.", keywords: ["children", "process", "jobs"], icon: faMicrochip },
+  { id: "privilege.get", group: "Execution", label: "Windows privileges", description: "Read the beacon process privilege inventory.", keywords: ["getprivs", "privileges", "token"], icon: faWrench },
+  { id: "privilege.run-as", group: "Execution", label: "Run as", description: "Run a command under supplied Windows credentials.", keywords: ["runas", "credentials", "identity"], icon: faTerminal },
+  { id: "privilege.make-token", group: "Execution", label: "Make token", description: "Create a Windows logon token from supplied credentials.", keywords: ["maketoken", "credentials", "identity"], icon: faWrench },
+  { id: "privilege.impersonate", group: "Execution", label: "Impersonate", description: "Impersonate a Windows token by identity.", keywords: ["impersonate", "token", "identity"], icon: faWrench },
+  { id: "privilege.revert", group: "Execution", label: "Revert identity", description: "Revert to the beacon process identity.", keywords: ["revert", "token", "identity"], icon: faWrench },
 ];
 
 interface BeaconManagementDraft {
@@ -183,7 +196,7 @@ const DEFAULT_MANAGEMENT_DRAFT: BeaconManagementDraft = {
   delaySeconds: "0",
 };
 
-const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, "execution">, TargetCapabilityId>> = {
+const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, BeaconExecutionSelection>, TargetCapabilityId>> = {
   "beacon.filesystem.pwd": "target.task.execute",
   "beacon.filesystem.ls": "target.task.execute",
   "beacon.process.list": "target.task.execute",
@@ -252,8 +265,9 @@ export function BeaconInteractionWorkspace({
   const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks, taskView === "output", false);
   const { contains } = useFilter({ sensitivity: "base" });
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
+  const isExecutionCommand = isBeaconExecutionCommandId(commandId);
   const isManagementCommand = isBeaconManagementCommandId(commandId);
-  const capability = commandId === "execution" ? undefined : capabilityFor(capabilities, COMMAND_CAPABILITIES[commandId]);
+  const capability = isExecutionCommand ? undefined : capabilityFor(capabilities, COMMAND_CAPABILITIES[commandId]);
   const commandAvailable = capability?.available === true && (isManagementCommand ? expectedTarget.mode === "beacon" : canQueue);
   const updatedOperation = submittedOperation && operationUpdates.find((operation) =>
     operation.requestId === submittedOperation.requestId &&
@@ -374,11 +388,11 @@ export function BeaconInteractionWorkspace({
           <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
             <Button
               fullWidth
-              {...(commandId === "execution" ? { form: executionFormId } : {})}
-              type={commandId === "execution" ? "submit" : "button"}
-              isDisabled={commandId === "execution" ? !executionState.isAvailable : !commandAvailable}
-              isPending={commandId === "execution" ? executionState.isPending : isSubmitting}
-              {...(commandId === "execution" ? {} : { onPress: () => void submit() })}
+              {...(isExecutionCommand ? { form: executionFormId } : {})}
+              type={isExecutionCommand ? "submit" : "button"}
+              isDisabled={isExecutionCommand ? !executionState.isAvailable : !commandAvailable}
+              isPending={isExecutionCommand ? executionState.isPending : isSubmitting}
+              {...(isExecutionCommand ? {} : { onPress: () => void submit() })}
             >
               <FontAwesomeIcon aria-hidden icon={faListCheck} /> {commandId === "target.rename" ? "Rename beacon" : "Queue task"}
             </Button>
@@ -394,6 +408,7 @@ export function BeaconInteractionWorkspace({
                 if (!isBeaconInteractionCommandId(nextId)) return;
                 setCommandId(nextId);
                 setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
+                setExecutionState({ isPending: false, isAvailable: false });
                 setSubmitError(undefined);
               }}
             >
@@ -432,11 +447,12 @@ export function BeaconInteractionWorkspace({
               </Autocomplete.Popover>
             </Autocomplete>
 
-            {commandId === "execution" ? (
+            {isExecutionCommand ? (
               <BeaconExecutionCommand
                 expectedTarget={expectedTarget}
                 formId={executionFormId}
-                key={targetIdentity}
+                key={`${targetIdentity}:${commandId}`}
+                selection={commandId}
                 targetIdentity={targetIdentity}
                 onStateChange={setExecutionState}
                 onQueuedTask={(taskId) => {
@@ -499,7 +515,7 @@ export function BeaconInteractionWorkspace({
               ) : null}
             </div>}
 
-            {commandId !== "execution" && !commandAvailable ? (
+            {!isExecutionCommand && !commandAvailable ? (
               <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
                 {isManagementCommand
                   ? capability?.reason?.message ?? "This command is unavailable for the selected beacon."
@@ -940,7 +956,9 @@ function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetry }: {
 }
 
 function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Element {
+  if (task.executionRead) return <BeaconExecutionReadTaskOutput key={`${task.beaconId}:${task.taskId}`} task={task} />;
   if (task.execution) return <BeaconExecutionTaskOutput key={`${task.beaconId}:${task.taskId}:${task.execution.operationId}`} task={task} />;
+  if (task.error && !task.disposition) return <></>;
   const operationId = task.operationId as string | undefined;
   if (operationId === "beacon.filesystem.pwd") return <WorkingDirectoryResult disposition={task.disposition} />;
   if (operationId === "beacon.filesystem.ls") {
@@ -951,6 +969,88 @@ function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Eleme
   }
   if (operationId === "beacon.network.interfaces") return <NetworkInterfacesResult disposition={task.disposition} />;
   return <GenericDisposition disposition={task.disposition} />;
+}
+
+function BeaconExecutionReadTaskOutput({ task }: { task: BeaconTaskDetail }): React.JSX.Element {
+  const [result, setResult] = useState<ExecutionReadResult>(task.executionRead!);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<string>();
+  const mounted = useRef(true);
+  const pagingRef = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (task.executionRead?.state === "completed") {
+      setResult(task.executionRead);
+      setPageError(undefined);
+    }
+  }, [task.executionRead]);
+
+  const loadMore = async (): Promise<void> => {
+    if (result.state !== "completed" || !result.nextCursor || pagingRef.current) return;
+    const requestedCursor = result.nextCursor;
+    pagingRef.current = true;
+    setIsLoadingMore(true);
+    setPageError(undefined);
+    try {
+      const response = await window.sliver.runExecutionRead({
+        operationId: result.operationId,
+        taskId: task.taskId,
+        cursor: requestedCursor,
+        limit: 50,
+      });
+      if (!mounted.current) return;
+      if (!response.ok || !response.value) throw new Error(response.error ?? "Could not load the next result page.");
+      const next = response.value;
+      if (next.state !== "completed" || next.operationId !== result.operationId || next.taskId !== task.taskId) {
+        throw new Error("The next page did not match this beacon task.");
+      }
+      setResult((current) => current.nextCursor === requestedCursor ? appendExecutionReadPage(current, next) : current);
+    } catch (error) {
+      if (mounted.current) setPageError(errorMessage(error));
+    } finally {
+      pagingRef.current = false;
+      if (mounted.current) setIsLoadingMore(false);
+    }
+  };
+
+  if (result.state === "submitted") return <p className="text-xs text-muted" role="status">Waiting for the beacon read result.</p>;
+  const children = result.operationId === "execution.children";
+  const rows: OperationScalar[][] = children
+    ? result.items.map((item) => [item.pid, item.path, item.args.join(" "), item.exited ? "Exited" : "Running", item.stdoutBytes + item.stderrBytes])
+    : result.privileges.map((item) => [item.name, item.description, item.removed ? "Removed" : item.enabled ? "Enabled" : "Disabled", item.usedForAccess ? "Yes" : "No"]);
+  const label = children ? "Background children" : "Windows privileges";
+  return (
+    <section aria-label={label} className="space-y-3" role="region">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h4 className="text-sm font-semibold text-foreground">{label}</h4>
+          {!children ? <p className="mt-1 text-xs text-muted">{result.processName} · {result.processIntegrity}{result.currentIdentity ? ` · ${result.currentIdentity}` : ""}</p> : null}
+        </div>
+        <span className="text-xs text-muted">{rows.length} of {result.total}</span>
+      </div>
+      {rows.length ? (
+        <ResultTable columns={children ? ["PID", "Process", "Arguments", "State", "Output bytes"] : ["Privilege", "Description", "State", "Used for access"]} rows={rows} />
+      ) : <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{children ? "No tracked background children were reported." : "No Windows privileges were reported."}</p>}
+      {result.truncated ? <TruncatedNotice /> : null}
+      {pageError ? <InlineMessage tone="danger">{pageError}</InlineMessage> : null}
+      {result.nextCursor ? <Button isPending={isLoadingMore} size="sm" variant="tertiary" onPress={() => void loadMore()}>Load more</Button> : null}
+    </section>
+  );
+}
+
+function appendExecutionReadPage(current: ExecutionReadResult, next: ExecutionReadResult): ExecutionReadResult {
+  if (current.operationId === "execution.children" && next.operationId === "execution.children") {
+    return { ...next, items: [...current.items, ...next.items] };
+  }
+  if (current.operationId === "privilege.get" && next.operationId === "privilege.get") {
+    return { ...next, privileges: [...current.privileges, ...next.privileges] };
+  }
+  return next;
 }
 
 function WorkingDirectoryResult({ disposition }: { disposition: OperationDisposition | undefined }): React.JSX.Element {
@@ -1126,6 +1226,12 @@ function isBeaconInteractionCommandId(value: string): value is BeaconInteraction
   return (BEACON_INTERACTION_COMMAND_IDS as readonly string[]).includes(value);
 }
 
+function isBeaconExecutionCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconExecutionSelection {
+  return commandId === "execution" || commandId === "execution.children" || commandId === "privilege.get" ||
+    commandId === "privilege.run-as" || commandId === "privilege.make-token" ||
+    commandId === "privilege.impersonate" || commandId === "privilege.revert";
+}
+
 type BeaconManagementCommandId = "target.ping" | "target.rename" | "target.env-set" | "target.env-unset" |
   "beacon.reconfigure" | "beacon.open-session";
 
@@ -1158,6 +1264,12 @@ function beaconCommandInput(
 ): TargetOperationInput {
   switch (commandId) {
     case "execution":
+    case "execution.children":
+    case "privilege.get":
+    case "privilege.run-as":
+    case "privilege.make-token":
+    case "privilege.impersonate":
+    case "privilege.revert":
       throw new Error("Choose execution options before queueing this task.");
     case "beacon.filesystem.pwd":
       return { operationId: commandId };

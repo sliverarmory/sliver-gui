@@ -8,6 +8,7 @@ import type {
   ExecutionActionResult,
   ExecutionCatalog,
   ExecutionOperationId,
+  ExecutionReadOperationId,
 } from "../../../shared/execution-contracts";
 import type { TargetRef } from "../../../shared/target-contracts";
 import { BofExecutionView } from "./BofExecutionView";
@@ -25,11 +26,14 @@ import {
 } from "./TargetExecutionWorkbench";
 
 export type BeaconExecutionCommandState = ExecutionComposerState;
+export type BeaconExecutionSelection = "execution" | "execution.children" | "privilege.get" |
+  "privilege.run-as" | "privilege.make-token" | "privilege.impersonate" | "privilege.revert";
 
 export interface BeaconExecutionCommandProps {
   expectedTarget: TargetRef;
   targetIdentity: string;
   formId: string;
+  selection?: BeaconExecutionSelection;
   onQueuedTask: (taskId: string) => void;
   onStateChange: (state: BeaconExecutionCommandState) => void;
 }
@@ -53,6 +57,7 @@ export function BeaconExecutionCommand({
   expectedTarget,
   targetIdentity,
   formId,
+  selection = "execution",
   onQueuedTask,
   onStateChange,
 }: BeaconExecutionCommandProps): React.JSX.Element {
@@ -66,6 +71,7 @@ export function BeaconExecutionCommand({
   const [composerState, setComposerState] = useState<ExecutionComposerState>(EMPTY_COMPOSER);
   const [isPreparing, setIsPreparing] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [isReading, setIsReading] = useState(false);
   const [plan, setPlan] = useState<ExecutionActionPlan>();
   const [result, setResult] = useState<ExecutionActionResult>();
   const identityRef = useRef(exactIdentity);
@@ -80,8 +86,10 @@ export function BeaconExecutionCommand({
   const catalogSequence = useRef(0);
   const prepareSequence = useRef(0);
   const executeSequence = useRef(0);
+  const readSequence = useRef(0);
   const preparingRef = useRef(false);
   const executingRef = useRef(false);
+  const readingRef = useRef(false);
   const previousSelection = useRef<string | undefined>(undefined);
   const queuedCallback = useRef(onQueuedTask);
   queuedCallback.current = onQueuedTask;
@@ -132,6 +140,7 @@ export function BeaconExecutionCommand({
       catalogSequence.current += 1;
       prepareSequence.current += 1;
       executeSequence.current += 1;
+      readSequence.current += 1;
       const current = planRef.current;
       planRef.current = undefined;
       if (current) discardToken(current.token);
@@ -164,19 +173,45 @@ export function BeaconExecutionCommand({
     const hasBofs = catalog !== undefined && ["windows", "linux", "darwin"].includes(catalog.target.os.trim().toLowerCase());
     return hasBofs ? [...supported.slice(0, 1), { id: "bofs", label: "BOFs" }, ...supported.slice(1)] : supported;
   }, [capabilities, catalog]);
-  const activeType = types.some((candidate) => candidate.id === type) ? type : types[0]?.id;
+  const activeType = selection === "execution"
+    ? (types.some((candidate) => candidate.id === type) ? type : types[0]?.id)
+    : selection;
   const capability = capabilities.find((candidate) => candidate.operationId === activeType);
   const isSharedComposer = activeType === "execution.process" || activeType === "execution.assembly" || activeType === "bofs";
-  const available = catalogIsCurrent && !isPreparing && !isExecuting && !plan &&
+  const available = catalogIsCurrent && !isPreparing && !isExecuting && !isReading && !plan &&
     (isSharedComposer ? composerState.isAvailable : capability?.available === true);
 
   useEffect(() => {
     onStateChange({
-      isPending: isPreparing || isExecuting || (isSharedComposer && composerState.isPending),
+      isPending: isPreparing || isExecuting || isReading || (isSharedComposer && composerState.isPending),
       isAvailable: available,
       error: error ?? (isSharedComposer ? composerState.error : capability?.reason?.message),
     });
-  }, [available, capability?.reason?.message, composerState.error, composerState.isPending, error, isExecuting, isPreparing, isSharedComposer, onStateChange]);
+  }, [available, capability?.reason?.message, composerState.error, composerState.isPending, error, isExecuting, isPreparing, isReading, isSharedComposer, onStateChange]);
+
+  const runRead = useCallback(async (operationId: ExecutionReadOperationId): Promise<void> => {
+    if (!catalogIsCurrent || !capability?.available || readingRef.current) return;
+    const requestIdentity = exactIdentity;
+    const sequence = ++readSequence.current;
+    readingRef.current = true;
+    setIsReading(true);
+    setError(undefined);
+    try {
+      const response = await window.sliver.runExecutionRead({ operationId, limit: 100 });
+      if (!mounted.current || sequence !== readSequence.current || requestIdentity !== identityRef.current) return;
+      if (!response.ok || !response.value) throw new Error(response.error ?? "Could not queue execution read.");
+      if (response.value.operationId !== operationId || response.value.state !== "submitted" || !response.value.taskId) {
+        throw new Error("The execution read returned no exact beacon task ID.");
+      }
+      queuedCallback.current(response.value.taskId);
+      toast.success("Task queued", { description: "The read will complete after the beacon checks in." });
+    } catch (failure) {
+      if (mounted.current && sequence === readSequence.current && requestIdentity === identityRef.current) setError(errorMessage(failure));
+    } finally {
+      readingRef.current = false;
+      if (mounted.current && sequence === readSequence.current && requestIdentity === identityRef.current) setIsReading(false);
+    }
+  }, [capability?.available, catalogIsCurrent, exactIdentity]);
 
   const execute = useCallback(async (directPlan?: ExecutionActionPlan): Promise<void> => {
     const current = directPlan ?? planRef.current;
@@ -265,7 +300,14 @@ export function BeaconExecutionCommand({
           : <p className="text-xs text-muted" role="status">Loading execution capabilities…</p>
       ) : (
         <>
-          {activeType ? <Tabs className="min-w-0 gap-3" selectedKey={activeType} onSelectionChange={(key) => selectType(String(key))}>
+          {isBeaconReadSelection(selection) ? (
+            <form id={formId} onSubmit={(event) => { event.preventDefault(); void runRead(selection); }}>
+              <p className="text-xs leading-relaxed text-muted">Queue a bounded read for this beacon. Its result appears in Task output after check-in.</p>
+            </form>
+          ) : selection !== "execution" && capability ? (
+            <ExecutionActionForm capability={capability} formId={formId} isPreparing={!catalogIsCurrent || isPreparing || isExecuting || !capability.available}
+              operationId={selection} target={catalog.target} onPrepare={prepare} />
+          ) : selection === "execution" && activeType ? <Tabs className="min-w-0 gap-3" selectedKey={activeType} onSelectionChange={(key) => selectType(String(key))}>
             <Tabs.ListContainer className="max-w-full overflow-x-auto">
               <Tabs.List aria-label="Execution type" className="w-max p-0.5">
                 {types.map((candidate) => <Tabs.Tab className="h-7 whitespace-nowrap px-2.5 text-xs" id={candidate.id} isDisabled={isPreparing || isExecuting || composerState.isPending || plan !== undefined} key={candidate.id}>{candidate.label}<Tabs.Indicator /></Tabs.Tab>)}
@@ -293,7 +335,8 @@ export function BeaconExecutionCommand({
               </Tabs.Panel>
             ))}
           </Tabs> : null}
-          {types.length === 0 ? <p className="text-xs text-muted" role="status">No execution types support this beacon.</p> : null}
+          {selection === "execution" && types.length === 0 ? <p className="text-xs text-muted" role="status">No execution types support this beacon.</p> : null}
+          {selection !== "execution" && !capability ? <p className="text-xs text-warning" role="status">This execution command is unavailable for the selected beacon.</p> : null}
           {isRefreshing ? <p className="mt-3 text-xs text-muted" role="status">Refreshing execution capabilities…</p> : null}
           {error ? <p className="mt-3 text-xs text-danger" role="alert">{error}</p> : null}
           {catalogError ? <Button className="mt-3" size="sm" variant="tertiary" onPress={() => void loadCatalog()}>Retry execution</Button> : null}
@@ -306,4 +349,8 @@ export function BeaconExecutionCommand({
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Execution could not be queued.";
+}
+
+function isBeaconReadSelection(value: BeaconExecutionSelection): value is ExecutionReadOperationId {
+  return value === "execution.children" || value === "privilege.get";
 }

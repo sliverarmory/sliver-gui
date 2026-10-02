@@ -7,7 +7,7 @@ import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { ExecutionActionPlan, ExecutionCapability, ExecutionCatalog, ExecutionOperationId } from "../../../shared/execution-contracts";
 import type { BeaconSummary, TargetRef } from "../../../shared/target-contracts";
 import { renderWithApplicationContextMenu as render } from "../application-context-menu-test-utils";
-import { BeaconExecutionCommand, type BeaconExecutionCommandState } from "./BeaconExecutionCommand";
+import { BeaconExecutionCommand, type BeaconExecutionCommandState, type BeaconExecutionSelection } from "./BeaconExecutionCommand";
 
 vi.mock("../components/ExecutionOutputTerminal", () => ({ ExecutionOutputTerminal: () => null }));
 
@@ -46,6 +46,7 @@ function plan(operationId: ExecutionOperationId = "execution.process", overrides
 function installApi(value = catalog()) {
   const api = {
     listExecutionCatalog: vi.fn().mockResolvedValue({ ok: true, value }),
+    runExecutionRead: vi.fn(),
     prepareExecutionAction: vi.fn().mockResolvedValue({ ok: true, value: plan() }),
     executeExecutionPlan: vi.fn().mockResolvedValue({ ok: true, value: { requestId: "execution-1", taskId: "task-1", operationId: "execution.process", state: "submitted", message: "Queued." } }),
     discardExecutionPlan: vi.fn().mockResolvedValue({ ok: true }),
@@ -61,10 +62,10 @@ function installApi(value = catalog()) {
   Object.defineProperty(window, "sliver", { configurable: true, value: api as unknown as SliverDesktopAPI });
   return api;
 }
-function Harness({ expectedTarget = targetRef, onQueuedTask = () => undefined }: { expectedTarget?: TargetRef; onQueuedTask?: (id: string) => void }) {
+function Harness({ expectedTarget = targetRef, onQueuedTask = () => undefined, selection = "execution" }: { expectedTarget?: TargetRef; onQueuedTask?: (id: string) => void; selection?: BeaconExecutionSelection }) {
   const [state, setState] = useState<BeaconExecutionCommandState>({ isPending: false, isAvailable: false });
   return <><button type="submit" form="beacon-execution-test" disabled={!state.isAvailable || state.isPending}>Queue task</button>
-    <BeaconExecutionCommand expectedTarget={expectedTarget} targetIdentity={`backend:${expectedTarget.id}`} formId="beacon-execution-test" onQueuedTask={onQueuedTask} onStateChange={setState} /></>;
+    <BeaconExecutionCommand expectedTarget={expectedTarget} targetIdentity={`backend:${expectedTarget.id}`} formId="beacon-execution-test" selection={selection} onQueuedTask={onQueuedTask} onStateChange={setState} /></>;
 }
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -74,6 +75,55 @@ function deferred<T>() {
 }
 
 describe("beacon execution command", () => {
+  it.each([
+    ["execution.children", target],
+    ["privilege.get", { ...target, os: "windows" }],
+  ] as const)("queues the selected %s read with an exact task ID", async (selection, selectedTarget) => {
+    const api = installApi(catalog([capability(selection, { platforms: [selectedTarget.os], risk: "read-only", confirmationRequired: false })], selectedTarget));
+    api.runExecutionRead.mockResolvedValue({ ok: true, value: {
+      operationId: selection, state: "submitted", taskId: `task-${selection}`, total: 0, truncated: false,
+      ...(selection === "execution.children" ? { items: [] } : { processName: "", processIntegrity: "", privileges: [] }),
+    } });
+    const queued = vi.fn();
+    render(<Harness selection={selection} onQueuedTask={queued} />);
+    const user = userEvent.setup();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Queue task" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(queued).toHaveBeenCalledExactlyOnceWith(`task-${selection}`));
+    expect(api.runExecutionRead).toHaveBeenCalledExactlyOnceWith({ operationId: selection, limit: 100 });
+    expect(api.prepareExecutionAction).not.toHaveBeenCalled();
+    expect(screen.queryByRole("tab", { name: "Process" })).not.toBeInTheDocument();
+  });
+
+  it.each(["privilege.run-as", "privilege.make-token", "privilege.impersonate", "privilege.revert"] as const)(
+    "preserves one-use review for the direct Windows identity command %s", async (selection) => {
+    const windowsTarget = { ...target, os: "windows" };
+    const api = installApi(catalog([capability(selection, {
+      platforms: ["windows"], credentialBearing: selection === "privilege.run-as" || selection === "privilege.make-token",
+    })], windowsTarget));
+    api.prepareExecutionAction.mockResolvedValue({ ok: true, value: plan(selection, { target: { backend, target: windowsTarget, fingerprint: targetRef.fingerprint } }) });
+    api.executeExecutionPlan.mockResolvedValue({ ok: true, value: { requestId: `${selection}-1`, taskId: `task-${selection}`, operationId: selection, state: "submitted", message: "Queued." } });
+    const queued = vi.fn();
+    const user = userEvent.setup();
+    render(<Harness selection={selection} onQueuedTask={queued} />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Queue task" })).toBeEnabled());
+    if (selection === "privilege.run-as" || selection === "privilege.make-token") {
+      await user.type(screen.getByRole("textbox", { name: "Username" }), "CORP\\alice");
+      await user.type(screen.getByLabelText("Password"), "one-use-secret");
+    }
+    if (selection === "privilege.run-as") await user.type(screen.getByRole("textbox", { name: "Process" }), "cmd.exe");
+    if (selection === "privilege.impersonate") await user.type(screen.getByRole("textbox", { name: "Logged-in username" }), "CORP\\alice");
+    await user.click(screen.getByRole("button", { name: "Queue task" }));
+    const review = await screen.findByRole("alertdialog", { name: "Execute this reviewed action?" });
+    expect(api.executeExecutionPlan).not.toHaveBeenCalled();
+    expect(api.prepareExecutionAction).toHaveBeenCalledWith({ draft: expect.objectContaining({ operationId: selection }) });
+    await user.click(within(review).getByRole("button", { name: "Execute" }));
+    await waitFor(() => expect(queued).toHaveBeenCalledExactlyOnceWith(`task-${selection}`));
+    expect(api.executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: `plan-${selection}` });
+    if (selection === "privilege.run-as" || selection === "privilege.make-token") {
+      expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    }
+  });
   it("uses the external form submit and requires process review before dispatch", async () => {
     const api = installApi(); const queued = vi.fn(); const user = userEvent.setup();
     render(<Harness onQueuedTask={queued} />);

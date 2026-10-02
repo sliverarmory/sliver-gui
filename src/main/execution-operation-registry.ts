@@ -7,6 +7,7 @@ import type {
 } from "../shared/execution-contracts.js";
 import { EXECUTION_OPERATION_IDS } from "../shared/execution-contracts.js";
 import type { TargetMode, TargetSummary } from "../shared/target-contracts.js";
+import { beaconCommandCapability, type BeaconCommandId } from "./beacon-command-matrix.js";
 
 export type ExecutionCategory = "process" | "payloads" | "remote" | "identity";
 
@@ -30,6 +31,14 @@ const ALL_PLATFORMS = Object.freeze(["windows", "linux", "darwin"] as const);
 const BOTH_MODES = Object.freeze(["session", "beacon"] as const);
 const WINDOWS = Object.freeze(["windows"] as const);
 const SESSION = Object.freeze(["session"] as const);
+const BC03_BEACON_COMMANDS = Object.freeze({
+  "execution.children": "implant.execute.children",
+  "privilege.get": "implant.getprivs",
+  "privilege.run-as": "implant.runas",
+  "privilege.make-token": "implant.make-token",
+  "privilege.impersonate": "implant.impersonate",
+  "privilege.revert": "implant.rev2self",
+} as const satisfies Partial<Record<ExecutionOperationId, BeaconCommandId>>);
 
 function artifact(
   role: ExecutionArtifactRequirement["role"],
@@ -213,6 +222,15 @@ function capabilityReason(
       return { code: "requires-windows", message: "This operation is available only on Windows targets." };
     }
     return { code: "unsupported-platform", message: `This operation is unavailable on ${platform || "unknown"} targets.` };
+  }
+  if (target.mode === "beacon" && operation.id in BC03_BEACON_COMMANDS) {
+    const commandId = BC03_BEACON_COMMANDS[operation.id as keyof typeof BC03_BEACON_COMMANDS];
+    const availability = beaconCommandCapability(commandId, target);
+    if (!availability.available) {
+      return availability.reason === "unsupported-architecture"
+        ? { code: "unsupported-architecture", message: "This beacon architecture is unavailable for this command." }
+        : { code: "dependency-unavailable", message: "This beacon command is unavailable for the selected transport or runtime." };
+    }
   }
   return undefined;
 }

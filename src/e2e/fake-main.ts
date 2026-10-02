@@ -274,6 +274,7 @@ const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 const beaconsTableFixture = process.argv.includes("--beacons-table-fixture");
 const beaconManagementDenialFixture = process.argv.includes("--beacon-management-denial-fixture");
 const beaconExecutionFixture = process.argv.includes("--beacon-execution-fixture");
+const beaconBC03Fixture = process.argv.includes("--beacon-bc03-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
 }
@@ -2027,7 +2028,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       recordM4("executeChildrenBeacon");
       requireBeacon(beaconId);
       const completed = sliverpb.ExecuteChildren.create({
-        Children: fakeExecutionChildren(),
+        Children: beaconBC03Fixture ? fakePagedExecutionChildren() : fakeExecutionChildren(),
         Response: response(false),
       });
       return sliverpb.ExecuteChildren.create({
@@ -2325,7 +2326,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       recordM4("getPrivsBeacon");
       requireBeacon(beaconId);
       const completed = sliverpb.GetPrivs.create({
-        PrivInfo: fakePrivileges(),
+        PrivInfo: beaconBC03Fixture ? fakePagedPrivileges() : fakePrivileges(),
         ProcessIntegrity: "High",
         ProcessName: "sliver-m4-beacon.exe",
         Response: response(false),
@@ -2750,6 +2751,22 @@ function fakeExecutionChildren(): sliverpb.ExecuteChild[] {
   ];
 }
 
+function fakePagedExecutionChildren(): sliverpb.ExecuteChild[] {
+  return [
+    ...fakeExecutionChildren().map((child) => sliverpb.ExecuteChild.create({
+      ...child,
+      StartTime: String(Math.floor(Date.parse(child.StartTime) / 1_000)),
+      ExitTime: child.ExitTime ? String(Math.floor(Date.parse(child.ExitTime) / 1_000)) : "0",
+    })),
+    ...Array.from({ length: 50 }, (_, index) => sliverpb.ExecuteChild.create({
+      Pid: 43_103 + index,
+      Path: `/usr/bin/fixture-child-${index + 1}`,
+      Args: [],
+      Exited: false,
+    })),
+  ];
+}
+
 function fakePrivileges(): sliverpb.WindowsPrivilegeEntry[] {
   return [
     sliverpb.WindowsPrivilegeEntry.create({
@@ -2768,6 +2785,17 @@ function fakePrivileges(): sliverpb.WindowsPrivilegeEntry[] {
       Removed: false,
       UsedForAccess: false,
     }),
+  ];
+}
+
+function fakePagedPrivileges(): sliverpb.WindowsPrivilegeEntry[] {
+  return [
+    ...fakePrivileges(),
+    ...Array.from({ length: 50 }, (_, index) => sliverpb.WindowsPrivilegeEntry.create({
+      Name: `FixturePrivilege${index + 1}`,
+      Description: `Fixture privilege ${index + 1}`,
+      Enabled: false,
+    })),
   ];
 }
 

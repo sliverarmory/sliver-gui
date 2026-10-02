@@ -17,6 +17,87 @@ const localOwnership: OperationOwnership = {
 };
 
 describe("BeaconTaskStore execution results", () => {
+  it("retains a task-bound first page of background children in task detail", async () => {
+    const response = Buffer.from(sliverpb.ExecuteChildren.encode(sliverpb.ExecuteChildren.fromPartial({
+      Children: Array.from({ length: 55 }, (_, index) => ({ Pid: index + 1, Path: `/bin/child-${index + 1}` })),
+      Response: {},
+    })).finish());
+    const request = Buffer.from("private request bytes");
+    const fixture = await executionFixture("ExecuteChildrenReq", response, { request });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task", () => ({
+      ownership: localOwnership,
+      localRequestId: "read_request_1",
+      executionOperationId: "execution.children",
+    }));
+
+    expect(detail.localRequestId).toBe("read_request_1");
+    expect(detail.execution).toBeUndefined();
+    expect(detail.executionRead).toMatchObject({
+      operationId: "execution.children",
+      state: "completed",
+      taskId: "execution_task",
+      total: 55,
+      truncated: true,
+      nextCursor: "execution-read:v2:execution.children:execution_task:50",
+    });
+    expect(detail.executionRead?.operationId === "execution.children" && detail.executionRead.items).toHaveLength(50);
+    expect(JSON.stringify(detail)).not.toContain("private request bytes");
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("retains a task-bound Windows privilege inventory and hides remote rejection text", async () => {
+    const response = Buffer.from(sliverpb.GetPrivs.encode(sliverpb.GetPrivs.fromPartial({
+      ProcessName: "agent.exe",
+      ProcessIntegrity: "High",
+      PrivInfo: [{ Name: "SeDebugPrivilege", Description: "Debug programs", Enabled: true }],
+      Response: {},
+    })).finish());
+    const fixture = await executionFixture("GetPrivsReq", response);
+    const attribution: TaskOwnershipResolver = () => ({ ownership: localOwnership, executionOperationId: "privilege.get" });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task", attribution);
+    expect(detail.executionRead).toMatchObject({
+      operationId: "privilege.get", state: "completed", taskId: "execution_task",
+      processName: "agent.exe", processIntegrity: "High", total: 1,
+      privileges: [{ name: "SeDebugPrivilege", enabled: true }],
+    });
+    expect(response.every((byte) => byte === 0)).toBe(true);
+
+    const rejected = Buffer.from(sliverpb.GetPrivs.encode(sliverpb.GetPrivs.fromPartial({
+      Response: { Err: "private target error" },
+    })).finish());
+    const rejectedFixture = await executionFixture("GetPrivsReq", rejected);
+    const rejectedDetail = await rejectedFixture.store.detail(beaconId, "execution_task", attribution);
+    expect(rejectedDetail.executionRead).toBeUndefined();
+    expect(rejectedDetail.errorKind).toBe("target-reported");
+    expect(JSON.stringify(rejectedDetail)).not.toContain("private target error");
+    expect(rejected.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("shows submitted read provenance and rejects mismatched fetched task descriptions", async () => {
+    const pending = await executionFixture("ExecuteChildrenReq", Buffer.alloc(0), { state: "pending" });
+    const attribution: TaskOwnershipResolver = () => ({ ownership: localOwnership, executionOperationId: "execution.children" });
+    const pendingDetail = await pending.store.detail(beaconId, "execution_task", attribution);
+    expect(pendingDetail.executionRead).toMatchObject({ operationId: "execution.children", state: "submitted", taskId: "execution_task" });
+    expect(pending.client.fetchBeaconTaskContent).not.toHaveBeenCalled();
+
+    const failed = await executionFixture("ExecuteChildrenReq", Buffer.alloc(0), { state: "failed" });
+    const failedDetail = await failed.store.detail(beaconId, "execution_task", attribution);
+    expect(failedDetail.executionRead).toBeUndefined();
+    expect(failedDetail.execution).toBeUndefined();
+
+    const response = Buffer.from(sliverpb.ExecuteChildren.encode(sliverpb.ExecuteChildren.fromPartial({ Response: {} })).finish());
+    const mismatched = await executionFixture("ExecuteChildrenReq", response, {
+      fetchedOverrides: { Description: "GetPrivsReq" },
+    });
+    const detail = await mismatched.store.detail(beaconId, "execution_task", attribution);
+    expect(detail.executionRead).toBeUndefined();
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
   it("loads old server-saved extension output without local execution provenance", async () => {
     const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
       Type: 91,

@@ -178,6 +178,35 @@ describe("beacon command matrix", () => {
     });
   });
 
+  it("exposes the six BC-03 execution commands through their closed current response boundary", () => {
+    const delivered = [
+      ["implant.execute.children", "execution.children", "ExecuteChildrenReq"],
+      ["implant.getprivs", "privilege.get", "GetPrivsReq"],
+      ["implant.runas", "privilege.run-as", "RunAsReq"],
+      ["implant.make-token", "privilege.make-token", "MakeTokenReq"],
+      ["implant.impersonate", "privilege.impersonate", "ImpersonateReq"],
+      ["implant.rev2self", "privilege.revert", "RevToSelfReq"],
+    ] as const;
+    for (const [id, operationId, description] of delivered) {
+      const row = BEACON_COMMAND_MATRIX[id];
+      expect(row.delivery).toBe("existing");
+      expect(row.route).toMatchObject({
+        kind: "existing-execution",
+        executionOperationId: operationId,
+        task: {
+          responsePolicy: "current-execution",
+          maximumResponseBytes: BEACON_RESPONSE_CEILINGS["current-execution"],
+          steps: [{ taskDescription: description }],
+        },
+      });
+      expect(beaconCommandCapability(id, beacon("windows"))).toEqual({ available: true });
+    }
+    expect(beaconCommandCapability("implant.execute.children", beacon("linux"))).toEqual({ available: true });
+    expect(beaconCommandCapability("implant.getprivs", beacon("linux"))).toEqual({ available: false, reason: "unsupported-platform" });
+    expect(BEACON_COMMAND_MATRIX["implant.runas"].optionBoundary.pending).toEqual([]);
+    expect(BEACON_COMMAND_MATRIX["implant.make-token"].optionBoundary.pending).toEqual([]);
+  });
+
   it("fails closed for unknown, future, unsupported, and unknown-target routes", () => {
     expect(beaconCommandCapability("implant.unknown", beacon())).toEqual({ available: false, reason: "unknown-command" });
     expect(beaconCommandCapability("implant.netstat", beacon())).toEqual({ available: false, reason: "not-delivered" });

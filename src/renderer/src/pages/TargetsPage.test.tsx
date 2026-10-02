@@ -1374,6 +1374,51 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.open-session", delaySeconds: 9 }));
   });
 
+  it("lists all six M4 beacon commands in the existing command picker", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /Working directory.*Command/i }));
+    for (const label of ["Background children", "Windows privileges", "Run as", "Make token", "Impersonate", "Revert identity"]) {
+      expect(screen.getByRole("option", { name: new RegExp(`^${label}`, "i") })).toBeInTheDocument();
+    }
+  });
+
+  it("renders and pages a task-bound children read after a queue jump", async () => {
+    const user = userEvent.setup();
+    const first = beaconTaskDetail({
+      taskId: "task-children", description: "ExecuteChildrenReq",
+      executionRead: {
+        operationId: "execution.children", state: "completed", taskId: "task-children", total: 2,
+        items: [{ pid: 4101, path: "/usr/bin/first", args: ["--one"], exited: false, stdoutBytes: 4, stderrBytes: 0 }],
+        nextCursor: "execution-read:v2:execution.children:task-children:1", truncated: true,
+      },
+    });
+    delete first.operationId;
+    delete first.disposition;
+    const runExecutionRead = vi.fn().mockResolvedValue({ ok: true, value: {
+      operationId: "execution.children", state: "completed", taskId: "task-children", total: 2,
+      items: [{ pid: 4102, path: "/usr/bin/second", args: [], exited: true, exitCode: 0, stdoutBytes: 0, stderrBytes: 0 }],
+      truncated: false,
+    } });
+    installAPI({
+      runExecutionRead,
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: first }),
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [first], page: { limit: 100, total: 1, truncated: false } } }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(await screen.findByRole("row", { name: /task-children/i }));
+    const result = await screen.findByRole("region", { name: "Background children" });
+    expect(within(result).getByText("/usr/bin/first")).toBeInTheDocument();
+    await user.click(within(result).getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(within(result).getByText("/usr/bin/second")).toBeInTheDocument());
+    expect(runExecutionRead).toHaveBeenCalledExactlyOnceWith({
+      operationId: "execution.children", taskId: "task-children", cursor: "execution-read:v2:execution.children:task-children:1", limit: 50,
+    });
+    expect(within(result).getByText("2 of 2")).toBeInTheDocument();
+  });
+
   it("respects management capability denial and tracks exact operation state changes", async () => {
     const user = userEvent.setup();
     let onOperationChanged: ((operation: TargetOperationRecord) => void) | undefined;

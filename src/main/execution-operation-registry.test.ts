@@ -59,6 +59,31 @@ describe("execution operation registry", () => {
     });
   });
 
+  it("applies the reviewed beacon command matrix to the six delivered M4 commands", () => {
+    const delivered = [
+      "execution.children",
+      "privilege.get",
+      "privilege.run-as",
+      "privilege.make-token",
+      "privilege.impersonate",
+      "privilege.revert",
+    ] as const;
+    const windowsBeacon = beacon("windows");
+    for (const operationId of delivered) {
+      expect(assertExecutionOperationSupported(operationId, windowsBeacon).id).toBe(operationId);
+      expect(() => assertExecutionOperationSupported(operationId, {
+        ...windowsBeacon,
+        transport: "namedpipe",
+      })).toThrow(/selected transport or runtime/u);
+      expect(() => assertExecutionOperationSupported(operationId, {
+        ...windowsBeacon,
+        arch: "unknown",
+      })).toThrow(/architecture/u);
+    }
+    expect(assertExecutionOperationSupported("execution.children", beacon("linux")).id).toBe("execution.children");
+    expect(() => assertExecutionOperationSupported("privilege.get", beacon("linux"))).toThrow(/Windows/u);
+  });
+
   it("fails closed for dead sessions", () => {
     expect(() => assertExecutionOperationSupported("execution.process", session("linux", "dead"))).toThrow(/active session/u);
     expect(executionCapabilitiesForTarget(session("linux", "dead")).every((capability) => !capability.available)).toBe(true);

@@ -11,7 +11,7 @@ import type {
   OperationOwnership,
   TargetOperationId,
 } from "../shared/operation-contracts.js";
-import type { ExecutionOperationId } from "../shared/execution-contracts.js";
+import { isExecutionReadOperationId, type ExecutionOperationId, type ExecutionReadOperationId, type ExecutionReadResult } from "../shared/execution-contracts.js";
 import { decodeBofOutput, decodeBofTask } from "./bof-workbench.js";
 import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS, EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES } from "./execution-beacon-task.js";
 import { ExecutionRemoteRejectedError } from "./execution-workbench.js";
@@ -412,7 +412,13 @@ export class BeaconTaskStore {
     operationId: BeaconTaskExecutionOutput["operationId"],
     attribution: ReturnType<TaskOwnershipResolver>,
   ): Promise<BeaconTaskDetail> {
-    const skeleton = { ...base, execution: { operationId } };
+    const readOperationId = operationId !== "bof.execute" && isExecutionReadOperationId(operationId)
+      ? operationId : undefined;
+    const skeleton = readOperationId
+      ? task.state === "pending" || task.state === "sent"
+        ? { ...base, executionRead: submittedExecutionReadResult(readOperationId, task.taskId) }
+        : base
+      : { ...base, execution: { operationId } };
     const descriptions = operationId === "bof.execute"
       ? ["CallExtensionReq"]
       : EXECUTION_BEACON_TASK_DESCRIPTIONS[operationId as keyof typeof EXECUTION_BEACON_TASK_DESCRIPTIONS];
@@ -466,8 +472,15 @@ export class BeaconTaskStore {
           }
           const decoded = decodeExecutionBeaconTask({
             operationId, description: task.description, response: content.Response,
+            ...(readOperationId ? { readInput: { operationId: readOperationId, taskId: task.taskId } } : {}),
             processWaited: attribution.executionOperationId === "execution.process" && attribution.processWaited === true,
           });
+          if (readOperationId) {
+            if (decoded.kind !== "read" || decoded.value.operationId !== readOperationId || decoded.value.taskId !== task.taskId) {
+              throw new Error("The execution result did not contain the correlated read result");
+            }
+            return { ...base, executionRead: decoded.value };
+          }
           if (decoded.kind !== "action") throw new Error("The execution result did not contain an action result");
           const result = decoded.value;
           return {
@@ -1029,7 +1042,19 @@ function executionDetailError(
   error: string,
   captured: Pick<BeaconTaskExecutionOutput, "stdout" | "stderr"> = {},
 ): BeaconTaskDetail {
+  if (operationId !== "bof.execute" && isExecutionReadOperationId(operationId)) {
+    return { ...base, errorKind, error };
+  }
   return { ...base, execution: { operationId, ...captured, outputError: error }, errorKind, error };
+}
+
+function submittedExecutionReadResult(
+  operationId: ExecutionReadOperationId,
+  taskId: string,
+): ExecutionReadResult {
+  return operationId === "execution.children"
+    ? { operationId, state: "submitted", taskId, items: [], total: 0, truncated: false }
+    : { operationId, state: "submitted", taskId, processName: "", processIntegrity: "", privileges: [], total: 0, truncated: false };
 }
 
 function taskState(state: string): BeaconTaskState {

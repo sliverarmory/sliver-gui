@@ -160,7 +160,7 @@ import type {
   SaveExecutionResultInput,
   SaveExecutionResultResult,
 } from "../shared/execution-contracts.js";
-import { isExecutionOperationId } from "../shared/execution-contracts.js";
+import { isExecutionOperationId, isExecutionReadOperationId } from "../shared/execution-contracts.js";
 import type { DotNetCatalog } from "../shared/dotnet-contracts.js";
 import type {
   AddBofOutputToLootInput,
@@ -3535,7 +3535,12 @@ export class ConnectionRegistry {
             engine.finishExternal(journal.requestId, "target-disappeared");
             throw new Error("The selected target changed while the execution read was running");
           }
-          if (response.taskId) engine.markExternalSubmitted(journal.requestId, response.taskId);
+          if (response.taskId) {
+            if (target.target.mode === "beacon") {
+              pool.recordExecutionTaskFact(response.taskId, selectedRef, input.operationId);
+            }
+            engine.markExternalSubmitted(journal.requestId, response.taskId);
+          }
           if (response.state === "completed") {
             engine.finishExternal(journal.requestId, "completed");
             return response;
@@ -5238,11 +5243,21 @@ export class ConnectionRegistry {
       throw new Error("The selected target cannot refresh a beacon execution task");
     }
     const operation = engine.findByTask(taskId, target.target.id);
+    const factBoundRead = !operation && readInput?.taskId === taskId &&
+      isExecutionReadOperationId(operationId) &&
+      pool.executionTaskFact(taskId, target.ref)?.operationId === operationId;
     if (
-      !operation ||
-      operation.operationId !== operationId ||
-      (expectedRequestId !== undefined && operation.requestId !== expectedRequestId)
+      operation
+        ? operation.operationId !== operationId ||
+          (expectedRequestId !== undefined && operation.requestId !== expectedRequestId)
+        : expectedRequestId !== undefined || !factBoundRead
     ) throw new Error("The execution result is unavailable for the current target");
+
+    // A second window can page an exact, pool-correlated read task without
+    // claiming or changing the submitting window's operation journal.
+    const markUnknown = (): void => {
+      if (operation) engine.markTaskOutcomeUnknown(taskId, target.target.id);
+    };
 
     const resolveOwnership = this.taskOwnershipResolver(context);
     try {
@@ -5252,7 +5267,7 @@ export class ConnectionRegistry {
         [taskId, ...pool.recoverableTaskIdsForBeacon(target.target.id)],
       );
     } catch {
-      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      markUnknown();
       return { state: "outcome-unknown" };
     }
     assertCurrent();
@@ -5260,28 +5275,28 @@ export class ConnectionRegistry {
     try {
       summary = pool.beaconTasks.task(target.target.id, taskId, resolveOwnership);
     } catch {
-      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      markUnknown();
       return { state: "outcome-unknown" };
     }
-    if (summary.localRequestId !== operation.requestId) {
-      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+    if (operation && summary.localRequestId !== operation.requestId) {
+      markUnknown();
       return { state: "outcome-unknown" };
     }
     switch (summary.state) {
       case "pending":
       case "sent":
-        if (operation.state !== "cancel-requested") {
+        if (operation && operation.state !== "cancel-requested") {
           await engine.reconcileTask({ taskId, beaconId: target.target.id, state: summary.state });
         }
         return { state: "pending" };
       case "canceled":
-        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "canceled" });
+        if (operation) await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "canceled" });
         return { state: "canceled" };
       case "failed":
-        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
+        if (operation) await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
         return { state: "failed" };
       case "unknown":
-        engine.markTaskOutcomeUnknown(taskId, target.target.id);
+        markUnknown();
         return { state: "outcome-unknown" };
       case "completed":
         break;
@@ -5307,7 +5322,7 @@ export class ConnectionRegistry {
         ...(processWaited ? { processWaited } : {}),
       });
       assertCurrent();
-      await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "completed" });
+      if (operation) await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "completed" });
       decodedTransferred = true;
       return { state: "decoded", decoded };
     } catch (error) {
@@ -5319,10 +5334,10 @@ export class ConnectionRegistry {
         throw error;
       }
       if (error instanceof ExecutionRemoteRejectedError) {
-        await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
+        if (operation) await engine.reconcileTask({ taskId, beaconId: target.target.id, state: "failed" });
         return { state: "failed" };
       }
-      engine.markTaskOutcomeUnknown(taskId, target.target.id);
+      markUnknown();
       return { state: "outcome-unknown" };
     } finally {
       content?.Request.fill(0);

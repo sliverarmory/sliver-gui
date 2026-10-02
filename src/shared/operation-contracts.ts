@@ -1,5 +1,5 @@
 import type { PageResult } from "./contracts.js";
-import type { ExecutionOperationId } from "./execution-contracts.js";
+import type { ExecutionOperationId, ExecutionReadResult } from "./execution-contracts.js";
 import type { SessionWorkbenchOperationId } from "./session-contracts.js";
 import type { TargetMode, TargetRef } from "./target-contracts.js";
 
@@ -301,6 +301,8 @@ export interface BeaconTaskSummary {
 export interface BeaconTaskDetail extends BeaconTaskSummary {
   operationId?: TargetOperationId;
   execution?: BeaconTaskExecutionOutput;
+  /** Main-decoded, task-bound first page of an execution inventory. */
+  executionRead?: ExecutionReadResult;
   disposition?: OperationDisposition;
   error?: string;
   errorKind?: "target-reported" | "decode-uncertain";
