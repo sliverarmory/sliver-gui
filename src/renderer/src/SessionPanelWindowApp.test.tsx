@@ -121,7 +121,7 @@ describe("SessionPanelWindowApp", () => {
     expect(workbench).toHaveAttribute("data-can-popout", "false");
     expect(workbench).toHaveAttribute("data-managed-deployment", "deployment-1");
     expect(api.claimSessionPanelWindow).toHaveBeenCalledOnce();
-    expect(document.title).toBe("Execution — Panel session");
+    await waitFor(() => expect(document.title).toBe("Execution — Panel session"));
   });
 
   it.each([
@@ -141,7 +141,7 @@ describe("SessionPanelWindowApp", () => {
     if (panel === "files") expect(editor).toHaveAttribute("data-route-incarnation", "4");
     if (panel === "network") expect(editor).toHaveAttribute("data-standalone", "true");
     expect(screen.getByRole("banner", { name: "Session window header" })).toHaveTextContent(panel === "processes" ? "Processes" : panel === "network" ? "Network" : panel === "files" ? "Files" : "Registry");
-    expect(document.title).toBe(`${panel === "processes" ? "Processes" : panel === "network" ? "Network" : panel === "files" ? "Files" : "Registry"} — Panel session`);
+    await waitFor(() => expect(document.title).toBe(`${panel === "processes" ? "Processes" : panel === "network" ? "Network" : panel === "files" ? "Files" : "Registry"} — Panel session`));
     expect(screen.queryByRole("region", { name: "Mock execution workbench" })).not.toBeInTheDocument();
   });
 

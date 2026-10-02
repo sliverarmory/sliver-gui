@@ -1131,7 +1131,9 @@ function decodeDisposition(
         !decoded.SearchPathAbsolute && !decoded.Response) {
         throw new Error("The search result contained no recognized fields");
       }
-      let truncated = false;
+      let truncated = Object.values(decoded.Results).reduce(
+        (count, file) => count + file.FileResults.length, 0,
+      ) > MAX_RESULT_ROWS;
       const rows: (string | boolean)[][] = [];
       for (const path of Object.keys(decoded.Results).sort()) {
         const file = decoded.Results[path];

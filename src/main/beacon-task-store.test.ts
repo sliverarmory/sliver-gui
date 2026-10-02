@@ -1705,4 +1705,46 @@ describe("BC-04 task-bound M2 read results", () => {
       kind: "inline-text", truncated: true,
     });
   });
+
+  it("marks grep results truncated when a later file has matches after exactly 256 rows", async () => {
+    const taskId = "grep_beyond_first_file";
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task(taskId, "completed", 10, "GrepReq")] });
+    const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 129,
+      Data: Buffer.from(sliverpb.GrepReq.encode(sliverpb.GrepReq.create({
+        Path: "/tmp", SearchPattern: "needle", Recursive: true,
+        Request: { Async: true, BeaconID: "", SessionID: "" },
+      })).finish()),
+    })).finish());
+    const response = Buffer.from(sliverpb.Grep.encode(sliverpb.Grep.create({
+      SearchPathAbsolute: "/tmp",
+      Results: {
+        "/tmp/a.txt": {
+          FileResults: Array.from({ length: 256 }, (_, index) => ({
+            LineNumber: String(index + 1), Line: `needle ${index + 1}`,
+          })),
+        },
+        "/tmp/z.txt": { FileResults: [{ LineNumber: "1", Line: "needle after limit" }] },
+      },
+    })).finish());
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: request, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+
+    const detail = await store.detail(beaconId, taskId, () => ({
+      ownership: localOwnership,
+      operationId: "beacon.filesystem.grep",
+      expectedRequest: { operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle",
+        recursive: true, before: 0, after: 0 },
+    }));
+
+    expect(detail.errorKind).toBeUndefined();
+    expect(detail.disposition).toMatchObject({ kind: "table", truncated: true });
+    expect(detail.disposition?.kind === "table" ? detail.disposition.rows : []).toHaveLength(256);
+    expect(detail.disposition?.kind === "table" ? detail.disposition.rows.at(-1)?.[2] : undefined).toBe("needle 256");
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
 });

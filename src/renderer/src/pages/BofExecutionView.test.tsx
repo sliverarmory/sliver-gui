@@ -163,9 +163,12 @@ async function chooseBof(
   searchTerm: string,
   optionName: RegExp,
 ): Promise<void> {
-  const trigger = composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]');
-  expect(trigger).not.toBeNull();
-  await user.click(trigger!);
+  const trigger = await waitFor(() => {
+    const candidate = composer.querySelector<HTMLElement>('[data-slot="autocomplete-trigger"]');
+    expect(candidate).not.toBeNull();
+    return candidate!;
+  });
+  await user.click(trigger);
   const search = await screen.findByRole("searchbox", { name: "Search BOFs" });
   await user.clear(search);
   await user.type(search, searchTerm);

@@ -2,27 +2,60 @@
 
 import { describe, expect, it } from "vitest";
 
-import { TARGET_OPERATION_IDS } from "../shared/operation-contracts.js";
+import {
+  TARGET_OPERATION_IDS,
+  type TargetMode,
+  type TargetOperationId,
+} from "../shared/operation-contracts.js";
 import {
   OPERATION_REGISTRY,
   findOperationDescriptor,
   getOperationDescriptor,
+  type OperationAdapterMethodId,
 } from "./operation-registry.js";
+
+// This reviewed dispatch map is independent of the compiled registry: an added
+// operation or a changed client method must receive an explicit test review.
+const REVIEWED_ADAPTER_METHODS = {
+  "target.ping": { session: "pingSession", beacon: "pingBeacon" },
+  "target.rename": { session: "renameSession", beacon: "renameBeacon" },
+  "target.env-set": { session: "setEnvSession", beacon: "setEnvBeacon" },
+  "target.env-unset": { session: "unsetEnvSession", beacon: "unsetEnvBeacon" },
+  "beacon.reconfigure": { beacon: "reconfigureBeacon" },
+  "beacon.open-session": { beacon: "openSessionFromBeacon" },
+  "beacon.filesystem.pwd": { beacon: "pwdBeacon" },
+  "beacon.filesystem.ls": { beacon: "lsBeacon" },
+  "beacon.process.list": { beacon: "psBeacon" },
+  "beacon.network.interfaces": { beacon: "ifconfigBeacon" },
+  "beacon.environment.list": { beacon: "envBeacon" },
+  "beacon.identity.whoami": { beacon: "whoamiBeacon" },
+  "beacon.network.netstat": { beacon: "netstatBeacon" },
+  "beacon.filesystem.mount": { beacon: "mountBeacon" },
+  "beacon.filesystem.memfiles": { beacon: "memfilesBeacon" },
+  "beacon.filesystem.cat": { beacon: "catBeacon" },
+  "beacon.filesystem.head": { beacon: "headBeacon" },
+  "beacon.filesystem.tail": { beacon: "tailBeacon" },
+  "beacon.filesystem.grep": { beacon: "grepBeacon" },
+} as const satisfies Record<TargetOperationId, Partial<Record<TargetMode, OperationAdapterMethodId>>>;
 
 describe("compiled operation registry", () => {
   it("is an exact allowlist with one internally consistent binding per declared mode", () => {
     expect(Object.keys(OPERATION_REGISTRY)).toEqual([...TARGET_OPERATION_IDS]);
+    expect(Object.keys(REVIEWED_ADAPTER_METHODS)).toEqual([...TARGET_OPERATION_IDS]);
 
     for (const operationId of TARGET_OPERATION_IDS) {
       const descriptor = OPERATION_REGISTRY[operationId];
       expect(descriptor.id).toBe(operationId);
       expect(Object.keys(descriptor.bindings).sort()).toEqual([...descriptor.modes].sort());
+      expect(Object.fromEntries(Object.entries(descriptor.bindings).map(([mode, binding]) => [
+        mode,
+        binding?.adapterMethod,
+      ])), operationId).toEqual(REVIEWED_ADAPTER_METHODS[operationId]);
       for (const mode of descriptor.modes) {
         const binding = descriptor.bindings[mode];
         expect(binding).toBeDefined();
         expect(binding?.timeout.timeoutSeconds).toBeGreaterThan(0);
         expect(binding?.timeout.afterSubmission).toBe("outcome-unknown");
-        expect(binding?.adapterMethod).toMatch(/^(ping|rename|setEnv|unsetEnv|reconfigure|openSession|pwd|ls|ps|ifconfig|env|whoami|netstat|mount|memfiles|cat|head|tail|grep)/u);
       }
     }
   });
