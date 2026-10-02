@@ -1589,7 +1589,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       const fixture = fakeBeaconIfconfigTaskResult();
       return sliverpb.Ifconfig.create({
-        Response: queueTask(beaconId, fixture.description, fixture.result),
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          42, sliverpb.IfconfigReq.encode(sliverpb.IfconfigReq.create({ Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
       });
     },
     async netstatSession(sessionId: string) {
@@ -1630,7 +1632,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       const fixture = fakeBeaconPwdTaskResult();
       return sliverpb.Pwd.create({
-        Response: queueTask(beaconId, fixture.description, fixture.result),
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          12, sliverpb.PwdReq.encode(sliverpb.PwdReq.create({ Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
       });
     },
     async mountBeacon(beaconId: string) {
@@ -1728,7 +1732,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       const fixture = fakeBeaconLsTaskResult(path);
       return sliverpb.Ls.create({
-        Response: queueTask(beaconId, fixture.description, fixture.result),
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          5, sliverpb.LsReq.encode(sliverpb.LsReq.create({ Path: path, Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
       });
     },
     async downloadFileSession(
@@ -1942,7 +1948,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       const fixture = fakeBeaconPsTaskResult(fullInfo);
       return sliverpb.Ps.create({
-        Response: queueTask(beaconId, fixture.description, fixture.result),
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          18, sliverpb.PsReq.encode(sliverpb.PsReq.create({ FullInfo: fullInfo, Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
       });
     },
     async terminateSessionProcess() { return unsupported("terminateSessionProcess"); },
@@ -2606,10 +2614,12 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     return sliverpb.EnvInfo.create({ Variables: entries, Response: response(false) });
   }
 
-  function fakeBeaconRequest(beaconId: string) {
+  // Sliver's asyncGenericHandler removes routing IDs before saving the queued
+  // request. BeaconTask.BeaconID, not this nested field, owns task identity.
+  function fakeBeaconRequest(_beaconId: string) {
     return {
       Async: true,
-      BeaconID: beaconId,
+      BeaconID: "",
       SessionID: "",
       Timeout: "60000000000",
     };

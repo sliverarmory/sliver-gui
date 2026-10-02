@@ -22,7 +22,7 @@ describe("compiled operation registry", () => {
         expect(binding).toBeDefined();
         expect(binding?.timeout.timeoutSeconds).toBeGreaterThan(0);
         expect(binding?.timeout.afterSubmission).toBe("outcome-unknown");
-        expect(binding?.adapterMethod).toMatch(/^(ping|rename|setEnv|unsetEnv|reconfigure|openSession|pwd|ls|ps|ifconfig)/u);
+        expect(binding?.adapterMethod).toMatch(/^(ping|rename|setEnv|unsetEnv|reconfigure|openSession|pwd|ls|ps|ifconfig|env|whoami|netstat|mount|memfiles|cat|head|tail|grep)/u);
       }
     }
   });
@@ -33,12 +33,22 @@ describe("compiled operation registry", () => {
       maxAutomaticRetries: 1,
     });
 
-    for (const operationId of [
+    const beaconReadIds = [
       "beacon.filesystem.pwd",
       "beacon.filesystem.ls",
       "beacon.process.list",
       "beacon.network.interfaces",
-    ] as const) {
+      "beacon.environment.list",
+      "beacon.identity.whoami",
+      "beacon.network.netstat",
+      "beacon.filesystem.mount",
+      "beacon.filesystem.memfiles",
+      "beacon.filesystem.cat",
+      "beacon.filesystem.head",
+      "beacon.filesystem.tail",
+      "beacon.filesystem.grep",
+    ] as const;
+    for (const operationId of beaconReadIds) {
       expect(getOperationDescriptor(operationId).idempotency).toEqual({
         class: "idempotent-read",
         maxAutomaticRetries: 0,
@@ -46,8 +56,7 @@ describe("compiled operation registry", () => {
     }
 
     for (const operationId of TARGET_OPERATION_IDS.filter((id) =>
-      id !== "target.ping" && !id.startsWith("beacon.filesystem.") &&
-      id !== "beacon.process.list" && id !== "beacon.network.interfaces"
+      id !== "target.ping" && !(beaconReadIds as readonly string[]).includes(id)
     )) {
       expect(getOperationDescriptor(operationId).idempotency).toEqual({
         class: "unconfirmed-mutation",
@@ -85,7 +94,11 @@ describe("compiled operation registry", () => {
     for (const descriptor of Object.values(OPERATION_REGISTRY)) {
       expect(descriptor.confirmation).toBe("none");
       expect(descriptor.capabilityId).toMatch(/^(target|beacon)\./u);
-      expect(descriptor.resultBounds.maximumDecodedBytes).toBeLessThanOrEqual(64 * 1_024);
+      expect(descriptor.resultBounds.maximumDecodedBytes).toBeLessThanOrEqual(128 * 1_024);
+      if (descriptor.resultBounds.maximumDecodedBytes > 64 * 1_024) {
+        expect(["beacon.filesystem.cat", "beacon.filesystem.head", "beacon.filesystem.tail"])
+          .toContain(descriptor.id);
+      }
       expect(descriptor.resultBounds.maximumTextCharacters).toBeLessThanOrEqual(16_384);
       expect(descriptor.resultBounds.maximumTableRows).toBeLessThanOrEqual(256);
       expect(descriptor.resultBounds.maximumStructuredFields).toBeLessThanOrEqual(64);

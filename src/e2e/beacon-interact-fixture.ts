@@ -118,7 +118,7 @@ export function fakeBeaconEnvTaskResult(name = ""): FakeBeaconTaskResult {
     result: encode(sliverpb.EnvInfo, sliverpb.EnvInfo.create({
       Variables: name === "" || name === "BC05_VISIBLE"
         ? [{ Key: "BC05_VISIBLE", Value: "fixture-value" }]
-        : [],
+        : [{ Key: name, Value: "" }],
     })),
   };
 }
@@ -162,6 +162,7 @@ export function fakeBeaconMountTaskResult(): FakeBeaconTaskResult {
         TotalSpace: "3145728",
         MountOptions: "rw",
       }],
+      Response: {},
     })),
   };
 }
@@ -188,6 +189,7 @@ export function fakeBeaconTextTaskResult(path: string, text: string): FakeBeacon
       Encoder: "gzip",
       Data: gzipSync(content),
       ReadFiles: 1,
+      Response: {},
     })),
   };
 }
@@ -209,6 +211,7 @@ export function fakeBeaconGrepTaskResult(path: string, pattern: string): FakeBea
           }],
         },
       },
+      Response: {},
     })),
   };
 }

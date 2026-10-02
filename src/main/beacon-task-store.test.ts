@@ -5,7 +5,7 @@ import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ExecutionOperationId } from "../shared/execution-contracts.js";
-import type { OperationOwnership } from "../shared/operation-contracts.js";
+import type { OperationOwnership, TargetOperationInput } from "../shared/operation-contracts.js";
 import { BeaconTaskStore, type TaskOwnershipResolver } from "./beacon-task-store.js";
 import { EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES } from "./execution-beacon-task.js";
 import { EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES } from "./execution-workbench.js";
@@ -741,7 +741,7 @@ describe("BeaconTaskStore", () => {
     expect([...staleResponse]).toEqual(new Array(staleResponse.length).fill(0));
   });
 
-  it("uses specialized decoding for the closed external Description map, including valid empty responses", async () => {
+  it("uses specialized decoding for the closed external Description map", async () => {
     const cases = [
       {
         description: "Ping",
@@ -773,12 +773,14 @@ describe("BeaconTaskStore", () => {
       {
         description: "PsReq",
         operationId: "beacon.process.list",
-        response: Buffer.from(sliverpb.Ps.encode(sliverpb.Ps.create()).finish()),
+        response: Buffer.from(sliverpb.Ps.encode(sliverpb.Ps.create({ Processes: [{ Pid: 1 }] })).finish()),
       },
       {
         description: "IfconfigReq",
         operationId: "beacon.network.interfaces",
-        response: Buffer.from(sliverpb.Ifconfig.encode(sliverpb.Ifconfig.create()).finish()),
+        response: Buffer.from(sliverpb.Ifconfig.encode(sliverpb.Ifconfig.create({
+          NetInterfaces: [{ Index: 1, Name: "lo" }],
+        })).finish()),
       },
     ] as const;
 
@@ -1444,11 +1446,122 @@ function fakeClient(tasks: clientpb.BeaconTasks, fetched?: clientpb.BeaconTask) 
 }
 
 describe("BC-04 task-bound M2 read results", () => {
+  it("rejects a nonempty working-directory response with no path", async () => {
+    const taskId = "pwd_missing_path";
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task(taskId, "completed", 10, "PwdReq")] });
+    const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 12,
+      Data: Buffer.from(sliverpb.PwdReq.encode(sliverpb.PwdReq.create({
+        Request: { Async: true, BeaconID: "", SessionID: "" },
+      })).finish()),
+    })).finish());
+    const response = Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({ Response: {} })).finish());
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: request, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    const detail = await store.detail(beaconId, taskId, () => ({
+      ownership: localOwnership, operationId: "beacon.filesystem.pwd",
+      expectedRequest: { operationId: "beacon.filesystem.pwd" },
+    }));
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.disposition).toBeUndefined();
+  });
+
+  it("reports a failed memory-file listing when the implant only clears Exists", async () => {
+    const taskId = "memfiles_missing";
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task(taskId, "completed", 10, "MemfilesListReq")] });
+    const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 115,
+      Data: Buffer.from(sliverpb.MemfilesListReq.encode(sliverpb.MemfilesListReq.create({
+        Request: { Async: true, BeaconID: "", SessionID: "" },
+      })).finish()),
+    })).finish());
+    const response = Buffer.from(sliverpb.Ls.encode(sliverpb.Ls.create({
+      Path: "/proc/123/fd/", Exists: false,
+    })).finish());
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: request, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    const detail = await store.detail(beaconId, taskId, () => ({
+      ownership: localOwnership, operationId: "beacon.filesystem.memfiles",
+      expectedRequest: { operationId: "beacon.filesystem.memfiles" },
+    }));
+    expect(detail.errorKind).toBe("target-reported");
+    expect(detail.disposition).toBeUndefined();
+  });
+
+  it("accepts an empty environment listing but refuses impossible empty named and structured results", async () => {
+    const cases = [
+      { expectedRequest: { operationId: "beacon.process.list", fullInfo: false }, description: "PsReq", type: 18,
+        request: sliverpb.PsReq.encode(sliverpb.PsReq.create({
+          FullInfo: false, Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.network.interfaces" }, description: "IfconfigReq", type: 42,
+        request: sliverpb.IfconfigReq.encode(sliverpb.IfconfigReq.create({
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true,
+          ip6: false, listen: false }, description: "NetstatReq", type: 49,
+        request: sliverpb.NetstatReq.encode(sliverpb.NetstatReq.create({
+          TCP: true, UDP: false, IP4: true, IP6: false, Listening: false,
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.environment.list" }, description: "EnvReq", type: 66,
+        request: sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: true },
+      { expectedRequest: { operationId: "beacon.environment.list", name: "PATH" }, description: "EnvReq", type: 66,
+        request: sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
+          Name: "PATH", Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.filesystem.mount" }, description: "MountReq", type: 134,
+        request: sliverpb.MountReq.encode(sliverpb.MountReq.create({
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.filesystem.memfiles" }, description: "MemfilesListReq", type: 115,
+        request: sliverpb.MemfilesListReq.encode(sliverpb.MemfilesListReq.create({
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+      { expectedRequest: { operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle",
+          recursive: false, before: 0, after: 0 }, description: "GrepReq", type: 129,
+        request: sliverpb.GrepReq.encode(sliverpb.GrepReq.create({
+          Path: "/tmp", SearchPattern: "needle", Recursive: false, LinesBefore: 0, LinesAfter: 0,
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish(), validEmpty: false },
+    ] as const;
+    for (const [index, entry] of cases.entries()) {
+      const taskId = `empty_m2_${index}`;
+      const metadata = clientpb.BeaconTasks.create({ Tasks: [task(taskId, "completed", 10, entry.description)] });
+      const savedRequest = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+        Type: entry.type, Data: Buffer.from(entry.request),
+      })).finish());
+      const client = fakeClient(metadata, clientpb.BeaconTask.create({
+        ...metadata.Tasks[0], Request: savedRequest, Response: Buffer.alloc(0),
+      }));
+      const store = new BeaconTaskStore(client);
+      await store.refresh(beaconId);
+      const result = await store.detail(beaconId, taskId, () => ({
+        ownership: localOwnership, operationId: entry.expectedRequest.operationId,
+        expectedRequest: entry.expectedRequest as TargetOperationInput,
+      }));
+      if (entry.validEmpty) {
+        expect(result.disposition).toMatchObject({ kind: "table", rows: [] });
+      } else {
+        expect(result.errorKind).toBe("decode-uncertain");
+        expect(result.disposition).toBeUndefined();
+      }
+    }
+  });
+
   it("redacts sensitive environment values and rejects a mismatched saved request", async () => {
     const saved = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
       Type: 66,
       Data: Buffer.from(sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
-        Name: "", Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+        Name: "", Request: { Async: true, BeaconID: "", SessionID: "" },
       })).finish()),
     })).finish());
     const response = Buffer.from(sliverpb.EnvInfo.encode(sliverpb.EnvInfo.create({
@@ -1473,7 +1586,7 @@ describe("BC-04 task-bound M2 read results", () => {
 
     const wrong = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
       Type: 66, Data: Buffer.from(sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
-        Name: "OTHER", Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+        Name: "OTHER", Request: { Async: true, BeaconID: "", SessionID: "" },
       })).finish()),
     })).finish());
     const rejected = fakeClient(metadata, clientpb.BeaconTask.create({
@@ -1488,19 +1601,35 @@ describe("BC-04 task-bound M2 read results", () => {
     }));
     expect(detail.errorKind).toBe("decode-uncertain");
     expect(detail.disposition).toBeUndefined();
+
+    const wrongResponseClient = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0],
+      Request: Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+        Type: 66, Data: Buffer.from(sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
+          Request: { Async: true, BeaconID: "", SessionID: "" },
+        })).finish()),
+      })).finish()),
+      Response: Buffer.from(sliverpb.Ping.encode(sliverpb.Ping.create({ Nonce: 123 })).finish()),
+    }));
+    const wrongResponseStore = new BeaconTaskStore(wrongResponseClient);
+    await wrongResponseStore.refresh(beaconId);
+    expect((await wrongResponseStore.detail(beaconId, "env_exact", () => ({
+      ownership: localOwnership, operationId: "beacon.environment.list",
+      expectedRequest: { operationId: "beacon.environment.list" },
+    }))).errorKind).toBe("decode-uncertain");
   });
 
   it("bounds gzip text, refuses invalid UTF-8, and never exposes raw artifact bytes", async () => {
     const createRequest = () => Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
       Type: 7, Data: Buffer.from(sliverpb.DownloadReq.encode(sliverpb.DownloadReq.create({
         Path: "/tmp/readme", MaxBytes: "65537", MaxLines: "0", RestrictedToFile: true,
-        Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+        Request: { Async: true, BeaconID: "", SessionID: "" },
       })).finish()),
     })).finish());
     const request = createRequest();
     const metadata = clientpb.BeaconTasks.create({ Tasks: [task("cat_exact", "completed", 10, "DownloadReq")] });
     const response = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
-      Exists: true, Path: "/tmp/readme", Encoder: "gzip", Data: gzipSync(Buffer.from("hello beacon")),
+      Exists: true, Path: "/tmp/readme", Encoder: "gzip", Data: gzipSync(Buffer.from("hello\nbeacon")),
     })).finish());
     const client = fakeClient(metadata, clientpb.BeaconTask.create({
       ...metadata.Tasks[0], Request: request, Response: response,
@@ -1510,7 +1639,7 @@ describe("BC-04 task-bound M2 read results", () => {
     const owner: TaskOwnershipResolver = () => ({ ownership: localOwnership, operationId: "beacon.filesystem.cat",
       expectedRequest: { operationId: "beacon.filesystem.cat", path: "/tmp/readme" } });
     const detail = await store.detail(beaconId, "cat_exact", owner);
-    expect(detail.disposition).toMatchObject({ kind: "inline-text", text: "hello beacon", truncated: false });
+    expect(detail.disposition).toMatchObject({ kind: "inline-text", text: "hello\nbeacon", truncated: false });
     expect(JSON.stringify(detail)).not.toContain("gzip");
 
     const tooLarge = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
@@ -1524,7 +1653,7 @@ describe("BC-04 task-bound M2 read results", () => {
     expect((await oversizedStore.detail(beaconId, "cat_exact", owner)).errorKind).toBe("decode-uncertain");
 
     const binary = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
-      Exists: true, Data: Buffer.from([0xff, 0xfe]),
+      Exists: true, Encoder: "gzip", Data: gzipSync(Buffer.from([0xff, 0xfe])),
     })).finish());
     const binaryClient = fakeClient(metadata, clientpb.BeaconTask.create({
       ...metadata.Tasks[0], Request: createRequest(), Response: binary,
@@ -1532,5 +1661,48 @@ describe("BC-04 task-bound M2 read results", () => {
     const binaryStore = new BeaconTaskStore(binaryClient);
     await binaryStore.refresh(beaconId);
     expect((await binaryStore.detail(beaconId, "cat_exact", owner)).errorKind).toBe("decode-uncertain");
+
+    const raw = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
+      Exists: true, Encoder: "", Data: Buffer.from("not a pinned file response"),
+    })).finish());
+    const rawClient = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: createRequest(), Response: raw,
+    }));
+    const rawStore = new BeaconTaskStore(rawClient);
+    await rawStore.refresh(beaconId);
+    expect((await rawStore.detail(beaconId, "cat_exact", owner)).errorKind).toBe("decode-uncertain");
+  });
+
+  it("renders exact head byte slices as text or bounded hex without falsely claiming preview truncation", async () => {
+    const createRequest = (count: number) => Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 7, Data: Buffer.from(sliverpb.DownloadReq.encode(sliverpb.DownloadReq.create({
+        Path: "/tmp/utf8", MaxBytes: String(count), MaxLines: "0", RestrictedToFile: true,
+        Request: { Async: true, BeaconID: "", SessionID: "" },
+      })).finish()),
+    })).finish());
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task("head_exact", "completed", 10, "DownloadReq")] });
+    const detailFor = async (count: number, data: Buffer) => {
+      const response = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
+        Exists: true, Path: "/tmp/utf8", Encoder: "gzip", Data: gzipSync(data),
+      })).finish());
+      const client = fakeClient(metadata, clientpb.BeaconTask.create({
+        ...metadata.Tasks[0], Request: createRequest(count), Response: response,
+      }));
+      const store = new BeaconTaskStore(client);
+      await store.refresh(beaconId);
+      return store.detail(beaconId, "head_exact", () => ({
+        ownership: localOwnership, operationId: "beacon.filesystem.head",
+        expectedRequest: { operationId: "beacon.filesystem.head", path: "/tmp/utf8", bytes: count },
+      }));
+    };
+    expect((await detailFor(2, Buffer.from("é"))).disposition).toMatchObject({
+      kind: "inline-text", text: "é", truncated: false,
+    });
+    expect((await detailFor(1, Buffer.from([0xc3]))).disposition).toMatchObject({
+      kind: "inline-text", text: "Non-UTF-8 byte slice (hex): c3", truncated: false,
+    });
+    expect((await detailFor(5_000, Buffer.alloc(5_000, 0x41))).disposition).toMatchObject({
+      kind: "inline-text", truncated: true,
+    });
   });
 });

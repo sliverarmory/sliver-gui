@@ -222,6 +222,19 @@ describe("beacon command matrix", () => {
     expect(beaconCommandCapability("implant.pwd", session)).toEqual({ available: false, reason: "requires-beacon" });
   });
 
+  it("records delivered BC-05 bounded read routes and Linux-only memfiles", () => {
+    for (const id of ["env", "netstat", "mount", "memfiles", "cat", "head", "tail", "grep", "whoami"]) {
+      expect(BEACON_COMMAND_MATRIX[`implant.${id}` as keyof typeof BEACON_COMMAND_MATRIX].delivery).toBe("existing");
+    }
+    expect(BEACON_COMMAND_MATRIX["implant.cat"].route).toMatchObject({
+      responsePolicy: "current-file-preview", maximumResponseBytes: 128 * 1024,
+    });
+    expect(BEACON_COMMAND_MATRIX["implant.memfiles"].platforms).toEqual(["linux"]);
+    expect(beaconCommandCapability("implant.memfiles", beacon("windows"))).toEqual({
+      available: false, reason: "unsupported-platform",
+    });
+  });
+
   it("records pinned platform and option boundaries without treating console visibility as runtime support", () => {
     expect(BEACON_COMMAND_MATRIX["implant.memfiles"].platforms).toEqual(["linux"]);
     expect(BEACON_COMMAND_MATRIX["implant.chmod"].platforms).toEqual(["linux", "darwin"]);

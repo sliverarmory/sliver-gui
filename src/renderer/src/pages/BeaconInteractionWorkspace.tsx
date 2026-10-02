@@ -610,7 +610,7 @@ export function BeaconInteractionWorkspace({
                   {commandId === "beacon.environment.list" ? (
                     <div className="space-y-2">
                       <Field label="Filter by variable name (optional)" mono value={readDraft.environmentName} onChange={(environmentName) => setReadDraft((current) => ({ ...current, environmentName }))} />
-                      <p className="text-xs text-muted">Sensitive values stay hidden in task history.</p>
+                      <p className="text-xs text-muted">Variables with recognized sensitive names are masked in task history.</p>
                     </div>
                   ) : null}
                   {commandId === "beacon.filesystem.cat" || commandId === "beacon.filesystem.head" || commandId === "beacon.filesystem.tail" || commandId === "beacon.filesystem.grep" ? (
@@ -1107,10 +1107,10 @@ function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Eleme
   const operationId = task.operationId as string | undefined;
   if (operationId === "beacon.filesystem.pwd") return <WorkingDirectoryResult disposition={task.disposition} />;
   if (operationId === "beacon.filesystem.ls") {
-    return <TableResult description="Filesystem metadata returned by this check-in." disposition={task.disposition} emptyLabel="The directory is empty." icon={faFolderOpen} title="Directory listing" />;
+    return <TableResult description="Filesystem metadata returned by this check-in." disposition={task.disposition} emptyLabel="The directory is empty." icon={faFolderOpen} presentation="directory" title="Directory listing" />;
   }
   if (operationId === "beacon.process.list") {
-    return <TableResult description="Process inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No processes were returned." icon={faMicrochip} title="Processes" />;
+    return <TableResult description="Process inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No processes were returned." icon={faMicrochip} presentation="processes" title="Processes" />;
   }
   if (operationId === "beacon.network.interfaces") return <NetworkInterfacesResult disposition={task.disposition} />;
   if (operationId === "beacon.environment.list") {
@@ -1251,15 +1251,17 @@ function TableResult({
   icon,
   disposition,
   emptyLabel,
+  presentation,
 }: {
   title: string;
   description: string;
   icon: IconDefinition;
   disposition: OperationDisposition | undefined;
   emptyLabel: string;
+  presentation?: "directory" | "processes" | undefined;
 }): React.JSX.Element {
   if (disposition?.kind !== "table") return <GenericDisposition disposition={disposition} />;
-  return <PagedTableResult description={description} disposition={disposition} emptyLabel={emptyLabel} icon={icon} title={title} />;
+  return <PagedTableResult description={description} disposition={disposition} emptyLabel={emptyLabel} icon={icon} presentation={presentation} title={title} />;
 }
 
 function PagedTableResult({
@@ -1268,14 +1270,40 @@ function PagedTableResult({
   icon,
   disposition,
   emptyLabel,
+  presentation,
 }: {
   title: string;
   description: string;
   icon: IconDefinition;
   disposition: Extract<OperationDisposition, { kind: "table" }>;
   emptyLabel: string;
+  presentation?: "directory" | "processes" | undefined;
 }): React.JSX.Element {
-  const preview = useTablePreview(disposition.rows);
+  const [directorySort, setDirectorySort] = useState<"name" | "modified" | "size">("name");
+  const [reverseSort, setReverseSort] = useState(false);
+  const [processPid, setProcessPid] = useState("");
+  const [processExecutable, setProcessExecutable] = useState("");
+  const [processOwner, setProcessOwner] = useState("");
+  const [processTree, setProcessTree] = useState(false);
+  const [showCommandLine, setShowCommandLine] = useState(false);
+  const prepared = useMemo(() => {
+    if (presentation === "directory") {
+      return { columns: disposition.columns, rows: sortDirectoryRows(disposition, directorySort, reverseSort) };
+    }
+    if (presentation === "processes") {
+      return prepareProcessRows(disposition, {
+        pid: processPid,
+        executable: processExecutable,
+        owner: processOwner,
+        tree: processTree,
+        commandLine: showCommandLine,
+      });
+    }
+    return { columns: disposition.columns, rows: disposition.rows };
+  }, [directorySort, disposition, presentation, processExecutable, processOwner, processPid, processTree, reverseSort, showCommandLine]);
+  const preview = useTablePreview(prepared.rows);
+  const hasProcessFilter = presentation === "processes" &&
+    Boolean(processPid.trim() || processExecutable.trim() || processOwner.trim());
   return (
     <div>
       <div className="mb-3 flex items-start gap-2">
@@ -1285,11 +1313,45 @@ function PagedTableResult({
           <p className="mt-0.5 text-xs text-muted">{description}</p>
         </div>
       </div>
-      <TablePreviewControls preview={preview} />
+      {presentation === "directory" ? (
+        <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Directory sort">
+          <span className="text-xs text-muted">Sort decoded rows by</span>
+          {(["name", "modified", "size"] as const).map((sort) => (
+            <Button aria-pressed={directorySort === sort} key={sort} size="sm" variant={directorySort === sort ? "primary" : "tertiary"} onPress={() => setDirectorySort(sort)}>
+              {sort === "name" ? "Name" : sort === "modified" ? "Modified" : "Size"}
+            </Button>
+          ))}
+          <Switch aria-label="Reverse directory sort" isSelected={reverseSort} onChange={setReverseSort}>
+            <Switch.Content className="min-w-0 flex-1"><span className="block text-xs text-foreground">Reverse</span></Switch.Content>
+            <Switch.Control><Switch.Thumb /></Switch.Control>
+          </Switch>
+        </div>
+      ) : null}
+      {presentation === "processes" ? (
+        <div className="mb-3 space-y-3 rounded-xl bg-default p-3">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="Filter PID" type="number" min={0} value={processPid} onChange={setProcessPid} />
+            <Field label="Filter executable" value={processExecutable} onChange={setProcessExecutable} />
+            <Field label="Filter owner" value={processOwner} onChange={setProcessOwner} />
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <Switch aria-label="Show process tree" isSelected={processTree} onChange={setProcessTree}>
+              <Switch.Content className="min-w-0 flex-1"><span className="block text-xs text-foreground">Process tree</span></Switch.Content>
+              <Switch.Control><Switch.Thumb /></Switch.Control>
+            </Switch>
+            <Switch aria-label="Show command line" isSelected={showCommandLine} onChange={setShowCommandLine}>
+              <Switch.Content className="min-w-0 flex-1"><span className="block text-xs text-foreground">Command line</span></Switch.Content>
+              <Switch.Control><Switch.Thumb /></Switch.Control>
+            </Switch>
+          </div>
+          <p className="text-xs text-muted">These controls apply to decoded rows in this task. Owner and command line values require a task queued with full process details.</p>
+        </div>
+      ) : null}
+      <TablePreviewControls preview={preview} sourceTotal={disposition.rows.length} />
       {preview.rows.length === 0 ? (
-        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : emptyLabel}</p>
+        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : hasProcessFilter ? "No decoded rows match the selected process filters." : emptyLabel}</p>
       ) : (
-        <ResultTable columns={disposition.columns} rows={preview.rows} />
+        <ResultTable columns={prepared.columns} rows={preview.rows} />
       )}
       {disposition.truncated ? <TruncatedNotice /> : null}
     </div>
@@ -1302,7 +1364,14 @@ function NetworkInterfacesResult({ disposition }: { disposition: OperationDispos
 }
 
 function PagedNetworkInterfacesResult({ disposition }: { disposition: Extract<OperationDisposition, { kind: "table" }> }): React.JSX.Element {
-  const preview = useTablePreview(disposition.rows);
+  const [showAll, setShowAll] = useState(false);
+  const visibleRows = useMemo(() => showAll ? disposition.rows : disposition.rows.flatMap((row) => {
+    const addressIndex = disposition.columns.indexOf("Addresses");
+    if (addressIndex < 0) return [row];
+    const addresses = String(row[addressIndex] ?? "").split(", ").filter(isConsoleVisibleAddress);
+    return addresses.length ? [row.map((value, index) => index === addressIndex ? addresses.join(", ") : value)] : [];
+  }), [disposition, showAll]);
+  const preview = useTablePreview(visibleRows);
   const valueAt = (row: OperationScalar[], label: string): string => {
     const index = disposition.columns.findIndex((column) => column.toLocaleLowerCase() === label.toLocaleLowerCase());
     return index < 0 ? "Not reported" : String(row[index] ?? "Not reported");
@@ -1316,9 +1385,16 @@ function PagedNetworkInterfacesResult({ disposition }: { disposition: Extract<Op
           <p className="mt-0.5 text-xs text-muted">Addresses and link-layer identity returned by the beacon.</p>
         </div>
       </div>
-      <TablePreviewControls preview={preview} />
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <Switch aria-label="Show all interface addresses" isSelected={showAll} onChange={setShowAll}>
+          <Switch.Content className="min-w-0 flex-1"><span className="block text-xs text-foreground">Show all interface addresses</span></Switch.Content>
+          <Switch.Control><Switch.Thumb /></Switch.Control>
+        </Switch>
+        {!showAll ? <span className="text-xs text-muted">{disposition.rows.length - visibleRows.length} decoded adapters hidden by the default address filter</span> : null}
+      </div>
+      <TablePreviewControls preview={preview} sourceTotal={disposition.rows.length} />
       {preview.rows.length === 0 ? (
-        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : "No network interfaces were returned."}</p>
+        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : !showAll && disposition.rows.length ? "No decoded interfaces match the default address filter." : "No network interfaces were returned."}</p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {preview.rows.map((row, index) => (
@@ -1336,6 +1412,97 @@ function PagedNetworkInterfacesResult({ disposition }: { disposition: Extract<Op
       {disposition.truncated ? <TruncatedNotice /> : null}
     </div>
   );
+}
+
+function columnIndex(columns: string[], label: string): number {
+  return columns.findIndex((column) => column.toLocaleLowerCase() === label.toLocaleLowerCase());
+}
+
+function sortDirectoryRows(
+  disposition: Extract<OperationDisposition, { kind: "table" }>,
+  sort: "name" | "modified" | "size",
+  reverse: boolean,
+): OperationScalar[][] {
+  const nameIndex = columnIndex(disposition.columns, "Name");
+  const sortIndex = columnIndex(disposition.columns, sort);
+  const stringAt = (row: OperationScalar[], index: number): string => String(row[index] ?? "");
+  const integerAt = (row: OperationScalar[], index: number): bigint => {
+    const value = stringAt(row, index);
+    return /^-?\d+$/u.test(value) ? BigInt(value) : 0n;
+  };
+  return [...disposition.rows].sort((left, right) => {
+    let order = 0;
+    if (sort !== "name" && sortIndex >= 0) {
+      const leftValue = integerAt(left, sortIndex);
+      const rightValue = integerAt(right, sortIndex);
+      order = leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0;
+    }
+    if (!order && nameIndex >= 0) {
+      const leftName = stringAt(left, nameIndex).toLocaleLowerCase();
+      const rightName = stringAt(right, nameIndex).toLocaleLowerCase();
+      order = leftName < rightName ? -1 : leftName > rightName ? 1 : 0;
+    }
+    return reverse ? -order : order;
+  });
+}
+
+function prepareProcessRows(
+  disposition: Extract<OperationDisposition, { kind: "table" }>,
+  options: { pid: string; executable: string; owner: string; tree: boolean; commandLine: boolean },
+): { columns: string[]; rows: OperationScalar[][] } {
+  const pidIndex = columnIndex(disposition.columns, "PID");
+  const ppidIndex = columnIndex(disposition.columns, "PPID");
+  const executableIndex = columnIndex(disposition.columns, "Executable");
+  const ownerIndex = columnIndex(disposition.columns, "Owner");
+  const commandLineIndex = columnIndex(disposition.columns, "Command line");
+  const pidFilter = options.pid.trim();
+  const executableFilter = options.executable.trim().toLocaleLowerCase();
+  const ownerFilter = options.owner.trim().toLocaleLowerCase();
+  const valueAt = (row: OperationScalar[], index: number): string => index < 0 ? "" : String(row[index] ?? "");
+  const matches = disposition.rows.filter((row) =>
+    (!pidFilter || valueAt(row, pidIndex) === pidFilter) &&
+    (!executableFilter || valueAt(row, executableIndex).toLocaleLowerCase().includes(executableFilter)) &&
+    (!ownerFilter || valueAt(row, ownerIndex).toLocaleLowerCase().includes(ownerFilter)));
+  const byPid = [...matches].sort((left, right) =>
+    Number(valueAt(left, pidIndex)) - Number(valueAt(right, pidIndex)) ||
+    Number(valueAt(left, ppidIndex)) - Number(valueAt(right, ppidIndex)));
+  let rows = matches;
+  if (options.tree && pidIndex >= 0 && ppidIndex >= 0 && executableIndex >= 0) {
+    const pidToIndex = new Map(byPid.map((row, index) => [valueAt(row, pidIndex), index]));
+    const children = new Map<number, number[]>();
+    const roots: number[] = [];
+    byPid.forEach((row, index) => {
+      const parent = pidToIndex.get(valueAt(row, ppidIndex));
+      if (parent === undefined || parent === index) roots.push(index);
+      else children.set(parent, [...(children.get(parent) ?? []), index]);
+    });
+    const seen = new Set<number>();
+    const ordered: OperationScalar[][] = [];
+    const visit = (index: number, depth: number): void => {
+      if (seen.has(index)) return;
+      seen.add(index);
+      const row = byPid[index]!;
+      ordered.push(row.map((value, column) => column === executableIndex
+        ? `${"  ".repeat(Math.min(depth, 12))}${depth ? "↳ " : ""}${String(value ?? "")}`
+        : value));
+      for (const child of children.get(index) ?? []) visit(child, depth + 1);
+    };
+    for (const root of roots) visit(root, 0);
+    for (let index = 0; index < byPid.length; index += 1) visit(index, 0);
+    rows = ordered;
+  }
+  if (options.commandLine || commandLineIndex < 0) return { columns: disposition.columns, rows };
+  return {
+    columns: disposition.columns.filter((_, index) => index !== commandLineIndex),
+    rows: rows.map((row) => row.filter((_, index) => index !== commandLineIndex)),
+  };
+}
+
+function isConsoleVisibleAddress(address: string): boolean {
+  const slash = address.lastIndexOf("/");
+  if (slash < 0 || address.startsWith("127") || address.startsWith("::1")) return false;
+  const subnet = Number(address.slice(slash + 1));
+  return Number.isInteger(subnet) && subnet > 0 && subnet <= 32;
 }
 
 interface TablePreview {
@@ -1378,7 +1545,7 @@ function useTablePreview(allRows: OperationScalar[][]): TablePreview {
   };
 }
 
-function TablePreviewControls({ preview }: { preview: TablePreview }): React.JSX.Element {
+function TablePreviewControls({ preview, sourceTotal }: { preview: TablePreview; sourceTotal?: number }): React.JSX.Element {
   return (
     <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
       <div className="w-full max-w-xs">
@@ -1388,6 +1555,7 @@ function TablePreviewControls({ preview }: { preview: TablePreview }): React.JSX
         <span className="text-xs tabular-nums text-muted">
           Showing {preview.matched ? preview.start + 1 : 0}–{preview.end} of {preview.matched} decoded rows
           {preview.query ? ` (${preview.total} before filter)` : ""}
+          {sourceTotal !== undefined && sourceTotal !== preview.total ? ` (${sourceTotal} before command options)` : ""}
         </span>
         {preview.pages > 1 ? (
           <>

@@ -530,7 +530,8 @@ test("BC-05 beacon reads use the command picker and exact task output", { timeou
       await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
       const search = page.getByRole("searchbox", { name: "Search beacon commands", exact: true });
       await search.fill(label);
-      await page.getByRole("option", { name: new RegExp(`^${label} (?:Filesystem|Networking|Environment|Identity)\\b`, "u") }).click();
+      await page.getByRole("option", { name: new RegExp(`^${label} (?:Filesystem|Networking|Environment|Identity|Processes)\\b`, "u") }).click();
+      await page.keyboard.press("Escape");
     };
     const submitAndOpen = async (description: string): Promise<Locator> => {
       const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
@@ -567,21 +568,30 @@ test("BC-05 beacon reads use the command picker and exact task output", { timeou
     assert.match(await (await submitAndOpen("EnvReq")).innerText(), /BC05_VISIBLE/u);
     await selectCommand("Network connections");
     assert.match(await (await submitAndOpen("NetstatReq")).innerText(), /192\.0\.2\.25/u);
+    await selectCommand("List processes");
+    await composer.getByText("Include full process details", { exact: true }).click();
+    const processOutput = await submitAndOpen("PsReq");
+    await processOutput.getByRole("textbox", { name: "Filter owner" }).fill("analyst");
+    await processOutput.getByRole("cell", { name: "python3", exact: true }).waitFor();
+    assert.equal(await processOutput.getByRole("cell", { name: "launchd", exact: true }).count(), 0);
+    await processOutput.getByRole("textbox", { name: "Filter owner" }).fill("");
+    await processOutput.getByText("Process tree", { exact: true }).click();
+    assert.match(await processOutput.innerText(), /↳/u, "process tree must use this task's decoded parent IDs");
     await selectCommand("Mounts");
     assert.match(await (await submitAndOpen("MountReq")).innerText(), /Fixture volume/u);
     await selectCommand("Read file");
     assert.match(await composer.innerText(), /File path/u, "Read file must expose its path form");
-    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    await composer.getByRole("textbox", { name: /^File path/u }).fill("/Users/e2e/workspace/notes.txt");
     assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 cat output/u);
     await selectCommand("Read file head");
-    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    await composer.getByRole("textbox", { name: /^File path/u }).fill("/Users/e2e/workspace/notes.txt");
     assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 head output/u);
     await selectCommand("Read file tail");
-    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    await composer.getByRole("textbox", { name: /^File path/u }).fill("/Users/e2e/workspace/notes.txt");
     assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 tail output/u);
     await selectCommand("Search files");
-    await composer.getByRole("textbox", { name: "Search path", exact: true }).fill("/Users/e2e/workspace");
-    await composer.getByRole("textbox", { name: "Search pattern", exact: true }).fill("fixture");
+    await composer.getByRole("textbox", { name: /^Search path/u }).fill("/Users/e2e/workspace");
+    await composer.getByRole("textbox", { name: /^Search pattern/u }).fill("fixture");
     assert.match(await (await submitAndOpen("GrepReq")).innerText(), /fixture appears in fixture text/u);
 
     const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
@@ -1222,9 +1232,17 @@ async function assertBeaconTaskViews(
   const directoryOutput = output.getByRole("article", { name: `Task output ${completedIds[1]}`, exact: true });
   await directoryOutput.scrollIntoViewIfNeeded();
   await directoryOutput.getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
+  const directoryRows = directoryOutput.getByRole("table").getByRole("row");
+  await directoryOutput.getByRole("group", { name: "Directory sort" }).getByRole("button", { name: "Size" }).click();
+  assert.match(await directoryRows.nth(1).innerText(), /projects/u, "directory size sort must apply to this task's decoded rows");
+  await directoryOutput.getByText("Reverse", { exact: true }).click();
+  assert.match(await directoryRows.nth(1).innerText(), /notes\.txt/u, "reverse size sort must remain local to this task");
   const networkOutput = output.getByRole("article", { name: `Task output ${completedIds[2]}`, exact: true });
   await networkOutput.scrollIntoViewIfNeeded();
   await networkOutput.getByText("en0", { exact: true }).waitFor();
+  assert.equal(await networkOutput.getByText("lo0", { exact: true }).count(), 0, "default interface view hides loopback-only adapters");
+  await networkOutput.getByText("Show all interface addresses", { exact: true }).click();
+  await networkOutput.getByText("lo0", { exact: true }).waitFor();
   assert.equal(await output.locator("article[data-task-id]").count(), 3, "the output tab must retain every completed result");
   assert.equal(await output.locator("dt").filter({ hasText: /^(Origin|Created|Sent|Completed)$/u }).count(), 0,
     "output history must omit the old task metadata block");

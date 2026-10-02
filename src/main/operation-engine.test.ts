@@ -651,6 +651,89 @@ describe("OperationEngine", () => {
     expect(harness.client.whoamiBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
   });
 
+  const originalM2Reads: Array<[TargetOperationInput, OperationClientMethod]> = [
+    [{ operationId: "beacon.filesystem.pwd" }, "pwdBeacon"],
+    [{ operationId: "beacon.filesystem.ls", path: "/tmp" }, "lsBeacon"],
+    [{ operationId: "beacon.process.list", fullInfo: false }, "psBeacon"],
+    [{ operationId: "beacon.network.interfaces" }, "ifconfigBeacon"],
+  ];
+
+  it.each(originalM2Reads)("keeps the established beacon transport eligibility for %s", async (input, method) => {
+    for (const transport of ["namedpipe", "tcppivot", "unknown"] as const) {
+      const harness = createHarness("beacon");
+      harness.active.summary.transport = transport;
+      const record = await harness.engine.submit(input);
+      expect(record.state, `${input.operationId} on ${transport}`).toBe("submitted");
+      expect(harness.client[method]).toHaveBeenCalledOnce();
+    }
+  });
+
+  it.each(originalM2Reads)("still rejects unreviewed OS and architecture for %s", async (input, method) => {
+    const invalidOs = createHarness("beacon");
+    invalidOs.active.summary.os = "freebsd";
+    expect((await invalidOs.engine.submit(input)).state).toBe("failed");
+    expect(invalidOs.client[method]).not.toHaveBeenCalled();
+
+    const invalidArch = createHarness("beacon");
+    invalidArch.active.summary.arch = "386";
+    expect((await invalidArch.engine.submit(input)).state).toBe("failed");
+    expect(invalidArch.client[method]).not.toHaveBeenCalled();
+  });
+
+  it("does not let the original transport exception override server capability denial", async () => {
+    const harness = createHarness("beacon");
+    harness.active.summary.transport = "unknown";
+    harness.capability.mockResolvedValue(false);
+    expect((await harness.engine.submit({ operationId: "beacon.filesystem.pwd" })).state).toBe("failed");
+    expect(harness.client.pwdBeacon).not.toHaveBeenCalled();
+  });
+
+  const newM2Reads: Array<[TargetOperationInput, OperationClientMethod, "darwin" | "linux" | "windows"]> = [
+    [{ operationId: "beacon.environment.list" }, "envBeacon", "darwin"],
+    [{ operationId: "beacon.identity.whoami" }, "whoamiBeacon", "windows"],
+    [{ operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true, ip6: false, listen: false }, "netstatBeacon", "darwin"],
+    [{ operationId: "beacon.filesystem.mount" }, "mountBeacon", "darwin"],
+    [{ operationId: "beacon.filesystem.memfiles" }, "memfilesBeacon", "linux"],
+    [{ operationId: "beacon.filesystem.cat", path: "/tmp/a" }, "catBeacon", "darwin"],
+    [{ operationId: "beacon.filesystem.head", path: "/tmp/a", lines: 2 }, "headBeacon", "darwin"],
+    [{ operationId: "beacon.filesystem.tail", path: "/tmp/a", bytes: 2 }, "tailBeacon", "darwin"],
+    [{ operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "x", recursive: false, before: 0, after: 0 }, "grepBeacon", "darwin"],
+  ];
+
+  it.each(newM2Reads)("keeps the conservative transport gate for %s", async (input, method, os) => {
+    const harness = createHarness("beacon");
+    harness.active.summary.os = os;
+    harness.active.summary.transport = "namedpipe";
+    expect((await harness.engine.submit(input)).state).toBe("failed");
+    expect(harness.client[method]).not.toHaveBeenCalled();
+  });
+
+  it("revalidates the exact command gate before dispatch after target facts change", async () => {
+    const original = createHarness("beacon");
+    original.assertTarget.mockImplementationOnce(async () => {
+      original.active.summary.transport = "tcppivot";
+      return original.active;
+    });
+    expect((await original.engine.submit({ operationId: "beacon.filesystem.pwd" })).state).toBe("submitted");
+    expect(original.client.pwdBeacon).toHaveBeenCalledOnce();
+
+    const newRead = createHarness("beacon");
+    newRead.assertTarget.mockImplementationOnce(async () => {
+      newRead.active.summary.transport = "tcppivot";
+      return newRead.active;
+    });
+    expect((await newRead.engine.submit({ operationId: "beacon.environment.list" })).state).toBe("failed");
+    expect(newRead.client.envBeacon).not.toHaveBeenCalled();
+
+    const platformChanged = createHarness("beacon");
+    platformChanged.assertTarget.mockImplementationOnce(async () => {
+      platformChanged.active.summary.os = "freebsd";
+      return platformChanged.active;
+    });
+    expect((await platformChanged.engine.submit({ operationId: "beacon.filesystem.pwd" })).state).toBe("failed");
+    expect(platformChanged.client.pwdBeacon).not.toHaveBeenCalled();
+  });
+
   it("rejects a directory-list acknowledgement for a different beacon", async () => {
     const harness = createHarness("beacon");
     harness.client.lsBeacon.mockResolvedValueOnce({

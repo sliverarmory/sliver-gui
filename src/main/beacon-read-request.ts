@@ -6,26 +6,31 @@ import type { TargetOperationInput } from "../shared/operation-contracts.js";
  * Verify the server-saved request against the exact locally submitted M2 read.
  * DownloadReq is shared by cat, head, and tail, so its description alone is
  * never enough to choose a decoder or claim the task as this operation.
+ * The server clears the nested BeaconID and SessionID before saving the task;
+ * the caller separately verifies and claims the task's authoritative BeaconID.
  */
 export function verifyBeaconReadRequest(
   expected: TargetOperationInput,
   bytes: Buffer,
-  beaconId: string,
 ): void {
-  const messageType = newReadMessageType(expected.operationId);
+  const messageType = beaconReadMessageType(expected.operationId);
   const envelope = sliverpb.Envelope.decode(bytes);
   try {
     if (envelope.Type !== messageType || envelope.UnknownMessageType || envelope.Data.length === 0) {
       throw new Error("Task request envelope did not match the command");
     }
-    verifyNestedRequest(expected, envelope.Data, beaconId);
+    verifyNestedRequest(expected, envelope.Data);
   } finally {
     envelope.Data.fill(0);
   }
 }
 
-function newReadMessageType(operationId: TargetOperationInput["operationId"]): number {
+function beaconReadMessageType(operationId: TargetOperationInput["operationId"]): number {
   switch (operationId) {
+    case "beacon.filesystem.pwd": return 12;
+    case "beacon.filesystem.ls": return 5;
+    case "beacon.process.list": return 18;
+    case "beacon.network.interfaces": return 42;
     case "beacon.environment.list": return 66;
     case "beacon.identity.whoami": return 100;
     case "beacon.network.netstat": return 49;
@@ -39,9 +44,27 @@ function newReadMessageType(operationId: TargetOperationInput["operationId"]): n
   }
 }
 
-function verifyNestedRequest(expected: TargetOperationInput, bytes: Buffer, beaconId: string): void {
+function verifyNestedRequest(expected: TargetOperationInput, bytes: Buffer): void {
   let request: { Async: boolean; BeaconID: string; SessionID: string } | undefined;
   switch (expected.operationId) {
+    case "beacon.filesystem.pwd":
+      request = sliverpb.PwdReq.decode(bytes).Request;
+      break;
+    case "beacon.filesystem.ls": {
+      const decoded = sliverpb.LsReq.decode(bytes);
+      request = decoded.Request;
+      if (decoded.Path !== expected.path) throw new Error("Directory request path did not match");
+      break;
+    }
+    case "beacon.process.list": {
+      const decoded = sliverpb.PsReq.decode(bytes);
+      request = decoded.Request;
+      if (decoded.FullInfo !== expected.fullInfo) throw new Error("Process request option did not match");
+      break;
+    }
+    case "beacon.network.interfaces":
+      request = sliverpb.IfconfigReq.decode(bytes).Request;
+      break;
     case "beacon.environment.list": {
       const decoded = sliverpb.EnvReq.decode(bytes);
       request = decoded.Request;
@@ -95,7 +118,7 @@ function verifyNestedRequest(expected: TargetOperationInput, bytes: Buffer, beac
     default:
       throw new Error("This operation has no reviewed M2 request verifier");
   }
-  if (request?.Async !== true || request.BeaconID !== beaconId || request.SessionID !== "") {
-    throw new Error("Task request was not bound to the selected beacon");
+  if (request?.Async !== true || request.BeaconID !== "" || request.SessionID !== "") {
+    throw new Error("Task request did not match the server's saved beacon task shape");
   }
 }

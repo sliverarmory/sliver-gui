@@ -42,6 +42,10 @@ const MAX_MESSAGE_CHARACTERS = 512;
 const DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS = 60;
 const TASK_IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/u;
 const BEACON_M2_PARITY_IDS: Readonly<Partial<Record<TargetOperationId, string>>> = Object.freeze({
+  "beacon.filesystem.pwd": "implant.pwd",
+  "beacon.filesystem.ls": "implant.ls",
+  "beacon.process.list": "implant.ps",
+  "beacon.network.interfaces": "implant.ifconfig",
   "beacon.environment.list": "implant.env",
   "beacon.identity.whoami": "implant.whoami",
   "beacon.network.netstat": "implant.netstat",
@@ -52,6 +56,12 @@ const BEACON_M2_PARITY_IDS: Readonly<Partial<Record<TargetOperationId, string>>>
   "beacon.filesystem.tail": "implant.tail",
   "beacon.filesystem.grep": "implant.grep",
 });
+const EXISTING_M2_TRANSPORT_EXCEPTIONS = new Set<TargetOperationId>([
+  "beacon.filesystem.pwd", "beacon.filesystem.ls", "beacon.process.list", "beacon.network.interfaces",
+]);
+const BEACON_REQUEST_VERIFIED_IDS = new Set<TargetOperationId>([
+  ...(Object.keys(BEACON_M2_PARITY_IDS) as TargetOperationId[]),
+]);
 
 const TERMINAL_STATES: ReadonlySet<TargetOperationState> = new Set([
   "completed",
@@ -264,7 +274,7 @@ export class OperationEngine {
       internal = {
         sequence: this.allocateSequence(),
         descriptor,
-        ...(BEACON_M2_PARITY_IDS[input.operationId] === undefined ? {} : { expectedRequest: input }),
+        ...(BEACON_REQUEST_VERIFIED_IDS.has(input.operationId) ? { expectedRequest: input } : {}),
         dispatchIssued: false,
         cancelWhenTaskKnown: false,
         cancellationIssued: false,
@@ -1154,7 +1164,13 @@ export class OperationEngine {
   private hasBeaconCommandCapability(operationId: TargetOperationId, target: TargetSummary): boolean {
     if (operationId === "beacon.identity.whoami" && target.os.trim().toLowerCase() !== "windows") return false;
     const parityId = BEACON_M2_PARITY_IDS[operationId];
-    return parityId === undefined || beaconCommandCapability(parityId, target).available;
+    if (parityId === undefined) return true;
+    const capability = beaconCommandCapability(parityId, target);
+    if (capability.available) return true;
+    // The original four reads already use target.task.execute on beacon pivot
+    // and unknown transports. Keep that established queue policy while still
+    // enforcing their exact command's delivery, platform, and architecture.
+    return EXISTING_M2_TRANSPORT_EXCEPTIONS.has(operationId) && capability.reason === "unsupported-transport";
   }
 
   private async requestTaskCancellation(internal: InternalOperation): Promise<void> {

@@ -353,7 +353,7 @@ export class BeaconTaskStore {
       if (attribution.expectedRequest) {
         try {
           if (attribution.expectedRequest.operationId !== operationId) throw new Error("Operation mismatch");
-          verifyBeaconReadRequest(attribution.expectedRequest, content.Request, task.beaconId);
+          verifyBeaconReadRequest(attribution.expectedRequest, content.Request);
         } catch {
           return detailError(base, operationId, "decode-uncertain", "The saved task request did not match the selected command");
         }
@@ -381,7 +381,7 @@ export class BeaconTaskStore {
       if (
         content.Response.length === 0 &&
         !requiresExactlyEmptyResponse(operationId) &&
-        !allowsEmptyDecodedResponse(operationId)
+        !allowsEmptyDecodedResponse(operationId, attribution.expectedRequest)
       ) {
         return detailError(
           base,
@@ -943,6 +943,7 @@ function decodeDisposition(
       // embedded Response entirely; only a present error envelope is a
       // target-reported failure.
       assertResponse(decoded.Response?.Err);
+      if (!decoded.Path) throw new Error("The working directory result was empty");
       const path = boundedResultText(decoded.Path, MAX_RESULT_TEXT);
       return {
         kind: "structured-detail" as const,
@@ -1035,6 +1036,9 @@ function decodeDisposition(
     case "beacon.environment.list": {
       const decoded = decodeCanonical(sliverpb.EnvInfo, response);
       assertResponse(decoded.Response?.Err);
+      if (response.length > 0 && decoded.Variables.length === 0 && !decoded.Response) {
+        throw new Error("The environment result contained no recognized fields");
+      }
       let truncated = decoded.Variables.length > MAX_RESULT_ROWS;
       const rows = decoded.Variables.slice(0, MAX_RESULT_ROWS).map((variable) => {
         const name = boundedResultText(variable.Key, 512);
@@ -1048,6 +1052,7 @@ function decodeDisposition(
     case "beacon.identity.whoami": {
       const decoded = decodeCanonical(sliverpb.CurrentTokenOwner, response);
       assertResponse(decoded.Response?.Err);
+      if (!decoded.Output && !decoded.Response) throw new Error("The token owner result was empty");
       const owner = boundedResultText(decoded.Output, MAX_RESULT_TEXT);
       return { kind: "structured-detail" as const, title: "Current token owner",
         fields: [{ label: "Identity", value: owner.value }], truncated: owner.changed };
@@ -1055,6 +1060,9 @@ function decodeDisposition(
     case "beacon.network.netstat": {
       const decoded = decodeCanonical(sliverpb.Netstat, response);
       assertResponse(decoded.Response?.Err);
+      if (response.length > 0 && decoded.Entries.length === 0 && !decoded.Response) {
+        throw new Error("The network result contained no recognized fields");
+      }
       let truncated = decoded.Entries.length > MAX_RESULT_ROWS;
       const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
         const bounded = boundedResultText(value, maximum);
@@ -1075,6 +1083,9 @@ function decodeDisposition(
     case "beacon.filesystem.mount": {
       const decoded = decodeCanonical(sliverpb.Mount, response);
       assertResponse(decoded.Response?.Err);
+      if (response.length > 0 && decoded.Info.length === 0 && !decoded.Response) {
+        throw new Error("The mount result contained no recognized fields");
+      }
       let truncated = decoded.Info.length > MAX_RESULT_ROWS;
       const text = (value: string, maximum = 512): string => {
         const bounded = boundedResultText(value, maximum);
@@ -1093,6 +1104,10 @@ function decodeDisposition(
     case "beacon.filesystem.memfiles": {
       const decoded = decodeCanonical(sliverpb.Ls, response);
       assertResponse(decoded.Response?.Err);
+      if (!decoded.Exists) throw new TargetReportedTaskError("The beacon could not list memory files");
+      if (response.length > 0 && decoded.Files.length === 0 && !decoded.Path && !decoded.Response) {
+        throw new Error("The memory file result contained no recognized fields");
+      }
       let truncated = decoded.Files.length > MAX_RESULT_ROWS;
       const text = (value: string, maximum = 512): string => {
         const bounded = boundedResultText(value, maximum);
@@ -1101,9 +1116,9 @@ function decodeDisposition(
       };
       const rows = decoded.Files.slice(0, MAX_RESULT_ROWS).map((file) => [
         text(file.Name), file.IsDir ? "Directory" : "File", text(file.Size, 128),
-        text(file.ModTime, 128), text(file.Mode, 128),
+        text(file.ModTime, 128), text(file.Mode, 128), text(file.Link),
       ]);
-      return { kind: "table" as const, columns: ["Name", "Type", "Size", "Modified", "Mode"], rows, truncated };
+      return { kind: "table" as const, columns: ["Name", "Type", "Size", "Modified", "Mode", "Link"], rows, truncated };
     }
     case "beacon.filesystem.cat":
     case "beacon.filesystem.head":
@@ -1112,6 +1127,10 @@ function decodeDisposition(
     case "beacon.filesystem.grep": {
       const decoded = decodeCanonical(sliverpb.Grep, response);
       assertResponse(decoded.Response?.Err);
+      if (response.length > 0 && Object.keys(decoded.Results).length === 0 &&
+        !decoded.SearchPathAbsolute && !decoded.Response) {
+        throw new Error("The search result contained no recognized fields");
+      }
       let truncated = false;
       const rows: (string | boolean)[][] = [];
       for (const path of Object.keys(decoded.Results).sort()) {
@@ -1172,19 +1191,32 @@ function decodeTextFileDisposition(
   let inflated: Buffer | undefined;
   try {
     let bytes: Buffer;
-    if (decoded.Encoder === "") bytes = decoded.Data;
-    else if (decoded.Encoder === "gzip") {
+    if (decoded.Encoder === "gzip") {
       inflated = gunzipSync(decoded.Data, { maxOutputLength: MAX_TEXT_FILE_BYTES + 1 });
       bytes = inflated;
     } else throw new Error("Unsupported file response encoding");
     if (bytes.length > MAX_TEXT_FILE_BYTES) throw new Error("The file response exceeded the bounded preview");
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    const bounded = boundedResultText(text, MAX_RESULT_TEXT);
+    let text: string;
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch (error) {
+      if (operationId === "beacon.filesystem.cat") throw error;
+      // Byte-count head/tail can legitimately cut through a UTF-8 code point.
+      // Preserve the exact returned bytes as a bounded hex preview rather than
+      // reporting a valid target response as an uncertain protobuf decode.
+      const maximumHexBytes = Math.floor((MAX_RESULT_TEXT - 28) / 2);
+      const hex = bytes.subarray(0, maximumHexBytes).toString("hex");
+      return {
+        kind: "inline-text" as const,
+        text: `Non-UTF-8 byte slice (hex): ${hex}`,
+        truncated: bytes.length > maximumHexBytes,
+      };
+    }
+    const bounded = boundedInlineText(text, MAX_RESULT_TEXT);
     return {
       kind: "inline-text" as const,
       text: bounded.value,
-      // Head and tail intentionally show only the requested slice.
-      truncated: bounded.changed || operationId !== "beacon.filesystem.cat",
+      truncated: bounded.changed,
     };
   } finally {
     decoded.Data.fill(0);
@@ -1207,13 +1239,12 @@ function requiresExactlyEmptyResponse(operationId: TargetOperationId): boolean {
   return operationId === "beacon.reconfigure" || operationId === "beacon.open-session";
 }
 
-function allowsEmptyDecodedResponse(operationId: TargetOperationId): boolean {
-  // An empty protobuf message is the canonical encoding of a successful
-  // inventory response containing zero rows.
-  return operationId === "beacon.process.list" || operationId === "beacon.network.interfaces" ||
-    operationId === "beacon.environment.list" || operationId === "beacon.network.netstat" ||
-    operationId === "beacon.filesystem.mount" || operationId === "beacon.filesystem.memfiles" ||
-    operationId === "beacon.filesystem.grep";
+function allowsEmptyDecodedResponse(operationId: TargetOperationId, expectedRequest?: TargetOperationInput): boolean {
+  // An empty full environment listing is valid. For process, interface, and
+  // socket listings, the pinned handlers can also emit no response on failure,
+  // so an empty payload cannot establish a successful zero-row result.
+  return operationId === "beacon.environment.list" &&
+    expectedRequest?.operationId === "beacon.environment.list" && expectedRequest.name === undefined;
 }
 
 function detailError(
@@ -1329,6 +1360,13 @@ function boundedText(value: string, maximum: number): string {
 
 function boundedResultText(value: string, maximum: number): { value: string; changed: boolean } {
   const bounded = boundedText(value, maximum);
+  return { value: bounded, changed: bounded !== value };
+}
+
+function boundedInlineText(value: string, maximum: number): { value: string; changed: boolean } {
+  const normalized = value.replace(/\r\n?/gu, "\n").replace(/[\p{Cc}\p{Cf}]/gu,
+    (character) => character === "\n" || character === "\t" ? character : " ");
+  const bounded = [...normalized].slice(0, maximum).join("");
   return { value: bounded, changed: bounded !== value };
 }
 

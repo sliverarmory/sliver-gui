@@ -1546,6 +1546,101 @@ describe("TargetsPage", () => {
     expect(within(output).getByText(/exceeded the bounded preview/)).toBeInTheDocument();
   });
 
+  it("sorts only the decoded rows of one directory task", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({
+      taskId: "task-directory-sort", description: "LsReq", operationId: "beacon.filesystem.ls",
+      disposition: {
+        kind: "table", columns: ["Name", "Type", "Size", "Modified"], truncated: false,
+        rows: [["zeta", "File", "2", "100"], ["alpha", "File", "50", "200"], ["beta", "File", "10", "150"]],
+      },
+    });
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: task }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const output = await screen.findByRole("article", { name: "Task output task-directory-sort" });
+    expect(await within(output).findByText("alpha")).toBeInTheDocument();
+    const names = () => within(output).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell")[0]?.textContent);
+    expect(names()).toEqual(["alpha", "beta", "zeta"]);
+    await user.click(within(output).getByRole("button", { name: "Size" }));
+    expect(names()).toEqual(["zeta", "beta", "alpha"]);
+    await user.click(within(output).getByRole("switch", { name: "Reverse directory sort" }));
+    expect(names()).toEqual(["alpha", "beta", "zeta"]);
+    await user.click(within(output).getByRole("button", { name: "Modified" }));
+    expect(names()).toEqual(["alpha", "beta", "zeta"]);
+  });
+
+  it("filters and groups decoded process rows without queueing another task", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({
+      taskId: "task-process-options", description: "PsReq", operationId: "beacon.process.list",
+      disposition: {
+        kind: "table", columns: ["PID", "PPID", "Executable", "Owner", "Architecture", "Session", "Command line"], truncated: false,
+        rows: [
+          [20, 10, "child.exe", "Alice", "amd64", 1, "child --test"],
+          [30, 20, "leaf.exe", "Bob", "amd64", 1, "leaf --test"],
+          [10, 0, "parent.exe", "Alice", "amd64", 1, "parent --test"],
+        ],
+      },
+    });
+    const getBeaconTask = vi.fn().mockResolvedValue({ ok: true, value: task });
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask,
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const output = await screen.findByRole("article", { name: "Task output task-process-options" });
+    expect(await within(output).findByText("parent.exe")).toBeInTheDocument();
+    expect(within(output).queryByRole("columnheader", { name: "Command line" })).not.toBeInTheDocument();
+    await user.click(within(output).getByRole("switch", { name: "Show command line" }));
+    expect(within(output).getByRole("columnheader", { name: "Command line" })).toBeInTheDocument();
+    await user.click(within(output).getByRole("switch", { name: "Show process tree" }));
+    expect(within(output).getByText(/↳ child\.exe/u)).toBeInTheDocument();
+    expect(within(output).getByText(/↳ leaf\.exe/u)).toBeInTheDocument();
+    await user.type(within(output).getByRole("textbox", { name: "Filter executable" }), "child");
+    expect(within(output).getByText("child.exe")).toBeInTheDocument();
+    expect(within(output).queryByText("parent.exe")).not.toBeInTheDocument();
+    const owner = within(output).getByRole("textbox", { name: "Filter owner" });
+    await user.type(owner, "alice");
+    expect(within(output).getByText("child.exe")).toBeInTheDocument();
+    await user.clear(owner);
+    await user.type(owner, "bob");
+    expect(within(output).getByText("No decoded rows match the selected process filters.")).toBeInTheDocument();
+    await user.clear(owner);
+    await user.clear(within(output).getByRole("textbox", { name: "Filter executable" }));
+    await user.type(within(output).getByRole("spinbutton", { name: "Filter PID" }), "30");
+    expect(within(output).getByText("leaf.exe")).toBeInTheDocument();
+    expect(within(output).queryByText("parent.exe")).not.toBeInTheDocument();
+    expect(getBeaconTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows console-default and all decoded network interface addresses", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({
+      taskId: "task-interface-options", description: "IfconfigReq", operationId: "beacon.network.interfaces",
+      disposition: {
+        kind: "table", columns: ["Index", "Name", "MAC", "Addresses"], truncated: false,
+        rows: [[1, "lo", "", "127.0.0.1/8"], [2, "eth0", "aa:bb", "10.0.0.8/24, ::1/128"], [3, "utun0", "", "fd00::1/64"]],
+      },
+    });
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: task }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const output = await screen.findByRole("article", { name: "Task output task-interface-options" });
+    expect(await within(output).findByText("eth0")).toBeInTheDocument();
+    expect(within(output).getByText("10.0.0.8/24")).toBeInTheDocument();
+    expect(within(output).queryByText("lo")).not.toBeInTheDocument();
+    expect(within(output).getByText(/2 decoded adapters hidden/)).toBeInTheDocument();
+    await user.click(within(output).getByRole("switch", { name: "Show all interface addresses" }));
+    expect(within(output).getByText("lo")).toBeInTheDocument();
+    expect(within(output).getByText("fd00::1/64")).toBeInTheDocument();
+    expect(within(output).getByText("10.0.0.8/24, ::1/128")).toBeInTheDocument();
+  });
+
   it("renders and pages a task-bound children read after a queue jump", async () => {
     const user = userEvent.setup();
     const first = beaconTaskDetail({
