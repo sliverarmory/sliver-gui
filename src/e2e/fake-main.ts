@@ -95,6 +95,11 @@ interface FakeMainState {
     c2s: string[];
     delayNanoseconds: string;
   }>;
+  reconfigureRequests: Array<{
+    beaconId: string;
+    options: Parameters<SliverClientAdapter["reconfigureBeacon"]>[1];
+    timeoutSeconds: number | undefined;
+  }>;
   tasks: Array<{
     id: string;
     beaconId: string;
@@ -216,6 +221,7 @@ const state: FakeMainState = {
     ]),
   ]),
   openSessionRequests: [],
+  reconfigureRequests: [],
   tasks: [],
   processCalls: [],
   beaconProcessCalls: [],
@@ -266,6 +272,7 @@ const registryLayoutFixture = process.argv.includes("--registry-layout-fixture")
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 const beaconsTableFixture = process.argv.includes("--beacons-table-fixture");
+const beaconManagementDenialFixture = process.argv.includes("--beacon-management-denial-fixture");
 const beaconExecutionFixture = process.argv.includes("--beacon-execution-fixture");
 if (registryLayoutFixture && overviewPivotFixture) {
   throw new Error("The Registry layout and Overview pivot fixtures cannot be enabled together");
@@ -812,6 +819,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     beacons.push(clientpb.Beacon.create({
       ...seedBeacon("m2-beacon"),
       ID: "m2_beacon",
+      ...(beaconManagementDenialFixture ? { ActiveC2: "" } : {}),
       Hostname: "m2-beacon-host",
       UUID: "m2-beacon-host-id",
       RemoteAddress: "127.0.0.1:41003",
@@ -2366,9 +2374,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       return {};
     },
-    async reconfigureBeacon(beaconId: string) {
+    async reconfigureBeacon(
+      beaconId: string,
+      options: Parameters<SliverClientAdapter["reconfigureBeacon"]>[1],
+      timeoutSeconds?: number,
+    ) {
       record("reconfigureBeacon");
       requireBeacon(beaconId);
+      testState.reconfigureRequests.push({ beaconId, options: { ...options }, timeoutSeconds });
       return sliverpb.Reconfigure.create({
         Response: queueTask(
           beaconId,

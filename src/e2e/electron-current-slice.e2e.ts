@@ -2862,7 +2862,7 @@ async function verifyInteractionWindowPopout(
       const breadcrumbs = popout.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
       await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
       await breadcrumbs.getByText(expectedName, { exact: true }).waitFor();
-      await popout.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+      await popout.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
       const taskTabs = popout.getByRole("tablist", { name: "Beacon task views", exact: true });
       await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).waitFor();
       await taskTabs.getByRole("tab", { name: "Task output", exact: true }).waitFor();
@@ -3074,7 +3074,7 @@ async function verifyBeaconAsyncTaskWorkspace(
   const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
   await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
   await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
-  await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
   const taskTabs = page.getByRole("tablist", { name: "Beacon task views", exact: true });
   const queueTab = taskTabs.getByRole("tab", { name: "Task queue", exact: true });
   const outputTab = taskTabs.getByRole("tab", { name: "Task output", exact: true });
@@ -3107,12 +3107,17 @@ async function verifyBeaconAsyncTaskWorkspace(
   );
   assert.equal(queuedTask.beaconId, beaconRef.id);
   assert.equal(queuedTask.state, "pending");
+  await page.getByRole("tabpanel", { name: "Task output", exact: true })
+    .getByRole("article", { name: `Task output ${queuedTask.id}`, exact: true })
+    .getByText("Waiting for the beacon", { exact: true }).waitFor();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "new beacon tasks must preserve the output view");
+  await queueTab.click();
 
   const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
   const queuedRow = queue.getByRole("row").filter({ hasText: queuedTask.id });
   await queuedRow.waitFor();
   await queuedRow.getByText("Pending", { exact: true }).waitFor();
-  assert.equal(await queueTab.getAttribute("aria-selected"), "true", "new beacon tasks must remain in the queue view");
+  assert.equal(await queueTab.getAttribute("aria-selected"), "true");
   await queuedRow.click();
   assert.equal(await outputTab.getAttribute("aria-selected"), "true", "pending task actions must jump to their output status");
   await page.getByText("Waiting for the beacon", { exact: true }).waitFor();
@@ -3604,6 +3609,8 @@ async function verifyM4BeaconExecution(
   assert.equal(catalog.value.targetRef.mode, "beacon");
   assert.equal(catalog.value.targetRef.id, "m1_beacon");
   assert.equal(catalog.value.capabilities.find((capability) => capability.operationId === "execution.process")?.available, true);
+  const outputTab = page.getByRole("tab", { name: "Task output", exact: true });
+  await outputTab.click();
   const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
   await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
   await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill("Execution");
@@ -3631,6 +3638,11 @@ async function verifyM4BeaconExecution(
   const submittedTask = afterBeacon.tasks.filter((task) => task.beaconId === "m1_beacon" && task.description === "ExecuteReq").at(-1);
   assert.ok(submittedTask);
   assert.equal(submittedTask.state, "pending");
+  await page.getByRole("tabpanel", { name: "Task output", exact: true })
+    .getByRole("article", { name: `Task output ${submittedTask.id}`, exact: true })
+    .getByText("Waiting for the beacon", { exact: true }).waitFor();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "reviewed execution must preserve the output view");
+  await page.getByRole("tab", { name: "Task queue", exact: true }).click();
   await page.getByRole("grid", { name: "Beacon task queue", exact: true }).getByRole("row").filter({ hasText: submittedTask.id }).waitFor();
   assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true");
   assert.equal(afterBeacon.m4Audit.retainedSensitiveInputs, 0);

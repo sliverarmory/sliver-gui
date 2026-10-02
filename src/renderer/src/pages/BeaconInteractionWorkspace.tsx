@@ -12,13 +12,13 @@ import {
   faSatellite,
   faTerminal,
   faTriangleExclamation,
+  faWrench,
 } from "@fortawesome/free-solid-svg-icons";
 import type { Key } from "react-aria-components";
 import {
   Autocomplete,
   Button,
   Chip,
-  Description,
   Label,
   ListBox,
   SearchField,
@@ -34,7 +34,7 @@ import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 
 import type { PageSummary } from "../../../shared/contracts";
-import type { TargetRef } from "../../../shared/target-contracts";
+import type { TargetCapabilityId, TargetCapabilityState, TargetRef } from "../../../shared/target-contracts";
 import type {
   BeaconTaskDetail,
   BeaconTaskSummary,
@@ -43,10 +43,10 @@ import type {
   TargetOperationInput,
   TargetOperationRecord,
 } from "../../../shared/operation-contracts";
-import { Field } from "../components/FormControls";
+import { AreaField, Field } from "../components/FormControls";
 import { BeaconExecutionCommand, type BeaconExecutionCommandState } from "./BeaconExecutionCommand";
 import { BeaconExecutionTaskOutput } from "./BeaconExecutionTaskOutput";
-import { formatTimestamp, taskStateColor } from "./target-page-model";
+import { capabilityFor, formatTimestamp, operationStateLabel, taskStateColor } from "./target-page-model";
 import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 
 export const BEACON_INTERACTION_COMMAND_IDS = [
@@ -55,13 +55,19 @@ export const BEACON_INTERACTION_COMMAND_IDS = [
   "beacon.filesystem.ls",
   "beacon.process.list",
   "beacon.network.interfaces",
+  "target.ping",
+  "target.rename",
+  "target.env-set",
+  "target.env-unset",
+  "beacon.reconfigure",
+  "beacon.open-session",
 ] as const;
 
 export type BeaconInteractionCommandId = (typeof BEACON_INTERACTION_COMMAND_IDS)[number];
 
 interface BeaconCommandPresentation {
   id: BeaconInteractionCommandId;
-  group: "Execution" | "Filesystem" | "Processes" | "Networking";
+  group: "Execution" | "Filesystem" | "Processes" | "Networking" | "Beacon";
   label: string;
   description: string;
   keywords: readonly string[];
@@ -109,11 +115,91 @@ const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
     keywords: ["ifconfig", "ipconfig", "addresses", "mac"],
     icon: faNetworkWired,
   },
+  {
+    id: "target.ping",
+    group: "Beacon",
+    label: "Ping",
+    description: "Queue a beacon ping.",
+    keywords: ["ping", "checkin"],
+    icon: faSatellite,
+  },
+  {
+    id: "target.rename",
+    group: "Beacon",
+    label: "Rename",
+    description: "Rename this beacon immediately.",
+    keywords: ["name", "rename"],
+    icon: faWrench,
+  },
+  {
+    id: "target.env-set",
+    group: "Beacon",
+    label: "Set environment variable",
+    description: "Queue an environment variable update.",
+    keywords: ["env", "set", "variable"],
+    icon: faWrench,
+  },
+  {
+    id: "target.env-unset",
+    group: "Beacon",
+    label: "Unset environment variable",
+    description: "Queue removal of an environment variable.",
+    keywords: ["env", "unset", "variable"],
+    icon: faWrench,
+  },
+  {
+    id: "beacon.reconfigure",
+    group: "Beacon",
+    label: "Reconfigure beacon",
+    description: "Queue beacon timing changes.",
+    keywords: ["reconfigure", "reconnect", "interval", "jitter"],
+    icon: faWrench,
+  },
+  {
+    id: "beacon.open-session",
+    group: "Beacon",
+    label: "Open session",
+    description: "Queue a request for an interactive session.",
+    keywords: ["session", "interactive"],
+    icon: faTerminal,
+  },
 ];
+
+interface BeaconManagementDraft {
+  name: string;
+  value: string;
+  reconnectIntervalSeconds: string;
+  intervalSeconds: string;
+  jitterSeconds: string;
+  delaySeconds: string;
+}
+
+const DEFAULT_MANAGEMENT_DRAFT: BeaconManagementDraft = {
+  name: "",
+  value: "",
+  reconnectIntervalSeconds: "",
+  intervalSeconds: "",
+  jitterSeconds: "",
+  delaySeconds: "0",
+};
+
+const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, "execution">, TargetCapabilityId>> = {
+  "beacon.filesystem.pwd": "target.task.execute",
+  "beacon.filesystem.ls": "target.task.execute",
+  "beacon.process.list": "target.task.execute",
+  "beacon.network.interfaces": "target.task.execute",
+  "target.ping": "target.ping",
+  "target.rename": "target.rename",
+  "target.env-set": "target.environment.write",
+  "target.env-unset": "target.environment.write",
+  "beacon.reconfigure": "beacon.reconfigure",
+  "beacon.open-session": "beacon.open-session",
+};
 
 export interface BeaconInteractionWorkspaceProps {
   expectedTarget: TargetRef;
   targetIdentity: string;
+  capabilities: readonly TargetCapabilityState[];
   canQueue: boolean;
   unavailableReason?: string | undefined;
   tasks: BeaconTaskSummary[];
@@ -126,11 +212,13 @@ export interface BeaconInteractionWorkspaceProps {
   onRefresh: () => void;
   onLoadMore: (cursor: string) => void;
   onCancelTask: (task: BeaconTaskDetail) => Promise<BeaconTaskDetail | undefined>;
+  operationUpdates: readonly TargetOperationRecord[];
 }
 
 export function BeaconInteractionWorkspace({
   expectedTarget,
   targetIdentity,
+  capabilities,
   canQueue,
   unavailableReason,
   tasks,
@@ -143,12 +231,15 @@ export function BeaconInteractionWorkspace({
   onRefresh,
   onLoadMore,
   onCancelTask,
+  operationUpdates,
 }: BeaconInteractionWorkspaceProps): React.JSX.Element {
   const [commandId, setCommandId] = useState<BeaconInteractionCommandId>("beacon.filesystem.pwd");
   const [path, setPath] = useState(".");
   const [fullInfo, setFullInfo] = useState(false);
+  const [managementDraft, setManagementDraft] = useState<BeaconManagementDraft>(DEFAULT_MANAGEMENT_DRAFT);
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submittedOperation, setSubmittedOperation] = useState<TargetOperationRecord>();
   const [executionState, setExecutionState] = useState<BeaconExecutionCommandState>({ isPending: false, isAvailable: false });
   const executionFormId = useId();
   const [cancelingTaskIds, setCancelingTaskIds] = useState<Set<string>>(() => new Set());
@@ -161,13 +252,23 @@ export function BeaconInteractionWorkspace({
   const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks, taskView === "output", false);
   const { contains } = useFilter({ sensitivity: "base" });
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
+  const isManagementCommand = isBeaconManagementCommandId(commandId);
+  const capability = commandId === "execution" ? undefined : capabilityFor(capabilities, COMMAND_CAPABILITIES[commandId]);
+  const commandAvailable = capability?.available === true && (isManagementCommand ? expectedTarget.mode === "beacon" : canQueue);
+  const updatedOperation = submittedOperation && operationUpdates.find((operation) =>
+    operation.requestId === submittedOperation.requestId &&
+    sameTarget(operation.target, submittedOperation.target) &&
+    operation.updatedAt >= submittedOperation.updatedAt);
+  const latestOperation = updatedOperation ?? submittedOperation;
 
   useEffect(() => {
     setCommandId("beacon.filesystem.pwd");
     setPath(".");
     setFullInfo(false);
+    setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
     setSubmitError(undefined);
     setIsSubmitting(false);
+    setSubmittedOperation(undefined);
     setExecutionState({ isPending: false, isAvailable: false });
     setCancelingTaskIds(new Set());
     setQueuedTaskId(undefined);
@@ -195,7 +296,7 @@ export function BeaconInteractionWorkspace({
     const submittedIdentity = targetIdentity;
     let input: TargetOperationInput;
     try {
-      input = beaconCommandInput(commandId, path, fullInfo);
+      input = beaconCommandInput(commandId, path, fullInfo, managementDraft);
       setSubmitError(undefined);
     } catch (validationError) {
       setSubmitError(errorMessage(validationError));
@@ -211,6 +312,17 @@ export function BeaconInteractionWorkspace({
         return;
       }
       if (!onSubmitted(result.value)) return;
+      if (isBeaconManagementCommandId(commandId)) {
+        setSubmittedOperation(result.value);
+        setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
+        if (result.value.taskId) {
+          setQueuedTaskId(result.value.taskId);
+          onRefresh();
+        } else if (result.value.state !== "completed" && result.value.state !== "failed" && result.value.state !== "target-disappeared") {
+          setSubmitError(result.value.message ?? "The operation has no exact beacon task ID, so queue insertion was not confirmed.");
+        }
+        return;
+      }
       if (!result.value.taskId) {
         setSubmitError(
           result.value.message ??
@@ -219,7 +331,6 @@ export function BeaconInteractionWorkspace({
         return;
       }
       setQueuedTaskId(result.value.taskId);
-      setTaskView("queue");
       toast.success("Task queued", {
         description: `${command.label} will run after the beacon checks in.`,
       });
@@ -255,8 +366,8 @@ export function BeaconInteractionWorkspace({
           <div className="flex items-start gap-3 px-5 py-4">
             <span className="section-icon"><FontAwesomeIcon aria-hidden icon={faSatellite} /></span>
             <div className="min-w-0">
-              <h2 className="text-sm font-semibold text-foreground" id="beacon-command-heading">Queue a beacon task</h2>
-              <p className="mt-0.5 text-xs leading-relaxed text-muted">Choose a command, configure it, and follow its result after the beacon checks in.</p>
+              <h2 className="text-sm font-semibold text-foreground" id="beacon-command-heading">Beacon command</h2>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted">Choose a command, configure it, and follow its result.</p>
             </div>
           </div>
 
@@ -265,15 +376,15 @@ export function BeaconInteractionWorkspace({
               fullWidth
               {...(commandId === "execution" ? { form: executionFormId } : {})}
               type={commandId === "execution" ? "submit" : "button"}
-              isDisabled={commandId === "execution" ? !executionState.isAvailable : !canQueue}
+              isDisabled={commandId === "execution" ? !executionState.isAvailable : !commandAvailable}
               isPending={commandId === "execution" ? executionState.isPending : isSubmitting}
               {...(commandId === "execution" ? {} : { onPress: () => void submit() })}
             >
-              <FontAwesomeIcon aria-hidden icon={faListCheck} /> Queue task
+              <FontAwesomeIcon aria-hidden icon={faListCheck} /> {commandId === "target.rename" ? "Rename beacon" : "Queue task"}
             </Button>
             <Autocomplete
               fullWidth
-              placeholder="Search beacon tasks"
+              placeholder="Search beacon commands"
               selectionMode="single"
               value={commandId}
               variant="secondary"
@@ -282,6 +393,7 @@ export function BeaconInteractionWorkspace({
                 const nextId = String(key);
                 if (!isBeaconInteractionCommandId(nextId)) return;
                 setCommandId(nextId);
+                setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
                 setSubmitError(undefined);
               }}
             >
@@ -291,7 +403,6 @@ export function BeaconInteractionWorkspace({
                 <Autocomplete.ClearButton />
                 <Autocomplete.Indicator />
               </Autocomplete.Trigger>
-              <Description>Type a command name or browse the common beacon tasks.</Description>
               <Autocomplete.Popover>
                 <Autocomplete.Filter filter={contains}>
                   <SearchField autoFocus aria-label="Search beacon commands" name="beacon-command-search" variant="secondary">
@@ -331,7 +442,6 @@ export function BeaconInteractionWorkspace({
                 onQueuedTask={(taskId) => {
                   if (identityRef.current !== targetIdentity) return;
                   setQueuedTaskId(taskId);
-                  setTaskView("queue");
                   onRefresh();
                 }}
               />
@@ -344,38 +454,74 @@ export function BeaconInteractionWorkspace({
                 </div>
               </div>
 
-              <div className="mt-4">
-                {commandId === "beacon.filesystem.ls" ? (
-                  <Field
-                    description="Absolute paths and paths relative to the beacon's working directory are accepted."
-                    label="Path"
-                    mono
-                    required
-                    value={path}
-                    onChange={setPath}
-                  />
-                ) : null}
-                {commandId === "beacon.process.list" ? (
-                  <Switch aria-label="Include full process details" isSelected={fullInfo} onChange={setFullInfo}>
-                    <Switch.Content className="min-w-0 flex-1">
-                      <span className="block text-sm font-medium text-foreground">Include full process details</span>
-                      <span className="mt-0.5 block text-xs leading-relaxed text-muted">Request owner, architecture, session, and command-line metadata when available.</span>
-                    </Switch.Content>
-                    <Switch.Control><Switch.Thumb /></Switch.Control>
-                  </Switch>
-                ) : null}
-                {commandId === "beacon.filesystem.pwd" || commandId === "beacon.network.interfaces" ? (
-                  <p className="text-xs leading-relaxed text-muted">This task has no additional options.</p>
-                ) : null}
-              </div>
+              {commandId !== "beacon.filesystem.pwd" && commandId !== "beacon.network.interfaces" && commandId !== "target.ping" ? (
+                <div className="mt-4">
+                  {commandId === "beacon.filesystem.ls" ? (
+                    <Field
+                      label="Path"
+                      mono
+                      required
+                      value={path}
+                      onChange={setPath}
+                    />
+                  ) : null}
+                  {commandId === "beacon.process.list" ? (
+                    <Switch aria-label="Include full process details" isSelected={fullInfo} onChange={setFullInfo}>
+                      <Switch.Content className="min-w-0 flex-1">
+                        <span className="block text-sm font-medium text-foreground">Include full process details</span>
+                      </Switch.Content>
+                      <Switch.Control><Switch.Thumb /></Switch.Control>
+                    </Switch>
+                  ) : null}
+                  {commandId === "target.rename" ? (
+                    <Field label="New target name" value={managementDraft.name} onChange={(name) => setManagementDraft((current) => ({ ...current, name }))} />
+                  ) : null}
+                  {commandId === "target.env-set" ? (
+                    <div className="flex flex-col gap-3">
+                      <Field label="Variable name" mono value={managementDraft.name} onChange={(name) => setManagementDraft((current) => ({ ...current, name }))} />
+                      <AreaField label="Variable value" mono rows={3} value={managementDraft.value} onChange={(value) => setManagementDraft((current) => ({ ...current, value }))} />
+                    </div>
+                  ) : null}
+                  {commandId === "target.env-unset" ? (
+                    <Field label="Variable name" mono value={managementDraft.name} onChange={(name) => setManagementDraft((current) => ({ ...current, name }))} />
+                  ) : null}
+                  {commandId === "beacon.reconfigure" ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Field label="Reconnect seconds" type="number" min={1} value={managementDraft.reconnectIntervalSeconds} onChange={(value) => setManagementDraft((current) => ({ ...current, reconnectIntervalSeconds: value }))} />
+                      <Field label="Interval seconds" type="number" min={1} value={managementDraft.intervalSeconds} onChange={(value) => setManagementDraft((current) => ({ ...current, intervalSeconds: value }))} />
+                      <Field label="Jitter seconds" type="number" min={1} value={managementDraft.jitterSeconds} onChange={(value) => setManagementDraft((current) => ({ ...current, jitterSeconds: value }))} />
+                    </div>
+                  ) : null}
+                  {commandId === "beacon.open-session" ? (
+                    <Field label="Delay seconds" type="number" min={0} value={managementDraft.delaySeconds} onChange={(value) => setManagementDraft((current) => ({ ...current, delaySeconds: value }))} />
+                  ) : null}
+                </div>
+              ) : null}
             </div>}
 
-            {commandId !== "execution" && !canQueue ? (
+            {commandId !== "execution" && !commandAvailable ? (
               <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
-                {unavailableReason ?? "Task execution is unavailable for this beacon."}
+                {isManagementCommand
+                  ? capability?.reason?.message ?? "This command is unavailable for the selected beacon."
+                  : unavailableReason ?? capability?.reason?.message ?? "Task execution is unavailable for this beacon."}
               </p>
             ) : null}
             {submitError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger-soft-foreground" role="alert">{submitError}</p> : null}
+            {isManagementCommand && latestOperation?.operationId === commandId ? (
+              <p
+                aria-label="Beacon command status"
+                className={`text-xs leading-relaxed ${latestOperation.state === "failed" || latestOperation.state === "target-disappeared"
+                  ? "text-danger"
+                  : latestOperation.state === "partial" || latestOperation.state === "outcome-unknown"
+                    ? "text-warning"
+                    : "text-muted"}`}
+                role="status"
+              >
+                {command.label} · {operationStateLabel(latestOperation.state)} · Request ID: {latestOperation.requestId}
+                {latestOperation.taskId ? ` · Task ID: ${latestOperation.taskId}` : ""}
+                {latestOperation.message ? ` · ${latestOperation.message}` : ""}
+              </p>
+            ) : null}
           </div>
         </section>
       </div>
@@ -980,7 +1126,36 @@ function isBeaconInteractionCommandId(value: string): value is BeaconInteraction
   return (BEACON_INTERACTION_COMMAND_IDS as readonly string[]).includes(value);
 }
 
-function beaconCommandInput(commandId: BeaconInteractionCommandId, path: string, fullInfo: boolean): TargetOperationInput {
+type BeaconManagementCommandId = "target.ping" | "target.rename" | "target.env-set" | "target.env-unset" |
+  "beacon.reconfigure" | "beacon.open-session";
+
+function isBeaconManagementCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconManagementCommandId {
+  return commandId === "target.ping" || commandId === "target.rename" || commandId === "target.env-set" ||
+    commandId === "target.env-unset" || commandId === "beacon.reconfigure" || commandId === "beacon.open-session";
+}
+
+function sameTarget(left: TargetRef, right: TargetRef): boolean {
+  return left.mode === right.mode && left.id === right.id &&
+    left.backendEpoch === right.backendEpoch && left.fingerprint === right.fingerprint;
+}
+
+function optionalInteger(value: string, label: string, minimum: number): number | undefined {
+  if (!value.trim()) return undefined;
+  return requiredInteger(value, label, minimum);
+}
+
+function requiredInteger(value: string, label: string, minimum: number): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`${label} must be an integer of ${minimum} or greater.`);
+  return parsed;
+}
+
+function beaconCommandInput(
+  commandId: BeaconInteractionCommandId,
+  path: string,
+  fullInfo: boolean,
+  management: BeaconManagementDraft,
+): TargetOperationInput {
   switch (commandId) {
     case "execution":
       throw new Error("Choose execution options before queueing this task.");
@@ -995,6 +1170,39 @@ function beaconCommandInput(commandId: BeaconInteractionCommandId, path: string,
       return { operationId: commandId, fullInfo };
     case "beacon.network.interfaces":
       return { operationId: commandId };
+    case "target.ping":
+      return { operationId: commandId };
+    case "target.rename": {
+      const name = management.name.trim();
+      if (!name) throw new Error("Enter a new target name.");
+      return { operationId: commandId, name };
+    }
+    case "target.env-set": {
+      const name = management.name.trim();
+      if (!name) throw new Error("Enter an environment variable name.");
+      return { operationId: commandId, name, value: management.value };
+    }
+    case "target.env-unset": {
+      const name = management.name.trim();
+      if (!name) throw new Error("Enter an environment variable name.");
+      return { operationId: commandId, name };
+    }
+    case "beacon.reconfigure": {
+      const reconnectIntervalSeconds = optionalInteger(management.reconnectIntervalSeconds, "Reconnect seconds", 1);
+      const intervalSeconds = optionalInteger(management.intervalSeconds, "Interval seconds", 1);
+      const jitterSeconds = optionalInteger(management.jitterSeconds, "Jitter seconds", 1);
+      if (reconnectIntervalSeconds === undefined && intervalSeconds === undefined && jitterSeconds === undefined) {
+        throw new Error("Change at least one beacon setting.");
+      }
+      return {
+        operationId: commandId,
+        ...(reconnectIntervalSeconds === undefined ? {} : { reconnectIntervalSeconds }),
+        ...(intervalSeconds === undefined ? {} : { intervalSeconds }),
+        ...(jitterSeconds === undefined ? {} : { jitterSeconds }),
+      };
+    }
+    case "beacon.open-session":
+      return { operationId: commandId, delaySeconds: requiredInteger(management.delaySeconds, "Delay seconds", 0) };
   }
 }
 

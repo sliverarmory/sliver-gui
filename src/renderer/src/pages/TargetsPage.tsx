@@ -317,11 +317,14 @@ export function TargetsPage({
   const mergeOperation = useCallback((operation: TargetOperationRecord) => {
     if (operation.backend.epoch !== backendEpochRef.current) return;
     setOperations((current) => {
+      const previous = current.find((item) => item.requestId === operation.requestId);
+      if (previous && !shouldReplaceOperationRecord(previous, operation)) return current;
       const next = current.filter((item) => item.requestId !== operation.requestId);
       next.unshift(operation);
       return next.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
     });
-    setSelectedOperation((current) => current?.requestId === operation.requestId ? operation : current);
+    setSelectedOperation((current) => current?.requestId === operation.requestId &&
+      shouldReplaceOperationRecord(current, operation) ? operation : current);
   }, []);
 
   const loadMoreTargets = useCallback(async (targetMode: TargetMode, cursor: string) => {
@@ -1362,6 +1365,7 @@ export function TargetsPage({
           <BeaconWorkspaceHeader beacon={active} details={targetDetail} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
             <BeaconInteractionWorkspace
               expectedTarget={activeRef!}
+              capabilities={snapshot.targetContext.capabilities}
               canQueue={taskExecutionCapability?.available === true}
               error={tasksError}
               isLoading={isLoadingTasks}
@@ -1371,12 +1375,26 @@ export function TargetsPage({
               tasks={tasksIdentity === `${backendIncarnation}:${activeIdentity}` ? tasks : []}
               unavailableReason={taskExecutionCapability?.reason?.message}
               watchEnabled={snapshot.targetContext.beaconWatch}
+              operationUpdates={operations.filter((operation) =>
+                targetRefIdentity(operation.target) === activeIdentity &&
+                operation.backend.epoch === activeRef?.backendEpoch &&
+                operation.backend.server === snapshot.connection.server &&
+                (snapshot.connection.configName === undefined ||
+                  operation.backend.configName === snapshot.connection.configName))}
               onCancelTask={cancelSelectedTask}
               onLoadMore={(cursor) => void loadTasks(cursor)}
               onRefresh={() => void loadTasks()}
               onSubmitted={(operation) => {
-                const submittedIncarnation = backendIncarnation;
-                if (submittedIncarnation !== backendIncarnationRef.current) return false;
+                if (
+                  backendIncarnation !== backendIncarnationRef.current ||
+                  activeIdentity !== activeIdentityRef.current ||
+                  targetRefIdentity(operation.target) !== activeIdentity ||
+                  operation.mode !== "beacon" ||
+                  operation.backend.epoch !== snapshot.connection.epoch ||
+                  operation.backend.server !== snapshot.connection.server ||
+                  (snapshot.connection.configName !== undefined &&
+                    operation.backend.configName !== snapshot.connection.configName)
+                ) return false;
                 mergeOperation(operation);
                 return true;
               }}
@@ -1859,24 +1877,14 @@ export function OperationComposer({
           <Field label="Variable name" mono value={draft.name} onChange={(name) => setDraft((current) => ({ ...current, name }))} />
         ) : null}
         {draft.operationId === "beacon.reconfigure" ? (
-          <>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Reconnect seconds" type="number" min={1} value={draft.reconnectIntervalSeconds} onChange={(value) => setDraft((current) => ({ ...current, reconnectIntervalSeconds: value }))} />
-              <Field label="Interval seconds" type="number" min={1} value={draft.intervalSeconds} onChange={(value) => setDraft((current) => ({ ...current, intervalSeconds: value }))} />
-              <Field label="Jitter seconds" type="number" min={1} value={draft.jitterSeconds} onChange={(value) => setDraft((current) => ({ ...current, jitterSeconds: value }))} />
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted">
-              Timing changes only. The server does not expose an authoritative alternate C2 list.
-            </p>
-          </>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Reconnect seconds" type="number" min={1} value={draft.reconnectIntervalSeconds} onChange={(value) => setDraft((current) => ({ ...current, reconnectIntervalSeconds: value }))} />
+            <Field label="Interval seconds" type="number" min={1} value={draft.intervalSeconds} onChange={(value) => setDraft((current) => ({ ...current, intervalSeconds: value }))} />
+            <Field label="Jitter seconds" type="number" min={1} value={draft.jitterSeconds} onChange={(value) => setDraft((current) => ({ ...current, jitterSeconds: value }))} />
+          </div>
         ) : null}
         {draft.operationId === "beacon.open-session" ? (
-          <div className="flex flex-col gap-2">
-            <Field label="Delay seconds" type="number" min={0} value={draft.delaySeconds} onChange={(value) => setDraft((current) => ({ ...current, delaySeconds: value }))} />
-            <p className="text-[11px] leading-relaxed text-muted">
-              Uses the main-owned current ActiveC2 for this beacon.
-            </p>
-          </div>
+          <Field label="Delay seconds" type="number" min={0} value={draft.delaySeconds} onChange={(value) => setDraft((current) => ({ ...current, delaySeconds: value }))} />
         ) : null}
 
         {!capability?.available ? (
@@ -2908,6 +2916,20 @@ function targetRefIdentity(target: TargetRef | null | undefined): string | undef
   return target
     ? `${target.backendEpoch}:${target.mode}:${target.id}:${target.fingerprint}`
     : undefined;
+}
+
+function shouldReplaceOperationRecord(current: TargetOperationRecord, next: TargetOperationRecord): boolean {
+  if (next.updatedAt !== current.updatedAt) return next.updatedAt > current.updatedAt;
+  return operationStateProgress(next.state) >= operationStateProgress(current.state);
+}
+
+function operationStateProgress(state: TargetOperationRecord["state"]): number {
+  if (state === "queued") return 0;
+  if (state === "submitting") return 1;
+  if (state === "submitted") return 2;
+  if (state === "running") return 3;
+  if (state === "cancel-requested") return 4;
+  return 5;
 }
 
 function actionOutcomeColor(status: TargetActionExecutionResult["outcomes"][number]["status"]): "success" | "danger" | "warning" | "default" {

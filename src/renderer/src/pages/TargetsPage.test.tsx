@@ -919,7 +919,7 @@ describe("TargetsPage", () => {
     expect(within(breadcrumbs).queryByRole("button", { name: "Beacons, switch beacon" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to live beacons" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Beacon command" })).toBeInTheDocument();
     const taskTabs = screen.getByRole("tablist", { name: "Beacon task views" });
     expect(within(taskTabs).getAllByRole("tab")).toEqual([
       screen.getByRole("tab", { name: "Task output" }),
@@ -973,7 +973,7 @@ describe("TargetsPage", () => {
     expect(within(summary).getByText("2s")).toBeInTheDocument();
     expect(within(summary).getByRole("button", { name: "Beacon details" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Beacon command" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
   });
 
@@ -1187,7 +1187,7 @@ describe("TargetsPage", () => {
     if (!marker || !sticky || !viewport) throw new Error("The beacon sticky summary markup is incomplete");
     const summary = screen.getByRole("heading", { name: beacon.name }).closest("header");
     expect(sticky).toContainElement(summary);
-    expect(sticky).not.toContainElement(screen.getByRole("heading", { name: "Queue a beacon task" }));
+    expect(sticky).not.toContainElement(screen.getByRole("heading", { name: "Beacon command" }));
     expect(sticky).toHaveAttribute("data-stuck", "false");
     expect(viewport.scrollTop).toBe(0);
     const observer = intersectionObserverRecords.find((candidate) => candidate.observed.includes(marker));
@@ -1294,7 +1294,7 @@ describe("TargetsPage", () => {
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onBack={vi.fn()} onSnapshot={vi.fn()} />);
     await act(async () => {});
 
-    const composer = screen.getByRole("region", { name: "Queue a beacon task" });
+    const composer = screen.getByRole("region", { name: "Beacon command" });
     const tasks = screen.getByRole("region", { name: "Beacon tasks" });
     const leftColumn = composer.parentElement;
     if (!leftColumn) throw new Error("The beacon composer column is incomplete");
@@ -1310,7 +1310,182 @@ describe("TargetsPage", () => {
     expect(listExecutionCatalog).not.toHaveBeenCalled();
   });
 
-  it("queues a reviewed process through the Execution command and refreshes its exact task", async () => {
+  it("runs the six typed beacon operations from the command autocomplete", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn(async (input: { operationId: string }) => ({
+      ok: true as const,
+      value: operationRecord({
+        requestId: `request-${input.operationId}`,
+        operationId: input.operationId as TargetOperationRecord["operationId"],
+        target: beaconRef,
+        targetName: beacon.name,
+        mode: "beacon",
+        state: input.operationId === "target.rename" ? "completed" : "submitted",
+        ...(input.operationId === "target.rename" ? {} : { taskId: `task-${input.operationId}` }),
+      }),
+    }));
+    installAPI({ submitTargetOperation });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    expect(screen.queryByRole("region", { name: "Manage beacon" })).not.toBeInTheDocument();
+    const choose = async (current: string, next: string) => {
+      await user.click(within(command).getByRole("button", { name: new RegExp(`${current}.*Command`, "i") }));
+      await user.click(await screen.findByRole("option", { name: new RegExp(`^${next}`, "i") }));
+    };
+    await choose("Working directory", "Ping");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "target.ping" }));
+    expect(within(command).getByRole("status", { name: "Beacon command status" })).toHaveTextContent("Submitted");
+    expect(within(command).getByRole("status", { name: "Beacon command status" })).toHaveTextContent("Task ID: task-target.ping");
+
+    await choose("Ping", "Rename");
+    await user.type(within(command).getByRole("textbox", { name: "New target name" }), "reviewed-name");
+    await user.click(within(command).getByRole("button", { name: "Rename beacon" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "target.rename", name: "reviewed-name" }));
+    const renameResult = within(command).getByRole("status", { name: "Beacon command status" });
+    expect(renameResult).toHaveTextContent("Completed");
+    expect(renameResult).not.toHaveTextContent("Task ID:");
+
+    await choose("Rename", "Set environment variable");
+    await user.type(within(command).getByRole("textbox", { name: "Variable name" }), "TASK_MODE");
+    await user.type(within(command).getByRole("textbox", { name: "Variable value" }), "reviewed");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "target.env-set", name: "TASK_MODE", value: "reviewed" }));
+
+    await choose("Set environment variable", "Unset environment variable");
+    await user.type(within(command).getByRole("textbox", { name: "Variable name" }), "TASK_MODE");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "target.env-unset", name: "TASK_MODE" }));
+
+    await choose("Unset environment variable", "Reconfigure beacon");
+    await user.type(within(command).getByRole("spinbutton", { name: "Reconnect seconds" }), "30");
+    await user.type(within(command).getByRole("spinbutton", { name: "Interval seconds" }), "60");
+    await user.type(within(command).getByRole("spinbutton", { name: "Jitter seconds" }), "5");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({
+      operationId: "beacon.reconfigure", reconnectIntervalSeconds: 30, intervalSeconds: 60, jitterSeconds: 5,
+    }));
+
+    await choose("Reconfigure beacon", "Open session");
+    await user.clear(within(command).getByRole("spinbutton", { name: "Delay seconds" }));
+    await user.type(within(command).getByRole("spinbutton", { name: "Delay seconds" }), "9");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.open-session", delaySeconds: 9 }));
+  });
+
+  it("respects management capability denial and tracks exact operation state changes", async () => {
+    const user = userEvent.setup();
+    let onOperationChanged: ((operation: TargetOperationRecord) => void) | undefined;
+    const submitted = operationRecord({
+      requestId: "request-management-state",
+      operationId: "target.ping",
+      target: beaconRef,
+      targetName: beacon.name,
+      mode: "beacon",
+      state: "submitted",
+      taskId: "task-management-state",
+      updatedAt: "2026-08-09T20:02:02.000Z",
+    });
+    const submitTargetOperation = vi.fn().mockResolvedValue({ ok: true, value: submitted });
+    installAPI({
+      submitTargetOperation,
+      onOperationChanged: vi.fn((callback) => { onOperationChanged = callback; return vi.fn(); }),
+    });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.capabilities = snapshot.targetContext.capabilities.map((capability) =>
+      capability.id === "beacon.open-session"
+        ? { id: capability.id, available: false, reason: { code: "unsupported-transport", message: "No active C2 endpoint" } }
+        : capability);
+    const view = render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Working directory.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Open session/i }));
+    expect(within(command).getByRole("button", { name: "Queue task" })).toBeDisabled();
+    expect(within(command).getByText("No active C2 endpoint")).toBeInTheDocument();
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+
+    await user.click(within(command).getByRole("button", { name: /Open session.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Ping/i }));
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledExactlyOnceWith({ operationId: "target.ping" }));
+    const status = within(command).getByRole("status", { name: "Beacon command status" });
+    expect(status).toHaveTextContent("Submitted");
+    expect(status).toHaveTextContent("Task ID: task-management-state");
+    act(() => onOperationChanged?.({
+      ...submitted, target: secondBeaconRef, state: "completed", updatedAt: "2026-08-09T20:02:03.000Z",
+    }));
+    expect(status).toHaveTextContent("Submitted");
+
+    act(() => onOperationChanged?.({ ...submitted, state: "failed", message: "Remote handler failed", updatedAt: "2026-08-09T20:02:04.000Z" }));
+    expect(status).toHaveTextContent("Failed");
+    expect(status).toHaveTextContent("Remote handler failed");
+    act(() => onOperationChanged?.({ ...submitted, state: "outcome-unknown", message: "Result could not be proved", updatedAt: "2026-08-09T20:02:05.000Z" }));
+    expect(status).toHaveTextContent("Outcome Unknown");
+    expect(status).toHaveTextContent("Result could not be proved");
+
+    view.rerender(<TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot("second")} onSnapshot={vi.fn()} />);
+    expect(screen.queryByRole("status", { name: "Beacon command status" })).not.toBeInTheDocument();
+  });
+
+  it("keeps ping and rename available when beacon task execution is denied", async () => {
+    const user = userEvent.setup();
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.capabilities = snapshot.targetContext.capabilities.map((capability) =>
+      capability.id === "target.task.execute"
+        ? { id: capability.id, available: false, reason: { code: "unsupported-by-server", message: "Task execution unavailable" } }
+        : capability);
+    installAPI();
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    expect(within(command).getByRole("button", { name: "Queue task" })).toBeDisabled();
+    expect(within(command).getByText("Task execution unavailable")).toBeInTheDocument();
+
+    await user.click(within(command).getByRole("button", { name: /Working directory.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Ping/i }));
+    expect(within(command).getByRole("button", { name: "Queue task" })).toBeEnabled();
+
+    await user.click(within(command).getByRole("button", { name: /Ping.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Rename/i }));
+    expect(within(command).getByRole("button", { name: "Rename beacon" })).toBeEnabled();
+  });
+
+  it("keeps a completed management event when an older submit response arrives later", async () => {
+    const user = userEvent.setup();
+    const submission = deferred<{ ok: true; value: TargetOperationRecord }>();
+    let onOperationChanged: ((operation: TargetOperationRecord) => void) | undefined;
+    const submitted = operationRecord({
+      requestId: "request-early-completion",
+      operationId: "target.ping",
+      target: beaconRef,
+      targetName: beacon.name,
+      mode: "beacon",
+      state: "submitted",
+      taskId: "task-early-completion",
+      updatedAt: "2026-08-09T20:02:02.000Z",
+    });
+    installAPI({
+      submitTargetOperation: vi.fn(() => submission.promise),
+      onOperationChanged: vi.fn((callback) => { onOperationChanged = callback; return vi.fn(); }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Working directory.*Command/i }));
+    await user.click(await screen.findByRole("option", { name: /^Ping/i }));
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    act(() => onOperationChanged?.({
+      ...submitted, state: "completed", message: "Round-trip confirmed", updatedAt: submitted.updatedAt,
+    }));
+    await act(async () => submission.resolve({ ok: true, value: submitted }));
+
+    const status = await within(command).findByRole("status", { name: "Beacon command status" });
+    expect(status).toHaveTextContent("Completed");
+    expect(status).toHaveTextContent("Round-trip confirmed");
+    expect(status).toHaveTextContent("Task ID: task-early-completion");
+  });
+
+  it.each(["Task output", "Task queue"] as const)("queues a reviewed process without changing the selected %s view", async (selectedTab) => {
     const user = userEvent.setup();
     const capability: ExecutionCapability = {
       ...beaconExecutionCapability(), operationId: "execution.process", risk: "high-opsec",
@@ -1340,6 +1515,8 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
     expect(listExecutionCatalog).not.toHaveBeenCalled();
+    if (selectedTab === "Task queue") await user.click(screen.getByRole("tab", { name: selectedTab }));
+    expect(screen.getByRole("tab", { name: selectedTab })).toHaveAttribute("aria-selected", "true");
     await user.click(screen.getByRole("button", { name: /Working directory.*Command/i }));
     await user.click(await screen.findByRole("option", { name: /^Execution/iu }));
     const types = await screen.findByRole("tablist", { name: "Execution type" });
@@ -1360,8 +1537,14 @@ describe("TargetsPage", () => {
     });
     await user.click(within(review).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: plan.token }));
+    if (selectedTab === "Task output") {
+      expect(await screen.findByRole("article", { name: `Task output ${pending.taskId}` })).toBeInTheDocument();
+    } else {
+      expect(await screen.findByRole("row", { name: /task-command-process/u })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("tab", { name: selectedTab })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     expect(await screen.findByRole("row", { name: /task-command-process/u })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
     await user.click(screen.getByRole("row", { name: /task-command-process/u }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: pending.taskId }));
   });
@@ -1555,6 +1738,51 @@ describe("TargetsPage", () => {
     expect(screen.getByRole("heading", { name: "Execution workbench" })).toBeInTheDocument();
   });
 
+  it.each(["Task output", "Task queue"] as const)("keeps %s selected when a common beacon task is queued", async (selectedTab) => {
+    const user = userEvent.setup();
+    const pending = beaconTaskDetail({
+      taskId: "task-preserve-tab",
+      state: "pending",
+      resultAvailable: false,
+      cancellation: { available: true },
+    });
+    delete pending.completedAt;
+    delete pending.disposition;
+    let queued = false;
+    const submitTargetOperation = vi.fn().mockImplementation(async () => {
+      queued = true;
+      return { ok: true, value: operationRecord({
+        requestId: "request-preserve-tab",
+        operationId: "beacon.filesystem.pwd",
+        target: beaconRef,
+        targetName: beacon.name,
+        mode: "beacon",
+        state: "submitted",
+        taskId: pending.taskId,
+      }) };
+    });
+    installAPI({
+      submitTargetOperation,
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: pending }),
+      listBeaconTasks: vi.fn().mockImplementation(async () => ({
+        ok: true,
+        value: { items: queued ? [pending] : [], page: { limit: 100, total: queued ? 1 : 0, truncated: false } },
+      })),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    if (selectedTab === "Task queue") await user.click(screen.getByRole("tab", { name: selectedTab }));
+    expect(screen.getByRole("tab", { name: selectedTab })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledExactlyOnceWith({ operationId: "beacon.filesystem.pwd" }));
+    if (selectedTab === "Task output") {
+      expect(await screen.findByRole("article", { name: `Task output ${pending.taskId}` })).toBeInTheDocument();
+    } else {
+      expect(await screen.findByRole("row", { name: /task-preserve-tab/u })).toBeInTheDocument();
+    }
+    expect(screen.getByRole("tab", { name: selectedTab })).toHaveAttribute("aria-selected", "true");
+  });
+
   it("queues a common beacon command and refreshes the selected completion after check-in", async () => {
     const user = userEvent.setup();
     let invalidateTasks: ((target: TargetRef) => void) | undefined;
@@ -1618,8 +1846,10 @@ describe("TargetsPage", () => {
 
     await user.click(screen.getByRole("button", { name: "Queue task" }));
     await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledWith({ operationId: "beacon.filesystem.pwd" }));
+    expect(await screen.findByRole("article", { name: `Task output ${task.taskId}` })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     expect(await screen.findByRole("row", { name: /task-pwd-1/i })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
     await user.click(screen.getByRole("row", { name: /task-pwd-1/i }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: "task-pwd-1" }));
     expect(await screen.findByText("Waiting for the beacon")).toBeInTheDocument();

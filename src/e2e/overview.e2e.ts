@@ -925,8 +925,14 @@ async function assertInteractionWorkspace(page: Page, mode: "session" | "beacon"
     const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
     await breadcrumbs.getByText("Beacons", { exact: true }).waitFor();
     await breadcrumbs.getByText(name, { exact: true }).waitFor();
-    await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
-    await page.getByRole("heading", { name: "Task queue", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: "Manage beacon", exact: true }).count(), 0,
+      "beacon management belongs in the existing command picker");
+    const taskViews = page.getByRole("tablist", { name: "Beacon task views", exact: true });
+    await taskViews.getByRole("tab", { name: "Task queue", exact: true }).waitFor();
+    const output = taskViews.getByRole("tab", { name: "Task output", exact: true });
+    await output.waitFor();
+    assert.equal(await output.getAttribute("aria-selected"), "true");
   }
 }
 

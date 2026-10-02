@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import type { TargetOperationRecord } from "../shared/operation-contracts.js";
 
 test("Beacons fills the catalog with live timing and opens the beacon async workspace", { timeout: 120_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -131,7 +132,7 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await workspaceNavigation.getByRole("button", { name: "Back to live beacons", exact: true }).waitFor();
     assert.equal(await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(), 0, "the beacon workspace must use compact breadcrumbs instead of a large header");
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
-    await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
     const taskViews = page.getByRole("tablist", { name: "Beacon task views", exact: true });
     await taskViews.waitFor();
     assert.deepEqual((await taskViews.getByRole("tab").allTextContents()).map((label) => label.trim()),
@@ -158,6 +159,227 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
+
+test("beacon commands bind six management operations to the selected target", { timeout: 90_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-beacon-management-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  await Promise.all([
+    mkdir(savedConfigDirectory, { recursive: true }),
+    mkdir(managedConfigDirectory, { recursive: true }),
+    mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
+  ]);
+  await writeFile(join(savedConfigDirectory, "beacon-management.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+
+  let application: ElectronApplication | undefined;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--beacons-table-fixture",
+        "--beacon-management-denial-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    const rendererErrors: string[] = [];
+    page.on("pageerror", (error) => rendererErrors.push(error.message));
+    await page.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Beacons"]:visible').click();
+    await page.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
+    const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+    await composer.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
+    assert.equal(await page.getByRole("heading", { name: "Manage beacon", exact: true }).count(), 0,
+      "management commands must live in the existing beacon command picker");
+    assert.equal(await page.locator(".beacon-interaction-workspace__controls > section").count(), 1,
+      "the command picker must be the only control card");
+
+    const openCommands = async (): Promise<Locator> => {
+      const search = page.getByRole("searchbox", { name: "Search beacon commands", exact: true });
+      if (!await search.isVisible()) {
+        await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
+      }
+      await search.waitFor();
+      return search;
+    };
+    const search = await openCommands();
+    for (const label of [
+      "Ping", "Rename", "Set environment variable", "Unset environment variable",
+      "Reconfigure beacon", "Open session",
+    ]) {
+      await search.fill(label);
+      await page.getByRole("option", { name: new RegExp(`^${label}\\b`, "u") }).waitFor();
+    }
+
+    const selectCommand = async (label: string): Promise<void> => {
+      const search = await openCommands();
+      await search.fill(label);
+      await page.getByRole("option", { name: new RegExp(`^${label}\\b`, "u") }).click();
+      await search.waitFor({ state: "hidden" });
+    };
+    const submitQueued = async (
+      label: string,
+      operationId: TargetOperationRecord["operationId"],
+      description: string,
+      fill: () => Promise<void> = async () => undefined,
+    ): Promise<TargetOperationRecord> => {
+      await selectCommand(label);
+      await fill();
+      const existingIds = new Set((await managementOperations(page)).map(({ requestId }) => requestId));
+      await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+      await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+      const operation = await waitForManagementOperation(page, existingIds, operationId);
+      assert.equal(operation.mode, "beacon");
+      assert.equal(operation.target.id, "m1_beacon");
+      assert.ok(operation.taskId, `${label} must retain the exact queued task ID`);
+      assert.ok(["submitted", "running"].includes(operation.state), `${label}: ${operation.state}`);
+      const task = await application!.evaluate((_electron, taskId) => (
+        globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => candidate.id === taskId)
+      ), operation.taskId);
+      assert.equal(task?.description, description);
+      assert.equal(task?.beaconId, "m1_beacon");
+      assert.equal(task?.state, "pending");
+      const status = composer.getByRole("status", { name: "Beacon command status", exact: true });
+      await status.waitFor();
+      assert.ok((await status.innerText()).includes(`Task ID: ${operation.taskId}`),
+        "the existing command card must show the exact queued task ID");
+      await page.getByRole("tab", { name: "Task queue", exact: true }).click();
+      const queuedRow = page.getByRole("grid", { name: "Beacon task queue", exact: true })
+        .getByRole("row").filter({ hasText: operation.taskId });
+      await queuedRow.waitFor();
+      await queuedRow.click();
+      await page.getByRole("tabpanel", { name: "Task output", exact: true })
+        .getByRole("article", { name: `Task output ${operation.taskId}`, exact: true }).waitFor();
+      await application!.evaluate((_electron, taskId) => {
+        globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId);
+      }, operation.taskId);
+      const completed = await waitForManagementState(page, operation.requestId, "completed");
+      assert.equal(completed.taskId, operation.taskId);
+      return completed;
+    };
+
+    await submitQueued("Ping", "target.ping", "Ping");
+    await submitQueued("Set environment variable", "target.env-set", "SetEnvReq", async () => {
+      await page.getByRole("textbox", { name: "Variable name", exact: true }).fill("BC02_E2E_VALUE");
+      await page.getByRole("textbox", { name: "Variable value", exact: true }).fill("first-value");
+    });
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.environment["BC02_E2E_VALUE"]), "first-value");
+    await submitQueued("Unset environment variable", "target.env-unset", "UnsetEnvReq", async () => {
+      await page.getByRole("textbox", { name: "Variable name", exact: true }).fill("BC02_E2E_VALUE");
+    });
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.environment["BC02_E2E_VALUE"]), undefined);
+    await submitQueued("Reconfigure beacon", "beacon.reconfigure", "ReconfigureReq", async () => {
+      await page.getByRole("spinbutton", { name: "Reconnect seconds", exact: true }).fill("7");
+      await page.getByRole("spinbutton", { name: "Interval seconds", exact: true }).fill("11");
+      await page.getByRole("spinbutton", { name: "Jitter seconds", exact: true }).fill("3");
+    });
+    assert.deepEqual(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.reconfigureRequests.at(-1)), {
+      beaconId: "m1_beacon",
+      options: {
+        reconnectIntervalNanoseconds: "7000000000",
+        intervalNanoseconds: "11000000000",
+        jitterNanoseconds: "3000000000",
+      },
+      timeoutSeconds: 60,
+    });
+    await submitQueued("Open session", "beacon.open-session", "OpenSession", async () => {
+      await page.getByRole("spinbutton", { name: "Delay seconds", exact: true }).fill("4");
+    });
+    const openRequest = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.openSessionRequests.at(-1));
+    assert.equal(openRequest?.beaconId, "m1_beacon");
+    assert.equal(openRequest?.delayNanoseconds, "4000000000");
+    assert.equal(openRequest?.c2s.length, 1);
+
+    await selectCommand("Rename");
+    await page.getByRole("textbox", { name: "New target name", exact: true }).fill("bc02-renamed");
+    const beforeRename = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.length);
+    const existingIds = new Set((await managementOperations(page)).map(({ requestId }) => requestId));
+    await composer.getByRole("button", { name: "Rename beacon", exact: true }).click();
+    const rename = await waitForManagementOperation(page, existingIds, "target.rename");
+    assert.equal(rename.state, "completed", "server-side rename must finish synchronously");
+    assert.equal(rename.taskId, undefined, "rename must not claim a beacon task");
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.length), beforeRename);
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.beaconName), "bc02-renamed");
+    const renameStatus = composer.getByRole("status", { name: "Beacon command status", exact: true });
+    await renameStatus.waitFor();
+    assert.match(await renameStatus.innerText(), /Rename · Completed · Request ID: /u);
+    assert.doesNotMatch(await renameStatus.innerText(), /Task ID:/u,
+      "a synchronous rename must not claim a queued task in the command card");
+
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await page.getByRole("menu", { name: "Beacons, switch beacon", exact: true })
+      .getByRole("menuitemradio", { name: /m2-beacon/u }).click();
+    await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
+    const commandStatus = composer.getByRole("status", { name: "Beacon command status", exact: true });
+    await commandStatus.waitFor({ state: "hidden" });
+    assert.equal(await commandStatus.count(), 0,
+      "switching targets must discard the previous beacon's command result");
+    await selectCommand("Open session");
+    const denied = composer.getByRole("button", { name: "Queue task", exact: true });
+    assert.equal(await denied.isDisabled(), true);
+    await page.getByText("This beacon has no supported authoritative C2 endpoint for session conversion.", { exact: true }).waitFor();
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.openSessionRequests.length), 1,
+      "a disabled capability must not dispatch another session conversion");
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+async function managementOperations(page: Page): Promise<TargetOperationRecord[]> {
+  return page.evaluate(async () => {
+    const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
+    const result = await api.listTargetOperations({ limit: 100 });
+    if (!result.ok || !result.value) throw new Error(result.error ?? "Could not read target operations");
+    return result.value.items;
+  });
+}
+
+async function waitForManagementOperation(
+  page: Page,
+  existingIds: ReadonlySet<string>,
+  operationId: TargetOperationRecord["operationId"],
+): Promise<TargetOperationRecord> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const operation = (await managementOperations(page)).find((candidate) =>
+      candidate.operationId === operationId && !existingIds.has(candidate.requestId));
+    if (operation) return operation;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for the ${operationId} management operation`);
+}
+
+async function waitForManagementState(
+  page: Page,
+  requestId: string,
+  state: TargetOperationRecord["state"],
+): Promise<TargetOperationRecord> {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    const operation = (await managementOperations(page)).find((candidate) => candidate.requestId === requestId);
+    if (operation?.state === state) return operation;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for management operation ${requestId} to reach ${state}`);
+}
 
 async function assertTargetCatalogScrollLayout(
   page: Page,
@@ -645,21 +867,32 @@ async function assertBeaconTaskViews(
   const queueTab = tabs.getByRole("tab", { name: "Task queue", exact: true });
   const outputTab = tabs.getByRole("tab", { name: "Task output", exact: true });
   const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+  const output = page.getByRole("tabpanel", { name: "Task output", exact: true });
+  await outputTab.click();
   const existingIds = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
   await application.evaluate(() => {
     globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true;
   });
   await page.getByRole("button", { name: "Queue task", exact: true }).click();
-  await queue.getByText("Pending", { exact: true }).waitFor();
-  const newTask = await application.evaluate((_electron, previousIds) => (
+  const findNewTask = () => application.evaluate((_electron, previousIds) => (
     globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((task) => !previousIds.includes(task.id))
   ), existingIds);
+  const deadline = Date.now() + 20_000;
+  let newTask = await findNewTask();
+  while (!newTask && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    newTask = await findNewTask();
+  }
   assert.ok(newTask && newTask.beaconId === "m1_beacon" && newTask.state === "pending");
-  assert.equal(await queueTab.getAttribute("aria-selected"), "true", "submission must preserve the queue tab");
+  await output.getByRole("article", { name: `Task output ${newTask.id}`, exact: true })
+    .getByText("Waiting for the beacon", { exact: true }).waitFor();
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true", "submission must preserve the output tab");
+  await output.getByRole("button", { name: "Cancel task", exact: true }).waitFor();
+  await queueTab.click();
+  await queue.getByText("Pending", { exact: true }).waitFor();
   await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-queue-pending.png") });
 
   await outputTab.click();
-  const output = page.getByRole("tabpanel", { name: "Task output", exact: true });
   await output.getByText("Waiting for the beacon", { exact: true }).waitFor();
   await output.getByRole("button", { name: "Cancel task", exact: true }).waitFor();
   await queueTab.click();
@@ -786,7 +1019,7 @@ async function assertBeaconTaskVerticalLayout(
     const scrollport = element.closest(".app-content, .interaction-window__content")!;
     const workspace = element.closest(".beacon-workspace")!;
     const cardBounds = element.getBoundingClientRect();
-    const composerBounds = workspace.querySelector('[aria-labelledby="beacon-command-heading"]')!.getBoundingClientRect();
+    const controlsBounds = workspace.querySelector(".beacon-interaction-workspace__controls")!.getBoundingClientRect();
     const viewportBounds = scrollport.getBoundingClientRect();
     const body = workspace.querySelector(".beacon-workspace__body-frame")!;
     const gutter = Number.parseFloat(body.ownerDocument.defaultView!.getComputedStyle(body).paddingBottom);
@@ -796,7 +1029,7 @@ async function assertBeaconTaskVerticalLayout(
     const scrollBounds = scroll.getBoundingClientRect();
     return {
       card: { top: cardBounds.top, bottom: cardBounds.bottom, height: cardBounds.height },
-      composerBottom: composerBounds.bottom,
+      controlsBottom: controlsBounds.bottom,
       viewportBottom: viewportBounds.top + scrollport.clientHeight,
       gutter,
       panelBottom: panelBounds.bottom,
@@ -819,9 +1052,9 @@ async function assertBeaconTaskVerticalLayout(
       await page.screenshot({ animations: "disabled" });
       await assertBeaconTaskColumns(page);
       const queue = await readLayout();
-      const expectedBottom = Math.max(queue.composerBottom, queue.viewportBottom - queue.gutter);
+      const expectedBottom = Math.max(queue.controlsBottom, queue.viewportBottom - queue.gutter);
       assert.ok(Math.abs(queue.card.bottom - expectedBottom) <= 2,
-        `the right task card must fill the command form or remaining window height: ${JSON.stringify(queue)}`);
+        `the right task card must fill the controls column or remaining window height: ${JSON.stringify(queue)}`);
       assert.ok(Math.abs(queue.panelBottom - queue.card.bottom) <= 2 && queue.footerTop !== undefined &&
         Math.abs(queue.scroll.bottom - queue.footerTop) <= 2,
       `the task queue must fill the card below its controls and above its footer: ${JSON.stringify(queue)}`);
@@ -941,6 +1174,7 @@ async function assertBeaconOutputFocus(page: Page, taskId: string): Promise<void
 
 async function assertBeaconTaskColumns(page: Page): Promise<void> {
   const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+  const controls = page.locator(".beacon-interaction-workspace__controls");
   const card = page.locator(".beacon-task-views");
   assert.equal(await page.getByRole("heading", { name: "Advanced execution", exact: true }).count(), 0,
     "dedicated beacon workspaces must omit advanced execution");
@@ -948,10 +1182,10 @@ async function assertBeaconTaskColumns(page: Page): Promise<void> {
   assert.equal(await page.getByRole("heading", { name: "Execution workbench", exact: true }).count(), 0);
   assert.equal(await card.count(), 1, "beacon queue and output must share one card");
   assert.equal(await card.getByRole("tablist", { name: "Beacon task views", exact: true }).count(), 1);
-  const [composerBounds, cardBounds] = await Promise.all([
-    composer.boundingBox(), card.boundingBox(),
+  const [composerBounds, controlsBounds, cardBounds] = await Promise.all([
+    composer.boundingBox(), controls.boundingBox(), card.boundingBox(),
   ]);
-  assert.ok(composerBounds && cardBounds, "beacon composer and task views must have measurable layouts");
+  assert.ok(composerBounds && controlsBounds && cardBounds, "beacon controls and task views must have measurable layouts");
   const layout = await card.evaluate((element) => {
     const workspace = element.closest(".beacon-workspace")!;
     const viewport = element.closest(".app-content, .interaction-window__content")!;
@@ -970,12 +1204,12 @@ async function assertBeaconTaskColumns(page: Page): Promise<void> {
       `wide beacon workspaces must split command/task columns 40/60 excluding their gap: ${JSON.stringify({ composerBounds, cardBounds, commandWidthRatio })}`);
     assert.ok(cardBounds.x >= composerBounds.x + composerBounds.width && Math.abs(cardBounds.y - composerBounds.y) <= 1,
       "the task queue/output card must sit in the right column beside the composer");
-    assert.ok(Math.abs(cardBounds.y + cardBounds.height - Math.max(composerBounds.y + composerBounds.height, layout.remainingBottom)) <= 2,
-      `the right task card must fill the command form or remaining window height in main and popout workspaces: ${JSON.stringify({ cardBounds, composerBounds, layout })}`);
+    assert.ok(Math.abs(cardBounds.y + cardBounds.height - Math.max(controlsBounds.y + controlsBounds.height, layout.remainingBottom)) <= 2,
+      `the right task card must fill the controls column or remaining window height in main and popout workspaces: ${JSON.stringify({ cardBounds, controlsBounds, layout })}`);
   } else {
-    assert.ok(cardBounds.y >= composerBounds.y + composerBounds.height && Math.abs(cardBounds.x - composerBounds.x) <= 1 &&
-      Math.abs(cardBounds.width - composerBounds.width) <= 1,
-    "narrow beacon layouts must stack the task views beneath the command form");
+    assert.ok(cardBounds.y >= controlsBounds.y + controlsBounds.height && Math.abs(cardBounds.x - controlsBounds.x) <= 1 &&
+      Math.abs(cardBounds.width - controlsBounds.width) <= 1,
+    "narrow beacon layouts must stack the task views beneath the controls column");
   }
   assert.ok(layout.cardOverflow <= 1 && layout.workspaceOverflow <= 1,
     `the unified task views must remain inside the available width: ${JSON.stringify(layout)}`);

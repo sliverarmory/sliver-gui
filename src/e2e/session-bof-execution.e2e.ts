@@ -163,7 +163,7 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     await page.getByRole("row", { name: /m1-beacon/iu }).click();
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
     const beaconComposer = page.locator('[aria-labelledby="beacon-command-heading"]');
-    await beaconComposer.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
+    await beaconComposer.getByRole("heading", { name: "Beacon command", exact: true }).waitFor();
     await beaconComposer.locator('[data-slot="autocomplete-trigger"]').first().click();
     await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill("Execution");
     await page.getByRole("option", { name: /^Execution/iu }).click();
@@ -184,6 +184,9 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     const beaconTask = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((task) =>
       task.beaconId === "m1_beacon" && task.description === "CallExtensionReq" && task.state === "completed"));
     assert.ok(beaconTask, "the beacon BOF must complete as an exact asynchronous task");
+    await beaconTasks.getByRole("tabpanel", { name: "Task output", exact: true })
+      .getByRole("article", { name: `Task output ${beaconTask.id}`, exact: true }).waitFor();
+    assert.equal(await outputTab.getAttribute("aria-selected"), "true", "BOF submission must preserve the output tab");
     await queueTab.click();
     const queueRow = beaconTasks.getByRole("grid", { name: "Beacon task queue", exact: true })
       .getByRole("row").filter({ hasText: beaconTask.id });
