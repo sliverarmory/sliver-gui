@@ -70,6 +70,78 @@ const M4_PRIVATE_KEY_CONTENT = [
   "",
 ].join("\n");
 
+test("Generate actions stay visible while scrolling and notifications stay bottom centered", { timeout: 30_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-layout-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "client-root");
+  const selectedConfigPath = join(temporaryRoot, "layout-operator.cfg");
+  await Promise.all([
+    ...[savedConfigDirectory, managedConfigDirectory, userDataDirectory, consoleClientRootDirectory]
+      .map((directory) => mkdir(directory, { recursive: true })),
+    writeFile(selectedConfigPath, fakeOperatorConfig(), { mode: 0o600 }),
+  ]);
+
+  let application: ElectronApplication | undefined;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(5_000);
+    await page.getByRole("dialog", { name: "Saved configurations" }).waitFor();
+    await application.evaluate(({ dialog }, configPath) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [configPath] });
+    }, selectedConfigPath);
+    await page.getByRole("button", {
+      name: /choose.*file|open file|connect (?:from |external )file/i,
+    }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Generate"]:visible').click();
+    await page.getByRole("heading", { name: "Generate implant", exact: true }).waitFor();
+    await verifyGenerateFooterScrolling(page);
+
+    await sendReleaseDownloadEvent(application, {
+      downloadId: "8e577480-5dc2-4dde-aa58-23c8f1770627",
+      artifact: "server",
+      os: "linux",
+      arch: "amd64",
+      status: "started",
+    });
+    const progress = page.getByRole("progressbar", { name: /Downloading Sliver server/ });
+    await progress.waitFor();
+    const toast = page.locator('[data-slot="toast"]').filter({ has: progress });
+    await toast.evaluate(async (element) => {
+      await Promise.all(element.getAnimations().map((animation: { finished: Promise<unknown> }) =>
+        animation.finished.catch(() => undefined)));
+    });
+    const toastBounds = await toast.boundingBox();
+    const viewport = await page.locator("html").boundingBox();
+    assert.ok(toastBounds && viewport, "the download notification must be rendered");
+    assert.ok(Math.abs(toastBounds.x + toastBounds.width / 2 - (viewport.x + viewport.width / 2)) <= 2,
+      "application notifications must stay horizontally centered");
+    assert.ok(toastBounds.y > viewport.y + viewport.height / 2 &&
+      toastBounds.y + toastBounds.height <= viewport.y + viewport.height,
+    "application notifications must remain visible near the bottom of the window");
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test("native loot media previews load under CSP", { timeout: 60_000 }, async () => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-loot-media-e2e-"));
@@ -2458,6 +2530,38 @@ async function sendReleaseDownloadEvent(
     if (!window) throw new Error("Expected an application window");
     window.webContents.send(input.channel, input.event);
   }, { channel: IPC.releaseDownloadChanged, event });
+}
+
+async function verifyGenerateFooterScrolling(page: Page): Promise<void> {
+  const content = page.locator(".generate-page__content");
+  const footer = page.locator('footer[aria-label="Generate actions"]');
+  const heading = page.getByRole("heading", { name: "Generate implant", exact: true });
+  await content.evaluate((element) => { element.scrollTop = 0; });
+  const [contentBefore, footerBefore, headingBefore, viewport] = await Promise.all([
+    content.boundingBox(), footer.boundingBox(), heading.boundingBox(), page.locator(".app-content").boundingBox(),
+  ]);
+  assert.ok(contentBefore && footerBefore && headingBefore && viewport, "Generate layout must be measurable");
+  assert.ok(footerBefore.y >= viewport.y &&
+    footerBefore.y + footerBefore.height <= viewport.y + viewport.height + 1,
+  "Generate actions must fit inside the application viewport before scrolling");
+
+  const scrollTop = await content.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    return element.scrollTop;
+  });
+  assert.ok(scrollTop > 0, "the configuration form must have scrollable content");
+  const [contentAfter, footerAfter, headingAfter] = await Promise.all([
+    content.boundingBox(), footer.boundingBox(), heading.boundingBox(),
+  ]);
+  assert.ok(contentAfter && footerAfter && headingAfter);
+  assert.ok(Math.abs(headingBefore.y - headingAfter.y - scrollTop) <= 1,
+    "scrolling the configuration must move the form content");
+  assert.ok(Math.abs(contentBefore.y - contentAfter.y) <= 1 && Math.abs(footerBefore.y - footerAfter.y) <= 1,
+    "scrolling the form must keep Generate actions pinned inside the same viewport");
+  assert.ok(contentAfter.y + contentAfter.height <= footerAfter.y + 1,
+    "the configuration scrollport must stop above the persistent actions");
+  await footer.getByRole("button", { name: "Reset", exact: true }).click({ trial: true });
+  await content.evaluate((element) => { element.scrollTop = 0; });
 }
 
 async function verifyM1TargetsAndOperations(

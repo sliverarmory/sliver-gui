@@ -9,6 +9,8 @@ import {
 import { DEFAULT_TEXT_EDITOR_SETTINGS_STATE } from "../shared/text-editor-settings-contracts.js";
 import { TEXT_EDITOR_IPC, type TextEditorAPI } from "../shared/text-editor-contracts.js";
 
+const { v: _version, revision: _revision, ...editorSettings } = DEFAULT_TEXT_EDITOR_SETTINGS_STATE;
+
 const mocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn<(name: string, api: unknown) => void>(),
   invoke: vi.fn(async (channel: string, ...args: unknown[]) => ({ channel, args })),
@@ -97,7 +99,6 @@ describe("text editor preload", () => {
     });
     await api().getApplicationSettings();
     await api().getEditorSettings();
-    const { v: _version, revision: _revision, ...editorSettings } = DEFAULT_TEXT_EDITOR_SETTINGS_STATE;
     await api().updateEditorSettings({
       expectedRevision: 0,
       settings: editorSettings,
@@ -129,18 +130,52 @@ describe("text editor preload", () => {
     expect(() => api().respondToRemoteOverwrite({
       requestId: "11111111-1111-4111-8111-111111111111", confirmed: "yes",
     } as never)).toThrow();
-    expect(() => api().updateEditorSettings({
-      expectedRevision: 0,
-      settings: { ...DEFAULT_TEXT_EDITOR_SETTINGS_STATE, fontSize: 100 },
-    })).toThrow();
-    expect(() => api().updateEditorSettings({
-      expectedRevision: 0,
-      settings: { ...DEFAULT_TEXT_EDITOR_SETTINGS_STATE, path: "/tmp/hidden" },
-    } as never)).toThrow();
     expect(() => api().respondToRemoteOverwrite({
       requestId: "11111111-1111-4111-8111-111111111111", confirmed: true, path: "/tmp/hidden",
     } as never)).toThrow();
     expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["font below minimum", { fontSize: 7 }],
+    ["font above maximum", { fontSize: 33 }],
+    ["fractional font size", { fontSize: 12.5 }],
+    ["tab below minimum", { tabSize: 0 }],
+    ["tab above maximum", { tabSize: 9 }],
+    ["fractional tab size", { tabSize: 2.5 }],
+    ["unrecognized font", { fontId: "remote-font" }],
+    ["unrecognized line numbers", { lineNumbers: "sometimes" }],
+    ["unrecognized whitespace mode", { renderWhitespace: "unknown" }],
+    ["non-boolean setting", { wordWrap: "false" }],
+    ["extra path authority", { path: "/tmp/hidden" }],
+  ])("rejects editor settings with %s before crossing IPC", (_label, override) => {
+    mocks.invoke.mockClear();
+    // Start with valid values so each case reaches the field validation it claims to test.
+    expect(() => api().updateEditorSettings({
+      expectedRevision: 0,
+      settings: { ...editorSettings, ...override },
+    } as never)).toThrow("Invalid text editor settings update");
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, "0"])(
+    "rejects editor settings revision %s before crossing IPC",
+    (expectedRevision) => {
+      mocks.invoke.mockClear();
+      expect(() => api().updateEditorSettings({ expectedRevision, settings: editorSettings } as never))
+        .toThrow("Invalid text editor settings update");
+      expect(mocks.invoke).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { fontSize: 8, tabSize: 1 },
+    { fontSize: 32, tabSize: 8 },
+  ])("accepts editor setting boundaries $fontSize/$tabSize", async (override) => {
+    mocks.invoke.mockClear();
+    const input = { expectedRevision: 7, settings: { ...editorSettings, ...override } };
+    await api().updateEditorSettings(input);
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(TEXT_EDITOR_IPC.updateEditorSettings, input);
   });
 
   it("forwards only validated remote overwrite requests and removes its listener", () => {

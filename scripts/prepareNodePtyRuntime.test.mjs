@@ -9,15 +9,37 @@ import afterPack, { verifySliverConsoleBeforeSigning } from "./afterPack.mjs";
 import {
   packagedRuntimeFilesForPlatform,
   prepareNodePtyRuntime,
-  runtimeFilesForPlatform,
 } from "./prepareNodePtyRuntime.mjs";
 import stageNodePtyBeforePack, { stageNodePtyRuntimeForElectron } from "./stageNodePtyForElectron.mjs";
 
-async function fixture(platform, omittedPath) {
+// Keep the fixture inventory independent of the implementation: accidentally
+// dropping a required DLL or helper must not silently drop it from the tests.
+const RUNTIME_FILES = {
+  darwin: [
+    "prebuilds/darwin-arm64/pty.node",
+    "prebuilds/darwin-arm64/spawn-helper",
+    "prebuilds/darwin-x64/pty.node",
+    "prebuilds/darwin-x64/spawn-helper",
+  ],
+  linux: ["build/Release/pty.node"],
+  win32: [
+    "prebuilds/win32-x64/conpty.node",
+    "prebuilds/win32-x64/conpty_console_list.node",
+    "prebuilds/win32-x64/pty.node",
+    "prebuilds/win32-x64/conpty/OpenConsole.exe",
+    "prebuilds/win32-x64/conpty/conpty.dll",
+    "prebuilds/win32-x64/winpty-agent.exe",
+    "prebuilds/win32-x64/winpty.dll",
+  ],
+};
+
+async function fixture(platform, { packaged = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "node-pty-runtime-test-"));
-  const files = runtimeFilesForPlatform(platform);
+  const required = packaged
+    ? [...new Set(RUNTIME_FILES[platform].map((path) => path.replace(/^prebuilds\/[^/]+\//u, "build/Release/")))]
+    : RUNTIME_FILES[platform];
+  const files = { required, helpers: required.filter((path) => path.endsWith("/spawn-helper")) };
   for (const relativePath of files.required) {
-    if (relativePath === omittedPath) continue;
     const filePath = join(directory, ...relativePath.split("/"));
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, relativePath, { mode: 0o644 });
@@ -47,16 +69,6 @@ test("accepts the Linux runtime without the macOS-only spawn helper", async () =
       helpers: [],
     });
     assert.deepEqual(packagedRuntimeFilesForPlatform("linux"), files);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test("validates Windows x64 runtime inventory without POSIX chmod", async () => {
-  const { directory } = await fixture("win32");
-  try {
-    const files = await prepareNodePtyRuntime({ platform: "win32", moduleDirectory: directory });
-    assert.deepEqual(files.helpers, []);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -129,16 +141,37 @@ test("maps Electron Builder architectures to the exact node-pty module directory
   }]);
 });
 
-test("fails closed when a current-platform runtime file is absent", async () => {
-  const missing = "prebuilds/darwin-arm64/pty.node";
-  const { directory } = await fixture("darwin", missing);
-  try {
-    await assert.rejects(
-      prepareNodePtyRuntime({ platform: "darwin", moduleDirectory: directory }),
-      new RegExp(missing.replace(".", "\\."), "u"),
-    );
-  } finally {
-    await rm(directory, { recursive: true, force: true });
+test("rejects each missing, empty, or non-file runtime dependency before packaging", async (context) => {
+  for (const platform of Object.keys(RUNTIME_FILES)) {
+    for (const packaged of [false, true]) {
+      await context.test(`${platform} ${packaged ? "packaged" : "installed"} runtime`, async () => {
+        const { directory, files } = await fixture(platform, { packaged });
+        try {
+          const options = { platform, moduleDirectory: directory, packaged };
+          assert.deepEqual(await prepareNodePtyRuntime(options), files);
+          for (const relativePath of files.required) {
+            const filePath = join(directory, ...relativePath.split("/"));
+            await rm(filePath);
+            await assert.rejects(prepareNodePtyRuntime(options), {
+              message: `node-pty is missing required ${platform} runtime file ${relativePath}`,
+            });
+            await writeFile(filePath, "");
+            await assert.rejects(prepareNodePtyRuntime(options), {
+              message: `node-pty runtime file is invalid: ${relativePath}`,
+            });
+            await rm(filePath);
+            await mkdir(filePath);
+            await assert.rejects(prepareNodePtyRuntime(options), {
+              message: `node-pty runtime file is invalid: ${relativePath}`,
+            });
+            await rm(filePath, { recursive: true });
+            await writeFile(filePath, relativePath);
+          }
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      });
+    }
   }
 });
 

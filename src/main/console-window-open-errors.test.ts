@@ -28,14 +28,4 @@ describe("console window open errors", () => {
       ]
     `);
   });
-
-  it("does not accept or interpolate the originating exception", () => {
-    const secretPath = "/Users/operator/.sliver-client/configs/production.cfg";
-    const nativeFailure = new Error(`spawn failed for ${secretPath}`);
-
-    const error = consoleWindowOpenError("window-create-failed");
-
-    expect(error).not.toContain(secretPath);
-    expect(error).not.toContain(nativeFailure.message);
-  });
 });

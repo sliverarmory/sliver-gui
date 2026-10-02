@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { NetworkForwardingAPI } from "../shared/network-forwarding-contracts.js";
 import {
@@ -25,11 +25,11 @@ vi.mock("electron", () => ({
   },
 }));
 
-await import("./network.js");
-
-const registrations = new Map(
-  electronMocks.on.mock.calls.map((call) => [call[0], call[1]] as const),
-);
+beforeEach(async () => {
+  vi.clearAllMocks();
+  vi.resetModules();
+  await import("./network.js");
+});
 
 describe("Network preload", () => {
   it("exposes only the frozen Network capability API", () => {
@@ -94,31 +94,31 @@ describe("Network preload", () => {
     await api.startPortForward(portInput);
     await api.stopPortForward("123e4567-e89b-42d3-a456-426614174000");
     await api.startReversePortForward(reverseInput);
-    await api.stopReversePortForward({
+    const stopReverseInput = {
       session: ref,
       listenerId: 7,
       expectedBind: reverseInput.bind,
       expectedDestination: reverseInput.destination,
-    });
+    };
+    await api.stopReversePortForward(stopReverseInput);
     await api.startSocks5Proxy(socksInput);
     await api.stopSocks5Proxy("socks5-223e4567-e89b-42d3-a456-426614174000");
     await api.getApplicationSettings();
-    expect(electronMocks.invoke.mock.calls.map(([channel]) => channel)).toEqual([
-      NETWORK_FORWARDING_IPC_INVOKE.getContext,
-      NETWORK_FORWARDING_IPC_INVOKE.list,
-      NETWORK_FORWARDING_IPC_INVOKE.startPortForward,
-      NETWORK_FORWARDING_IPC_INVOKE.stopPortForward,
-      NETWORK_FORWARDING_IPC_INVOKE.startReversePortForward,
-      NETWORK_FORWARDING_IPC_INVOKE.stopReversePortForward,
-      NETWORK_FORWARDING_IPC_INVOKE.startSocks5Proxy,
-      NETWORK_FORWARDING_IPC_INVOKE.stopSocks5Proxy,
-      NETWORK_FORWARDING_IPC_INVOKE.getApplicationSettings,
+    expect(electronMocks.invoke.mock.calls).toEqual([
+      [NETWORK_FORWARDING_IPC_INVOKE.getContext],
+      [NETWORK_FORWARDING_IPC_INVOKE.list, { reverseTargets: [ref] }],
+      [NETWORK_FORWARDING_IPC_INVOKE.startPortForward, portInput],
+      [NETWORK_FORWARDING_IPC_INVOKE.stopPortForward, "123e4567-e89b-42d3-a456-426614174000"],
+      [NETWORK_FORWARDING_IPC_INVOKE.startReversePortForward, reverseInput],
+      [NETWORK_FORWARDING_IPC_INVOKE.stopReversePortForward, stopReverseInput],
+      [NETWORK_FORWARDING_IPC_INVOKE.startSocks5Proxy, socksInput],
+      [NETWORK_FORWARDING_IPC_INVOKE.stopSocks5Proxy, "socks5-223e4567-e89b-42d3-a456-426614174000"],
+      [NETWORK_FORWARDING_IPC_INVOKE.getApplicationSettings],
     ]);
   });
 
   it("buffers native tab navigation until React subscribes", async () => {
-    const handler = registrations.get(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested);
-    if (!handler) throw new Error("Missing navigation listener");
+    const handler = registeredHandler(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested);
     handler({}, "socks5");
     const listener = vi.fn();
     const unsubscribe = exposedApi().onNavigationRequested(listener);
@@ -127,26 +127,71 @@ describe("Network preload", () => {
     unsubscribe();
   });
 
-  it("coalesces no authority and removes both inventory subscriptions", () => {
+  it("discards native payloads and removes the exact handler from both inventory channels", () => {
     const listener = vi.fn();
     const unsubscribe = exposedApi().onChanged(listener);
-    const networkRegistration = electronMocks.on.mock.calls.find(
-      ([channel]) => channel === NETWORK_FORWARDING_IPC_EVENTS.changed && typeof channel === "string",
-    );
-    const snapshotRegistration = electronMocks.on.mock.calls.find(
-      ([channel]) => channel === IPC.snapshotChanged && typeof channel === "string",
-    );
-    (networkRegistration?.[1] as (() => void) | undefined)?.();
-    (snapshotRegistration?.[1] as (() => void) | undefined)?.();
-    expect(listener).toHaveBeenCalledTimes(2);
+    const networkHandler = registeredHandler(NETWORK_FORWARDING_IPC_EVENTS.changed);
+    const snapshotHandler = registeredHandler(IPC.snapshotChanged);
+    networkHandler({ sender: "native event" }, { secret: "private inventory" });
+    snapshotHandler({ sender: "native event" }, { secret: "private snapshot" });
+    expect(listener.mock.calls).toEqual([[], []]);
     unsubscribe();
-    expect(electronMocks.removeListener).toHaveBeenCalledWith(
-      NETWORK_FORWARDING_IPC_EVENTS.changed,
-      expect.any(Function),
-    );
-    expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.snapshotChanged, expect.any(Function));
+    expect(electronMocks.removeListener.mock.calls).toEqual([
+      [NETWORK_FORWARDING_IPC_EVENTS.changed, networkHandler],
+      [IPC.snapshotChanged, snapshotHandler],
+    ]);
+  });
+
+  it("retains buffered navigation when a subscriber unmounts before delivery", async () => {
+    const handler = registeredHandler(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested);
+    handler({}, "port-forward");
+    handler({}, "socks5");
+    const first = vi.fn();
+    const stopFirst = exposedApi().onNavigationRequested(first);
+    stopFirst();
+    await Promise.resolve();
+    expect(first).not.toHaveBeenCalled();
+
+    const second = vi.fn();
+    const stopSecond = exposedApi().onNavigationRequested(second);
+    await Promise.resolve();
+    expect(second).toHaveBeenCalledExactlyOnceWith("socks5");
+    stopSecond();
+    handler({}, "reverse-port-forward");
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not replay buffered navigation after a newer live request", async () => {
+    const handler = registeredHandler(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested);
+    handler({}, "port-forward");
+    const listener = vi.fn();
+    const stop = exposedApi().onNavigationRequested(listener);
+    handler({}, "reverse-port-forward");
+    await Promise.resolve();
+    expect(listener).toHaveBeenCalledExactlyOnceWith("reverse-port-forward");
+    stop();
+  });
+
+  it("drops malformed navigation both before and after subscription", async () => {
+    const handler = registeredHandler(NETWORK_FORWARDING_IPC_EVENTS.navigationRequested);
+    const malformed = [[], ["unknown"], [{ tab: "socks5" }], ["socks5", "extra"], [null]];
+    for (const payload of malformed) handler({}, ...payload);
+    const listener = vi.fn();
+    const stop = exposedApi().onNavigationRequested(listener);
+    await Promise.resolve();
+    for (const payload of malformed) handler({}, ...payload);
+    expect(listener).not.toHaveBeenCalled();
+    handler({ sender: "native event" }, "socks5");
+    expect(listener).toHaveBeenCalledExactlyOnceWith("socks5");
+    stop();
   });
 });
+
+function registeredHandler(channel: string): (...args: unknown[]) => void {
+  const registration = electronMocks.on.mock.calls.find(([registered]) => registered === channel);
+  if (typeof registration?.[1] !== "function") throw new Error(`Missing listener for ${channel}`);
+  return registration[1];
+}
 
 function exposedApi(): NetworkForwardingAPI {
   const match = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => name === "network");

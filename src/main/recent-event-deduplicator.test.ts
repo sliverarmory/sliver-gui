@@ -6,15 +6,32 @@ import { clientpb } from "sliver-script";
 import { RecentEventDeduplicator } from "./recent-event-deduplicator.js";
 
 describe("RecentEventDeduplicator", () => {
-  it("suppresses an identical consecutive event only inside the bounded window", () => {
+  it("expires duplicate suppression from the accepted event, even during a continuous duplicate run", () => {
     let now = 10_000;
     const deduplicator = new RecentEventDeduplicator(1_000, () => now);
     const stopped = jobEvent(41);
 
     expect(deduplicator.shouldRecord(stopped)).toBe(true);
-    now += 25;
+    now = 10_500;
     expect(deduplicator.shouldRecord(jobEvent(41))).toBe(false);
-    now += 976;
+    now = 11_000;
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(false);
+    now = 11_001;
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(true);
+    now = 11_002;
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(false);
+  });
+
+  it("accepts an event after the clock moves backwards and starts a fresh bounded window", () => {
+    let now = 10_000;
+    const deduplicator = new RecentEventDeduplicator(1_000, () => now);
+
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(true);
+    now = 5_000;
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(true);
+    now = 5_001;
+    expect(deduplicator.shouldRecord(jobEvent(41))).toBe(false);
+    now = 6_001;
     expect(deduplicator.shouldRecord(jobEvent(41))).toBe(true);
   });
 

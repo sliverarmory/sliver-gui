@@ -89,6 +89,7 @@ test("checked-in overlays retain the reviewed explicit-profile and private-trans
     "client/console/console.go",
   ]);
 
+  assert.deepEqual(verified.record, sourceManifest.build.overlay);
   const [configOverlay, runnerOverlay, consoleOverlay] = await Promise.all(
     verified.record.files.map(({ replacementPath }) => readFile(join(ROOT_DIRECTORY, replacementPath), "utf8")),
   );
@@ -138,7 +139,7 @@ test("clears hostile inherited Go configuration and workspace overrides", () => 
   });
 });
 
-test("requires exact module, VCS, target, and build settings", () => {
+test("requires exact module, VCS, target, and build settings", async (context) => {
   const sourceManifest = {
     source: {
       commandPackage: "github.com/bishopfox/sliver/client",
@@ -168,14 +169,25 @@ test("requires exact module, VCS, target, and build settings", () => {
     vcsRevision: sourceManifest.source.commit,
     vcsModified: false,
   });
-  assert.throws(
-    () => validateGoBuildInfo(buildInfo.replace("GOARCH=amd64", "GOARCH=arm64"), { sourceManifest, slice }),
-    /GOARCH is arm64, expected amd64/u,
-  );
-  assert.throws(
-    () => validateGoBuildInfo(buildInfo.replace("vcs.modified=false", "vcs.modified=true"), { sourceManifest, slice }),
-    /vcs.modified is true, expected false/u,
-  );
+  const invalidFields = [
+    ["path\tgithub.com/bishopfox/sliver/client", "path\texample.com/other/client", /build path/u],
+    ["mod\tgithub.com/bishopfox/sliver", "mod\texample.com/other", /module/u],
+    ["-tags=go_sqlite,client", "-tags=server", /setting -tags/u],
+    ["-trimpath=true", "-trimpath=false", /setting -trimpath/u],
+    ["CGO_ENABLED=0", "CGO_ENABLED=1", /setting CGO_ENABLED/u],
+    ["GOARCH=amd64", "GOARCH=arm64", /setting GOARCH/u],
+    ["GOOS=linux", "GOOS=windows", /setting GOOS/u],
+    ["vcs=git", "vcs=hg", /setting vcs /u],
+    [`vcs.revision=${sourceManifest.source.commit}`, `vcs.revision=${"0".repeat(40)}`, /setting vcs.revision/u],
+    ["vcs.modified=false", "vcs.modified=true", /setting vcs.modified/u],
+  ];
+  for (const [valid, invalid, error] of invalidFields) {
+    await context.test(`rejects changed or absent ${valid.split(/[=\t]/u)[0]}`, () => {
+      assert.throws(() => validateGoBuildInfo(buildInfo.replace(valid, invalid), { sourceManifest, slice }), error);
+      const missing = buildInfo.split("\n").filter((line) => !line.includes(valid)).join("\n");
+      assert.throws(() => validateGoBuildInfo(missing, { sourceManifest, slice }), error);
+    });
+  }
 });
 
 test("accepts only the exact clean pinned source checkout", async () => {
@@ -189,7 +201,7 @@ test("accepts only the exact clean pinned source checkout", async () => {
   await verifyPinnedCheckout({ sourceDirectory: "/checkout/sliver", sourceManifest: manifest, run });
 });
 
-test("rejects source drift and dirty source", async () => {
+test("rejects source drift and dirty source", async (context) => {
   const runWith = (overrides) => async (_command, args) => {
     const defaults = {
       "rev-parse --show-toplevel": "/checkout/sliver\n",
@@ -200,22 +212,22 @@ test("rejects source drift and dirty source", async () => {
     return { ...defaults, ...overrides }[args.join(" ")] ?? "";
   };
 
-  await assert.rejects(
-    verifyPinnedCheckout({
-      sourceDirectory: "/checkout/sliver",
-      sourceManifest: manifest,
-      run: runWith({ "rev-parse HEAD": "cccccccccccccccccccccccccccccccccccccccc\n" }),
-    }),
-    /expected a{40}/u,
-  );
-  await assert.rejects(
-    verifyPinnedCheckout({
-      sourceDirectory: "/checkout/sliver",
-      sourceManifest: manifest,
-      run: runWith({ "status --porcelain=v1 --untracked-files=all": " M client/main.go\n" }),
-    }),
-    /must be clean/u,
-  );
+  for (const [name, overrides, error] of [
+    ["parent repository", { "rev-parse --show-toplevel": "/checkout\n" }, /repository root/u],
+    ["different commit", { "rev-parse HEAD": `${"c".repeat(40)}\n` }, /expected a{40}/u],
+    ["different tree", { "rev-parse HEAD^{tree}": `${"c".repeat(40)}\n` }, /expected b{40}/u],
+    ["modified source", { "status --porcelain=v1 --untracked-files=all": " M client/main.go\n" }, /must be clean/u],
+    ["staged source", { "status --porcelain=v1 --untracked-files=all": "M  client/main.go\n" }, /must be clean/u],
+    ["untracked source", { "status --porcelain=v1 --untracked-files=all": "?? client/injected.go\n" }, /must be clean/u],
+  ]) {
+    await context.test(name, async () => {
+      await assert.rejects(verifyPinnedCheckout({
+        sourceDirectory: "/checkout/sliver",
+        sourceManifest: manifest,
+        run: runWith(overrides),
+      }), error);
+    });
+  }
 });
 
 test("verifies digest-bound source overlay inputs without modifying the pinned checkout", async () => {
@@ -338,6 +350,15 @@ test("requires exact packaged corresponding-source files for the Sliver console 
       sourceOverlay: overlay,
       buildOverlay: overlay,
     });
+
+    await assert.rejects(verifyPackagedSourceOverlayFiles({
+      packagedDirectory,
+      sourceOverlay: overlay,
+      buildOverlay: {
+        ...overlay,
+        files: [{ ...overlay.files[0], sha256: "0".repeat(64) }],
+      },
+    }), /provenance does not match its build evidence/u);
 
     await writeFile(packagedSourcePath, "tampered source overlay\n");
     await assert.rejects(

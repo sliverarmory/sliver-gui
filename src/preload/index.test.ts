@@ -165,7 +165,7 @@ const invokeArguments = {
 
 const electronMocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn<(name: string, api: SliverDesktopAPI) => void>(),
-  invoke: vi.fn((channel: string, ...args: unknown[]) => ({ channel, args })),
+  invoke: vi.fn(async (channel: string, ...args: unknown[]) => ({ channel, args })),
   send: vi.fn(),
   postMessage: vi.fn(),
   on: vi.fn(),
@@ -245,26 +245,15 @@ describe("sandboxed preload bridge", () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(IPC.savedConfigsChanged, handler);
   });
 
-  it("exposes frozen saved-config methods using only their dedicated IPC channels", async () => {
+  it("exposes only the frozen application capability surfaces", () => {
     expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual([
       "sliver", "applicationZoom", "applicationContextMenu",
     ]);
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
-    expect(call).toBeDefined();
     if (!call) throw new Error("Expected the preload API to be exposed");
     const [name, exposed] = call;
     expect(name).toBe("sliver");
     expect(Object.isFrozen(exposed)).toBe(true);
-
-    await exposed.listSavedConfigs();
-    await exposed.connectSavedConfig("3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2");
-
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.listSavedConfigs);
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(
-      2,
-      IPC.connectSavedConfig,
-      "3f3bfca3-b80a-4cf2-b7e2-a2d86e5a01b2",
-    );
   });
 
   it("resolves a dropped File path in preload and sends only the private typed envelope", async () => {
@@ -332,22 +321,6 @@ describe("sandboxed preload bridge", () => {
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow, request);
     await exposed.openCloudDeploymentWindow();
     expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.openCloudDeploymentWindow);
-  });
-
-  it("copies a managed server public IP using only its deployment identity", async () => {
-    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
-    if (!exposed) throw new Error("Expected the preload API to be exposed");
-    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
-    await exposed.copyManagedServerPublicIp(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerPublicIp, input);
-  });
-
-  it("copies a managed server SSH command using only its deployment identity", async () => {
-    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]?.[1];
-    if (!exposed) throw new Error("Expected the preload API to be exposed");
-    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
-    await exposed.copyManagedServerSshCommand(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(IPC.copyManagedServerSshCommand, input);
   });
 
   it("exposes only current zoom, reset, and change subscription capabilities", () => {
@@ -468,34 +441,25 @@ describe("sandboxed preload bridge", () => {
     );
   });
 
-  it("routes every invoke method through its same-named shared channel", async () => {
+  it("preserves arguments, replies, and rejections through each dedicated invoke channel", async () => {
     const call = electronMocks.exposeInMainWorld.mock.calls[0];
     if (!call) throw new Error("Expected the preload API to be exposed");
     const [, exposed] = call;
 
-    expect(Object.keys(exposed).sort()).toEqual([
-      ...Object.keys(IPC_INVOKE),
-      ...SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
-    ].sort());
     for (const method of Object.keys(IPC_INVOKE) as Array<keyof typeof IPC_INVOKE>) {
       electronMocks.invoke.mockClear();
       const args: readonly unknown[] = invokeArguments[method];
-      await Reflect.apply(exposed[method], exposed, args);
-      expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(IPC_INVOKE[method], ...args);
+      const reply = { channel: "main-process-reply", args: [method] };
+      electronMocks.invoke.mockResolvedValueOnce(reply);
+      await expect(Reflect.apply(exposed[method], exposed, args), method).resolves.toBe(reply);
+      expect(electronMocks.invoke, method).toHaveBeenCalledExactlyOnceWith(IPC_INVOKE[method], ...args);
+
+      electronMocks.invoke.mockClear();
+      const failure = new Error(`Main rejected ${method}`);
+      electronMocks.invoke.mockRejectedValueOnce(failure);
+      await expect(Reflect.apply(exposed[method], exposed, args), method).rejects.toBe(failure);
+      expect(electronMocks.invoke, method).toHaveBeenCalledExactlyOnceWith(IPC_INVOKE[method], ...args);
     }
-  });
-
-  it("opens and claims a dedicated interaction window without renderer-authored target arguments", async () => {
-    const call = electronMocks.exposeInMainWorld.mock.calls[0];
-    if (!call) throw new Error("Expected the preload API to be exposed");
-    const [, exposed] = call;
-    electronMocks.invoke.mockClear();
-
-    await exposed.openInteractionWindow();
-    await exposed.claimInteractionWindow();
-
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(1, IPC.openInteractionWindow);
-    expect(electronMocks.invoke).toHaveBeenNthCalledWith(2, IPC.claimInteractionWindow);
   });
 
   it("keeps the preload allowlist narrow and exposes no raw Electron transport", () => {

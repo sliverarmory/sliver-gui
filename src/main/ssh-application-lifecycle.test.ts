@@ -944,9 +944,67 @@ describe("Console application window lifecycle", () => {
     expect(runtime.close).toHaveBeenCalledOnce();
   });
 
-  it("preserves a hidden console when showing its retained window fails", async () => {
+  it.each([
+    { phase: "connection inspection", code: "CONSOLE_OPEN_CONNECTION_CHECK_FAILED", createsWindow: false },
+    { phase: "window registration", code: "CONSOLE_OPEN_WINDOW_REGISTER_FAILED", createsWindow: true },
+    { phase: "renderer loading", code: "CONSOLE_OPEN_RENDERER_LOAD_FAILED", createsWindow: true },
+  ])("redacts $phase failures and allows a clean retry", async ({ phase, code, createsWindow }) => {
+    const { application, actions, workspaceWindow, registry, startConsoleRuntime } =
+      await createConsoleLifecycleFixture();
+    const { BrowserWindow } = await import("electron");
+    const secret = "/private-fixture/operator-secret.cfg";
+    const failure = new Error(`Native ${phase} failure: ${secret}`);
+    const diagnostics = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const loadURL = vi.spyOn(BrowserWindow.prototype, "loadURL");
+    const windowCount = harness.windows.length;
+
+    try {
+      if (phase === "connection inspection") {
+        registry.snapshot.mockImplementationOnce(() => { throw failure; });
+      } else if (phase === "window registration") {
+        registry.registerWindow.mockImplementationOnce(() => { throw failure; });
+      } else {
+        loadURL.mockRejectedValueOnce(failure);
+      }
+
+      const source = identityFor(workspaceWindow);
+      const result = await actions.open(source);
+
+      expect(result).toEqual({
+        ok: false,
+        error: expect.stringMatching(new RegExp(`Reference: ${code}$`, "u")),
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(diagnostics).toHaveBeenCalledExactlyOnceWith(`[sliver-console] ${result.error}\n`);
+      expect(startConsoleRuntime).not.toHaveBeenCalled();
+      expect(harness.windows).toHaveLength(windowCount + Number(createsWindow));
+      if (createsWindow) {
+        const failedWindow = harness.windows.at(-1)!;
+        expect(failedWindow.isDestroyed()).toBe(true);
+        expect(registry.unregisterWindow).toHaveBeenCalledWith(failedWindow.webContents.id);
+      }
+      expect(workspaceWindow.isDestroyed()).toBe(false);
+
+      expect(await actions.open(source)).toEqual({ ok: true });
+      const replacementWindow = harness.windows.at(-1)!;
+      expect(replacementWindow.isDestroyed()).toBe(false);
+      expect(await actions.claim(identityFor(replacementWindow))).toMatchObject({
+        ok: true,
+        value: { kind: "console" },
+      });
+      expect(startConsoleRuntime).toHaveBeenCalledOnce();
+    } finally {
+      loadURL.mockRestore();
+      diagnostics.mockRestore();
+      await application.stop();
+    }
+  });
+
+  it("preserves a hidden console and redacts native errors when restoring it fails", async () => {
     const { application, actions, workspaceWindow, runtimes, startConsoleRuntime } =
       await createConsoleLifecycleFixture();
+    const secret = "/private-fixture/operator-secret.cfg";
+    const diagnostics = vi.spyOn(process.stderr, "write").mockReturnValue(true);
 
     try {
       const source = identityFor(workspaceWindow);
@@ -955,10 +1013,16 @@ describe("Console application window lifecycle", () => {
       expect((await actions.claim(identityFor(consoleWindow))).ok).toBe(true);
       consoleWindow.close();
       consoleWindow.show.mockImplementationOnce(() => {
-        throw new Error("simulated native window show failure");
+        throw new Error(`Native window show failed: ${secret}`);
       });
 
-      expect(await actions.open(source)).toMatchObject({ ok: false });
+      const result = await actions.open(source);
+      expect(result).toEqual({
+        ok: false,
+        error: expect.stringMatching(/Reference: CONSOLE_OPEN_WINDOW_RESTORE_FAILED$/u),
+      });
+      expect(JSON.stringify(result)).not.toContain(secret);
+      expect(diagnostics).toHaveBeenCalledExactlyOnceWith(`[sliver-console] ${result.error}\n`);
       expect(consoleWindow.isDestroyed()).toBe(false);
       expect(consoleWindow.isVisible()).toBe(false);
       expect(runtimes[0]!.close).not.toHaveBeenCalled();
@@ -966,6 +1030,7 @@ describe("Console application window lifecycle", () => {
       expect(consoleWindow.isVisible()).toBe(true);
       expect(startConsoleRuntime).toHaveBeenCalledOnce();
     } finally {
+      diagnostics.mockRestore();
       await application.stop();
     }
     expect(runtimes[0]!.close).toHaveBeenCalledOnce();
@@ -1520,6 +1585,7 @@ async function createConsoleLifecycleFixture(
     application,
     actions: registration[7]!,
     workspaceWindow: harness.windows.at(-1)!,
+    registry,
     runtimes,
     startConsoleRuntime,
   };

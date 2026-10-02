@@ -30,8 +30,9 @@ function detail(summary: BeaconTaskSummary, text = summary.taskId): BeaconTaskDe
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function installAPI(getBeaconTask: SliverDesktopAPI["getBeaconTask"]) {
@@ -294,7 +295,7 @@ describe("useBeaconTaskOutputs", () => {
     expect(view.result.current.entries[0]?.task.state).toBe("completed");
   });
 
-  it("rejects stale exact-target and A-to-B-to-A responses while preserving the concurrency limit", async () => {
+  it("rejects stale exact-target and A-to-B-to-A responses", async () => {
     const one = task("same-task");
     const two = task("same-task", { beaconId: "beacon-two" });
     const gates = Array.from({ length: 3 }, () => deferred<TaskResult>());
@@ -314,14 +315,83 @@ describe("useBeaconTaskOutputs", () => {
     expect(view.result.current.entries).toHaveLength(1);
   });
 
-  it.each(["task", "beacon"])("rejects a response for a different %s", async (mismatch) => {
+  it("counts retired requests toward the concurrency limit and discards their queued work on target switch", async () => {
+    const retiredTasks = Array.from({ length: 6 }, (_, index) => task(`retired-${index}`));
+    const currentTasks = Array.from({ length: 5 }, (_, index) => task(`current-${index}`, { beaconId: "beacon-two" }));
+    const gates = new Map([...retiredTasks, ...currentTasks].map((summary) => [summary.taskId, deferred<TaskResult>()]));
+    let active = 0;
+    let maximum = 0;
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(({ taskId }) => {
+      active += 1;
+      maximum = Math.max(maximum, active);
+      return gates.get(taskId)!.promise.finally(() => { active -= 1; });
+    });
+    installAPI(getBeaconTask);
+    const view = renderHook(({ identity, tasks }) => useBeaconTaskOutputs(identity, tasks), {
+      initialProps: { identity: "exact-one", tasks: retiredTasks },
+    });
+    expect(getBeaconTask).toHaveBeenCalledTimes(4);
+
+    view.rerender({ identity: "exact-two", tasks: currentTasks });
+    expect(getBeaconTask).toHaveBeenCalledTimes(4);
+    expect(view.result.current.entries.map((entry) => entry.task.taskId)).toEqual(currentTasks.map((summary) => summary.taskId));
+
+    await act(async () => gates.get(retiredTasks[0]!.taskId)!.resolve({ ok: true, value: detail(retiredTasks[0]!) }));
+    expect(getBeaconTask).toHaveBeenCalledTimes(5);
+    expect(getBeaconTask.mock.calls[4]?.[0]).toEqual({ taskId: currentTasks[0]!.taskId });
+    expect(view.result.current.entries.every((entry) => !entry.detail)).toBe(true);
+
+    await act(async () => {
+      for (const summary of [...retiredTasks, ...currentTasks]) {
+        gates.get(summary.taskId)!.resolve({ ok: true, value: detail(summary) });
+      }
+    });
+    await waitFor(() => expect(view.result.current.entries.every((entry) => entry.detail && !entry.isLoading)).toBe(true));
+    expect(getBeaconTask).toHaveBeenCalledTimes(9);
+    expect(getBeaconTask).not.toHaveBeenCalledWith({ taskId: retiredTasks[4]!.taskId });
+    expect(getBeaconTask).not.toHaveBeenCalledWith({ taskId: retiredTasks[5]!.taskId });
+    expect(maximum).toBe(4);
+    expect(active).toBe(0);
+  });
+
+  it("releases a scheduler slot after a transport rejection and recovers only the explicitly retried output", async () => {
+    const tasks = Array.from({ length: 5 }, (_, index) => task(`task-${index}`));
+    const gates = new Map(tasks.map((summary) => [summary.taskId, deferred<TaskResult>()]));
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(({ taskId }) => gates.get(taskId)!.promise);
+    installAPI(getBeaconTask);
+    const view = renderHook(({ tasks }) => useBeaconTaskOutputs("exact-one", tasks), { initialProps: { tasks } });
+    expect(getBeaconTask).toHaveBeenCalledTimes(4);
+
+    await act(async () => gates.get(tasks[0]!.taskId)!.reject(new Error("Connection closed")));
+    expect(view.result.current.entries[0]).toMatchObject({ error: "Connection closed", isLoading: false });
+    expect(view.result.current.entries[0]?.detail).toBeUndefined();
+    expect(getBeaconTask).toHaveBeenCalledTimes(5);
+    expect(getBeaconTask.mock.calls[4]?.[0]).toEqual({ taskId: tasks[4]!.taskId });
+
+    await act(async () => {
+      for (const summary of tasks.slice(1)) gates.get(summary.taskId)!.resolve({ ok: true, value: detail(summary) });
+    });
+    expect(view.result.current.entries.slice(1).every((entry) => entry.detail && !entry.isLoading)).toBe(true);
+    view.rerender({ tasks: tasks.map((summary) => ({ ...summary })) });
+    expect(getBeaconTask).toHaveBeenCalledTimes(5);
+
+    getBeaconTask.mockResolvedValueOnce({ ok: true, value: detail(tasks[0]!, "Recovered output") });
+    act(() => view.result.current.loadOutput(tasks[0]!, true));
+    await waitFor(() => expect(view.result.current.entries[0]?.detail?.disposition).toMatchObject({ text: "Recovered output" }));
+    expect(view.result.current.entries[0]).toMatchObject({ error: undefined, isLoading: false });
+    expect(getBeaconTask).toHaveBeenCalledTimes(6);
+  });
+
+  it.each(["task", "beacon"])("rejects and zeroizes a response for a different %s", async (mismatch) => {
     const requested = task("requested");
-    const response = detail({ ...requested, ...(mismatch === "task" ? { taskId: "other" } : { beaconId: "other" }) });
+    const response = executionDetail({ ...requested, ...(mismatch === "task" ? { taskId: "other" } : { beaconId: "other" }) }, 16);
     const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockResolvedValue({ ok: true, value: response });
     installAPI(getBeaconTask);
     const view = renderHook(() => useBeaconTaskOutputs("exact-one", [requested]));
     await waitFor(() => expect(view.result.current.entries[0]?.error).toBe("The server returned output for a different task."));
     expect(view.result.current.entries[0]?.detail).toBeUndefined();
+    expect(response.execution?.stdout?.data).toEqual(new Uint8Array(16));
+    expect(response.execution?.stderr?.data).toEqual(new Uint8Array(16));
     expect(getBeaconTask).toHaveBeenCalledOnce();
   });
 
