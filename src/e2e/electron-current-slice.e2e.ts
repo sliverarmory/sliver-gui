@@ -2866,7 +2866,7 @@ async function verifyInteractionWindowPopout(
       const taskTabs = popout.getByRole("tablist", { name: "Beacon task views", exact: true });
       await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).waitFor();
       await taskTabs.getByRole("tab", { name: "Task output", exact: true }).waitFor();
-      assert.equal(await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true");
+      assert.equal(await taskTabs.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true");
       assert.equal(await popout.locator(".beacon-task-views").count(), 1,
         "the beacon popout must combine queue and output into one task card");
       assert.equal(
@@ -3080,7 +3080,7 @@ async function verifyBeaconAsyncTaskWorkspace(
   const outputTab = taskTabs.getByRole("tab", { name: "Task output", exact: true });
   await queueTab.waitFor();
   await outputTab.waitFor();
-  assert.equal(await queueTab.getAttribute("aria-selected"), "true");
+  assert.equal(await outputTab.getAttribute("aria-selected"), "true");
   assert.equal(await page.locator(".beacon-task-views").count(), 1);
 
   const command = page.locator('[data-slot="autocomplete-trigger"]:visible');

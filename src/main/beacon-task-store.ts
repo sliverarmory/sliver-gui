@@ -13,8 +13,9 @@ import type {
 } from "../shared/operation-contracts.js";
 import type { ExecutionOperationId } from "../shared/execution-contracts.js";
 import { decodeBofOutput, decodeBofTask } from "./bof-workbench.js";
-import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS } from "./execution-beacon-task.js";
+import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS, EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES } from "./execution-beacon-task.js";
 import { ExecutionRemoteRejectedError } from "./execution-workbench.js";
+import { decodeHistoricalBeaconTask } from "./historical-beacon-task.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
 const MAX_TASKS = 500;
@@ -159,8 +160,8 @@ export class BeaconTaskCancellationError extends Error {
   }
 }
 
-/** Shared, metadata-only task inventory. Raw protobuf payloads are fetched and
- * decoded only for an explicitly selected task, then zeroized immediately. */
+/** Shared, metadata-only task inventory. Detail requests fetch and decode one
+ * bounded server-saved payload at a time, then zeroize its raw bytes. */
 export class BeaconTaskStore {
   private readonly catalogs = new Map<string, TaskCatalog>();
   private readonly refreshes = new Map<string, RefreshState>();
@@ -172,7 +173,7 @@ export class BeaconTaskStore {
   private catalogClock = 0;
 
   constructor(private readonly client: Pick<SliverClientAdapter,
-    "getBeaconTasks" | "fetchBeaconTask" | "fetchBofBeaconTask" | "cancelBeaconTask">) {}
+    "getBeaconTasks" | "fetchBeaconTaskContent" | "fetchBofBeaconTask" | "cancelBeaconTask">) {}
 
   async refresh(
     beaconId: string,
@@ -278,7 +279,7 @@ export class BeaconTaskStore {
     if (!task.resultAvailable) return base;
 
     const operationId = attribution.operationId ?? EXTERNAL_OPERATION_BY_DESCRIPTION.get(task.description);
-    if (!operationId) return base;
+    if (!operationId) return this.historicalDetail(task, base);
     const expectedDescription = EXPECTED_DESCRIPTION_BY_OPERATION[operationId];
     if (attribution.operationId && task.description !== expectedDescription) {
       return detailError(
@@ -297,7 +298,7 @@ export class BeaconTaskStore {
 
     let content: clientpb.BeaconTask;
     try {
-      content = await this.client.fetchBeaconTask(task.taskId);
+      content = await this.client.fetchBeaconTaskContent(task.beaconId, task.taskId, task.description);
     } catch {
       return detailError(
         base,
@@ -315,7 +316,11 @@ export class BeaconTaskStore {
           "The server returned task content for a different resource",
         );
       }
-      if (content.Response.length > MAX_DECODE_BYTES || content.Request.length > MAX_DECODE_BYTES) {
+      if (content.Response.length > MAX_DECODE_BYTES) {
+        if (!attribution.operationId) {
+          const fallback = decodeHistoricalBeaconTask(task.description, content.Request, content.Response);
+          if (fallback.disposition) return { ...base, operationId, ...fallback };
+        }
         return detailError(
           base,
           operationId,
@@ -348,6 +353,10 @@ export class BeaconTaskStore {
         return { ...base, operationId, disposition };
       } catch (error) {
         const targetReported = error instanceof TargetReportedTaskError;
+        if (!targetReported && !attribution.operationId) {
+          const fallback = decodeHistoricalBeaconTask(task.description, content.Request, content.Response);
+          if (fallback.disposition) return { ...base, operationId, ...fallback };
+        }
         return detailError(
           base,
           operationId,
@@ -361,6 +370,37 @@ export class BeaconTaskStore {
       content.Request.fill(0);
       content.Response.fill(0);
     }
+    } finally {
+      this.detailAdmissions -= 1;
+    }
+  }
+
+  private async historicalDetail(task: InternalTask, base: BeaconTaskSummary): Promise<BeaconTaskDetail> {
+    if (this.detailAdmissions >= MAX_CONCURRENT_TASK_DETAILS) {
+      throw new Error("Too many beacon task details are already being fetched; wait for one to finish");
+    }
+    this.detailAdmissions += 1;
+    try {
+      let content: clientpb.BeaconTask;
+      try {
+        content = await this.client.fetchBeaconTaskContent(task.beaconId, task.taskId, task.description);
+      } catch {
+        return { ...base, errorKind: "decode-uncertain", error: "The beacon task result could not be fetched" };
+      }
+      try {
+        if (content.ID !== task.taskId || content.BeaconID !== task.beaconId ||
+          content.Description !== task.description || content.State.trim().toLowerCase() !== "completed") {
+          return { ...base, errorKind: "decode-uncertain", error: "The server returned task content for a different resource" };
+        }
+        try {
+          return { ...base, ...decodeHistoricalBeaconTask(task.description, content.Request, content.Response) };
+        } catch {
+          return { ...base, errorKind: "decode-uncertain", error: "The beacon task result could not be decoded safely" };
+        }
+      } finally {
+        content.Request.fill(0);
+        content.Response.fill(0);
+      }
     } finally {
       this.detailAdmissions -= 1;
     }
@@ -389,7 +429,7 @@ export class BeaconTaskStore {
       try {
         content = operationId === "bof.execute"
           ? await this.client.fetchBofBeaconTask(task.beaconId, task.taskId, "CallExtensionReq")
-          : await this.client.fetchBeaconTask(task.taskId);
+          : await this.client.fetchBeaconTaskContent(task.beaconId, task.taskId, task.description);
       }
       catch { return executionDetailError(base, operationId, "decode-uncertain", "The beacon task result could not be fetched"); }
       try {
@@ -419,6 +459,10 @@ export class BeaconTaskStore {
               return executionDetailError(base, operationId, "target-reported", "The beacon task response reported an error", captured);
             }
             return { ...base, execution: { operationId, ...captured } };
+          }
+          if (!attribution.executionOperationId && content.Response.length > EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES) {
+            const fallback = decodeHistoricalBeaconTask(task.description, content.Request, content.Response);
+            if (fallback.disposition) return { ...base, ...fallback };
           }
           const decoded = decodeExecutionBeaconTask({
             operationId, description: task.description, response: content.Response,

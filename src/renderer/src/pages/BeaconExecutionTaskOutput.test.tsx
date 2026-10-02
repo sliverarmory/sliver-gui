@@ -168,6 +168,9 @@ describe("BeaconExecutionTaskOutput", () => {
     expect(decoder.decode(stderrOutput.mock.calls[0]![0])).toBe("stderr output\r\n");
     await user.click(screen.getByRole("button", { name: "Copy output" }));
     expect(writeText).toHaveBeenLastCalledWith(decoder.decode(stderr));
+    await user.click(screen.getByRole("radio", { name: "Stdout" }));
+    expect(screen.getByRole("radio", { name: "Stdout" })).toBeChecked();
+    expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("stdout output");
     expect(stdout).toEqual(encoder.encode("\u001b[32mstdout output\u001b[0m\n"));
   });
 

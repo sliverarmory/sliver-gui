@@ -38,6 +38,15 @@ interface IntersectionObserverRecord {
 }
 
 const intersectionObserverRecords: IntersectionObserverRecord[] = [];
+let autoVisibleTaskRows = true;
+
+interface ResizeObserverRecord {
+  readonly callback: ResizeObserverCallback;
+  readonly observed: Element[];
+  disconnected: boolean;
+}
+
+const resizeObserverRecords: ResizeObserverRecord[] = [];
 
 beforeAll(() => {
   vi.stubGlobal("IntersectionObserver", class IntersectionObserver {
@@ -55,6 +64,15 @@ beforeAll(() => {
 
     observe(target: Element) {
       this.record.observed.push(target);
+      if (autoVisibleTaskRows && this.record.root instanceof Element &&
+        this.record.root.getAttribute("aria-label") === "Beacon task outputs" &&
+        target.matches("article[data-task-id]") && this.record.observed.length <= 8) {
+        queueMicrotask(() => {
+          if (!this.record.disconnected && this.record.observed.includes(target)) {
+            emitIntersection(this.record, target, 1);
+          }
+        });
+      }
     }
 
     unobserve(target: Element) {
@@ -67,9 +85,25 @@ beforeAll(() => {
     }
   });
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
+    readonly record: ResizeObserverRecord;
+
+    constructor(callback: ResizeObserverCallback) {
+      this.record = { callback, observed: [], disconnected: false };
+      resizeObserverRecords.push(this.record);
+    }
+
+    observe(target: Element) {
+      this.record.observed.push(target);
+    }
+
+    unobserve(target: Element) {
+      const index = this.record.observed.indexOf(target);
+      if (index >= 0) this.record.observed.splice(index, 1);
+    }
+
+    disconnect() {
+      this.record.disconnected = true;
+    }
   });
   Object.defineProperty(Element.prototype, "getAnimations", {
     configurable: true,
@@ -85,6 +119,8 @@ afterAll(() => {
 afterEach(() => {
   cleanup();
   intersectionObserverRecords.length = 0;
+  resizeObserverRecords.length = 0;
+  autoVisibleTaskRows = true;
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
@@ -535,6 +571,10 @@ function emitIntersection(
   }], {} as IntersectionObserver);
 }
 
+function emitResize(record: ResizeObserverRecord, target: Element): void {
+  record.callback([{ target, contentRect: target.getBoundingClientRect() } as ResizeObserverEntry], {} as ResizeObserver);
+}
+
 describe("TargetsPage", () => {
   it.each(["none", "beacon"] as const)("keeps the beacon catalog full width with %s selected and no detail sidebar", (active) => {
     installAPI();
@@ -880,9 +920,13 @@ describe("TargetsPage", () => {
     expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Back to live beacons" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "false");
-    expect(screen.getByRole("tablist", { name: "Beacon task views" })).toBeInTheDocument();
+    const taskTabs = screen.getByRole("tablist", { name: "Beacon task views" });
+    expect(within(taskTabs).getAllByRole("tab")).toEqual([
+      screen.getByRole("tab", { name: "Task output" }),
+      screen.getByRole("tab", { name: "Task queue" }),
+    ]);
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "false");
     expect(screen.queryByRole("heading", { name: "All target operations" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Operator presence" })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Execution workbench" })).not.toBeInTheDocument();
@@ -930,7 +974,7 @@ describe("TargetsPage", () => {
     expect(within(summary).getByRole("button", { name: "Beacon details" })).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("switch", { name: "Watch active beacon" })).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Queue a beacon task" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("refreshes the beacon summary from snapshots and handles missing metadata", () => {
@@ -1256,7 +1300,8 @@ describe("TargetsPage", () => {
     if (!leftColumn) throw new Error("The beacon composer column is incomplete");
     expect(tasks.parentElement).toBe(leftColumn.parentElement);
     expect(leftColumn).not.toContainElement(tasks);
-    expect(within(tasks).getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    expect(within(tasks).getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    await user.click(within(tasks).getByRole("tab", { name: "Task queue" }));
     expect(within(tasks).getByRole("grid", { name: "Beacon task queue" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Advanced execution" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Show advanced execution" })).not.toBeInTheDocument();
@@ -1317,6 +1362,7 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(executeExecutionPlan).toHaveBeenCalledExactlyOnceWith({ token: plan.token }));
     expect(await screen.findByRole("row", { name: /task-command-process/u })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("row", { name: /task-command-process/u }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: pending.taskId }));
   });
 
@@ -1369,6 +1415,9 @@ describe("TargetsPage", () => {
     await user.click(within(processEntry).getByRole("radio", { name: "Stderr" }));
     expect(within(processEntry).getByLabelText("Execution output transcript")).toHaveTextContent("process stderr");
     expect(within(assemblyEntry).getByLabelText("Execution output transcript")).toHaveTextContent("assembly stdout");
+    await user.click(within(processEntry).getByRole("radio", { name: "Stdout" }));
+    expect(within(processEntry).getByRole("radio", { name: "Stdout" })).toBeChecked();
+    expect(within(processEntry).getByLabelText("Execution output transcript")).toHaveTextContent("process stdout");
 
     await user.click(screen.getByRole("tab", { name: "Task queue" }));
     await user.click(screen.getByRole("row", { name: /task-execution-process/u }));
@@ -1376,6 +1425,103 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(reopened).toHaveFocus());
     expect(screen.getAllByRole("article")).toHaveLength(3);
     expect(screen.getByText("/srv/first-output")).toBeInTheDocument();
+  });
+
+  it("renders stored output for older completed tasks of different server task types", async () => {
+    const user = userEvent.setup();
+    const extension = beaconTaskDetail({
+      taskId: "historical-extension",
+      description: "CallExtensionReq",
+      createdAt: "2026-07-01T10:00:00.000Z",
+      completedAt: "2026-07-01T10:01:00.000Z",
+      ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+      disposition: { kind: "inline-text", text: "Stored extension result", truncated: false },
+    });
+    const environment = beaconTaskDetail({
+      taskId: "historical-environment",
+      description: "EnvReq",
+      createdAt: "2026-07-01T09:00:00.000Z",
+      completedAt: "2026-07-01T09:01:00.000Z",
+      ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+      disposition: { kind: "inline-text", text: "PATH=/usr/bin", truncated: false },
+    });
+    delete extension.operationId;
+    delete environment.operationId;
+    const details = [extension, environment];
+    const summaries = details.map(({ disposition: _disposition, ...summary }) => summary);
+    const getBeaconTask = vi.fn().mockImplementation(async ({ taskId }) => ({
+      ok: true,
+      value: details.find((task) => task.taskId === taskId),
+    }));
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: summaries, page: { limit: 100, total: summaries.length, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    const extensionEntry = await screen.findByRole("article", { name: `Task output ${extension.taskId}` });
+    const environmentEntry = screen.getByRole("article", { name: `Task output ${environment.taskId}` });
+    expect(await within(extensionEntry).findByText("Stored extension result")).toBeInTheDocument();
+    expect(await within(environmentEntry).findByText("PATH=/usr/bin")).toBeInTheDocument();
+    expect(within(extensionEntry).queryByText("No decoded result is available for this task.")).not.toBeInTheDocument();
+    expect(within(environmentEntry).queryByText("No decoded result is available for this task.")).not.toBeInTheDocument();
+  });
+
+  it("fetches old task content only for visible rows and offers a manual load action", async () => {
+    autoVisibleTaskRows = false;
+    const user = userEvent.setup();
+    const details = Array.from({ length: 24 }, (_, index) => {
+      const task = beaconTaskDetail({
+        taskId: `historical-${String(index).padStart(2, "0")}`,
+        description: "EnvReq",
+        ownership: { origin: "unknown", actor: { attribution: "unknown" } },
+        disposition: { kind: "inline-text", text: `Saved response ${index}`, truncated: false },
+      });
+      delete task.operationId;
+      return task;
+    });
+    const summaries = details.map(({ disposition: _disposition, ...summary }) => summary);
+    const getBeaconTask = vi.fn().mockImplementation(async ({ taskId }) => ({
+      ok: true,
+      value: details.find((task) => task.taskId === taskId),
+    }));
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: summaries, page: { limit: 100, total: summaries.length, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    const output = screen.getByRole("region", { name: "Beacon task outputs" });
+    const articles = within(output).getAllByRole("article");
+    expect(articles).toHaveLength(24);
+    expect(getBeaconTask).not.toHaveBeenCalled();
+    const observer = intersectionObserverRecords.find((record) => record.root === output);
+    if (!observer) throw new Error("Expected output viewport observer");
+    expect(observer.observed).toHaveLength(24);
+
+    act(() => {
+      emitIntersection(observer, articles[0]!, 1);
+      emitIntersection(observer, articles[1]!, 1);
+    });
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    expect(await within(articles[0]!).findByText("Saved response 0")).toBeInTheDocument();
+    expect(within(articles[20]!).queryByText("Saved response 20")).not.toBeInTheDocument();
+
+    act(() => emitIntersection(observer, articles[20]!, 1));
+    expect(await within(articles[20]!).findByText("Saved response 20")).toBeInTheDocument();
+    expect(getBeaconTask).toHaveBeenCalledTimes(3);
+    await user.click(within(articles[21]!).getByRole("button", { name: "Load task output" }));
+    expect(await within(articles[21]!).findByText("Saved response 21")).toBeInTheDocument();
+    expect(getBeaconTask).toHaveBeenCalledTimes(4);
   });
 
   it("keeps shared beacon execution available and discards its review when the exact identity changes", async () => {
@@ -1474,8 +1620,8 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(submitTargetOperation).toHaveBeenCalledWith({ operationId: "beacon.filesystem.pwd" }));
     expect(await screen.findByRole("row", { name: /task-pwd-1/i })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("row", { name: /task-pwd-1/i }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: "task-pwd-1" }));
-    await user.click(screen.getByRole("tab", { name: "Task output" }));
     expect(await screen.findByText("Waiting for the beacon")).toBeInTheDocument();
 
     task = {
@@ -1604,10 +1750,10 @@ describe("TargetsPage", () => {
       />,
     );
 
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     await user.click(await screen.findByRole("row", { name: /task-race-1/i }));
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(1));
     expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
-    await user.click(screen.getByRole("tab", { name: "Task output" }));
     summary = completed;
     await act(async () => invalidateTasks?.(beaconRef));
     firstDetail.resolve({ ok: true, value: pending });
@@ -1617,7 +1763,6 @@ describe("TargetsPage", () => {
   });
 
   it("automatically appends task outputs and keeps decoded history cached across catalog refreshes", async () => {
-    const user = userEvent.setup();
     const first = beaconTaskDetail();
     const second = beaconTaskDetail({
       taskId: "task-output-2",
@@ -1648,9 +1793,8 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     await waitFor(() => expect(getBeaconTask).toHaveBeenCalledWith({ taskId: first.taskId }));
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    await user.click(screen.getByRole("tab", { name: "Task output" }));
     const output = screen.getByRole("tabpanel", { name: "Task output" });
     expect(await within(output).findByText("/srv/first-output")).toBeInTheDocument();
     listedTasks = [second];
@@ -1683,8 +1827,7 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     const emptyOutput = screen.getByRole("tabpanel", { name: "Task output" });
     expect(within(emptyOutput).getByRole("heading", { name: "No task output" })).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Task queue" }));
@@ -1724,6 +1867,7 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
     const firstEntry = await screen.findByRole("article", { name: `Task output ${first.taskId}` });
     expect(await within(firstEntry).findByRole("button", { name: "Cancel task" })).toBeEnabled();
@@ -1765,8 +1909,9 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
-    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Beacon task outputs" })).toBeInTheDocument();
@@ -1794,6 +1939,59 @@ describe("TargetsPage", () => {
     await waitFor(() => expect(screen.getByRole("article", { name: `Task output ${first.taskId}` })).toHaveFocus());
     expect(await screen.findByText("/srv/first-output")).toBeInTheDocument();
     expect(getBeaconTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a selected older output in view when a preceding row expands", async () => {
+    const user = userEvent.setup();
+    const newer = beaconTaskDetail({ taskId: "newer-output", createdAt: "2026-08-09T20:04:00.000Z" });
+    const older = beaconTaskDetail({ taskId: "older-output", createdAt: "2026-08-09T20:03:00.000Z" });
+    const newerDetail = deferred<Awaited<ReturnType<SliverDesktopAPI["getBeaconTask"]>>>();
+    const getBeaconTask = vi.fn().mockImplementation(({ taskId }) =>
+      taskId === newer.taskId ? newerDetail.promise : Promise.resolve({ ok: true, value: older })
+    );
+    installAPI({
+      getBeaconTask,
+      listBeaconTasks: vi.fn().mockResolvedValue({
+        ok: true,
+        value: { items: [newer, older], page: { limit: 100, total: 2, truncated: false } },
+      }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
+    await user.click(await screen.findByRole("row", { name: /older-output/u }));
+    const viewport = screen.getByRole("region", { name: "Beacon task outputs" });
+    const selected = screen.getByRole("article", { name: `Task output ${older.taskId}` });
+    expect(await within(selected).findByText("/srv/first-output")).toBeInTheDocument();
+    expect(selected).toHaveFocus();
+    const content = viewport.firstElementChild;
+    if (!content) throw new Error("Expected task output content");
+    const observer = resizeObserverRecords.find((record) => !record.disconnected && record.observed.includes(content));
+    if (!observer) throw new Error("Expected output layout observer");
+    const initialScroll = viewport.scrollTop;
+    let precedingGrowth = 0;
+    vi.spyOn(viewport, "getBoundingClientRect").mockReturnValue({ top: 0, bottom: 200 } as DOMRect);
+    vi.spyOn(selected, "getBoundingClientRect").mockImplementation(() => ({
+      top: 20 + precedingGrowth - (viewport.scrollTop - initialScroll),
+      bottom: 120 + precedingGrowth - (viewport.scrollTop - initialScroll),
+    } as DOMRect));
+
+    await act(async () => newerDetail.resolve({ ok: true, value: newer }));
+    expect(await screen.findAllByText("/srv/first-output")).toHaveLength(2);
+    precedingGrowth = 100;
+    act(() => emitResize(observer, content));
+    await waitFor(() => expect(viewport.scrollTop).toBe(initialScroll + 100));
+    expect(selected.getBoundingClientRect().top).toBe(20);
+    expect(selected).toHaveFocus();
+
+    precedingGrowth = 160;
+    act(() => emitResize(observer, content));
+    fireEvent.pointerDown(selected);
+    expect(observer.disconnected).toBe(true);
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(viewport.scrollTop).toBe(initialScroll + 100);
   });
 
   it("isolates failed output entries and retries them without replacing successful history", async () => {
@@ -1825,8 +2023,8 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
-    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
     await user.click(screen.getByRole("tab", { name: "Task output" }));
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
     const output = screen.getByRole("tabpanel", { name: "Task output" });
     const failedEntry = within(output).getByRole("article", { name: `Task output ${task.taskId}` });
     expect(await within(failedEntry).findByRole("alert")).toHaveTextContent("The task detail could not be fetched");
@@ -1881,8 +2079,8 @@ describe("TargetsPage", () => {
     });
     render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
 
-    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
     await user.click(screen.getByRole("tab", { name: "Task output" }));
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
     const entry = screen.getByRole("article", { name: `Task output ${task.taskId}` });
     expect(await within(entry).findByRole("alert")).toHaveTextContent(uncertain.error);
     expect(screen.getByText("/srv/stable-output")).toBeInTheDocument();
@@ -1932,16 +2130,16 @@ describe("TargetsPage", () => {
     const { rerender } = render(
       <TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot()} onSnapshot={vi.fn()} />,
     );
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     await user.click(await screen.findByRole("row", { name: /task-output-1/i }));
     expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("Loading task output…")).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Task queue" }));
     listedTasks = [second];
     rerender(<TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={switchableBeaconSnapshot("second")} onSnapshot={vi.fn()} />);
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    expect(await screen.findByRole("row", { name: /task-nightly-1/i })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     await act(async () => firstDetail.resolve({ ok: true, value: first }));
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    await user.click(screen.getByRole("tab", { name: "Task output" }));
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
     const output = screen.getByRole("tabpanel", { name: "Task output" });
     expect(await within(output).findByText("/srv/nightly-output")).toBeInTheDocument();
     expect(within(output).getAllByRole("article")).toHaveLength(1);

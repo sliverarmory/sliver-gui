@@ -38,6 +38,7 @@ interface OutputScheduler {
   queue: OutputRequest[];
   currentStore: OutputStore;
   isActive: boolean;
+  fetchEnabled: boolean;
   notify: () => void;
 }
 
@@ -46,7 +47,12 @@ const MAX_CACHED_EXECUTION_BYTES = 32 * 1_024 * 1_024;
 const RELEASED_OUTPUT_MESSAGE = "This output was released from memory. Load it again to view it.";
 
 /** Keeps decoded output history local to one exact beacon identity. */
-export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSummary[]): {
+export function useBeaconTaskOutputs(
+  targetIdentity: string,
+  tasks: BeaconTaskSummary[],
+  fetchEnabled = true,
+  autoFetch = true,
+): {
   entries: BeaconTaskOutputEntry[];
   loadOutput: (task: BeaconTaskSummary, retry?: boolean) => void;
 } {
@@ -57,11 +63,17 @@ export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSu
     queue: [],
     currentStore: store,
     isActive: false,
+    fetchEnabled,
     notify: () => setVersion((version) => version + 1),
   });
   const scheduler = schedulerRef.current;
   // Store identity, rather than the target string alone, also rejects A -> B -> A responses.
   scheduler.currentStore = store;
+  scheduler.fetchEnabled = fetchEnabled;
+
+  useEffect(() => {
+    pump(scheduler);
+  }, [fetchEnabled, scheduler]);
 
   useEffect(() => {
     scheduler.isActive = true;
@@ -95,13 +107,14 @@ export function useBeaconTaskOutputs(targetIdentity: string, tasks: BeaconTaskSu
       if (!store.records.has(task.taskId) && !hasOutput(task)) continue;
       const previous = store.records.get(task.taskId)?.entry;
       const record = reconcileTask(store, task);
-      // Once a queued task is opened, keep its status current before it produces output.
-      enqueue(scheduler, store, record, false, false);
+      // An opened task stays current as its state changes; untouched history is
+      // fetched only when its output row enters the viewport.
+      if (autoFetch || record.opened) enqueue(scheduler, store, record, false, false);
       if (record.entry !== previous) changed = true;
     }
     if (changed) notify(scheduler, store);
     pump(scheduler);
-  }, [scheduler, store, tasks]);
+  }, [autoFetch, scheduler, store, tasks]);
 
   const loadOutput = useCallback((task: BeaconTaskSummary, retry = false): void => {
     if (!isCurrentStore(scheduler, store)) return;
@@ -212,7 +225,8 @@ function notify(scheduler: OutputScheduler, store: OutputStore): void {
 }
 
 function pump(scheduler: OutputScheduler): void {
-  while (scheduler.isActive && scheduler.activeCount < MAX_CONCURRENT_OUTPUTS && scheduler.queue.length > 0) {
+  while (scheduler.isActive && scheduler.fetchEnabled &&
+    scheduler.activeCount < MAX_CONCURRENT_OUTPUTS && scheduler.queue.length > 0) {
     const request = scheduler.queue.shift();
     if (!request || !isCurrentRequest(scheduler, request)) continue;
     scheduler.activeCount += 1;

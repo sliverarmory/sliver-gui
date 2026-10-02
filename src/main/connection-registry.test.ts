@@ -607,7 +607,7 @@ describe("BOF execution records", () => {
     if (!unrelated.ok) throw new Error(unrelated.error);
     expect(unrelated.value.execution).toBeUndefined();
     expect(client.fetchBofBeaconTask).toHaveBeenCalledTimes(1);
-    expect(client.fetchBeaconTask).not.toHaveBeenCalled();
+    expect(client.fetchBeaconTaskContent).toHaveBeenCalledWith("beacon_bof_output", "other-extension-task", "CallExtensionReq");
 
     client.beaconState.Beacons = [clientpb.Beacon.create({ ...client.beaconState.Beacons[0]!, UUID: "replacement-host" })];
     await registry.refresh(2);
@@ -9287,6 +9287,8 @@ class FakeSliverClient {
       Response: Buffer.from(task.Response),
     });
   });
+  readonly fetchBeaconTaskContent = vi.fn(async (_beaconId: string, taskId: string, _description: string) =>
+    this.fetchBeaconTask(taskId));
   readonly fetchBofBeaconTask = vi.fn(async (_beaconId: string, taskId: string, _description: string) => {
     const task = [...this.taskState.values()].flat().find((candidate) => candidate.ID === taskId);
     if (!task) throw new Error("unknown fake BOF task");
@@ -9465,6 +9467,7 @@ class FakeSliverClient {
     closeSession: this.closeSession,
     getBeaconTasks: this.getBeaconTasks,
     fetchBeaconTask: this.fetchBeaconTask,
+    fetchBeaconTaskContent: this.fetchBeaconTaskContent,
     fetchBofBeaconTask: this.fetchBofBeaconTask,
     cancelBeaconTask: this.cancelBeaconTask,
     rmBeacon: this.rmBeacon,

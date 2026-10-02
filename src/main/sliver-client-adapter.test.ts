@@ -1,10 +1,13 @@
 // @vitest-environment node
 
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import type { SliverClient } from "sliver-script";
+import { clientpb, type SliverClient } from "sliver-script";
 
 import {
   adaptSliverClient,
+  BEACON_TASK_CONTENT_REQUEST_MAX_BYTES,
+  BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES,
+  BOF_TASK_RESPONSE_MAX_BYTES,
   type SliverClientAdapter,
 } from "./sliver-client-adapter.js";
 
@@ -92,5 +95,107 @@ describe("SliverClientAdapter beacon reads", () => {
 
   it("keeps the broad interactive beacon object outside the reviewed adapter type", () => {
     expectTypeOf<SliverClientAdapter>().not.toHaveProperty("interactBeacon");
+  });
+
+  it("fetches a saved task larger than the SDK task-content limit through the bounded control RPC", async () => {
+    const task = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "PwdReq", State: "completed",
+      Request: Buffer.alloc(96 * 1024, 0x41), Response: Buffer.from([1, 2, 3]),
+    });
+    const getBeaconTaskContent = vi.fn(async () => task);
+    const fetchBeaconTask = vi.fn();
+    const adapter = adaptSliverClient({ rpc: { getBeaconTaskContent }, fetchBeaconTask } as unknown as SliverClient);
+
+    await expect(adapter.fetchBeaconTaskContent("beacon-1", "task-1", "PwdReq"))
+      .resolves.toBe(task);
+    expect(getBeaconTaskContent).toHaveBeenCalledExactlyOnceWith(
+      { ID: "task-1" }, { signal: expect.any(AbortSignal) },
+    );
+    expect(fetchBeaconTask).not.toHaveBeenCalled();
+  });
+
+  it("accepts a bounded saved response larger than the BOF-specific response cap", async () => {
+    const task = clientpb.BeaconTask.create({
+      ID: "task-2", BeaconID: "beacon-1", Description: "DownloadReq", State: "completed",
+      Request: Buffer.from([1]), Response: Buffer.alloc(BOF_TASK_RESPONSE_MAX_BYTES + 1, 0x42),
+    });
+    const getBeaconTaskContent = vi.fn(async () => task);
+    const adapter = adaptSliverClient({ rpc: { getBeaconTaskContent } } as unknown as SliverClient);
+
+    await expect(adapter.fetchBeaconTaskContent("beacon-1", "task-2", "DownloadReq"))
+      .resolves.toBe(task);
+  });
+
+  it("rejects invalid task selectors before making an RPC", async () => {
+    const getBeaconTaskContent = vi.fn();
+    const adapter = adaptSliverClient({ rpc: { getBeaconTaskContent } } as unknown as SliverClient);
+
+    await expect(adapter.fetchBeaconTaskContent("bad beacon", "task-1", "PwdReq"))
+      .rejects.toThrow("Invalid beacon task identity");
+    await expect(adapter.fetchBeaconTaskContent("beacon-1", "bad task", "PwdReq"))
+      .rejects.toThrow("Invalid beacon task identity");
+    await expect(adapter.fetchBeaconTaskContent("beacon-1", "task-1", "PwdReq suffix"))
+      .rejects.toThrow("Invalid beacon task identity");
+    expect(getBeaconTaskContent).not.toHaveBeenCalled();
+  });
+
+  it("zeroizes saved task bytes on identity, type, or content-size failure", async () => {
+    const wrongTaskId = clientpb.BeaconTask.create({
+      ID: "other-task", BeaconID: "beacon-1", Description: "PwdReq",
+      Request: Buffer.from("private request"), Response: Buffer.from("private response"),
+    });
+    const mismatch = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "other-beacon", Description: "PwdReq",
+      Request: Buffer.from("private request"), Response: Buffer.from("private response"),
+    });
+    const wrongDescription = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "LsReq",
+      Request: Buffer.from("private request"), Response: Buffer.from("private response"),
+    });
+    const malformed = {
+      ...clientpb.BeaconTask.create({
+        ID: "task-1", BeaconID: "beacon-1", Description: "PwdReq",
+        Request: Buffer.from("private request"),
+      }),
+      Response: "not bytes",
+    } as unknown as clientpb.BeaconTask;
+    const oversizedRequest = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "PwdReq",
+      Request: Buffer.alloc(BEACON_TASK_CONTENT_REQUEST_MAX_BYTES + 1, 0x41),
+      Response: Buffer.from("private response"),
+    });
+    const oversizedResponse = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "PwdReq",
+      Request: Buffer.from("private request"),
+      Response: Buffer.alloc(BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES + 1, 0x42),
+    });
+    const oversizedCombined = clientpb.BeaconTask.create({
+      ID: "task-1", BeaconID: "beacon-1", Description: "PwdReq",
+      Request: Buffer.alloc(BEACON_TASK_CONTENT_REQUEST_MAX_BYTES, 0x41),
+      Response: Buffer.alloc(BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES, 0x42),
+    });
+    const candidates = [
+      wrongTaskId, mismatch, wrongDescription, malformed,
+      oversizedRequest, oversizedResponse, oversizedCombined,
+    ];
+    const getBeaconTaskContent = vi.fn()
+      .mockResolvedValueOnce(wrongTaskId)
+      .mockResolvedValueOnce(mismatch)
+      .mockResolvedValueOnce(wrongDescription)
+      .mockResolvedValueOnce(malformed)
+      .mockResolvedValueOnce(oversizedRequest)
+      .mockResolvedValueOnce(oversizedResponse)
+      .mockResolvedValueOnce(oversizedCombined);
+    const adapter = adaptSliverClient({ rpc: { getBeaconTaskContent } } as unknown as SliverClient);
+
+    for (const candidate of candidates) {
+      await expect(adapter.fetchBeaconTaskContent("beacon-1", "task-1", "PwdReq"))
+        .rejects.toThrow("The beacon task content did not match the bounded request");
+      expect(candidate.Request.every((byte) => byte === 0)).toBe(true);
+      if (Buffer.isBuffer(candidate.Response)) {
+        expect(candidate.Response.every((byte) => byte === 0)).toBe(true);
+      }
+    }
+    expect(getBeaconTaskContent).toHaveBeenCalledTimes(candidates.length);
   });
 });

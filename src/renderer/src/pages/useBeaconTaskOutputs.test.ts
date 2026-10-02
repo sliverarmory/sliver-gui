@@ -39,6 +39,48 @@ function installAPI(getBeaconTask: SliverDesktopAPI["getBeaconTask"]) {
 }
 
 describe("useBeaconTaskOutputs", () => {
+  it("waits to fetch saved task content until the output view is active", async () => {
+    const saved = task("historical-output");
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockResolvedValue({
+      ok: true, value: detail(saved, "saved output"),
+    });
+    installAPI(getBeaconTask);
+    const view = renderHook(({ enabled }) => useBeaconTaskOutputs("exact-one", [saved], enabled), {
+      initialProps: { enabled: false },
+    });
+
+    expect(view.result.current.entries).toHaveLength(1);
+    expect(getBeaconTask).not.toHaveBeenCalled();
+    view.rerender({ enabled: true });
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledOnce());
+    await waitFor(() => expect(view.result.current.entries[0]?.detail?.disposition).toMatchObject({ text: "saved output" }));
+  });
+
+  it("keeps untouched history idle while fetching and refreshing an opened task", async () => {
+    const opened = task("opened");
+    const untouched = task("untouched");
+    const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(async ({ taskId }) => ({
+      ok: true, value: detail(taskId === opened.taskId ? opened : untouched),
+    }));
+    installAPI(getBeaconTask);
+    const view = renderHook(({ enabled, tasks }) => useBeaconTaskOutputs("exact-one", tasks, enabled, false), {
+      initialProps: { enabled: false, tasks: [opened, untouched] },
+    });
+
+    expect(view.result.current.entries).toHaveLength(2);
+    expect(getBeaconTask).not.toHaveBeenCalled();
+    act(() => view.result.current.loadOutput(opened));
+    expect(getBeaconTask).not.toHaveBeenCalled();
+    view.rerender({ enabled: true, tasks: [opened, untouched] });
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledOnce());
+    expect(getBeaconTask).toHaveBeenCalledWith({ taskId: opened.taskId });
+
+    const revised = { ...opened, completedAt: "2026-09-26T20:01:00.000Z" };
+    view.rerender({ enabled: true, tasks: [revised, untouched] });
+    await waitFor(() => expect(getBeaconTask).toHaveBeenCalledTimes(2));
+    expect(getBeaconTask).not.toHaveBeenCalledWith({ taskId: untouched.taskId });
+  });
+
   it("preserves explicitly opened output while newer background completions exceed the cache budget", async () => {
     const tasks = Array.from({ length: 33 }, (_, index) => task(`background-${index}`));
     const getBeaconTask = vi.fn<SliverDesktopAPI["getBeaconTask"]>().mockImplementation(async ({ taskId }) => ({

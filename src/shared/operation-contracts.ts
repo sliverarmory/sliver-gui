@@ -297,7 +297,7 @@ export interface BeaconTaskSummary {
   ownership: OperationOwnership;
 }
 
-/** Decoded, bounded result fields and output. Raw protobuf request/response bytes are never shared. */
+/** Decoded, bounded result fields and output. Full raw protobuf request/response buffers are never shared. */
 export interface BeaconTaskDetail extends BeaconTaskSummary {
   operationId?: TargetOperationId;
   execution?: BeaconTaskExecutionOutput;

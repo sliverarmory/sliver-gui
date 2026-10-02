@@ -168,6 +168,8 @@ export type SliverClientAdapter = Pick<
   /** Executes one main-selected Armory object through the fixed BOF RPC. */
   callBofSession(sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
   callBofBeacon(beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  /** Fetches one exact, bounded server-saved beacon task on the control channel. */
+  fetchBeaconTaskContent(beaconId: string, taskId: string, description: string, timeoutSeconds?: number): Promise<clientpb.BeaconTask>;
   /** Fetches only a correlated BOF task on the SDK's 16 MiB control channel. */
   fetchBofBeaconTask(beaconId: string, taskId: string, description: BofTaskDescription, timeoutSeconds?: number): Promise<clientpb.BeaconTask>;
   /** Registers a main-selected installed COFF loader for a legacy BOF. */
@@ -181,10 +183,14 @@ export type SliverClientAdapter = Pick<
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
 
 export type BofTaskDescription = "CallExtensionReq" | "RegisterExtensionReq";
-export const BOF_TASK_REQUEST_MAX_BYTES = 14 * 1024 * 1024;
+export const BEACON_TASK_CONTENT_REQUEST_MAX_BYTES = 14 * 1024 * 1024;
+export const BEACON_TASK_CONTENT_MAX_BYTES = 15 * 1024 * 1024;
+export const BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BYTES;
+export const BOF_TASK_REQUEST_MAX_BYTES = BEACON_TASK_CONTENT_REQUEST_MAX_BYTES;
 export const BOF_TASK_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
-export const BOF_TASK_CONTENT_MAX_BYTES = 15 * 1024 * 1024;
+export const BOF_TASK_CONTENT_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BYTES;
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+const TASK_DESCRIPTION = /^[A-Za-z][A-Za-z0-9_]{0,255}$/u;
 
 function isByteArray(value: unknown): value is Uint8Array {
   return ArrayBuffer.isView(value) && (value as Uint8Array).BYTES_PER_ELEMENT === 1 &&
@@ -205,6 +211,22 @@ function verifyBofTaskContent(
   if (isByteArray(task.Request)) task.Request.fill(0);
   if (isByteArray(task.Response)) task.Response.fill(0);
   throw new Error("The BOF task content did not match the bounded request");
+}
+
+function verifyBeaconTaskContent(
+  task: clientpb.BeaconTask,
+  beaconId: string,
+  taskId: string,
+  description: string,
+): clientpb.BeaconTask {
+  if (task?.ID === taskId && task.BeaconID === beaconId && task.Description === description &&
+    isByteArray(task.Request) && isByteArray(task.Response) &&
+    task.Request.length <= BEACON_TASK_CONTENT_REQUEST_MAX_BYTES &&
+    task.Response.length <= BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES &&
+    task.Request.length + task.Response.length <= BEACON_TASK_CONTENT_MAX_BYTES) return task;
+  if (isByteArray(task?.Request)) task.Request.fill(0);
+  if (isByteArray(task?.Response)) task.Response.fill(0);
+  throw new Error("The beacon task content did not match the bounded request");
 }
 
 /**
@@ -258,6 +280,17 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
         ServerStore: false,
         Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
       }, { signal })),
+    // The SDK task-content channel is capped at 80 KiB, while server-saved
+    // requests can contain large artifacts. Fetch the one exact task through
+    // the 16 MiB control channel and reject oversized content before use.
+    fetchBeaconTaskContent: async (beaconId: string, taskId: string, description: string, timeoutSeconds = 30) => {
+      if (!TASK_ID.test(beaconId) || !TASK_ID.test(taskId) || !TASK_DESCRIPTION.test(description)) {
+        throw new Error("Invalid beacon task identity");
+      }
+      const task = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        client.rpc.getBeaconTaskContent({ ID: taskId }, { signal }));
+      return verifyBeaconTaskContent(task, beaconId, taskId, description);
+    },
     // GetBeaconTaskContent includes the original request, which embeds the BOF
     // object. The SDK's task-content channel permits only 80 KiB total, even
     // when the BOF response is small. This BOF-only exception uses the control

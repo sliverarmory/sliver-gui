@@ -1852,8 +1852,8 @@ describe("Sidebar navigation", () => {
     expect(workspaceNavigation).toHaveAttribute("aria-label", "Beacon workspace navigation");
     expect(within(workspaceNavigation).getByRole("button", { name: "Back to live beacons" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Async task workspace" })).not.toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.getByRole("tab", { name: "Task output" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Task queue" })).toHaveAttribute("aria-selected", "false");
     expect(api.selectTarget).toHaveBeenCalledWith(ref);
     expect(screen.queryByRole("grid", { name: "Sliver beacons" })).not.toBeInTheDocument();
     expect(within(interact).getByRole("row", { name: "Beacons" })).toHaveAttribute("data-current", "true");

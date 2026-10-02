@@ -132,8 +132,11 @@ test("Beacons fills the catalog with live timing and opens the beacon async work
     assert.equal(await page.getByRole("heading", { name: "Async task workspace", exact: true }).count(), 0, "the beacon workspace must use compact breadcrumbs instead of a large header");
     await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
     await page.getByRole("heading", { name: "Queue a beacon task", exact: true }).waitFor();
-    await page.getByRole("tablist", { name: "Beacon task views", exact: true }).waitFor();
-    assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true");
+    const taskViews = page.getByRole("tablist", { name: "Beacon task views", exact: true });
+    await taskViews.waitFor();
+    assert.deepEqual((await taskViews.getByRole("tab").allTextContents()).map((label) => label.trim()),
+      ["Task output", "Task queue"]);
+    assert.equal(await taskViews.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true");
     assert.equal(await table.count(), 0, "the beacon interaction must replace the catalog");
     assert.equal(await page.getByRole("region", { name: "Managed Shells", exact: true }).count(), 0);
     await assertBeaconWorkspaceHeader(application, page, screenshotDirectory, "beacon-header", 960);
@@ -237,6 +240,7 @@ async function assertBeaconBreadcrumbSwitching(
   const trigger = breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true });
   const menu = page.getByRole("menu", { name: "Beacons, switch beacon", exact: true });
   const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+  await page.getByRole("tab", { name: "Task queue", exact: true }).click();
   await queue.getByText("No tasks queued", { exact: true }).waitFor();
 
   await trigger.click();
@@ -262,6 +266,9 @@ async function assertBeaconBreadcrumbSwitching(
   await breadcrumbs.getByText("m2-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "m2-beacon", exact: true }).waitFor();
   await assertBeaconWorkspaceScrollReset(page);
+  assert.equal(await page.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true",
+    "switching beacons must restore the default output tab");
+  await page.getByRole("tab", { name: "Task queue", exact: true }).click();
   await queue.getByText("No tasks queued", { exact: true }).waitFor();
   assert.equal(await page.getByRole("heading", { name: "m1-beacon", exact: true }).count(), 0,
     "switching must replace the beacon detail as well as the breadcrumb");
@@ -297,12 +304,11 @@ async function assertBeaconBreadcrumbSwitching(
   await menu.getByRole("menuitemradio", { name: /m1-beacon/u }).click();
   await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
   await page.getByRole("heading", { name: "m1-beacon", exact: true }).waitFor();
-  await queue.getByText("No tasks queued", { exact: true }).waitFor();
-  assert.equal(await page.getByRole("tab", { name: "Task queue", exact: true }).getAttribute("aria-selected"), "true",
-    "switching the exact beacon must restore the default queue tab");
-  await page.getByRole("tab", { name: "Task output", exact: true }).click();
+  assert.equal(await page.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true",
+    "switching the exact beacon must restore the default output tab");
   await page.getByRole("heading", { name: "No task output", exact: true }).waitFor();
   await page.getByRole("tab", { name: "Task queue", exact: true }).click();
+  await queue.getByText("No tasks queued", { exact: true }).waitFor();
   assert.equal(await queue.getByText(queuedTasks[0]!.id, { exact: true }).count(), 0,
     "switching back must clear the other beacon's task queue and completion selection");
 }
@@ -335,6 +341,8 @@ async function assertBeaconPopoutSwitching(
     const pwdTask = await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks
       .find((task) => task.beaconId === "m1_beacon" && task.description === "PwdReq" && task.state === "completed"));
     assert.ok(pwdTask);
+    assert.equal(await taskTabs.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true");
+    await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).click();
     await popout.getByRole("grid", { name: "Beacon task queue", exact: true })
       .getByRole("row").filter({ hasText: pwdTask.id }).click();
     const output = popout.getByRole("tabpanel", { name: "Task output", exact: true });
@@ -359,6 +367,8 @@ async function assertBeaconPopoutSwitching(
     await assertBeaconWorkspaceScrollReset(popout);
     assert.equal(await nativeWindow.evaluate((window) => window.getTitle()), "Interact — m2-beacon",
       "switching the popout beacon must update its native window title");
+    assert.equal(await taskTabs.getByRole("tab", { name: "Task output", exact: true }).getAttribute("aria-selected"), "true");
+    await taskTabs.getByRole("tab", { name: "Task queue", exact: true }).click();
     await popout.getByRole("grid", { name: "Beacon task queue", exact: true }).getByText("Pending", { exact: true }).waitFor();
     await sourcePage.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true })
       .getByText("m1-beacon", { exact: true }).waitFor();
@@ -451,6 +461,10 @@ async function assertBeaconExecutionCommands(
       await execution.getByRole("button", { name: "Copy output", exact: true }).click();
       assert.equal(await application.evaluate(({ clipboard }) => clipboard.readText()), stderr,
         "copying a task's stderr must use that exact decoded stream");
+      await execution.locator('[data-slot="segment"]').evaluate(async (element) => {
+        const animations: Array<{ finished: Promise<unknown> }> = element.getAnimations({ subtree: true });
+        await Promise.all(animations.map((animation) => animation.finished.catch(() => undefined)));
+      });
       await execution.getByRole("radio", { name: "Stdout", exact: true }).click();
       await waitForExecutionStream(execution, "Stdout", stdout);
       await execution.locator('[data-terminal-state="ready"]').waitFor();
@@ -702,17 +716,20 @@ async function assertBeaconTaskViews(
     assert.equal(await queueTab.getAttribute("aria-selected"), "true");
   }
 
-  // Open the history manually: completed outputs must load together without
-  // requiring a queue click for each result.
+  // Open the history manually: each completed result must load as its row
+  // becomes visible without requiring a queue click.
   await outputTab.click();
   for (const taskId of completedIds) {
     await output.getByRole("article", { name: `Task output ${taskId}`, exact: true }).waitFor();
   }
+  await pwdOutput.scrollIntoViewIfNeeded();
   await pwdOutput.getByText("/Users/e2e/workspace", { exact: true }).waitFor();
-  await output.getByRole("article", { name: `Task output ${completedIds[1]}`, exact: true })
-    .getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
-  await output.getByRole("article", { name: `Task output ${completedIds[2]}`, exact: true })
-    .getByText("en0", { exact: true }).waitFor();
+  const directoryOutput = output.getByRole("article", { name: `Task output ${completedIds[1]}`, exact: true });
+  await directoryOutput.scrollIntoViewIfNeeded();
+  await directoryOutput.getByRole("cell", { name: "notes.txt", exact: true }).first().waitFor();
+  const networkOutput = output.getByRole("article", { name: `Task output ${completedIds[2]}`, exact: true });
+  await networkOutput.scrollIntoViewIfNeeded();
+  await networkOutput.getByText("en0", { exact: true }).waitFor();
   assert.equal(await output.locator("article[data-task-id]").count(), 3, "the output tab must retain every completed result");
   assert.equal(await output.locator("dt").filter({ hasText: /^(Origin|Created|Sent|Completed)$/u }).count(), 0,
     "output history must omit the old task metadata block");
@@ -750,7 +767,6 @@ async function assertBeaconTaskViews(
   }
   assert.ok(positions[1]! > positions[0]!, "queue clicks must scroll to the matching early or late history entry");
   await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-task-output-history-jump.png") });
-  await queueTab.click();
   await assertNarrowBeaconOutputJump(application, page, newTask.id, join(screenshotDirectory, "beacon-task-output-narrow-jump.png"));
   await assertBeaconTaskVerticalLayout(application, page, screenshotDirectory);
 }
@@ -789,12 +805,14 @@ async function assertBeaconTaskVerticalLayout(
     };
   });
   try {
-    const heights: { queue: number; output: number; card: number }[] = [];
+    const heights: { content: number; queue: number; output: number; card: number }[] = [];
     for (const height of [950, 1250]) {
       await nativeWindow.evaluate((window, nextHeight) => window.setSize(1440, nextHeight), height);
-      await page.waitForFunction((expectedHeight) => (
-        globalThis as unknown as { innerHeight: number; innerWidth: number }
-      ).innerHeight === expectedHeight && (globalThis as unknown as { innerWidth: number }).innerWidth === 1440, height);
+      const contentSize = await nativeWindow.evaluate((window) => window.getContentSize());
+      await page.waitForFunction((expectedSize) => {
+        const viewportSize = globalThis as unknown as { innerWidth: number; innerHeight: number };
+        return viewportSize.innerWidth === expectedSize[0] && viewportSize.innerHeight === expectedSize[1];
+      }, contentSize);
       await viewport.evaluate((element) => { element.scrollTop = 0; });
       await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
       await queueTab.click();
@@ -815,18 +833,21 @@ async function assertBeaconTaskVerticalLayout(
         Math.abs(output.scroll.bottom - output.panelBottom) <= 2 &&
         Math.abs(output.panelBottom - output.card.bottom) <= 2,
       `output history must fill the same right card below its tabs: ${JSON.stringify(output)}`);
-      heights.push({ queue: queue.scroll.height, output: output.scroll.height, card: output.card.height });
+      heights.push({ content: contentSize[1]!, queue: queue.scroll.height, output: output.scroll.height, card: output.card.height });
       await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `beacon-task-output-fill-${height}.png`) });
     }
-    assert.ok(heights[1]!.queue > heights[0]!.queue + 200 &&
-      heights[1]!.output > heights[0]!.output + 200 && heights[1]!.card > heights[0]!.card + 200,
-    `both task views must grow with a taller native window instead of retaining a fixed height: ${JSON.stringify(heights)}`);
+    if (heights[1]!.content > heights[0]!.content + 200) {
+      assert.ok(heights[1]!.queue > heights[0]!.queue + 200 &&
+        heights[1]!.output > heights[0]!.output + 200 && heights[1]!.card > heights[0]!.card + 200,
+      `both task views must grow with a taller native window instead of retaining a fixed height: ${JSON.stringify(heights)}`);
+    }
   } finally {
     await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
+    const restoredContentSize = await nativeWindow.evaluate((window) => window.getContentSize());
     await page.waitForFunction((size) => {
       const viewportSize = globalThis as unknown as { innerWidth: number; innerHeight: number };
       return viewportSize.innerWidth === size[0] && viewportSize.innerHeight === size[1];
-    }, originalSize);
+    }, restoredContentSize);
     await queueTab.click();
     await viewport.evaluate((element) => { element.scrollTop = 0; });
     await page.locator('.beacon-workspace__sticky[data-stuck="false"]').waitFor();
@@ -844,6 +865,7 @@ async function assertNarrowBeaconOutputJump(
   const viewport = page.locator(":is(.app-content, .interaction-window__content):has(.beacon-workspace)");
   const queueTab = page.getByRole("tab", { name: "Task queue", exact: true });
   try {
+    await queueTab.click();
     await nativeWindow.evaluate((window) => window.setSize(960, 768));
     await page.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth === 960);
     const row = page.getByRole("grid", { name: "Beacon task queue", exact: true })

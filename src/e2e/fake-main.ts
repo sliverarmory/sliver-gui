@@ -2414,6 +2414,14 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       if (!task) throw new Error("Unknown fake beacon task");
       return cloneTask(task);
     },
+    async fetchBeaconTaskContent(beaconId: string, taskId: string, description: string) {
+      record("fetchBeaconTaskContent");
+      const task = tasks.get(taskId);
+      if (!task || task.BeaconID !== beaconId || task.Description !== description) {
+        throw new Error("Unknown fake beacon task");
+      }
+      return cloneTask(task);
+    },
     async fetchBofBeaconTask(beaconId: string, taskId: string, description: "CallExtensionReq" | "RegisterExtensionReq") {
       record("fetchBofBeaconTask");
       const task = tasks.get(taskId);

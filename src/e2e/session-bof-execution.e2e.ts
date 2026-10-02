@@ -175,7 +175,8 @@ test("session and beacon BOFs render Armory arguments, dispatch packed invocatio
     const beaconTasks = page.getByRole("region", { name: "Beacon tasks", exact: true });
     const queueTab = beaconTasks.getByRole("tab", { name: "Task queue", exact: true });
     const outputTab = beaconTasks.getByRole("tab", { name: "Task output", exact: true });
-    await beaconTasks.getByRole("grid", { name: "Beacon task queue", exact: true }).waitFor();
+    await outputTab.waitFor();
+    assert.equal(await outputTab.getAttribute("aria-selected"), "true");
     await selectInstalledBof(page, beaconForm, "sa-dir");
     await beaconForm.getByRole("textbox", { name: /targetdir/u }).fill("/tmp/beacon-BOF");
     await beaconComposer.getByRole("button", { name: "Queue task", exact: true }).click();

@@ -17,6 +17,90 @@ const localOwnership: OperationOwnership = {
 };
 
 describe("BeaconTaskStore execution results", () => {
+  it("loads old server-saved extension output without local execution provenance", async () => {
+    const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 91,
+      Data: Buffer.from(sliverpb.CallExtensionReq.encode(sliverpb.CallExtensionReq.create({ IsBOF: true })).finish()),
+    })).finish());
+    const response = Buffer.from(sliverpb.CallExtension.encode(sliverpb.CallExtension.create({
+      BOFOutputs: [
+        { Type: 0, Data: Buffer.from("old extension stdout") },
+        { Type: 0x0d, Data: Buffer.from("old extension stderr") },
+      ],
+      Response: {},
+    })).finish());
+    const fixture = await executionFixture("CallExtensionReq", response, { request });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+
+    expect(detail.ownership.origin).toBe("unknown");
+    expect(detail.execution).toBeUndefined();
+    expect(detail.disposition?.kind).toBe("inline-text");
+    if (detail.disposition?.kind !== "inline-text") throw new Error("Expected saved extension output");
+    expect(detail.disposition.text).toContain("old extension stdout");
+    expect(detail.disposition.text).toContain("old extension stderr");
+    expect(fixture.client.fetchBeaconTaskContent).toHaveBeenCalledWith(beaconId, "execution_task", "CallExtensionReq");
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("loads a saved non-BOF environment result without local operation history", async () => {
+    const request = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({ Type: 66 })).finish());
+    const response = Buffer.from(sliverpb.EnvInfo.encode(sliverpb.EnvInfo.create({
+      Variables: [{ Key: "PATH", Value: "/usr/bin" }], Response: {},
+    })).finish());
+    const fixture = await executionFixture("EnvReq", response, { request });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+
+    expect(detail.execution).toBeUndefined();
+    expect(detail.operationId).toBeUndefined();
+    expect(detail.disposition?.kind).toBe("inline-text");
+    if (detail.disposition?.kind !== "inline-text") throw new Error("Expected saved environment result");
+    expect(detail.disposition.text).toContain("PATH");
+    expect(detail.disposition.text).toContain("/usr/bin");
+    expect(fixture.client.fetchBeaconTaskContent).toHaveBeenCalledWith(beaconId, "execution_task", "EnvReq");
+    expect(request.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("shows a bounded saved-response preview for otherwise unknown completed task types", async () => {
+    const response = Buffer.from("older generic task output");
+    const fixture = await executionFixture("FutureTaskReq", response, { request: Buffer.from("private request") });
+
+    const detail = await fixture.store.detail(beaconId, "execution_task");
+
+    expect(detail.disposition?.kind).toBe("inline-text");
+    if (detail.disposition?.kind !== "inline-text") throw new Error("Expected saved task output");
+    expect(detail.disposition.text).toContain("older generic task output");
+    expect(detail.disposition.text).not.toContain("private request");
+    expect(fixture.client.fetchBeaconTaskContent).toHaveBeenCalledWith(beaconId, "execution_task", "FutureTaskReq");
+    expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("previews oversized saved results for externally submitted mapped tasks", async () => {
+    const listing = Buffer.from(sliverpb.Ls.encode(sliverpb.Ls.create({
+      Files: Array.from({ length: 180 }, (_, index) => ({ Name: `historic-${index}-${"x".repeat(500)}` })),
+    })).finish());
+    expect(listing.length).toBeGreaterThan(64 * 1024);
+    const listed = await executionFixture("LsReq", listing, { request: Buffer.alloc(0) });
+    const listingDetail = await listed.store.detail(beaconId, "execution_task");
+    expect(listingDetail.disposition?.kind).toBe("inline-text");
+    if (listingDetail.disposition?.kind !== "inline-text") throw new Error("Expected saved directory preview");
+    expect(listingDetail.disposition.text).toContain("historic-0-");
+    expect(listingDetail.disposition.truncated).toBe(true);
+
+    const stdout = Buffer.alloc(2 * 1_024 * 1_024 + 128 * 1_024, 65);
+    const processResponse = Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({ Pid: 44, Stdout: stdout })).finish());
+    const executed = await executionFixture("ExecuteReq", processResponse, { request: Buffer.alloc(0) });
+    const executionDetail = await executed.store.detail(beaconId, "execution_task");
+    expect(executionDetail.execution).toBeUndefined();
+    expect(executionDetail.disposition?.kind).toBe("inline-text");
+    if (executionDetail.disposition?.kind !== "inline-text") throw new Error("Expected saved process preview");
+    expect(executionDetail.disposition.text).toContain("Pid: 44");
+    expect(executionDetail.disposition.truncated).toBe(true);
+  });
+
   it("decodes and independently bounds process stdout and stderr without previewing artifact-bearing requests", async () => {
     const stdout = Buffer.alloc(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 3, 65);
     const stderr = Buffer.alloc(EXECUTION_WORKBENCH_OUTPUT_MAX_BYTES + 5, 66);
@@ -72,13 +156,13 @@ describe("BeaconTaskStore execution results", () => {
     }
   });
 
-  it("does not infer BOF or ambiguous task execution from an external description", async () => {
+  it("previews saved content without claiming BOF or ambiguous task execution from an external description", async () => {
     for (const description of ["CallExtensionReq", "TaskReq", "ExecuteReq suffix", "InvokeExecuteAssembly"]) {
       const fixture = await executionFixture(description, Buffer.from("untrusted task response"));
       const detail = await fixture.store.detail(beaconId, "execution_task");
       expect(detail.execution).toBeUndefined();
       expect(detail.operationId).toBeUndefined();
-      expect(fixture.client.fetchBeaconTask).not.toHaveBeenCalled();
+      expect(fixture.client.fetchBeaconTaskContent).toHaveBeenCalledWith(beaconId, "execution_task", description);
     }
   });
 
@@ -575,7 +659,7 @@ describe("BeaconTaskStore", () => {
     expect([...staleResponse]).toEqual(new Array(staleResponse.length).fill(0));
   });
 
-  it("decodes only the closed external Description map, including valid empty responses", async () => {
+  it("uses specialized decoding for the closed external Description map, including valid empty responses", async () => {
     const cases = [
       {
         description: "Ping",
@@ -642,8 +726,11 @@ describe("BeaconTaskStore", () => {
     await unknownStore.refresh(beaconId);
     const unknownDetail = await unknownStore.detail(beaconId, "unknown_external");
     expect(unknownDetail.operationId).toBeUndefined();
-    expect(unknownDetail.disposition).toBeUndefined();
-    expect(unknownClient.fetchBeaconTask).not.toHaveBeenCalled();
+    expect(unknownDetail.disposition).toMatchObject({
+      kind: "inline-text",
+      text: "The server stored no response payload for this completed task.",
+    });
+    expect(unknownClient.fetchBeaconTaskContent).toHaveBeenCalledWith(beaconId, "unknown_external", "ping");
   });
 
   it("decodes bounded, sanitized filesystem, process, and interface dispositions", async () => {
@@ -1158,7 +1245,7 @@ describe("BeaconTaskStore", () => {
           })],
         });
       }),
-      fetchBeaconTask: vi.fn(),
+      fetchBeaconTaskContent: vi.fn(),
       fetchBofBeaconTask: vi.fn(),
       cancelBeaconTask: vi.fn(),
     };
@@ -1260,9 +1347,11 @@ function task(id: string, state: string, createdAt: number, description = "task"
 }
 
 function fakeClient(tasks: clientpb.BeaconTasks, fetched?: clientpb.BeaconTask) {
+  const fetchBeaconTask = vi.fn(async () => fetched ?? tasks.Tasks[0]!);
   return {
     getBeaconTasks: vi.fn(async (_beaconId: string) => tasks),
-    fetchBeaconTask: vi.fn(async () => fetched ?? tasks.Tasks[0]!),
+    fetchBeaconTask,
+    fetchBeaconTaskContent: vi.fn(async (_beaconId: string, _taskId: string, _description: string) => fetchBeaconTask()),
     fetchBofBeaconTask: vi.fn(async () => fetched ?? tasks.Tasks[0]!),
     cancelBeaconTask: vi.fn(async (taskId: string) => clientpb.BeaconTask.create({
       ID: taskId,

@@ -153,12 +153,12 @@ export function BeaconInteractionWorkspace({
   const executionFormId = useId();
   const [cancelingTaskIds, setCancelingTaskIds] = useState<Set<string>>(() => new Set());
   const [queuedTaskId, setQueuedTaskId] = useState<string>();
-  const [taskView, setTaskView] = useState("queue");
+  const [taskView, setTaskView] = useState("output");
   const [outputJump, setOutputJump] = useState<{ taskId: string; sequence: number }>();
   const jumpSequence = useRef(0);
   const identityRef = useRef(targetIdentity);
   identityRef.current = targetIdentity;
-  const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks);
+  const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks, taskView === "output", false);
   const { contains } = useFilter({ sensitivity: "base" });
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
 
@@ -171,7 +171,7 @@ export function BeaconInteractionWorkspace({
     setExecutionState({ isPending: false, isAvailable: false });
     setCancelingTaskIds(new Set());
     setQueuedTaskId(undefined);
-    setTaskView("queue");
+    setTaskView("output");
     setOutputJump(undefined);
   }, [targetIdentity]);
 
@@ -382,10 +382,10 @@ export function BeaconInteractionWorkspace({
 
       <section aria-label="Beacon tasks" className="beacon-task-views min-w-0 overflow-hidden rounded-2xl border border-separator bg-surface">
         <Tabs className="absolute inset-0 min-h-0 min-w-0 gap-0" selectedKey={taskView} onSelectionChange={(key) => setTaskView(String(key))}>
-          <Tabs.ListContainer className="mx-5 my-4 w-fit max-w-full shrink-0">
-            <Tabs.List aria-label="Beacon task views">
-              <Tabs.Tab className="whitespace-nowrap" id="queue">Task queue<Tabs.Indicator /></Tabs.Tab>
-              <Tabs.Tab className="whitespace-nowrap" id="output">Task output<Tabs.Indicator /></Tabs.Tab>
+          <Tabs.ListContainer className="mx-5 my-3 w-fit max-w-full shrink-0">
+            <Tabs.List aria-label="Beacon task views" className="p-0.5">
+              <Tabs.Tab className="h-6 whitespace-nowrap px-2.5 text-xs" id="output">Task output<Tabs.Indicator /></Tabs.Tab>
+              <Tabs.Tab className="h-6 whitespace-nowrap px-2.5 text-xs" id="queue">Task queue<Tabs.Indicator /></Tabs.Tab>
             </Tabs.List>
           </Tabs.ListContainer>
           <Tabs.Panel className="flex min-h-0 min-w-0 flex-1 flex-col p-0" id="queue">
@@ -405,13 +405,16 @@ export function BeaconInteractionWorkspace({
             <BeaconTaskOutputList
               cancelingTaskIds={cancelingTaskIds}
               error={error}
+              isActive={taskView === "output"}
               isLoadingMore={isLoadingMore}
               jump={outputJump}
+              key={targetIdentity}
               outputs={outputs}
               page={page}
               onCancel={(task) => void cancel(task)}
               onLoadMore={onLoadMore}
               onRetry={(task) => loadOutput(task, true)}
+              onVisible={loadOutput}
             />
           </Tabs.Panel>
         </Tabs>
@@ -530,38 +533,113 @@ function BeaconTaskOutputList({
   jump,
   cancelingTaskIds,
   error,
+  isActive,
   page,
   isLoadingMore,
   onCancel,
   onRetry,
   onLoadMore,
+  onVisible,
 }: {
   outputs: BeaconTaskOutputEntry[];
   jump: { taskId: string; sequence: number } | undefined;
   cancelingTaskIds: Set<string>;
   error: string | undefined;
+  isActive: boolean;
   page: PageSummary | undefined;
   isLoadingMore: boolean;
   onCancel: (task: BeaconTaskDetail) => void;
   onRetry: (task: BeaconTaskSummary) => void;
   onLoadMore: (cursor: string) => void;
+  onVisible: (task: BeaconTaskSummary) => void;
 }): React.JSX.Element {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const entryRefs = useRef(new Map<string, HTMLElement>());
+  const entryRefCallbacks = useRef(new Map<string, (element: HTMLElement | null) => void>());
+  const observerRef = useRef<IntersectionObserver | undefined>(undefined);
+  const visibleTaskIds = useRef(new Set<string>());
+  const requestedRevisions = useRef(new Map<string, string>());
+  const canceledJumpSequence = useRef<number | undefined>(undefined);
+  const outputById = useRef(new Map(outputs.map((output) => [output.task.taskId, output])));
+  outputById.current = new Map(outputs.map((output) => [output.task.taskId, output]));
+  const requestVisibleRef = useRef<(taskId: string) => void>(() => undefined);
+  requestVisibleRef.current = (taskId) => {
+    if (!isActive) return;
+    const output = outputById.current.get(taskId);
+    if (!output || output.detail || output.isLoading || output.error) return;
+    const task = output.task;
+    const revision = JSON.stringify([task.state, task.resultAvailable, task.sentAt, task.completedAt]);
+    if (requestedRevisions.current.get(taskId) === revision) return;
+    requestedRevisions.current.set(taskId, revision);
+    onVisible(task);
+  };
+  const entryRef = (taskId: string): ((element: HTMLElement | null) => void) => {
+    let callback = entryRefCallbacks.current.get(taskId);
+    if (!callback) {
+      callback = (element) => {
+        const previous = entryRefs.current.get(taskId);
+        if (previous && previous !== element) observerRef.current?.unobserve(previous);
+        if (element) {
+          entryRefs.current.set(taskId, element);
+          observerRef.current?.observe(element);
+        } else {
+          entryRefs.current.delete(taskId);
+          visibleTaskIds.current.delete(taskId);
+        }
+      };
+      entryRefCallbacks.current.set(taskId, callback);
+    }
+    return callback;
+  };
   const jumpIsLoading = outputs.find((entry) => entry.task.taskId === jump?.taskId)?.isLoading;
   const nextCursor = page?.nextCursor;
 
   useEffect(() => {
-    if (!jump) return;
+    if (!isActive || outputs.length === 0) return;
+    const viewport = viewportRef.current;
+    if (!viewport || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const taskId = entry.target.getAttribute("data-task-id");
+        if (!taskId) continue;
+        if (entry.isIntersecting) {
+          visibleTaskIds.current.add(taskId);
+          requestVisibleRef.current(taskId);
+        } else {
+          visibleTaskIds.current.delete(taskId);
+        }
+      }
+    }, { root: viewport, rootMargin: "160px 0px", threshold: 0 });
+    observerRef.current = observer;
+    for (const element of entryRefs.current.values()) observer.observe(element);
+    return () => {
+      observer.disconnect();
+      observerRef.current = undefined;
+      visibleTaskIds.current.clear();
+    };
+  }, [isActive, outputs.length > 0]);
+
+  useEffect(() => {
+    if (!isActive) return;
+    // jsdom and older runtimes have no intersection observer. Bound the
+    // initial fallback instead of loading every retained server response.
+    if (typeof IntersectionObserver === "undefined") {
+      for (const output of outputs.slice(0, 8)) visibleTaskIds.current.add(output.task.taskId);
+    }
+    for (const taskId of visibleTaskIds.current) requestVisibleRef.current(taskId);
+  }, [isActive, outputs]);
+
+  useEffect(() => {
+    if (!isActive || !jump || canceledJumpSequence.current === jump.sequence) return;
     const entry = entryRefs.current.get(jump.taskId);
     const viewport = viewportRef.current;
     if (!entry || !viewport) return;
     entry.focus({ preventScroll: true });
-    viewport.scrollTop += entry.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 20;
     const scrollport = viewport.closest(".app-content, .interaction-window__content");
-    if (!scrollport) return;
-    const summary = scrollport.querySelector('header[aria-label="Beacon summary"]');
+    const summary = scrollport?.querySelector('header[aria-label="Beacon summary"]');
     const revealOutput = (): void => {
+      if (!scrollport) return;
       const viewportBounds = viewport.getBoundingClientRect();
       const entryBounds = entry.getBoundingClientRect();
       const scrollportBounds = scrollport.getBoundingClientRect();
@@ -573,14 +651,44 @@ function BeaconTaskOutputList({
         scrollport.scrollTop += outputTop - visibleTop;
       }
     };
-    revealOutput();
+    const alignEntry = (): void => {
+      const delta = entry.getBoundingClientRect().top - viewport.getBoundingClientRect().top - 20;
+      if (Math.abs(delta) > 1) viewport.scrollTop += delta;
+      revealOutput();
+    };
+    alignEntry();
     // Pinning the summary changes its bounds; remeasure after its scroll observer commits.
     let frame = requestAnimationFrame(() => {
-      revealOutput();
-      frame = requestAnimationFrame(revealOutput);
+      alignEntry();
+      frame = requestAnimationFrame(alignEntry);
     });
-    return () => cancelAnimationFrame(frame);
-  }, [jump, jumpIsLoading]);
+    let resizeFrame = 0;
+    const resizeObserver = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(() => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(alignEntry);
+    });
+    if (contentRef.current) resizeObserver?.observe(contentRef.current);
+    resizeObserver?.observe(viewport);
+    const stopFollowing = (): void => {
+      canceledJumpSequence.current = jump.sequence;
+      resizeObserver?.disconnect();
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(resizeFrame);
+    };
+    for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+      // Stop pending scroll corrections before controls inside the row handle
+      // the same pointer or keyboard event.
+      viewport.addEventListener(event, stopFollowing, { capture: true, passive: true });
+    }
+    return () => {
+      resizeObserver?.disconnect();
+      cancelAnimationFrame(frame);
+      cancelAnimationFrame(resizeFrame);
+      for (const event of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+        viewport.removeEventListener(event, stopFollowing, true);
+      }
+    };
+  }, [isActive, jump, jumpIsLoading]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col border-t border-separator">
@@ -595,23 +703,21 @@ function BeaconTaskOutputList({
         </EmptyState>
       ) : (
         <ScrollShadow aria-label="Beacon task outputs" className="min-h-0 flex-1 overflow-y-auto px-5 py-5" ref={viewportRef} role="region">
-          <div className="flex min-w-0 flex-col gap-5">
+          <div className="flex min-w-0 flex-col gap-5" ref={contentRef}>
             {outputs.map((output) => (
               <article
                 aria-label={`Task output ${output.task.taskId}`}
                 className="min-w-0 rounded-xl border-b border-separator pb-5 outline-none last:border-b-0 last:pb-0 focus-visible:ring-2 focus-visible:ring-accent"
                 data-task-id={output.task.taskId}
                 key={output.task.taskId}
-                ref={(element) => {
-                  if (element) entryRefs.current.set(output.task.taskId, element);
-                  else entryRefs.current.delete(output.task.taskId);
-                }}
+                ref={entryRef(output.task.taskId)}
                 tabIndex={-1}
               >
                 <BeaconTaskOutput
                   isCanceling={cancelingTaskIds.has(output.task.taskId)}
                   output={output}
                   onCancel={onCancel}
+                  onLoad={() => onVisible(output.task)}
                   onRetry={() => onRetry(output.task)}
                 />
               </article>
@@ -630,10 +736,11 @@ function BeaconTaskOutputList({
   );
 }
 
-function BeaconTaskOutput({ output, isCanceling, onCancel, onRetry }: {
+function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetry }: {
   output: BeaconTaskOutputEntry;
   isCanceling: boolean;
   onCancel: (task: BeaconTaskDetail) => void;
+  onLoad: () => void;
   onRetry: () => void;
 }): React.JSX.Element {
   const task = output.detail;
@@ -647,6 +754,9 @@ function BeaconTaskOutput({ output, isCanceling, onCancel, onRetry }: {
         <Chip color={taskStateColor(task?.state ?? output.task.state)} size="sm" variant="soft">{stateLabel(task?.state ?? output.task.state)}</Chip>
       </div>
       {output.isLoading ? <p className="text-xs text-muted" role="status">Loading task output…</p> : null}
+      {!task && !output.isLoading && !output.error ? (
+        <Button className="self-start" size="sm" variant="tertiary" onPress={onLoad}>Load task output</Button>
+      ) : null}
       {output.error ? (
         <div className="flex flex-col gap-3">
           <InlineMessage tone="danger">{output.error}</InlineMessage>
