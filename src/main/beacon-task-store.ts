@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 
 import { sliverpb, type clientpb } from "sliver-script";
 
@@ -10,12 +11,15 @@ import type {
   BeaconTaskSummary,
   OperationOwnership,
   TargetOperationId,
+  TargetOperationInput,
 } from "../shared/operation-contracts.js";
+import { isSensitiveSessionEnvironmentName } from "../shared/session-contracts.js";
 import { isExecutionReadOperationId, type ExecutionOperationId, type ExecutionReadOperationId, type ExecutionReadResult } from "../shared/execution-contracts.js";
 import { decodeBofOutput, decodeBofTask } from "./bof-workbench.js";
 import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS, EXECUTION_BEACON_TASK_MAX_RESPONSE_BYTES } from "./execution-beacon-task.js";
 import { ExecutionRemoteRejectedError } from "./execution-workbench.js";
 import { decodeHistoricalBeaconTask } from "./historical-beacon-task.js";
+import { verifyBeaconReadRequest } from "./beacon-read-request.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
 const MAX_TASKS = 500;
@@ -23,6 +27,8 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 const MAX_DESCRIPTION = 256;
 const MAX_DECODE_BYTES = 64 * 1024;
+const MAX_FILE_RESPONSE_BYTES = 128 * 1024;
+const MAX_TEXT_FILE_BYTES = 65_536;
 const MAX_CURSOR_SNAPSHOTS = 32;
 const MAX_CURSOR_SNAPSHOTS_PER_OWNER = 4;
 const CURSOR_SNAPSHOT_TTL_MS = 60_000;
@@ -57,6 +63,13 @@ const CANCELLABLE_TASK_DESCRIPTIONS = new Set([
   "LsReq",
   "PsReq",
   "IfconfigReq",
+  "EnvReq",
+  "CurrentTokenOwnerReq",
+  "NetstatReq",
+  "MountReq",
+  "MemfilesListReq",
+  "DownloadReq",
+  "GrepReq",
 ]);
 
 interface InternalTask {
@@ -116,6 +129,7 @@ export type TaskOwnershipResolver = (taskId: string, beaconId: string) => {
   executionOperationId?: ExecutionOperationId | "bof.execute";
   processWaited?: boolean;
   expectedPingNonce?: number | undefined;
+  expectedRequest?: TargetOperationInput;
 };
 
 const EXPECTED_DESCRIPTION_BY_OPERATION: Readonly<Partial<Record<TargetOperationId, string>>> = Object.freeze({
@@ -128,13 +142,29 @@ const EXPECTED_DESCRIPTION_BY_OPERATION: Readonly<Partial<Record<TargetOperation
   "beacon.filesystem.ls": "LsReq",
   "beacon.process.list": "PsReq",
   "beacon.network.interfaces": "IfconfigReq",
+  "beacon.environment.list": "EnvReq",
+  "beacon.identity.whoami": "CurrentTokenOwnerReq",
+  "beacon.network.netstat": "NetstatReq",
+  "beacon.filesystem.mount": "MountReq",
+  "beacon.filesystem.memfiles": "MemfilesListReq",
+  "beacon.filesystem.cat": "DownloadReq",
+  "beacon.filesystem.head": "DownloadReq",
+  "beacon.filesystem.tail": "DownloadReq",
+  "beacon.filesystem.grep": "GrepReq",
 });
 
+const NEW_M2_OPERATION_IDS = new Set<TargetOperationId>([
+  "beacon.environment.list", "beacon.identity.whoami", "beacon.network.netstat",
+  "beacon.filesystem.mount", "beacon.filesystem.memfiles", "beacon.filesystem.cat",
+  "beacon.filesystem.head", "beacon.filesystem.tail", "beacon.filesystem.grep",
+]);
+
 const EXTERNAL_OPERATION_BY_DESCRIPTION = new Map<string, TargetOperationId>(
-  Object.entries(EXPECTED_DESCRIPTION_BY_OPERATION).map(([operationId, description]) => [
-    description,
-    operationId as TargetOperationId,
-  ]),
+  Object.entries(EXPECTED_DESCRIPTION_BY_OPERATION)
+    .filter(([operationId, description], _index, entries) =>
+      !NEW_M2_OPERATION_IDS.has(operationId as TargetOperationId) &&
+      entries.filter(([, candidate]) => candidate === description).length === 1)
+    .map(([operationId, description]) => [description, operationId as TargetOperationId]),
 );
 
 const EXTERNAL_EXECUTION_BY_DESCRIPTION = new Map<string, ExecutionOperationId>([
@@ -316,7 +346,19 @@ export class BeaconTaskStore {
           "The server returned task content for a different resource",
         );
       }
-      if (content.Response.length > MAX_DECODE_BYTES) {
+      if (attribution.expectedRequest &&
+        (content.Description !== task.description || content.State.trim().toLowerCase() !== "completed")) {
+        return detailError(base, operationId, "decode-uncertain", "The server returned task content for a different task state or description");
+      }
+      if (attribution.expectedRequest) {
+        try {
+          if (attribution.expectedRequest.operationId !== operationId) throw new Error("Operation mismatch");
+          verifyBeaconReadRequest(attribution.expectedRequest, content.Request, task.beaconId);
+        } catch {
+          return detailError(base, operationId, "decode-uncertain", "The saved task request did not match the selected command");
+        }
+      }
+      if (content.Response.length > maximumResponseBytes(operationId)) {
         if (!attribution.operationId) {
           const fallback = decodeHistoricalBeaconTask(task.description, content.Request, content.Response);
           if (fallback.disposition) return { ...base, operationId, ...fallback };
@@ -990,6 +1032,105 @@ function decodeDisposition(
         truncated,
       };
     }
+    case "beacon.environment.list": {
+      const decoded = decodeCanonical(sliverpb.EnvInfo, response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Variables.length > MAX_RESULT_ROWS;
+      const rows = decoded.Variables.slice(0, MAX_RESULT_ROWS).map((variable) => {
+        const name = boundedResultText(variable.Key, 512);
+        const sensitive = isSensitiveSessionEnvironmentName(variable.Key);
+        const value = sensitive ? { value: "[redacted]", changed: false } : boundedResultText(variable.Value, MAX_RESULT_TEXT);
+        truncated ||= name.changed || value.changed;
+        return [name.value, value.value, sensitive ? "Yes" : "No"];
+      });
+      return { kind: "table" as const, columns: ["Name", "Value", "Sensitive"], rows, truncated };
+    }
+    case "beacon.identity.whoami": {
+      const decoded = decodeCanonical(sliverpb.CurrentTokenOwner, response);
+      assertResponse(decoded.Response?.Err);
+      const owner = boundedResultText(decoded.Output, MAX_RESULT_TEXT);
+      return { kind: "structured-detail" as const, title: "Current token owner",
+        fields: [{ label: "Identity", value: owner.value }], truncated: owner.changed };
+    }
+    case "beacon.network.netstat": {
+      const decoded = decodeCanonical(sliverpb.Netstat, response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Entries.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const address = (value: { Ip: string; Port: number } | undefined): string =>
+        value ? text(`${value.Ip}:${nonNegativeInteger(value.Port)}`, 512) : "";
+      const rows = decoded.Entries.slice(0, MAX_RESULT_ROWS).map((entry) => [
+        text(entry.Protocol, 64), address(entry.LocalAddr), address(entry.RemoteAddr),
+        text(entry.SkState, 128), nonNegativeInteger(entry.UID),
+        entry.Process ? nonNegativeInteger(entry.Process.Pid) : "",
+        entry.Process ? text(entry.Process.Executable, 512) : "",
+      ]);
+      return { kind: "table" as const,
+        columns: ["Protocol", "Local", "Remote", "State", "UID", "PID", "Process"], rows, truncated };
+    }
+    case "beacon.filesystem.mount": {
+      const decoded = decodeCanonical(sliverpb.Mount, response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Info.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = 512): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const rows = decoded.Info.slice(0, MAX_RESULT_ROWS).map((item) => [
+        text(item.VolumeName), text(item.VolumeType, 128), text(item.MountPoint),
+        text(item.FileSystem, 128), text(item.Label), text(item.UsedSpace, 128),
+        text(item.FreeSpace, 128), text(item.TotalSpace, 128), text(item.MountOptions),
+      ]);
+      return { kind: "table" as const,
+        columns: ["Volume", "Type", "Mount point", "Filesystem", "Label", "Used", "Free", "Total", "Options"],
+        rows, truncated };
+    }
+    case "beacon.filesystem.memfiles": {
+      const decoded = decodeCanonical(sliverpb.Ls, response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = decoded.Files.length > MAX_RESULT_ROWS;
+      const text = (value: string, maximum = 512): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const rows = decoded.Files.slice(0, MAX_RESULT_ROWS).map((file) => [
+        text(file.Name), file.IsDir ? "Directory" : "File", text(file.Size, 128),
+        text(file.ModTime, 128), text(file.Mode, 128),
+      ]);
+      return { kind: "table" as const, columns: ["Name", "Type", "Size", "Modified", "Mode"], rows, truncated };
+    }
+    case "beacon.filesystem.cat":
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail":
+      return decodeTextFileDisposition(operationId, response);
+    case "beacon.filesystem.grep": {
+      const decoded = decodeCanonical(sliverpb.Grep, response);
+      assertResponse(decoded.Response?.Err);
+      let truncated = false;
+      const rows: (string | boolean)[][] = [];
+      for (const path of Object.keys(decoded.Results).sort()) {
+        const file = decoded.Results[path];
+        if (!file) continue;
+        for (const match of file.FileResults) {
+          if (rows.length >= MAX_RESULT_ROWS) { truncated = true; break; }
+          const values = [path, match.LineNumber, match.Line,
+            match.LinesBefore.slice(0, MAX_RESULT_NESTED_ITEMS).join("\n"),
+            match.LinesAfter.slice(0, MAX_RESULT_NESTED_ITEMS).join("\n")];
+          if (match.LinesBefore.length > MAX_RESULT_NESTED_ITEMS || match.LinesAfter.length > MAX_RESULT_NESTED_ITEMS) truncated = true;
+          const bounded = values.map((value) => boundedResultText(value, MAX_RESULT_TEXT));
+          truncated ||= bounded.some((value) => value.changed);
+          rows.push([...bounded.map((value) => value.value), file.IsBinary]);
+        }
+        if (rows.length >= MAX_RESULT_ROWS) break;
+      }
+      return { kind: "table" as const, columns: ["Path", "Line", "Match", "Before", "After", "Binary"], rows, truncated };
+    }
     case "target.rename":
       return {
         kind: "structured-detail" as const,
@@ -997,6 +1138,57 @@ function decodeDisposition(
         fields: [{ label: "Result", value: "Inventory refresh required" }],
         truncated: false,
       };
+  }
+}
+
+function maximumResponseBytes(operationId: TargetOperationId): number {
+  return operationId === "beacon.filesystem.cat" || operationId === "beacon.filesystem.head" ||
+    operationId === "beacon.filesystem.tail" ? MAX_FILE_RESPONSE_BYTES : MAX_DECODE_BYTES;
+}
+
+function decodeCanonical<Value>(
+  codec: { decode(bytes: Uint8Array): Value; encode(value: Value): { finish(): Uint8Array } },
+  bytes: Buffer,
+): Value {
+  const decoded = codec.decode(bytes);
+  const canonical = codec.encode(decoded).finish();
+  try {
+    if (canonical.length !== bytes.length || canonical.some((byte, index) => byte !== bytes[index])) {
+      throw new Error("The task response did not match its expected protobuf type");
+    }
+  } finally {
+    canonical.fill(0);
+  }
+  return decoded;
+}
+
+function decodeTextFileDisposition(
+  operationId: "beacon.filesystem.cat" | "beacon.filesystem.head" | "beacon.filesystem.tail",
+  response: Buffer,
+) {
+  const decoded = decodeCanonical(sliverpb.Download, response);
+  assertResponse(decoded.Response?.Err);
+  if (!decoded.Exists || decoded.IsDir) throw new TargetReportedTaskError("The requested file is unavailable");
+  let inflated: Buffer | undefined;
+  try {
+    let bytes: Buffer;
+    if (decoded.Encoder === "") bytes = decoded.Data;
+    else if (decoded.Encoder === "gzip") {
+      inflated = gunzipSync(decoded.Data, { maxOutputLength: MAX_TEXT_FILE_BYTES + 1 });
+      bytes = inflated;
+    } else throw new Error("Unsupported file response encoding");
+    if (bytes.length > MAX_TEXT_FILE_BYTES) throw new Error("The file response exceeded the bounded preview");
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    const bounded = boundedResultText(text, MAX_RESULT_TEXT);
+    return {
+      kind: "inline-text" as const,
+      text: bounded.value,
+      // Head and tail intentionally show only the requested slice.
+      truncated: bounded.changed || operationId !== "beacon.filesystem.cat",
+    };
+  } finally {
+    decoded.Data.fill(0);
+    inflated?.fill(0);
   }
 }
 
@@ -1018,7 +1210,10 @@ function requiresExactlyEmptyResponse(operationId: TargetOperationId): boolean {
 function allowsEmptyDecodedResponse(operationId: TargetOperationId): boolean {
   // An empty protobuf message is the canonical encoding of a successful
   // inventory response containing zero rows.
-  return operationId === "beacon.process.list" || operationId === "beacon.network.interfaces";
+  return operationId === "beacon.process.list" || operationId === "beacon.network.interfaces" ||
+    operationId === "beacon.environment.list" || operationId === "beacon.network.netstat" ||
+    operationId === "beacon.filesystem.mount" || operationId === "beacon.filesystem.memfiles" ||
+    operationId === "beacon.filesystem.grep";
 }
 
 function detailError(

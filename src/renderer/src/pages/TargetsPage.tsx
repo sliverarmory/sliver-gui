@@ -170,6 +170,15 @@ const OPERATION_CAPABILITIES: Readonly<Record<TargetOperationId, TargetCapabilit
   "beacon.filesystem.ls": "target.task.execute",
   "beacon.process.list": "target.task.execute",
   "beacon.network.interfaces": "target.task.execute",
+  "beacon.environment.list": "target.task.execute",
+  "beacon.identity.whoami": "target.task.execute",
+  "beacon.network.netstat": "target.task.execute",
+  "beacon.filesystem.mount": "target.task.execute",
+  "beacon.filesystem.memfiles": "target.task.execute",
+  "beacon.filesystem.cat": "target.task.execute",
+  "beacon.filesystem.head": "target.task.execute",
+  "beacon.filesystem.tail": "target.task.execute",
+  "beacon.filesystem.grep": "target.task.execute",
 };
 
 export function TargetsPage({
@@ -1365,6 +1374,7 @@ export function TargetsPage({
           <BeaconWorkspaceHeader beacon={active} details={targetDetail} key={`${backendIncarnation}:${activeIdentity}`} nowMs={checkinNow}>
             <BeaconInteractionWorkspace
               expectedTarget={activeRef!}
+              beacon={active}
               capabilities={snapshot.targetContext.capabilities}
               canQueue={taskExecutionCapability?.available === true}
               error={tasksError}
@@ -2849,6 +2859,15 @@ function operationInputFromDraft(draft: OperationDraft): TargetOperationInput {
     case "beacon.filesystem.ls":
     case "beacon.process.list":
     case "beacon.network.interfaces":
+    case "beacon.environment.list":
+    case "beacon.identity.whoami":
+    case "beacon.network.netstat":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
+    case "beacon.filesystem.cat":
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail":
+    case "beacon.filesystem.grep":
       throw new Error("Use the beacon task workspace for this command.");
   }
 }

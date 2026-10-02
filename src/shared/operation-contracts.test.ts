@@ -28,7 +28,7 @@ import {
 } from "./operation-contracts.js";
 
 describe("operation contracts", () => {
-  it("publishes the complete closed M1 operation, state, task, and disposition unions", () => {
+  it("publishes the complete closed target operation, state, task, and disposition unions", () => {
     expect(TARGET_OPERATION_IDS).toEqual([
       "target.ping",
       "target.rename",
@@ -40,6 +40,15 @@ describe("operation contracts", () => {
       "beacon.filesystem.ls",
       "beacon.process.list",
       "beacon.network.interfaces",
+      "beacon.environment.list",
+      "beacon.identity.whoami",
+      "beacon.network.netstat",
+      "beacon.filesystem.mount",
+      "beacon.filesystem.memfiles",
+      "beacon.filesystem.cat",
+      "beacon.filesystem.head",
+      "beacon.filesystem.tail",
+      "beacon.filesystem.grep",
     ]);
     expect(TARGET_OPERATION_STATES).toEqual([
       "queued",
@@ -84,7 +93,7 @@ describe("operation contracts", () => {
     >();
   });
 
-  it("accepts only the ten typed operation input shapes", () => {
+  it("accepts the original ten typed operation input shapes", () => {
     expect(parseTargetOperationInput({ operationId: "target.ping" })).toEqual({ operationId: "target.ping" });
     expect(parseTargetOperationInput({ operationId: "target.rename", name: "target-01.example" })).toEqual({
       operationId: "target.rename",
@@ -135,6 +144,23 @@ describe("operation contracts", () => {
     expect(parseTargetOperationInput({ operationId: "beacon.network.interfaces" })).toEqual({
       operationId: "beacon.network.interfaces",
     });
+  });
+
+  it("accepts bounded BC-05 reads and rejects unsafe counts or extra fields", () => {
+    expect(parseTargetOperationInput({ operationId: "beacon.environment.list", name: "PATH" }))
+      .toEqual({ operationId: "beacon.environment.list", name: "PATH" });
+    expect(parseTargetOperationInput({ operationId: "beacon.filesystem.head", path: "/tmp/a", lines: 10 }))
+      .toEqual({ operationId: "beacon.filesystem.head", path: "/tmp/a", lines: 10 });
+    expect(parseTargetOperationInput({ operationId: "beacon.filesystem.tail", path: "/tmp/a", bytes: 128 }))
+      .toEqual({ operationId: "beacon.filesystem.tail", path: "/tmp/a", bytes: 128 });
+    expect(parseTargetOperationInput({ operationId: "beacon.filesystem.grep", path: ".", pattern: "needle",
+      recursive: false, before: 0, after: 2 })).toMatchObject({ pattern: "needle", after: 2 });
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.head", path: "/tmp/a",
+      bytes: 2, lines: 1 })).toThrow(/either bytes or lines/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.tail", path: "/tmp/a",
+      lines: 10 })).toThrow(/unavailable/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.filesystem.cat", path: "/tmp/a", rpc: "download" }))
+      .toThrow(/exactly/u);
   });
 
   it("rejects an arbitrary method selector and every renderer-supplied policy field", () => {

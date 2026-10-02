@@ -5,6 +5,7 @@ import { clientpb, type SliverClient } from "sliver-script";
 
 import {
   adaptSliverClient,
+  BEACON_TEXT_READ_PROBE_BYTES,
   BEACON_TASK_CONTENT_REQUEST_MAX_BYTES,
   BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES,
   BOF_TASK_RESPONSE_MAX_BYTES,
@@ -95,6 +96,102 @@ describe("SliverClientAdapter beacon reads", () => {
 
   it("keeps the broad interactive beacon object outside the reviewed adapter type", () => {
     expectTypeOf<SliverClientAdapter>().not.toHaveProperty("interactBeacon");
+  });
+
+  it("queues the M2 inventory reads through fixed beacon RPCs and preserves acknowledgements", async () => {
+    const acknowledgement = { Response: { Async: true, BeaconID: "different", TaskID: "task-1" } };
+    const getEnv = vi.fn(async () => acknowledgement);
+    const currentTokenOwner = vi.fn(async () => acknowledgement);
+    const netstat = vi.fn(async () => acknowledgement);
+    const mount = vi.fn(async () => acknowledgement);
+    const memfilesList = vi.fn(async () => acknowledgement);
+    const interactBeacon = vi.fn();
+    const adapter = adaptSliverClient({
+      rpc: { getEnv, currentTokenOwner, netstat, mount, memfilesList }, interactBeacon,
+    } as unknown as SliverClient);
+
+    await expect(adapter.envBeacon("beacon-1", "", 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.envBeacon("beacon-1", "API_ENDPOINT", 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.whoamiBeacon("beacon-1", 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.netstatBeacon("beacon-1", {
+      tcp: true, udp: false, ip4: true, ip6: false, listen: true,
+    }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.mountBeacon("beacon-1", 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.memfilesBeacon("beacon-1", 30)).resolves.toBe(acknowledgement);
+
+    const request = {
+      Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "",
+    };
+    const callOptions = { signal: expect.any(AbortSignal) };
+    expect(getEnv).toHaveBeenNthCalledWith(1, { Name: "", Request: request }, callOptions);
+    expect(getEnv).toHaveBeenNthCalledWith(2, { Name: "API_ENDPOINT", Request: request }, callOptions);
+    expect(currentTokenOwner).toHaveBeenCalledExactlyOnceWith({ Request: request }, callOptions);
+    expect(netstat).toHaveBeenCalledExactlyOnceWith({
+      TCP: true, UDP: false, IP4: true, IP6: false, Listening: true, Request: request,
+    }, callOptions);
+    expect(mount).toHaveBeenCalledExactlyOnceWith({ Request: request }, callOptions);
+    expect(memfilesList).toHaveBeenCalledExactlyOnceWith({ Request: request }, callOptions);
+    expect(interactBeacon).not.toHaveBeenCalled();
+  });
+
+  it("uses one bounded DownloadReq shape for cat, head, and tail", async () => {
+    const acknowledgement = { Response: { Async: true, BeaconID: "beacon-1", TaskID: "task-1" } };
+    const download = vi.fn(async (_request: unknown, _options: unknown) => acknowledgement);
+    const adapter = adaptSliverClient({ rpc: { download } } as unknown as SliverClient);
+
+    await expect(adapter.catBeacon("beacon-1", "/tmp/a.txt", 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.headBeacon("beacon-1", "/tmp/a.txt", { bytes: 128 }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.headBeacon("beacon-1", "/tmp/a.txt", { lines: 10 }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.tailBeacon("beacon-1", "/tmp/a.txt", { bytes: 128 }, 30)).resolves.toBe(acknowledgement);
+
+    const requests = download.mock.calls.map(([request]) => request);
+    const base = {
+      Path: "/tmp/a.txt", RestrictedToFile: true, Recurse: false,
+      Request: { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" },
+    };
+    expect(requests).toEqual([
+      { ...base, MaxBytes: String(BEACON_TEXT_READ_PROBE_BYTES), MaxLines: "0" },
+      { ...base, MaxBytes: "128", MaxLines: "0" },
+      { ...base, MaxBytes: String(BEACON_TEXT_READ_PROBE_BYTES), MaxLines: "10" },
+      { ...base, MaxBytes: "-128", MaxLines: "0" },
+    ]);
+    expect(download.mock.calls.every(([, options]) =>
+      (options as { signal?: unknown })?.signal instanceof AbortSignal)).toBe(true);
+  });
+
+  it("rejects unsafe text-read shapes before queuing a beacon task", async () => {
+    const download = vi.fn();
+    const adapter = adaptSliverClient({ rpc: { download } } as unknown as SliverClient);
+
+    await expect(adapter.catBeacon("beacon-1", "", 30)).rejects.toThrow("Invalid beacon file path");
+    expect(() => adapter.headBeacon("beacon-1", "/tmp/a", {}, 30)).toThrow("Choose either bytes or lines");
+    expect(() => adapter.headBeacon("beacon-1", "/tmp/a", { bytes: 1, lines: 1 }, 30))
+      .toThrow("Choose either bytes or lines");
+    expect(() => adapter.headBeacon("beacon-1", "/tmp/a", { bytes: 65_537 }, 30))
+      .toThrow("Byte count must be between 1 and 65536");
+    expect(() => adapter.headBeacon("beacon-1", "/tmp/a", { lines: 4_097 }, 30))
+      .toThrow("Line count must be between 1 and 4096");
+    expect(() => adapter.tailBeacon("beacon-1", "/tmp/a", { lines: 10 }, 30))
+      .toThrow("Beacon tail currently supports bounded bytes only");
+    expect(download).not.toHaveBeenCalled();
+  });
+
+  it("queues grep with explicit context and rejects out-of-range inputs", async () => {
+    const acknowledgement = { Response: { Async: true, BeaconID: "beacon-1", TaskID: "task-1" } };
+    const grep = vi.fn(async () => acknowledgement);
+    const adapter = adaptSliverClient({ rpc: { grep } } as unknown as SliverClient);
+
+    await expect(adapter.grepBeacon("beacon-1", {
+      path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3,
+    }, 30)).resolves.toBe(acknowledgement);
+    expect(grep).toHaveBeenCalledExactlyOnceWith({
+      Path: "/tmp", SearchPattern: "needle", Recursive: true, LinesBefore: 2, LinesAfter: 3,
+      Request: { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" },
+    }, { signal: expect.any(AbortSignal) });
+    expect(() => adapter.grepBeacon("beacon-1", {
+      path: "/tmp", pattern: "x", recursive: false, before: 65, after: 0,
+    }, 30)).toThrow("Invalid beacon grep options");
+    expect(grep).toHaveBeenCalledTimes(1);
   });
 
   it("fetches a saved task larger than the SDK task-content limit through the bounded control RPC", async () => {

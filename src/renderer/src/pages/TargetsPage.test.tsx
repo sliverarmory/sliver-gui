@@ -1384,6 +1384,168 @@ describe("TargetsPage", () => {
     }
   });
 
+  it("shows BC-05 identity facts from the latest beacon inventory without queueing tasks", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn();
+    installAPI({ submitTargetOperation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, pid: 4242, uid: "1000", gid: "1001", username: "bob" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (current: string, next: string) => {
+      await user.click(within(command).getByRole("button", { name: new RegExp(`${current}.*Command`, "i") }));
+      await user.click(await screen.findByRole("option", { name: new RegExp(`^${next}`, "i") }));
+    };
+    await choose("Working directory", "Process ID");
+    expect(within(command).getByText("4242")).toBeInTheDocument();
+    expect(within(command).getByText(/latest server target inventory/i)).toBeInTheDocument();
+    expect(within(command).queryByRole("button", { name: "Queue task" })).not.toBeInTheDocument();
+    await choose("Process ID", "User ID");
+    expect(within(command).getByText("1000")).toBeInTheDocument();
+    await choose("User ID", "Group ID");
+    expect(within(command).getByText("1001")).toBeInTheDocument();
+    await choose("Group ID", "Current identity");
+    expect(within(command).getByText("bob")).toBeInTheDocument();
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+  });
+
+  it("queues BC-05 inventory commands through the existing beacon picker", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn(async (input: { operationId: string }) => ({
+      ok: true as const,
+      value: operationRecord({
+        requestId: `request-${input.operationId}`,
+        operationId: input.operationId as TargetOperationRecord["operationId"],
+        target: beaconRef,
+        mode: "beacon",
+        state: "submitted",
+        taskId: `task-${input.operationId}`,
+      }),
+    }));
+    installAPI({ submitTargetOperation });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (current: string, next: string) => {
+      await user.click(within(command).getByRole("button", { name: new RegExp(`${current}.*Command`, "i") }));
+      await user.click(await screen.findByRole("option", { name: new RegExp(`^${next}`, "i") }));
+    };
+    await choose("Working directory", "Environment variables");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.environment.list" }));
+    await user.type(within(command).getByRole("textbox", { name: "Filter by variable name (optional)" }), "PATH");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.environment.list", name: "PATH" }));
+    await choose("Environment variables", "Mounts");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.filesystem.mount" }));
+    await choose("Mounts", "Memory files");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.filesystem.memfiles" }));
+  });
+
+  it("queues BC-05 file reads with bounded typed options", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn(async (input: { operationId: string }) => ({
+      ok: true as const,
+      value: operationRecord({ operationId: input.operationId as TargetOperationRecord["operationId"], target: beaconRef, mode: "beacon", state: "submitted", taskId: `task-${input.operationId}` }),
+    }));
+    installAPI({ submitTargetOperation });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (current: string, nextId: string) => {
+      await user.click(within(command).getByRole("button", { name: new RegExp(`${current}.*Command`, "i") }));
+      const options = await screen.findAllByRole("option");
+      const choice = options.find((option) => option.getAttribute("data-key") === nextId);
+      expect(choice).toBeDefined();
+      await user.click(choice!);
+    };
+    await choose("Working directory", "beacon.filesystem.cat");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    expect(await within(command).findByRole("alert")).toHaveTextContent("Enter a file path");
+    await user.type(within(command).getByRole("textbox", { name: "File path" }), "/tmp/log.txt");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.filesystem.cat", path: "/tmp/log.txt" }));
+
+    await choose("Read file", "beacon.filesystem.head");
+    await user.type(within(command).getByRole("textbox", { name: "File path" }), "/tmp/log.txt");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.filesystem.head", path: "/tmp/log.txt", lines: 10 }));
+    await choose("Read file head", "beacon.filesystem.tail");
+    await user.type(within(command).getByRole("textbox", { name: "File path" }), "/tmp/log.txt");
+    expect(within(command).queryByRole("switch", { name: "Count bytes instead of lines" })).not.toBeInTheDocument();
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.filesystem.tail", path: "/tmp/log.txt", bytes: 4096 }));
+
+    await choose("Read file tail", "beacon.filesystem.grep");
+    await user.type(within(command).getByRole("textbox", { name: "Search path" }), "/tmp");
+    await user.type(within(command).getByRole("textbox", { name: "Search pattern" }), "needle");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({
+      operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle", recursive: false, before: 0, after: 0,
+    }));
+  });
+
+  it("applies beacon platform gates and exact netstat options to BC-05 commands", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn(async (input: { operationId: string }) => ({
+      ok: true as const,
+      value: operationRecord({ operationId: input.operationId as TargetOperationRecord["operationId"], target: beaconRef, mode: "beacon", state: "submitted", taskId: `task-${input.operationId}` }),
+    }));
+    installAPI({ submitTargetOperation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (current: string, next: string) => {
+      await user.click(within(command).getByRole("button", { name: new RegExp(`${current}.*Command`, "i") }));
+      await user.click(await screen.findByRole("option", { name: new RegExp(`^${next}`, "i") }));
+    };
+    await choose("Working directory", "Memory files");
+    expect(within(command).getByRole("button", { name: "Queue task" })).toBeDisabled();
+    expect(within(command).getByText("Memory files require a Linux beacon.")).toBeInTheDocument();
+    await choose("Memory files", "Current identity");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.identity.whoami" }));
+    await choose("Current identity", "Network connections");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({
+      operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true, ip6: false, listen: false,
+    }));
+  });
+
+  it("filters and pages decoded process rows within the same beacon task output", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({
+      taskId: "task-process-preview",
+      description: "PsReq",
+      operationId: "beacon.process.list",
+      disposition: {
+        kind: "table",
+        columns: ["PID", "Process"],
+        rows: Array.from({ length: 55 }, (_, index) => [index + 1, `process-${index + 1}`]),
+        truncated: true,
+      },
+    });
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: task }),
+    });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const output = await screen.findByRole("article", { name: "Task output task-process-preview" });
+    expect(await within(output).findByText("process-50")).toBeInTheDocument();
+    expect(within(output).queryByText("process-51")).not.toBeInTheDocument();
+    expect(within(output).getByText(/Showing 1–50 of 55 decoded rows/)).toBeInTheDocument();
+    await user.click(within(output).getByRole("button", { name: "Next" }));
+    expect(within(output).getByText("process-51")).toBeInTheDocument();
+    expect(within(output).queryByText("process-50")).not.toBeInTheDocument();
+    expect(within(output).getByText(/Showing 51–55 of 55 decoded rows/)).toBeInTheDocument();
+    await user.type(within(output).getByRole("textbox", { name: "Filter decoded rows" }), "process-54");
+    expect(within(output).getByText("process-54")).toBeInTheDocument();
+    expect(within(output).queryByText("process-51")).not.toBeInTheDocument();
+    expect(within(output).getByText(/Showing 1–1 of 1 decoded rows/)).toBeInTheDocument();
+    expect(within(output).getByText(/exceeded the bounded preview/)).toBeInTheDocument();
+  });
+
   it("renders and pages a task-bound children read after a queue jump", async () => {
     const user = userEvent.setup();
     const first = beaconTaskDetail({

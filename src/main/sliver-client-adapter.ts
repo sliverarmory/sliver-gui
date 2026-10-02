@@ -165,6 +165,15 @@ export type SliverClientAdapter = Pick<
   lsBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
   psBeacon(beaconId: string, fullInfo: boolean, timeoutSeconds: number): Promise<sliverpb.Ps>;
   ifconfigBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Ifconfig>;
+  envBeacon(beaconId: string, name: string, timeoutSeconds: number): Promise<sliverpb.EnvInfo>;
+  whoamiBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.CurrentTokenOwner>;
+  netstatBeacon(beaconId: string, options: BeaconNetstatOptions, timeoutSeconds: number): Promise<sliverpb.Netstat>;
+  mountBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Mount>;
+  memfilesBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
+  catBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Download>;
+  headBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
+  tailBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
+  grepBeacon(beaconId: string, options: BeaconGrepOptions, timeoutSeconds: number): Promise<sliverpb.Grep>;
   /** Executes one main-selected Armory object through the fixed BOF RPC. */
   callBofSession(sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
   callBofBeacon(beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
@@ -182,6 +191,32 @@ export type SliverClientAdapter = Pick<
 
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
 
+export interface BeaconNetstatOptions {
+  tcp: boolean;
+  udp: boolean;
+  ip4: boolean;
+  ip6: boolean;
+  listen: boolean;
+}
+
+export interface BeaconTextSliceOptions {
+  bytes?: number;
+  lines?: number;
+}
+
+export interface BeaconGrepOptions {
+  path: string;
+  pattern: string;
+  recursive: boolean;
+  before: number;
+  after: number;
+}
+
+/** One byte past the maximum accepted complete text result detects truncation. */
+export const BEACON_TEXT_READ_PROBE_BYTES = 64 * 1024 + 1;
+export const BEACON_TEXT_READ_MAX_BYTES = BEACON_TEXT_READ_PROBE_BYTES - 1;
+export const BEACON_TEXT_READ_MAX_LINES = 4_096;
+
 export type BofTaskDescription = "CallExtensionReq" | "RegisterExtensionReq";
 export const BEACON_TASK_CONTENT_REQUEST_MAX_BYTES = 14 * 1024 * 1024;
 export const BEACON_TASK_CONTENT_MAX_BYTES = 15 * 1024 * 1024;
@@ -191,6 +226,46 @@ export const BOF_TASK_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const BOF_TASK_CONTENT_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BYTES;
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const TASK_DESCRIPTION = /^[A-Za-z][A-Za-z0-9_]{0,255}$/u;
+
+function beaconTaskRequest(beaconId: string, timeoutSeconds: number) {
+  return {
+    Async: true,
+    Timeout: timeoutSecondsToNanoseconds(timeoutSeconds),
+    BeaconID: beaconId,
+    SessionID: "",
+  };
+}
+
+function checkedPath(path: string): string {
+  if (typeof path !== "string" || path.length === 0 || path.length > 4_096 || path.includes("\0")) {
+    throw new Error("Invalid beacon file path");
+  }
+  return path;
+}
+
+function checkedSliceCount(value: number, maximum: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+    throw new Error(`${label} must be between 1 and ${maximum}`);
+  }
+  return value;
+}
+
+function beaconTextSlice(options: BeaconTextSliceOptions, tail: boolean): { MaxBytes: string; MaxLines: string } {
+  const hasBytes = options.bytes !== undefined;
+  const hasLines = options.lines !== undefined;
+  if (hasBytes === hasLines) throw new Error("Choose either bytes or lines");
+  if (tail && !hasBytes) {
+    // The pinned implant reads the whole file before applying a negative
+    // MaxLines value, so line-mode tail cannot have a reliable memory bound.
+    throw new Error("Beacon tail currently supports bounded bytes only");
+  }
+  if (hasBytes) {
+    const count = checkedSliceCount(options.bytes!, BEACON_TEXT_READ_MAX_BYTES, "Byte count");
+    return { MaxBytes: String(tail ? -count : count), MaxLines: "0" };
+  }
+  const count = checkedSliceCount(options.lines!, BEACON_TEXT_READ_MAX_LINES, "Line count");
+  return { MaxBytes: String(BEACON_TEXT_READ_PROBE_BYTES), MaxLines: String(count) };
+}
 
 function isByteArray(value: unknown): value is Uint8Array {
   return ArrayBuffer.isView(value) && (value as Uint8Array).BYTES_PER_ELEMENT === 1 &&
@@ -258,6 +333,76 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
       client.interactBeacon(beaconId).ps(fullInfo, timeoutSeconds),
     ifconfigBeacon: (beaconId: string, timeoutSeconds: number) =>
       client.interactBeacon(beaconId).ifconfig(timeoutSeconds),
+    envBeacon: (beaconId: string, name: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.getEnv({
+        Name: name,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    whoamiBeacon: (beaconId: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.currentTokenOwner({
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    netstatBeacon: (beaconId: string, options: BeaconNetstatOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.netstat({
+        TCP: options.tcp,
+        UDP: options.udp,
+        IP4: options.ip4,
+        IP6: options.ip6,
+        Listening: options.listen,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    mountBeacon: (beaconId: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.mount({
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    memfilesBeacon: (beaconId: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.memfilesList({
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    catBeacon: (beaconId: string, path: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.download({
+        Path: checkedPath(path),
+        RestrictedToFile: true,
+        Recurse: false,
+        MaxBytes: String(BEACON_TEXT_READ_PROBE_BYTES),
+        MaxLines: "0",
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    headBeacon: (beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number) => {
+      const slice = beaconTextSlice(options, false);
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.download({
+        Path: checkedPath(path),
+        RestrictedToFile: true,
+        Recurse: false,
+        ...slice,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal }));
+    },
+    tailBeacon: (beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number) => {
+      const slice = beaconTextSlice(options, true);
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.download({
+        Path: checkedPath(path),
+        RestrictedToFile: true,
+        Recurse: false,
+        ...slice,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal }));
+    },
+    grepBeacon: (beaconId: string, options: BeaconGrepOptions, timeoutSeconds: number) => {
+      if (typeof options.pattern !== "string" || options.pattern.length === 0 || options.pattern.length > 1_024 ||
+        !Number.isSafeInteger(options.before) || options.before < 0 || options.before > 64 ||
+        !Number.isSafeInteger(options.after) || options.after < 0 || options.after > 64) {
+        throw new Error("Invalid beacon grep options");
+      }
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.grep({
+        SearchPattern: options.pattern,
+        Path: checkedPath(options.path),
+        Recursive: options.recursive,
+        LinesBefore: options.before,
+        LinesAfter: options.after,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal }));
+    },
     callBofSession: (sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number) =>
       withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
         Name: createHash("sha256").update(object).digest("hex"),

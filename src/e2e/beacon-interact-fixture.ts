@@ -1,12 +1,21 @@
+import { gzipSync } from "node:zlib";
+
 import { sliverpb } from "sliver-script";
 
 export const FAKE_BEACON_WORKSPACE_PATH = "/Users/e2e/workspace";
 
 export const FAKE_BEACON_TASK_DESCRIPTIONS = {
+  download: "DownloadReq",
+  env: "EnvReq",
+  grep: "GrepReq",
   ifconfig: "IfconfigReq",
   ls: "LsReq",
+  memfiles: "MemfilesListReq",
+  mount: "MountReq",
+  netstat: "NetstatReq",
   ps: "PsReq",
   pwd: "PwdReq",
+  whoami: "CurrentTokenOwnerReq",
 } as const;
 
 export interface FakeBeaconTaskResult {
@@ -99,6 +108,107 @@ export function fakeBeaconIfconfigTaskResult(): FakeBeaconTaskResult {
         MAC: "",
         IPAddresses: ["10.13.37.25/32", "fd00:1337::25/128"],
       }],
+    })),
+  };
+}
+
+export function fakeBeaconEnvTaskResult(name = ""): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.env,
+    result: encode(sliverpb.EnvInfo, sliverpb.EnvInfo.create({
+      Variables: name === "" || name === "BC05_VISIBLE"
+        ? [{ Key: "BC05_VISIBLE", Value: "fixture-value" }]
+        : [],
+    })),
+  };
+}
+
+export function fakeBeaconWhoamiTaskResult(): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.whoami,
+    result: encode(sliverpb.CurrentTokenOwner, sliverpb.CurrentTokenOwner.create({
+      Output: "fixture-token-owner",
+    })),
+  };
+}
+
+export function fakeBeaconNetstatTaskResult(): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.netstat,
+    result: encode(sliverpb.Netstat, sliverpb.Netstat.create({
+      Entries: [{
+        LocalAddr: { Ip: "192.0.2.25", Port: 41001 },
+        RemoteAddr: { Ip: "198.51.100.8", Port: 31337 },
+        SkState: "ESTABLISHED",
+        UID: 501,
+        Protocol: "tcp4",
+      }],
+    })),
+  };
+}
+
+export function fakeBeaconMountTaskResult(): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.mount,
+    result: encode(sliverpb.Mount, sliverpb.Mount.create({
+      Info: [{
+        VolumeName: "disk3s1",
+        VolumeType: "apfs",
+        MountPoint: "/",
+        Label: "Fixture volume",
+        FileSystem: "apfs",
+        UsedSpace: "1048576",
+        FreeSpace: "2097152",
+        TotalSpace: "3145728",
+        MountOptions: "rw",
+      }],
+    })),
+  };
+}
+
+export function fakeBeaconMemfilesTaskResult(): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.memfiles,
+    result: encode(sliverpb.Ls, sliverpb.Ls.create({
+      Path: "/proc/self/fd",
+      Exists: true,
+      Files: [file("73", false, "4096", "-rw-------", "m2-memory-cache.bin")],
+    })),
+  };
+}
+
+export function fakeBeaconTextTaskResult(path: string, text: string): FakeBeaconTaskResult {
+  const content = Buffer.from(text, "utf8");
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.download,
+    result: encode(sliverpb.Download, sliverpb.Download.create({
+      Path: path,
+      Exists: true,
+      IsDir: false,
+      Encoder: "gzip",
+      Data: gzipSync(content),
+      ReadFiles: 1,
+    })),
+  };
+}
+
+export function fakeBeaconGrepTaskResult(path: string, pattern: string): FakeBeaconTaskResult {
+  return {
+    description: FAKE_BEACON_TASK_DESCRIPTIONS.grep,
+    result: encode(sliverpb.Grep, sliverpb.Grep.create({
+      SearchPathAbsolute: path,
+      Results: {
+        [`${path}/notes.txt`]: {
+          IsBinary: false,
+          FileResults: [{
+            LineNumber: "2",
+            Positions: [{ Start: 0, End: pattern.length }],
+            Line: `${pattern} appears in fixture text`,
+            LinesBefore: ["context before"],
+            LinesAfter: ["context after"],
+          }],
+        },
+      },
     })),
   };
 }

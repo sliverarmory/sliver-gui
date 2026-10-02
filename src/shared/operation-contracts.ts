@@ -16,6 +16,15 @@ export const TARGET_OPERATION_IDS = Object.freeze([
   "beacon.filesystem.ls",
   "beacon.process.list",
   "beacon.network.interfaces",
+  "beacon.environment.list",
+  "beacon.identity.whoami",
+  "beacon.network.netstat",
+  "beacon.filesystem.mount",
+  "beacon.filesystem.memfiles",
+  "beacon.filesystem.cat",
+  "beacon.filesystem.head",
+  "beacon.filesystem.tail",
+  "beacon.filesystem.grep",
 ] as const);
 
 export type TargetOperationId = (typeof TARGET_OPERATION_IDS)[number];
@@ -78,6 +87,41 @@ export interface BeaconNetworkInterfacesOperationInput {
   operationId: "beacon.network.interfaces";
 }
 
+export interface BeaconEnvironmentListOperationInput {
+  operationId: "beacon.environment.list";
+  name?: string;
+}
+
+export interface BeaconNetstatOperationInput {
+  operationId: "beacon.network.netstat";
+  tcp: boolean;
+  udp: boolean;
+  ip4: boolean;
+  ip6: boolean;
+  listen: boolean;
+}
+
+export interface BeaconTextFileOperationInput {
+  operationId: "beacon.filesystem.cat";
+  path: string;
+}
+
+export interface BeaconFileEdgeOperationInput {
+  operationId: "beacon.filesystem.head" | "beacon.filesystem.tail";
+  path: string;
+  bytes?: number;
+  lines?: number;
+}
+
+export interface BeaconGrepOperationInput {
+  operationId: "beacon.filesystem.grep";
+  path: string;
+  pattern: string;
+  recursive: boolean;
+  before: number;
+  after: number;
+}
+
 /**
  * The complete renderer-submittable operation surface. The selected target is
  * intentionally absent: the main process resolves it from the calling
@@ -93,7 +137,14 @@ export type TargetOperationInput =
   | BeaconWorkingDirectoryOperationInput
   | BeaconDirectoryListingOperationInput
   | BeaconProcessListOperationInput
-  | BeaconNetworkInterfacesOperationInput;
+  | BeaconNetworkInterfacesOperationInput
+  | BeaconEnvironmentListOperationInput
+  | { operationId: "beacon.identity.whoami" |
+      "beacon.filesystem.mount" | "beacon.filesystem.memfiles" }
+  | BeaconNetstatOperationInput
+  | BeaconTextFileOperationInput
+  | BeaconFileEdgeOperationInput
+  | BeaconGrepOperationInput;
 
 export const TARGET_OPERATION_STATES = Object.freeze([
   "queued",
@@ -356,6 +407,10 @@ export const OPERATION_INPUT_LIMITS = Object.freeze({
   environmentNameLength: 256,
   environmentValueLength: 16_384,
   beaconPathLength: 4_096,
+  beaconPatternLength: 1_024,
+  beaconTextBytes: 65_536,
+  beaconTextLines: 4_096,
+  beaconGrepContextLines: 64,
   maximumIntervalSeconds: 604_800,
   maximumDelaySeconds: 86_400,
   pageCursorLength: 256,
@@ -412,8 +467,15 @@ export function parseTargetOperationInput(value: unknown): TargetOperationInput 
       return parseOpenBeaconSessionInput(record);
     case "beacon.filesystem.pwd":
     case "beacon.network.interfaces":
+    case "beacon.identity.whoami":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
       requireExactKeys(record, ["operationId"]);
       return { operationId };
+    case "beacon.environment.list": {
+      requireAllowedKeys(record, ["operationId", "name"]);
+      return { operationId, ...(record["name"] === undefined ? {} : { name: parseEnvironmentName(record["name"]) }) };
+    }
     case "beacon.filesystem.ls": {
       requireExactKeys(record, ["operationId", "path"]);
       const path = requireString(record["path"], "path", OPERATION_INPUT_LIMITS.beaconPathLength);
@@ -424,7 +486,51 @@ export function parseTargetOperationInput(value: unknown): TargetOperationInput 
       requireExactKeys(record, ["operationId", "fullInfo"]);
       if (typeof record["fullInfo"] !== "boolean") throw new TypeError("fullInfo must be a boolean");
       return { operationId, fullInfo: record["fullInfo"] };
+    case "beacon.network.netstat": {
+      requireExactKeys(record, ["operationId", "tcp", "udp", "ip4", "ip6", "listen"]);
+      for (const name of ["tcp", "udp", "ip4", "ip6", "listen"] as const) {
+        if (typeof record[name] !== "boolean") throw new TypeError(`${name} must be a boolean`);
+      }
+      return { operationId, tcp: record["tcp"] as boolean, udp: record["udp"] as boolean,
+        ip4: record["ip4"] as boolean, ip6: record["ip6"] as boolean, listen: record["listen"] as boolean };
+    }
+    case "beacon.filesystem.cat":
+      requireExactKeys(record, ["operationId", "path"]);
+      return { operationId, path: parseBeaconPath(record["path"]) };
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail": {
+      requireAllowedKeys(record, ["operationId", "path", "bytes", "lines"]);
+      const path = parseBeaconPath(record["path"]);
+      if (record["bytes"] !== undefined && record["lines"] !== undefined) {
+        throw new TypeError("choose either bytes or lines");
+      }
+      const bytes = record["bytes"] === undefined ? undefined :
+        requireInteger(record["bytes"], "bytes", 1, OPERATION_INPUT_LIMITS.beaconTextBytes);
+      const lines = record["lines"] === undefined ? undefined :
+        requireInteger(record["lines"], "lines", 1, OPERATION_INPUT_LIMITS.beaconTextLines);
+      if (bytes === undefined && lines === undefined) throw new TypeError("choose a byte or line count");
+      if (operationId === "beacon.filesystem.tail" && lines !== undefined) {
+        throw new TypeError("beacon tail line mode is unavailable because the target reads the entire file first");
+      }
+      return { operationId, path, ...(bytes === undefined ? {} : { bytes }), ...(lines === undefined ? {} : { lines }) };
+    }
+    case "beacon.filesystem.grep": {
+      requireExactKeys(record, ["operationId", "path", "pattern", "recursive", "before", "after"]);
+      const path = parseBeaconPath(record["path"]);
+      const pattern = requireString(record["pattern"], "pattern", OPERATION_INPUT_LIMITS.beaconPatternLength);
+      if (pattern.includes("\0")) throw new TypeError("pattern must not contain NUL characters");
+      if (typeof record["recursive"] !== "boolean") throw new TypeError("recursive must be a boolean");
+      const before = requireInteger(record["before"], "before", 0, OPERATION_INPUT_LIMITS.beaconGrepContextLines);
+      const after = requireInteger(record["after"], "after", 0, OPERATION_INPUT_LIMITS.beaconGrepContextLines);
+      return { operationId, path, pattern, recursive: record["recursive"], before, after };
+    }
   }
+}
+
+function parseBeaconPath(value: unknown): string {
+  const path = requireString(value, "path", OPERATION_INPUT_LIMITS.beaconPathLength);
+  if (path.includes("\0")) throw new TypeError("path must not contain NUL characters");
+  return path;
 }
 
 export function parseOperationPageRequest(value: unknown): OperationPageRequest {

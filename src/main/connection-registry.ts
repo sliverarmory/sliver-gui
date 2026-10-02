@@ -483,6 +483,7 @@ interface PoolTaskClaim {
   beaconId: string;
   claimedAt: number;
   expectedPingNonce?: number;
+  expectedRequest?: TargetOperationInput;
   requiresResultVerification: boolean;
   recoverable: boolean;
 }
@@ -5804,7 +5805,7 @@ export class ConnectionRegistry {
       reserveTaskClaim: (requestId) => pool.reserveTaskClaim(contentsId, requestId),
       releaseTaskClaimReservation: (requestId) =>
         pool.releaseTaskClaimReservation(contentsId, requestId),
-      claimTask: (taskId, requestId, operationId, beaconId, expectedPingNonce) =>
+      claimTask: (taskId, requestId, operationId, beaconId, expectedPingNonce, expectedRequest) =>
         pool.claimTask(
           contentsId,
           taskId,
@@ -5813,6 +5814,7 @@ export class ConnectionRegistry {
           beaconId,
           expectedPingNonce,
           true,
+          expectedRequest,
         ),
       claimExternalTask: (taskId, requestId, operationId, beaconId) =>
         pool.claimTask(
@@ -5968,6 +5970,7 @@ export class ConnectionRegistry {
         const requiresResultVerification =
           engine?.requiresTaskResultVerification(taskId, beaconId) === true;
         const expectedPingNonce = engine?.expectedPingNonceForTask(taskId, beaconId);
+        const expectedRequest = engine?.expectedRequestForTask(taskId, beaconId);
         return {
           ownership: operation.ownership,
           localRequestId: operation.requestId,
@@ -5979,6 +5982,7 @@ export class ConnectionRegistry {
             ? {
                 operationId: operation.operationId as TargetOperationId,
                 ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
+                ...(expectedRequest === undefined ? {} : { expectedRequest }),
               }
             : {}),
         };
@@ -6000,6 +6004,7 @@ export class ConnectionRegistry {
                 ...(claim.expectedPingNonce === undefined
                   ? {}
                   : { expectedPingNonce: claim.expectedPingNonce }),
+                ...(claim.expectedRequest === undefined ? {} : { expectedRequest: claim.expectedRequest }),
               }
             : {}),
         };
@@ -8230,6 +8235,7 @@ class BackendPool {
     beaconId: string,
     expectedPingNonce?: number,
     requiresResultVerification = true,
+    expectedRequest?: TargetOperationInput,
   ): boolean {
     const now = this.now();
     this.pruneTaskClaims(now);
@@ -8242,6 +8248,7 @@ class BackendPool {
         existing.operationId === operationId &&
         existing.beaconId === beaconId &&
         existing.expectedPingNonce === expectedPingNonce &&
+        JSON.stringify(existing.expectedRequest) === JSON.stringify(expectedRequest) &&
         existing.requiresResultVerification === requiresResultVerification;
     }
     this.pruneSettledInvisibleTaskClaims();
@@ -8253,6 +8260,7 @@ class BackendPool {
       beaconId,
       claimedAt: now,
       ...(expectedPingNonce === undefined ? {} : { expectedPingNonce }),
+      ...(expectedRequest === undefined ? {} : { expectedRequest }),
       requiresResultVerification,
       recoverable: true,
     });

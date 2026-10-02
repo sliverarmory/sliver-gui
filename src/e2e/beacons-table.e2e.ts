@@ -481,6 +481,130 @@ test("BC-03 beacon commands retain read results and reviewed Windows actions in 
   }
 });
 
+test("BC-05 beacon reads use the command picker and exact task output", { timeout: 150_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-beacon-bc05-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  await Promise.all([
+    mkdir(savedConfigDirectory, { recursive: true }),
+    mkdir(managedConfigDirectory, { recursive: true }),
+    mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
+  ]);
+  await writeFile(join(savedConfigDirectory, "beacon-bc05.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+
+  let application: ElectronApplication | undefined;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--beacons-table-fixture",
+        "--beacon-execution-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    const rendererErrors: string[] = [];
+    page.on("pageerror", (error) => rendererErrors.push(error.message));
+    await page.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Beacons"]:visible').click();
+    await page.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
+    const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+    const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+
+    const selectCommand = async (label: string): Promise<void> => {
+      await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
+      const search = page.getByRole("searchbox", { name: "Search beacon commands", exact: true });
+      await search.fill(label);
+      await page.getByRole("option", { name: new RegExp(`^${label} (?:Filesystem|Networking|Environment|Identity)\\b`, "u") }).click();
+    };
+    const submitAndOpen = async (description: string): Promise<Locator> => {
+      const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+      await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+      await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+      const deadline = Date.now() + 10_000;
+      let task: { id: string; beaconId: string; description: string } | undefined;
+      while (!task && Date.now() < deadline) {
+        task = await application!.evaluate((_electron, existing) =>
+          globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => !existing.includes(candidate.id)), knownIds);
+        if (!task) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(task, `${description} must queue from the existing beacon command card: ${await composer.innerText()}`);
+      assert.equal(task.description, description);
+      await page.getByRole("tab", { name: "Task queue", exact: true }).click();
+      const row = queue.getByRole("row").filter({ hasText: task.id });
+      await row.getByText("Pending", { exact: true }).waitFor();
+      await application!.evaluate((_electron, taskId) => globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId), task.id);
+      await row.getByText("Completed", { exact: true }).waitFor();
+      await row.click();
+      await assertBeaconOutputFocus(page, task.id);
+      return page.getByRole("article", { name: `Task output ${task.id}`, exact: true });
+    };
+
+    await selectCommand("Process ID");
+    await composer.getByText("41002", { exact: true }).waitFor();
+    assert.equal(await composer.getByRole("button", { name: "Queue task", exact: true }).count(), 0);
+    await selectCommand("Current identity");
+    await composer.getByText("e2e-user", { exact: true }).waitFor();
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.length), 0);
+
+    await selectCommand("Environment variables");
+    await composer.getByRole("textbox", { name: "Filter by variable name (optional)", exact: true }).fill("BC05_VISIBLE");
+    assert.match(await (await submitAndOpen("EnvReq")).innerText(), /BC05_VISIBLE/u);
+    await selectCommand("Network connections");
+    assert.match(await (await submitAndOpen("NetstatReq")).innerText(), /192\.0\.2\.25/u);
+    await selectCommand("Mounts");
+    assert.match(await (await submitAndOpen("MountReq")).innerText(), /Fixture volume/u);
+    await selectCommand("Read file");
+    assert.match(await composer.innerText(), /File path/u, "Read file must expose its path form");
+    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 cat output/u);
+    await selectCommand("Read file head");
+    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 head output/u);
+    await selectCommand("Read file tail");
+    await composer.getByRole("textbox", { name: "File path", exact: true }).fill("/Users/e2e/workspace/notes.txt");
+    assert.match(await (await submitAndOpen("DownloadReq")).innerText(), /deterministic BC-05 tail output/u);
+    await selectCommand("Search files");
+    await composer.getByRole("textbox", { name: "Search path", exact: true }).fill("/Users/e2e/workspace");
+    await composer.getByRole("textbox", { name: "Search pattern", exact: true }).fill("fixture");
+    assert.match(await (await submitAndOpen("GrepReq")).innerText(), /fixture appears in fixture text/u);
+
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await page.getByRole("menu", { name: "Beacons, switch beacon", exact: true })
+      .getByRole("menuitemradio", { name: /windows-execution-beacon/u }).click();
+    await page.getByRole("heading", { name: "windows-execution-beacon", exact: true }).waitFor();
+    await selectCommand("Current identity");
+    assert.match(await (await submitAndOpen("CurrentTokenOwnerReq")).innerText(), /fixture-token-owner/u);
+
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await page.getByRole("menu", { name: "Beacons, switch beacon", exact: true })
+      .getByRole("menuitemradio", { name: /linux-execution-beacon/u }).click();
+    await page.getByRole("heading", { name: "linux-execution-beacon", exact: true }).waitFor();
+    await selectCommand("Memory files");
+    assert.match(await (await submitAndOpen("MemfilesListReq")).innerText(), /m2-memory-cache\.bin/u);
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 async function managementOperations(page: Page): Promise<TargetOperationRecord[]> {
   return page.evaluate(async () => {
     const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;

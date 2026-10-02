@@ -209,7 +209,7 @@ describe("beacon command matrix", () => {
 
   it("fails closed for unknown, future, unsupported, and unknown-target routes", () => {
     expect(beaconCommandCapability("implant.unknown", beacon())).toEqual({ available: false, reason: "unknown-command" });
-    expect(beaconCommandCapability("implant.netstat", beacon())).toEqual({ available: false, reason: "not-delivered" });
+    expect(beaconCommandCapability("implant.netstat", beacon())).toEqual({ available: true });
     expect(beaconCommandCapability("implant.pwd", beacon())).toEqual({ available: true });
     expect(beaconCommandCapability("implant.pwd", beacon("freebsd"))).toEqual({ available: false, reason: "unsupported-platform" });
     expect(beaconCommandCapability("implant.pwd", beacon("linux", "unknown"))).toEqual({ available: false, reason: "unsupported-architecture" });

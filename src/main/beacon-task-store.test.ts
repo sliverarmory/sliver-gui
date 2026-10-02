@@ -1,6 +1,7 @@
 // @vitest-environment node
 
 import { clientpb, sliverpb } from "sliver-script";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 
 import type { ExecutionOperationId } from "../shared/execution-contracts.js";
@@ -1441,3 +1442,95 @@ function fakeClient(tasks: clientpb.BeaconTasks, fetched?: clientpb.BeaconTask) 
     })),
   };
 }
+
+describe("BC-04 task-bound M2 read results", () => {
+  it("redacts sensitive environment values and rejects a mismatched saved request", async () => {
+    const saved = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 66,
+      Data: Buffer.from(sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
+        Name: "", Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+      })).finish()),
+    })).finish());
+    const response = Buffer.from(sliverpb.EnvInfo.encode(sliverpb.EnvInfo.create({
+      Variables: [{ Key: "PATH", Value: "/usr/bin" }, { Key: "API_TOKEN", Value: "private-value" }],
+    })).finish());
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task("env_exact", "completed", 10, "EnvReq")] });
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: saved, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    const result = await store.detail(beaconId, "env_exact", () => ({
+      ownership: localOwnership, operationId: "beacon.environment.list",
+      expectedRequest: { operationId: "beacon.environment.list" },
+    }));
+    expect(result.disposition).toMatchObject({ kind: "table", rows: [
+      ["PATH", "/usr/bin", "No"], ["API_TOKEN", "[redacted]", "Yes"],
+    ] });
+    expect(JSON.stringify(result)).not.toContain("private-value");
+    expect(saved.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+
+    const wrong = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 66, Data: Buffer.from(sliverpb.EnvReq.encode(sliverpb.EnvReq.create({
+        Name: "OTHER", Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+      })).finish()),
+    })).finish());
+    const rejected = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: wrong,
+      Response: Buffer.from(sliverpb.EnvInfo.encode(sliverpb.EnvInfo.create()).finish()),
+    }));
+    const rejectedStore = new BeaconTaskStore(rejected);
+    await rejectedStore.refresh(beaconId);
+    const detail = await rejectedStore.detail(beaconId, "env_exact", () => ({
+      ownership: localOwnership, operationId: "beacon.environment.list",
+      expectedRequest: { operationId: "beacon.environment.list" },
+    }));
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.disposition).toBeUndefined();
+  });
+
+  it("bounds gzip text, refuses invalid UTF-8, and never exposes raw artifact bytes", async () => {
+    const createRequest = () => Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: 7, Data: Buffer.from(sliverpb.DownloadReq.encode(sliverpb.DownloadReq.create({
+        Path: "/tmp/readme", MaxBytes: "65537", MaxLines: "0", RestrictedToFile: true,
+        Request: { Async: true, BeaconID: beaconId, SessionID: "" },
+      })).finish()),
+    })).finish());
+    const request = createRequest();
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task("cat_exact", "completed", 10, "DownloadReq")] });
+    const response = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
+      Exists: true, Path: "/tmp/readme", Encoder: "gzip", Data: gzipSync(Buffer.from("hello beacon")),
+    })).finish());
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: request, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    const owner: TaskOwnershipResolver = () => ({ ownership: localOwnership, operationId: "beacon.filesystem.cat",
+      expectedRequest: { operationId: "beacon.filesystem.cat", path: "/tmp/readme" } });
+    const detail = await store.detail(beaconId, "cat_exact", owner);
+    expect(detail.disposition).toMatchObject({ kind: "inline-text", text: "hello beacon", truncated: false });
+    expect(JSON.stringify(detail)).not.toContain("gzip");
+
+    const tooLarge = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
+      Exists: true, Encoder: "gzip", Data: gzipSync(Buffer.alloc(65_537, 65)),
+    })).finish());
+    const oversizedClient = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: createRequest(), Response: tooLarge,
+    }));
+    const oversizedStore = new BeaconTaskStore(oversizedClient);
+    await oversizedStore.refresh(beaconId);
+    expect((await oversizedStore.detail(beaconId, "cat_exact", owner)).errorKind).toBe("decode-uncertain");
+
+    const binary = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
+      Exists: true, Data: Buffer.from([0xff, 0xfe]),
+    })).finish());
+    const binaryClient = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: createRequest(), Response: binary,
+    }));
+    const binaryStore = new BeaconTaskStore(binaryClient);
+    await binaryStore.refresh(beaconId);
+    expect((await binaryStore.detail(beaconId, "cat_exact", owner)).errorKind).toBe("decode-uncertain");
+  });
+});

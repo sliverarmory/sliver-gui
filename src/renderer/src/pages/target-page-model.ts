@@ -31,6 +31,15 @@ const OPERATION_LABELS: Readonly<Record<TargetOperationId, string>> = {
   "beacon.filesystem.ls": "List directory",
   "beacon.process.list": "List processes",
   "beacon.network.interfaces": "List network interfaces",
+  "beacon.environment.list": "List environment variables",
+  "beacon.identity.whoami": "Read current identity",
+  "beacon.network.netstat": "List network connections",
+  "beacon.filesystem.mount": "List mounts",
+  "beacon.filesystem.memfiles": "List memory files",
+  "beacon.filesystem.cat": "Read file",
+  "beacon.filesystem.head": "Read file head",
+  "beacon.filesystem.tail": "Read file tail",
+  "beacon.filesystem.grep": "Search files",
 };
 
 const SESSION_OPERATION_LABELS = {

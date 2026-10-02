@@ -568,6 +568,13 @@ describe("OperationEngine", () => {
     [{ operationId: "beacon.filesystem.ls", path: "/tmp" }, "lsBeacon", 60],
     [{ operationId: "beacon.process.list", fullInfo: true }, "psBeacon", 60],
     [{ operationId: "beacon.network.interfaces" }, "ifconfigBeacon", 30],
+    [{ operationId: "beacon.environment.list" }, "envBeacon", 30],
+    [{ operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true, ip6: false, listen: true }, "netstatBeacon", 60],
+    [{ operationId: "beacon.filesystem.mount" }, "mountBeacon", 30],
+    [{ operationId: "beacon.filesystem.cat", path: "/tmp/readme.txt" }, "catBeacon", 60],
+    [{ operationId: "beacon.filesystem.head", path: "/tmp/readme.txt", lines: 8 }, "headBeacon", 60],
+    [{ operationId: "beacon.filesystem.tail", path: "/tmp/readme.txt", bytes: 512 }, "tailBeacon", 60],
+    [{ operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3 }, "grepBeacon", 60],
   ];
 
   it.each(asyncCases)("correlates an exact async task ID for %s", async (input, method, timeout) => {
@@ -596,6 +603,52 @@ describe("OperationEngine", () => {
     expect(harness.client.lsBeacon).toHaveBeenCalledWith(harness.active.ref.id, "/var/tmp", 60);
     expect(harness.client.psBeacon).toHaveBeenCalledWith(harness.active.ref.id, true, 60);
     expect(harness.client.ifconfigBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
+  });
+
+  it("dispatches BC-05 read options only through named client methods", async () => {
+    const harness = createHarness("beacon");
+    const targetId = harness.active.ref.id;
+
+    await harness.engine.submit({ operationId: "beacon.environment.list", name: "HOME" });
+    await harness.engine.submit({ operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true, ip6: false, listen: true });
+    await harness.engine.submit({ operationId: "beacon.filesystem.mount" });
+    await harness.engine.submit({ operationId: "beacon.filesystem.cat", path: "/tmp/readme.txt" });
+    await harness.engine.submit({ operationId: "beacon.filesystem.head", path: "/tmp/readme.txt", lines: 8 });
+    await harness.engine.submit({ operationId: "beacon.filesystem.tail", path: "/tmp/readme.txt", bytes: 512 });
+    await harness.engine.submit({
+      operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3,
+    });
+
+    expect(harness.client.envBeacon).toHaveBeenCalledWith(targetId, "HOME", 30);
+    expect(harness.client.netstatBeacon).toHaveBeenCalledWith(targetId, {
+      tcp: true, udp: false, ip4: true, ip6: false, listen: true,
+    }, 60);
+    expect(harness.client.mountBeacon).toHaveBeenCalledWith(targetId, 30);
+    expect(harness.client.catBeacon).toHaveBeenCalledWith(targetId, "/tmp/readme.txt", 60);
+    expect(harness.client.headBeacon).toHaveBeenCalledWith(targetId, "/tmp/readme.txt", { lines: 8 }, 60);
+    expect(harness.client.tailBeacon).toHaveBeenCalledWith(targetId, "/tmp/readme.txt", { bytes: 512 }, 60);
+    expect(harness.client.grepBeacon).toHaveBeenCalledWith(targetId, {
+      path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3,
+    }, 60);
+  });
+
+  it("gates BC-05 platform reads before client dispatch", async () => {
+    const harness = createHarness("beacon");
+    await harness.engine.submit({ operationId: "beacon.filesystem.memfiles" });
+    await harness.engine.submit({ operationId: "beacon.identity.whoami" });
+    expect(harness.client.memfilesBeacon).not.toHaveBeenCalled();
+    expect(harness.client.whoamiBeacon).not.toHaveBeenCalled();
+
+    harness.active.summary.os = "linux";
+    await expect(harness.engine.submit({ operationId: "beacon.filesystem.memfiles" }))
+      .resolves.toMatchObject({ state: "submitted" });
+    expect(harness.client.memfilesBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
+
+    harness.active.summary.os = "windows";
+    harness.client.whoamiBeacon.mockResolvedValueOnce(asyncResponse("windows_whoami_task"));
+    await expect(harness.engine.submit({ operationId: "beacon.identity.whoami" }))
+      .resolves.toMatchObject({ state: "submitted" });
+    expect(harness.client.whoamiBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
   });
 
   it("rejects a directory-list acknowledgement for a different beacon", async () => {
@@ -1532,6 +1585,15 @@ function fakeClient(mode: TargetMode) {
     lsBeacon: vi.fn(async () => defaultTask),
     psBeacon: vi.fn(async () => defaultTask),
     ifconfigBeacon: vi.fn(async () => defaultTask),
+    envBeacon: vi.fn(async () => defaultTask),
+    whoamiBeacon: vi.fn(async () => defaultTask),
+    netstatBeacon: vi.fn(async () => defaultTask),
+    mountBeacon: vi.fn(async () => defaultTask),
+    memfilesBeacon: vi.fn(async () => defaultTask),
+    catBeacon: vi.fn(async () => defaultTask),
+    headBeacon: vi.fn(async () => defaultTask),
+    tailBeacon: vi.fn(async () => defaultTask),
+    grepBeacon: vi.fn(async () => defaultTask),
   } as unknown as OperationEngineHost["client"] & Record<OperationClientMethod, ReturnType<typeof vi.fn>>;
 }
 
@@ -1566,7 +1628,16 @@ type OperationClientMethod =
   | "pwdBeacon"
   | "lsBeacon"
   | "psBeacon"
-  | "ifconfigBeacon";
+  | "ifconfigBeacon"
+  | "envBeacon"
+  | "whoamiBeacon"
+  | "netstatBeacon"
+  | "mountBeacon"
+  | "memfilesBeacon"
+  | "catBeacon"
+  | "headBeacon"
+  | "tailBeacon"
+  | "grepBeacon";
 
 function resolvedTarget(mode: TargetMode): ResolvedOperationTarget {
   const summary = targetSummary(mode);
@@ -1683,5 +1754,14 @@ const _closedInputProof: TargetOperationInput[] = [
   { operationId: "beacon.filesystem.ls", path: "/tmp" },
   { operationId: "beacon.process.list", fullInfo: true },
   { operationId: "beacon.network.interfaces" },
+  { operationId: "beacon.environment.list", name: "HOME" },
+  { operationId: "beacon.identity.whoami" },
+  { operationId: "beacon.network.netstat", tcp: true, udp: false, ip4: true, ip6: false, listen: true },
+  { operationId: "beacon.filesystem.mount" },
+  { operationId: "beacon.filesystem.memfiles" },
+  { operationId: "beacon.filesystem.cat", path: "/tmp/readme.txt" },
+  { operationId: "beacon.filesystem.head", path: "/tmp/readme.txt", lines: 8 },
+  { operationId: "beacon.filesystem.tail", path: "/tmp/readme.txt", bytes: 512 },
+  { operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3 },
 ];
 void _closedInputProof;

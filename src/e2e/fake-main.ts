@@ -34,6 +34,7 @@ import {
   ConnectionRegistry,
   type SliverClientAdapter,
 } from "../main/connection-registry.js";
+import { BEACON_TEXT_READ_PROBE_BYTES } from "../main/sliver-client-adapter.js";
 import { loadTerminalRuntime } from "../main/terminal-runtime.js";
 import { resolveManagedServerFromDeployments } from "../main/managed-server-resolver.js";
 import type { ManagedSshTarget } from "../shared/ssh-contracts.js";
@@ -58,10 +59,17 @@ import {
   E2E_AZURE_TENANT_ID,
 } from "./cloud-deployment-fixture.js";
 import {
+  fakeBeaconEnvTaskResult,
+  fakeBeaconGrepTaskResult,
   fakeBeaconIfconfigTaskResult,
   fakeBeaconLsTaskResult,
+  fakeBeaconMemfilesTaskResult,
+  fakeBeaconMountTaskResult,
+  fakeBeaconNetstatTaskResult,
   fakeBeaconPsTaskResult,
   fakeBeaconPwdTaskResult,
+  fakeBeaconTextTaskResult,
+  fakeBeaconWhoamiTaskResult,
 } from "./beacon-interact-fixture.js";
 import { createCloudDnsFixture } from "./cloud-dns-fixture.js";
 
@@ -1469,6 +1477,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       requireBeacon(beaconId);
       return environmentResponse(name);
     },
+    async envBeacon(beaconId: string, name: string) {
+      record("envBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconEnvTaskResult(name);
+      return sliverpb.EnvInfo.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          66, sliverpb.EnvReq.encode(sliverpb.EnvReq.create({ Name: name, Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
+      });
+    },
     async setEnvSession(sessionId: string, key: string, value: string) {
       record("setEnvSession");
       requireSession(sessionId);
@@ -1528,6 +1546,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         ),
       });
     },
+    async whoamiBeacon(beaconId: string) {
+      record("whoamiBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconWhoamiTaskResult();
+      return sliverpb.CurrentTokenOwner.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          100, sliverpb.CurrentTokenOwnerReq.encode(sliverpb.CurrentTokenOwnerReq.create({ Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
+      });
+    },
     async listEnvSession(sessionId: string) {
       record("listEnvSession");
       requireSession(sessionId);
@@ -1579,6 +1607,19 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Response: response(false),
       });
     },
+    async netstatBeacon(beaconId: string, options: { tcp: boolean; udp: boolean; ip4: boolean; ip6: boolean; listen: boolean }) {
+      record("netstatBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconNetstatTaskResult();
+      return sliverpb.Netstat.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          49, sliverpb.NetstatReq.encode(sliverpb.NetstatReq.create({
+            TCP: options.tcp, UDP: options.udp, IP4: options.ip4, IP6: options.ip6,
+            Listening: options.listen, Request: fakeBeaconRequest(beaconId),
+          })).finish(),
+        )),
+      });
+    },
     async pwdSession(sessionId: string) {
       record("pwdSession");
       requireSession(sessionId);
@@ -1590,6 +1631,73 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       const fixture = fakeBeaconPwdTaskResult();
       return sliverpb.Pwd.create({
         Response: queueTask(beaconId, fixture.description, fixture.result),
+      });
+    },
+    async mountBeacon(beaconId: string) {
+      record("mountBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconMountTaskResult();
+      return sliverpb.Mount.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          134, sliverpb.MountReq.encode(sliverpb.MountReq.create({ Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
+      });
+    },
+    async memfilesBeacon(beaconId: string) {
+      record("memfilesBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconMemfilesTaskResult();
+      return sliverpb.Ls.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          115, sliverpb.MemfilesListReq.encode(sliverpb.MemfilesListReq.create({ Request: fakeBeaconRequest(beaconId) })).finish(),
+        )),
+      });
+    },
+    async catBeacon(beaconId: string, path: string) {
+      record("catBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconTextTaskResult(path, "deterministic BC-05 cat output\n");
+      return sliverpb.Download.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, fakeBeaconDownloadRequest(beaconId, path, String(BEACON_TEXT_READ_PROBE_BYTES), "0")),
+      });
+    },
+    async headBeacon(beaconId: string, path: string, options: { bytes?: number; lines?: number }) {
+      record("headBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconTextTaskResult(path, "deterministic BC-05 head output\n");
+      return sliverpb.Download.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, fakeBeaconDownloadRequest(
+          beaconId, path,
+          String(options.bytes ?? BEACON_TEXT_READ_PROBE_BYTES),
+          String(options.lines ?? 0),
+        )),
+      });
+    },
+    async tailBeacon(beaconId: string, path: string, options: { bytes?: number; lines?: number }) {
+      record("tailBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconTextTaskResult(path, "deterministic BC-05 tail output\n");
+      return sliverpb.Download.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, fakeBeaconDownloadRequest(
+          beaconId, path, String(-options.bytes!), "0",
+        )),
+      });
+    },
+    async grepBeacon(beaconId: string, options: { path: string; pattern: string; recursive: boolean; before: number; after: number }) {
+      record("grepBeacon");
+      requireBeacon(beaconId);
+      const fixture = fakeBeaconGrepTaskResult(options.path, options.pattern);
+      return sliverpb.Grep.create({
+        Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
+          129, sliverpb.GrepReq.encode(sliverpb.GrepReq.create({
+            Path: options.path,
+            SearchPattern: options.pattern,
+            Recursive: options.recursive,
+            LinesBefore: options.before,
+            LinesAfter: options.after,
+            Request: fakeBeaconRequest(beaconId),
+          })).finish(),
+        )),
       });
     },
     async cdSession(sessionId: string, path: string) {
@@ -2498,7 +2606,34 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     return sliverpb.EnvInfo.create({ Variables: entries, Response: response(false) });
   }
 
-  function queueTask(beaconId: string, description: string, result: Buffer) {
+  function fakeBeaconRequest(beaconId: string) {
+    return {
+      Async: true,
+      BeaconID: beaconId,
+      SessionID: "",
+      Timeout: "60000000000",
+    };
+  }
+
+  function beaconTaskRequest(type: number, data: Uint8Array): Buffer {
+    return Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: type,
+      Data: Buffer.from(data),
+    })).finish());
+  }
+
+  function fakeBeaconDownloadRequest(beaconId: string, path: string, maxBytes: string, maxLines: string): Buffer {
+    return beaconTaskRequest(7, sliverpb.DownloadReq.encode(sliverpb.DownloadReq.create({
+      Path: path,
+      RestrictedToFile: true,
+      Recurse: false,
+      MaxBytes: maxBytes,
+      MaxLines: maxLines,
+      Request: fakeBeaconRequest(beaconId),
+    })).finish());
+  }
+
+  function queueTask(beaconId: string, description: string, result: Buffer, request?: Buffer) {
     const id = `m1_task_${nextTaskId++}`;
     const createdAt = epochSeconds();
     const task = clientpb.BeaconTask.create({
@@ -2508,7 +2643,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       State: "pending",
       SentAt: "0",
       CompletedAt: "0",
-      Request: Buffer.from("FAKE_TASK_REQUEST_SECRET_M1_DO_NOT_RENDER"),
+      Request: request ?? Buffer.from("FAKE_TASK_REQUEST_SECRET_M1_DO_NOT_RENDER"),
       Response: result,
       Description: description,
     });

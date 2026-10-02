@@ -34,7 +34,7 @@ import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 
 import type { PageSummary } from "../../../shared/contracts";
-import type { TargetCapabilityId, TargetCapabilityState, TargetRef } from "../../../shared/target-contracts";
+import type { BeaconSummary, TargetCapabilityId, TargetCapabilityState, TargetRef } from "../../../shared/target-contracts";
 import type { ExecutionReadResult } from "../../../shared/execution-contracts";
 import type {
   BeaconTaskDetail,
@@ -56,6 +56,18 @@ export const BEACON_INTERACTION_COMMAND_IDS = [
   "beacon.filesystem.ls",
   "beacon.process.list",
   "beacon.network.interfaces",
+  "beacon.environment.list",
+  "beacon.identity.pid",
+  "beacon.identity.uid",
+  "beacon.identity.gid",
+  "beacon.identity.whoami",
+  "beacon.network.netstat",
+  "beacon.filesystem.mount",
+  "beacon.filesystem.memfiles",
+  "beacon.filesystem.cat",
+  "beacon.filesystem.head",
+  "beacon.filesystem.tail",
+  "beacon.filesystem.grep",
   "target.ping",
   "target.rename",
   "target.env-set",
@@ -74,7 +86,7 @@ export type BeaconInteractionCommandId = (typeof BEACON_INTERACTION_COMMAND_IDS)
 
 interface BeaconCommandPresentation {
   id: BeaconInteractionCommandId;
-  group: "Execution" | "Filesystem" | "Processes" | "Networking" | "Beacon";
+  group: "Execution" | "Filesystem" | "Processes" | "Networking" | "Identity" | "Environment" | "Beacon";
   label: string;
   description: string;
   keywords: readonly string[];
@@ -122,6 +134,18 @@ const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
     keywords: ["ifconfig", "ipconfig", "addresses", "mac"],
     icon: faNetworkWired,
   },
+  { id: "beacon.environment.list", group: "Environment", label: "Environment variables", description: "Read variables in the beacon process environment.", keywords: ["env", "environment", "variables"], icon: faTerminal },
+  { id: "beacon.identity.pid", group: "Identity", label: "Process ID", description: "Show the PID reported in the latest beacon inventory.", keywords: ["getpid", "pid", "process"], icon: faMicrochip },
+  { id: "beacon.identity.uid", group: "Identity", label: "User ID", description: "Show the UID reported in the latest beacon inventory.", keywords: ["getuid", "uid", "user"], icon: faTerminal },
+  { id: "beacon.identity.gid", group: "Identity", label: "Group ID", description: "Show the GID reported in the latest beacon inventory.", keywords: ["getgid", "gid", "group"], icon: faTerminal },
+  { id: "beacon.identity.whoami", group: "Identity", label: "Current identity", description: "Read the Windows token owner, or show the latest reported username.", keywords: ["whoami", "username", "token", "identity"], icon: faTerminal },
+  { id: "beacon.network.netstat", group: "Networking", label: "Network connections", description: "Read a bounded network connection inventory.", keywords: ["netstat", "tcp", "udp", "sockets"], icon: faNetworkWired },
+  { id: "beacon.filesystem.mount", group: "Filesystem", label: "Mounts", description: "Read mounted filesystems and volumes.", keywords: ["mount", "volumes", "drives"], icon: faFolderOpen },
+  { id: "beacon.filesystem.memfiles", group: "Filesystem", label: "Memory files", description: "List memory files on a Linux beacon.", keywords: ["memfiles", "memory", "files"], icon: faFolderOpen },
+  { id: "beacon.filesystem.cat", group: "Filesystem", label: "Read file", description: "Read bounded text from a file.", keywords: ["cat", "file", "text"], icon: faFolderOpen },
+  { id: "beacon.filesystem.head", group: "Filesystem", label: "Read file head", description: "Read the first lines or bytes of a file.", keywords: ["head", "file", "lines", "bytes"], icon: faFolderOpen },
+  { id: "beacon.filesystem.tail", group: "Filesystem", label: "Read file tail", description: "Read the last bounded bytes of a file.", keywords: ["tail", "file", "bytes"], icon: faFolderOpen },
+  { id: "beacon.filesystem.grep", group: "Filesystem", label: "Search files", description: "Search files for a pattern with bounded output.", keywords: ["grep", "search", "pattern"], icon: faFolderOpen },
   {
     id: "target.ping",
     group: "Beacon",
@@ -196,11 +220,62 @@ const DEFAULT_MANAGEMENT_DRAFT: BeaconManagementDraft = {
   delaySeconds: "0",
 };
 
-const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, BeaconExecutionSelection>, TargetCapabilityId>> = {
+interface BeaconReadDraft {
+  environmentName: string;
+  path: string;
+  pattern: string;
+  count: string;
+  countBytes: boolean;
+  recursive: boolean;
+  before: string;
+  after: string;
+  tcp: boolean;
+  udp: boolean;
+  ip4: boolean;
+  ip6: boolean;
+  listen: boolean;
+}
+
+const DEFAULT_READ_DRAFT: BeaconReadDraft = {
+  environmentName: "",
+  path: "",
+  pattern: "",
+  count: "10",
+  countBytes: false,
+  recursive: false,
+  before: "0",
+  after: "0",
+  tcp: true,
+  udp: false,
+  ip4: true,
+  ip6: false,
+  listen: false,
+};
+
+const NETSTAT_OPTION_LABELS = {
+  tcp: "TCP",
+  udp: "UDP",
+  ip4: "IPv4",
+  ip6: "IPv6",
+  listen: "Include listening sockets",
+} as const;
+
+type BeaconMetadataCommandId = "beacon.identity.pid" | "beacon.identity.uid" | "beacon.identity.gid";
+
+const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, BeaconExecutionSelection | BeaconMetadataCommandId>, TargetCapabilityId>> = {
   "beacon.filesystem.pwd": "target.task.execute",
   "beacon.filesystem.ls": "target.task.execute",
   "beacon.process.list": "target.task.execute",
   "beacon.network.interfaces": "target.task.execute",
+  "beacon.environment.list": "target.task.execute",
+  "beacon.identity.whoami": "target.task.execute",
+  "beacon.network.netstat": "target.task.execute",
+  "beacon.filesystem.mount": "target.task.execute",
+  "beacon.filesystem.memfiles": "target.task.execute",
+  "beacon.filesystem.cat": "target.task.execute",
+  "beacon.filesystem.head": "target.task.execute",
+  "beacon.filesystem.tail": "target.task.execute",
+  "beacon.filesystem.grep": "target.task.execute",
   "target.ping": "target.ping",
   "target.rename": "target.rename",
   "target.env-set": "target.environment.write",
@@ -211,6 +286,7 @@ const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, 
 
 export interface BeaconInteractionWorkspaceProps {
   expectedTarget: TargetRef;
+  beacon: BeaconSummary;
   targetIdentity: string;
   capabilities: readonly TargetCapabilityState[];
   canQueue: boolean;
@@ -230,6 +306,7 @@ export interface BeaconInteractionWorkspaceProps {
 
 export function BeaconInteractionWorkspace({
   expectedTarget,
+  beacon,
   targetIdentity,
   capabilities,
   canQueue,
@@ -250,6 +327,7 @@ export function BeaconInteractionWorkspace({
   const [path, setPath] = useState(".");
   const [fullInfo, setFullInfo] = useState(false);
   const [managementDraft, setManagementDraft] = useState<BeaconManagementDraft>(DEFAULT_MANAGEMENT_DRAFT);
+  const [readDraft, setReadDraft] = useState<BeaconReadDraft>(DEFAULT_READ_DRAFT);
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submittedOperation, setSubmittedOperation] = useState<TargetOperationRecord>();
@@ -267,8 +345,15 @@ export function BeaconInteractionWorkspace({
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
   const isExecutionCommand = isBeaconExecutionCommandId(commandId);
   const isManagementCommand = isBeaconManagementCommandId(commandId);
-  const capability = isExecutionCommand ? undefined : capabilityFor(capabilities, COMMAND_CAPABILITIES[commandId]);
-  const commandAvailable = capability?.available === true && (isManagementCommand ? expectedTarget.mode === "beacon" : canQueue);
+  const metadataFact = beaconMetadataFact(commandId, beacon, expectedTarget);
+  const capability = isExecutionCommand || isBeaconMetadataCommandId(commandId)
+    ? undefined
+    : capabilityFor(capabilities, COMMAND_CAPABILITIES[commandId]);
+  const commandAvailable = metadataFact === undefined && capability?.available === true &&
+    beacon.id === expectedTarget.id &&
+    (isManagementCommand ? expectedTarget.mode === "beacon" : canQueue) &&
+    (commandId !== "beacon.filesystem.memfiles" || beacon.os.toLocaleLowerCase() === "linux") &&
+    (commandId !== "beacon.identity.whoami" || beacon.os.toLocaleLowerCase() === "windows");
   const updatedOperation = submittedOperation && operationUpdates.find((operation) =>
     operation.requestId === submittedOperation.requestId &&
     sameTarget(operation.target, submittedOperation.target) &&
@@ -280,6 +365,7 @@ export function BeaconInteractionWorkspace({
     setPath(".");
     setFullInfo(false);
     setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
+    setReadDraft(DEFAULT_READ_DRAFT);
     setSubmitError(undefined);
     setIsSubmitting(false);
     setSubmittedOperation(undefined);
@@ -307,10 +393,11 @@ export function BeaconInteractionWorkspace({
   }, [queuedTaskId, loadOutput, tasks]);
 
   const submit = async (): Promise<void> => {
+    if (metadataFact) return;
     const submittedIdentity = targetIdentity;
     let input: TargetOperationInput;
     try {
-      input = beaconCommandInput(commandId, path, fullInfo, managementDraft);
+      input = beaconCommandInput(commandId, path, fullInfo, managementDraft, readDraft);
       setSubmitError(undefined);
     } catch (validationError) {
       setSubmitError(errorMessage(validationError));
@@ -386,7 +473,7 @@ export function BeaconInteractionWorkspace({
           </div>
 
           <div className="flex flex-col gap-4 border-t border-separator px-5 py-5">
-            <Button
+            {!metadataFact ? <Button
               fullWidth
               {...(isExecutionCommand ? { form: executionFormId } : {})}
               type={isExecutionCommand ? "submit" : "button"}
@@ -395,7 +482,7 @@ export function BeaconInteractionWorkspace({
               {...(isExecutionCommand ? {} : { onPress: () => void submit() })}
             >
               <FontAwesomeIcon aria-hidden icon={faListCheck} /> {commandId === "target.rename" ? "Rename beacon" : "Queue task"}
-            </Button>
+            </Button> : null}
             <Autocomplete
               fullWidth
               placeholder="Search beacon commands"
@@ -408,6 +495,7 @@ export function BeaconInteractionWorkspace({
                 if (!isBeaconInteractionCommandId(nextId)) return;
                 setCommandId(nextId);
                 setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
+                setReadDraft({ ...DEFAULT_READ_DRAFT, count: nextId === "beacon.filesystem.tail" ? "4096" : "10", countBytes: nextId === "beacon.filesystem.tail" });
                 setExecutionState({ isPending: false, isAvailable: false });
                 setSubmitError(undefined);
               }}
@@ -470,7 +558,15 @@ export function BeaconInteractionWorkspace({
                 </div>
               </div>
 
-              {commandId !== "beacon.filesystem.pwd" && commandId !== "beacon.network.interfaces" && commandId !== "target.ping" ? (
+              {metadataFact ? (
+                <div className="mt-4 rounded-xl border border-separator bg-surface px-4 py-3" role="status">
+                  <p className="text-xs text-muted">{metadataFact.label} · latest server target inventory</p>
+                  <p className="mt-1 break-all font-mono text-sm text-foreground">{metadataFact.exact ? metadataFact.value ?? "Not reported" : "Waiting for selected beacon inventory"}</p>
+                  {metadataFact.exact ? <p className="mt-2 text-xs text-muted">Last check-in: {formatTimestamp(beacon.lastCheckinAt)}. This value was reported by the server and is not a new task result.</p> : null}
+                </div>
+              ) : null}
+
+              {commandId !== "beacon.filesystem.pwd" && commandId !== "beacon.network.interfaces" && commandId !== "target.ping" && !metadataFact ? (
                 <div className="mt-4">
                   {commandId === "beacon.filesystem.ls" ? (
                     <Field
@@ -511,13 +607,62 @@ export function BeaconInteractionWorkspace({
                   {commandId === "beacon.open-session" ? (
                     <Field label="Delay seconds" type="number" min={0} value={managementDraft.delaySeconds} onChange={(value) => setManagementDraft((current) => ({ ...current, delaySeconds: value }))} />
                   ) : null}
+                  {commandId === "beacon.environment.list" ? (
+                    <div className="space-y-2">
+                      <Field label="Filter by variable name (optional)" mono value={readDraft.environmentName} onChange={(environmentName) => setReadDraft((current) => ({ ...current, environmentName }))} />
+                      <p className="text-xs text-muted">Sensitive values stay hidden in task history.</p>
+                    </div>
+                  ) : null}
+                  {commandId === "beacon.filesystem.cat" || commandId === "beacon.filesystem.head" || commandId === "beacon.filesystem.tail" || commandId === "beacon.filesystem.grep" ? (
+                    <Field label={commandId === "beacon.filesystem.grep" ? "Search path" : "File path"} mono required value={readDraft.path} onChange={(value) => setReadDraft((current) => ({ ...current, path: value }))} />
+                  ) : null}
+                  {commandId === "beacon.filesystem.head" || commandId === "beacon.filesystem.tail" ? (
+                    <div className="mt-3 flex flex-col gap-3">
+                      {commandId === "beacon.filesystem.head" ? (
+                        <Switch aria-label="Count bytes instead of lines" isSelected={readDraft.countBytes} onChange={(countBytes) => setReadDraft((current) => ({ ...current, countBytes, count: countBytes ? "4096" : "10" }))}>
+                          <Switch.Content className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Count bytes instead of lines</span></Switch.Content>
+                          <Switch.Control><Switch.Thumb /></Switch.Control>
+                        </Switch>
+                      ) : null}
+                      <Field label={commandId === "beacon.filesystem.tail" || readDraft.countBytes ? "Bytes" : "Lines"} type="number" min={1} max={commandId === "beacon.filesystem.head" && !readDraft.countBytes ? 4096 : 65536} value={readDraft.count} onChange={(value) => setReadDraft((current) => ({ ...current, count: value }))} />
+                    </div>
+                  ) : null}
+                  {commandId === "beacon.filesystem.grep" ? (
+                    <div className="mt-3 flex flex-col gap-3">
+                      <Field label="Search pattern" mono required value={readDraft.pattern} onChange={(value) => setReadDraft((current) => ({ ...current, pattern: value }))} />
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <Field label="Lines before" type="number" min={0} max={64} value={readDraft.before} onChange={(value) => setReadDraft((current) => ({ ...current, before: value }))} />
+                        <Field label="Lines after" type="number" min={0} max={64} value={readDraft.after} onChange={(value) => setReadDraft((current) => ({ ...current, after: value }))} />
+                      </div>
+                      <Switch aria-label="Search recursively" isSelected={readDraft.recursive} onChange={(recursive) => setReadDraft((current) => ({ ...current, recursive }))}>
+                        <Switch.Content className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Search recursively</span></Switch.Content>
+                        <Switch.Control><Switch.Thumb /></Switch.Control>
+                      </Switch>
+                    </div>
+                  ) : null}
+                  {commandId === "beacon.network.netstat" ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {(["tcp", "udp", "ip4", "ip6", "listen"] as const).map((option) => (
+                        <Switch aria-label={NETSTAT_OPTION_LABELS[option]} isSelected={readDraft[option]} key={option} onChange={(selected) => setReadDraft((current) => ({ ...current, [option]: selected }))}>
+                          <Switch.Content className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">{NETSTAT_OPTION_LABELS[option]}</span></Switch.Content>
+                          <Switch.Control><Switch.Thumb /></Switch.Control>
+                        </Switch>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>}
 
-            {!isExecutionCommand && !commandAvailable ? (
+            {!isExecutionCommand && !metadataFact && !commandAvailable ? (
               <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs text-warning-soft-foreground" role="status">
-                {isManagementCommand
+                {beacon.id !== expectedTarget.id
+                  ? "Wait for the selected beacon inventory to refresh."
+                  : commandId === "beacon.filesystem.memfiles" && beacon.os.toLocaleLowerCase() !== "linux"
+                  ? "Memory files require a Linux beacon."
+                  : commandId === "beacon.identity.whoami" && beacon.os.toLocaleLowerCase() !== "windows"
+                    ? "A token-owner task requires a Windows beacon."
+                    : isManagementCommand
                   ? capability?.reason?.message ?? "This command is unavailable for the selected beacon."
                   : unavailableReason ?? capability?.reason?.message ?? "Task execution is unavailable for this beacon."}
               </p>
@@ -968,6 +1113,24 @@ function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Eleme
     return <TableResult description="Process inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No processes were returned." icon={faMicrochip} title="Processes" />;
   }
   if (operationId === "beacon.network.interfaces") return <NetworkInterfacesResult disposition={task.disposition} />;
+  if (operationId === "beacon.environment.list") {
+    return <TableResult description="Environment captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No environment variables were returned." icon={faTerminal} title="Environment variables" />;
+  }
+  if (operationId === "beacon.network.netstat") {
+    return <TableResult description="Connection inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No network connections were returned." icon={faNetworkWired} title="Network connections" />;
+  }
+  if (operationId === "beacon.filesystem.mount") {
+    return <TableResult description="Mounted filesystems captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No mounts were returned." icon={faFolderOpen} title="Mounts" />;
+  }
+  if (operationId === "beacon.filesystem.memfiles") {
+    return <TableResult description="Memory files captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No memory files were returned." icon={faFolderOpen} title="Memory files" />;
+  }
+  if (operationId === "beacon.filesystem.grep") {
+    return <TableResult description="Matches returned by this beacon task." disposition={task.disposition} emptyLabel="No matches were returned." icon={faFolderOpen} title="File search" />;
+  }
+  if (operationId === "beacon.filesystem.cat" || operationId === "beacon.filesystem.head" || operationId === "beacon.filesystem.tail") {
+    return <TextResult disposition={task.disposition} title={operationResultTitle(task)} />;
+  }
   return <GenericDisposition disposition={task.disposition} />;
 }
 
@@ -1071,6 +1234,17 @@ function WorkingDirectoryResult({ disposition }: { disposition: OperationDisposi
   );
 }
 
+function TextResult({ disposition, title }: { disposition: OperationDisposition | undefined; title: string }): React.JSX.Element {
+  if (disposition?.kind !== "inline-text") return <GenericDisposition disposition={disposition} />;
+  return (
+    <section aria-label={title} className="space-y-2" role="region">
+      <h4 className="text-sm font-semibold text-foreground">{title}</h4>
+      <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-2xl bg-default p-4 font-mono text-xs leading-relaxed text-foreground">{disposition.text}</pre>
+      {disposition.truncated ? <TruncatedNotice /> : null}
+    </section>
+  );
+}
+
 function TableResult({
   title,
   description,
@@ -1085,6 +1259,23 @@ function TableResult({
   emptyLabel: string;
 }): React.JSX.Element {
   if (disposition?.kind !== "table") return <GenericDisposition disposition={disposition} />;
+  return <PagedTableResult description={description} disposition={disposition} emptyLabel={emptyLabel} icon={icon} title={title} />;
+}
+
+function PagedTableResult({
+  title,
+  description,
+  icon,
+  disposition,
+  emptyLabel,
+}: {
+  title: string;
+  description: string;
+  icon: IconDefinition;
+  disposition: Extract<OperationDisposition, { kind: "table" }>;
+  emptyLabel: string;
+}): React.JSX.Element {
+  const preview = useTablePreview(disposition.rows);
   return (
     <div>
       <div className="mb-3 flex items-start gap-2">
@@ -1094,10 +1285,11 @@ function TableResult({
           <p className="mt-0.5 text-xs text-muted">{description}</p>
         </div>
       </div>
-      {disposition.rows.length === 0 ? (
-        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{emptyLabel}</p>
+      <TablePreviewControls preview={preview} />
+      {preview.rows.length === 0 ? (
+        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : emptyLabel}</p>
       ) : (
-        <ResultTable columns={disposition.columns} rows={disposition.rows} />
+        <ResultTable columns={disposition.columns} rows={preview.rows} />
       )}
       {disposition.truncated ? <TruncatedNotice /> : null}
     </div>
@@ -1106,6 +1298,11 @@ function TableResult({
 
 function NetworkInterfacesResult({ disposition }: { disposition: OperationDisposition | undefined }): React.JSX.Element {
   if (disposition?.kind !== "table") return <GenericDisposition disposition={disposition} />;
+  return <PagedNetworkInterfacesResult disposition={disposition} />;
+}
+
+function PagedNetworkInterfacesResult({ disposition }: { disposition: Extract<OperationDisposition, { kind: "table" }> }): React.JSX.Element {
+  const preview = useTablePreview(disposition.rows);
   const valueAt = (row: OperationScalar[], label: string): string => {
     const index = disposition.columns.findIndex((column) => column.toLocaleLowerCase() === label.toLocaleLowerCase());
     return index < 0 ? "Not reported" : String(row[index] ?? "Not reported");
@@ -1119,11 +1316,12 @@ function NetworkInterfacesResult({ disposition }: { disposition: OperationDispos
           <p className="mt-0.5 text-xs text-muted">Addresses and link-layer identity returned by the beacon.</p>
         </div>
       </div>
-      {disposition.rows.length === 0 ? (
-        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">No network interfaces were returned.</p>
+      <TablePreviewControls preview={preview} />
+      {preview.rows.length === 0 ? (
+        <p className="rounded-2xl bg-default px-4 py-5 text-sm text-muted">{preview.query ? "No decoded rows match this filter." : "No network interfaces were returned."}</p>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
-          {disposition.rows.map((row, index) => (
+          {preview.rows.map((row, index) => (
             <article className="min-w-0 rounded-2xl bg-default p-4" key={`${valueAt(row, "Index")}:${valueAt(row, "Name")}:${index}`}>
               <div className="flex items-center justify-between gap-3">
                 <p className="truncate text-sm font-semibold text-foreground">{valueAt(row, "Name")}</p>
@@ -1136,6 +1334,69 @@ function NetworkInterfacesResult({ disposition }: { disposition: OperationDispos
         </div>
       )}
       {disposition.truncated ? <TruncatedNotice /> : null}
+    </div>
+  );
+}
+
+interface TablePreview {
+  query: string;
+  setQuery: (query: string) => void;
+  rows: OperationScalar[][];
+  matched: number;
+  total: number;
+  page: number;
+  pages: number;
+  start: number;
+  end: number;
+  setPage: (page: number) => void;
+}
+
+function useTablePreview(allRows: OperationScalar[][]): TablePreview {
+  const [query, setQueryValue] = useState("");
+  const [page, setPage] = useState(0);
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase();
+    return needle
+      ? allRows.filter((row) => row.some((value) => String(value ?? "").toLocaleLowerCase().includes(needle)))
+      : allRows;
+  }, [allRows, query]);
+  const pages = Math.max(1, Math.ceil(filtered.length / 50));
+  const activePage = Math.min(page, pages - 1);
+  const start = activePage * 50;
+  const end = Math.min(start + 50, filtered.length);
+  return {
+    query,
+    setQuery: (value) => { setQueryValue(value.slice(0, 200)); setPage(0); },
+    rows: filtered.slice(start, end),
+    matched: filtered.length,
+    total: allRows.length,
+    page: activePage,
+    pages,
+    start,
+    end,
+    setPage,
+  };
+}
+
+function TablePreviewControls({ preview }: { preview: TablePreview }): React.JSX.Element {
+  return (
+    <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+      <div className="w-full max-w-xs">
+        <Field label="Filter decoded rows" value={preview.query} onChange={preview.setQuery} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs tabular-nums text-muted">
+          Showing {preview.matched ? preview.start + 1 : 0}–{preview.end} of {preview.matched} decoded rows
+          {preview.query ? ` (${preview.total} before filter)` : ""}
+        </span>
+        {preview.pages > 1 ? (
+          <>
+            <Button isDisabled={preview.page === 0} size="sm" variant="tertiary" onPress={() => preview.setPage(preview.page - 1)}>Previous</Button>
+            <span className="text-xs tabular-nums text-muted">Page {preview.page + 1} of {preview.pages}</span>
+            <Button isDisabled={preview.page + 1 >= preview.pages} size="sm" variant="tertiary" onPress={() => preview.setPage(preview.page + 1)}>Next</Button>
+          </>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -1235,6 +1496,24 @@ function isBeaconExecutionCommandId(commandId: BeaconInteractionCommandId): comm
 type BeaconManagementCommandId = "target.ping" | "target.rename" | "target.env-set" | "target.env-unset" |
   "beacon.reconfigure" | "beacon.open-session";
 
+function beaconMetadataFact(commandId: BeaconInteractionCommandId, beacon: BeaconSummary, expectedTarget: TargetRef): { label: string; value: string | number | undefined; exact: boolean } | undefined {
+  let fact: { label: string; value: string | number | undefined } | undefined;
+  switch (commandId) {
+    case "beacon.identity.pid": fact = { label: "Process ID", value: beacon.pid }; break;
+    case "beacon.identity.uid": fact = { label: "User ID", value: beacon.uid }; break;
+    case "beacon.identity.gid": fact = { label: "Group ID", value: beacon.gid }; break;
+    case "beacon.identity.whoami":
+      fact = beacon.os.toLocaleLowerCase() === "windows" ? undefined : { label: "Username", value: beacon.username };
+      break;
+    default: break;
+  }
+  return fact ? { ...fact, exact: beacon.id === expectedTarget.id } : undefined;
+}
+
+function isBeaconMetadataCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconMetadataCommandId {
+  return commandId === "beacon.identity.pid" || commandId === "beacon.identity.uid" || commandId === "beacon.identity.gid";
+}
+
 function isBeaconManagementCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconManagementCommandId {
   return commandId === "target.ping" || commandId === "target.rename" || commandId === "target.env-set" ||
     commandId === "target.env-unset" || commandId === "beacon.reconfigure" || commandId === "beacon.open-session";
@@ -1261,6 +1540,7 @@ function beaconCommandInput(
   path: string,
   fullInfo: boolean,
   management: BeaconManagementDraft,
+  read: BeaconReadDraft,
 ): TargetOperationInput {
   switch (commandId) {
     case "execution":
@@ -1282,6 +1562,51 @@ function beaconCommandInput(
       return { operationId: commandId, fullInfo };
     case "beacon.network.interfaces":
       return { operationId: commandId };
+    case "beacon.environment.list": {
+      const name = read.environmentName.trim();
+      return { operationId: commandId, ...(name ? { name } : {}) };
+    }
+    case "beacon.identity.whoami":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
+      return { operationId: commandId };
+    case "beacon.identity.pid":
+    case "beacon.identity.uid":
+    case "beacon.identity.gid":
+      throw new Error("This value comes from the latest beacon inventory, without queueing a task.");
+    case "beacon.network.netstat":
+      if (!read.tcp && !read.udp) throw new Error("Select TCP or UDP.");
+      if (!read.ip4 && !read.ip6) throw new Error("Select IPv4 or IPv6.");
+      return { operationId: commandId, tcp: read.tcp, udp: read.udp, ip4: read.ip4, ip6: read.ip6, listen: read.listen };
+    case "beacon.filesystem.cat": {
+      const filePath = read.path.trim();
+      if (!filePath) throw new Error("Enter a file path.");
+      return { operationId: commandId, path: filePath };
+    }
+    case "beacon.filesystem.head": {
+      const filePath = read.path.trim();
+      if (!filePath) throw new Error("Enter a file path.");
+      const count = requiredInteger(read.count, read.countBytes ? "Bytes" : "Lines", 1);
+      if (count > (read.countBytes ? 65_536 : 4_096)) throw new Error(read.countBytes ? "Bytes must be 65536 or fewer." : "Lines must be 4096 or fewer.");
+      return { operationId: commandId, path: filePath, ...(read.countBytes ? { bytes: count } : { lines: count }) };
+    }
+    case "beacon.filesystem.tail": {
+      const filePath = read.path.trim();
+      if (!filePath) throw new Error("Enter a file path.");
+      const bytes = requiredInteger(read.count, "Bytes", 1);
+      if (bytes > 65_536) throw new Error("Bytes must be 65536 or fewer.");
+      return { operationId: commandId, path: filePath, bytes };
+    }
+    case "beacon.filesystem.grep": {
+      const filePath = read.path.trim();
+      const pattern = read.pattern.trim();
+      if (!filePath) throw new Error("Enter a search path.");
+      if (!pattern) throw new Error("Enter a search pattern.");
+      const before = requiredInteger(read.before, "Lines before", 0);
+      const after = requiredInteger(read.after, "Lines after", 0);
+      if (before > 64 || after > 64) throw new Error("Context must be 64 lines or fewer per side.");
+      return { operationId: commandId, path: filePath, pattern, recursive: read.recursive, before, after };
+    }
     case "target.ping":
       return { operationId: commandId };
     case "target.rename": {

@@ -30,6 +30,7 @@ import {
   getSessionOperationDescriptor,
 } from "./session-operation-registry.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
+import { beaconCommandCapability } from "./beacon-command-matrix.js";
 
 const DEFAULT_TERMINAL_RECORD_LIMIT = 200;
 const DEFAULT_RECOVERABLE_TASK_RECORD_LIMIT = 100;
@@ -40,6 +41,17 @@ const MAX_PAGE_LIMIT = 100;
 const MAX_MESSAGE_CHARACTERS = 512;
 const DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS = 60;
 const TASK_IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/u;
+const BEACON_M2_PARITY_IDS: Readonly<Partial<Record<TargetOperationId, string>>> = Object.freeze({
+  "beacon.environment.list": "implant.env",
+  "beacon.identity.whoami": "implant.whoami",
+  "beacon.network.netstat": "implant.netstat",
+  "beacon.filesystem.mount": "implant.mount",
+  "beacon.filesystem.memfiles": "implant.memfiles",
+  "beacon.filesystem.cat": "implant.cat",
+  "beacon.filesystem.head": "implant.head",
+  "beacon.filesystem.tail": "implant.tail",
+  "beacon.filesystem.grep": "implant.grep",
+});
 
 const TERMINAL_STATES: ReadonlySet<TargetOperationState> = new Set([
   "completed",
@@ -92,6 +104,15 @@ export interface OperationEngineHost {
     | "lsBeacon"
     | "psBeacon"
     | "ifconfigBeacon"
+    | "envBeacon"
+    | "whoamiBeacon"
+    | "netstatBeacon"
+    | "mountBeacon"
+    | "memfilesBeacon"
+    | "catBeacon"
+    | "headBeacon"
+    | "tailBeacon"
+    | "grepBeacon"
   >;
   ownerWindowId: number;
   resolveActiveTarget(): ResolvedOperationTarget | null | Promise<ResolvedOperationTarget | null>;
@@ -105,6 +126,7 @@ export interface OperationEngineHost {
     operationId: TargetOperationId,
     beaconId: string,
     expectedPingNonce?: number,
+    expectedRequest?: TargetOperationInput,
   ): boolean;
   claimExternalTask(
     taskId: string,
@@ -137,6 +159,7 @@ interface InternalOperation {
   cancellationIssued: boolean;
   cancellationPromise?: Promise<void>;
   pingNonce?: number;
+  expectedRequest?: TargetOperationInput;
   expectedTargetName?: string;
   environmentReconciliation?: {
     name: string;
@@ -241,6 +264,7 @@ export class OperationEngine {
       internal = {
         sequence: this.allocateSequence(),
         descriptor,
+        ...(BEACON_M2_PARITY_IDS[input.operationId] === undefined ? {} : { expectedRequest: input }),
         dispatchIssued: false,
         cancelWhenTaskKnown: false,
         cancellationIssued: false,
@@ -283,6 +307,9 @@ export class OperationEngine {
       }
       if (!(await this.hasCapability(activeTarget, descriptor.capabilityId))) {
         return this.finish(internal, "failed", "This operation is not currently available for the selected target");
+      }
+      if (!this.hasBeaconCommandCapability(input.operationId, activeTarget.summary)) {
+        return this.finish(internal, "failed", "The selected beacon does not support this command");
       }
 
       // Give a caller that immediately changes its mind a deterministic local
@@ -548,6 +575,15 @@ export class OperationEngine {
     const internal = requestId ? this.operations.get(requestId) : undefined;
     return internal?.record.mode === "beacon" && internal.record.target.id === beaconId
       ? internal.pingNonce
+      : undefined;
+  }
+
+  expectedRequestForTask(taskId: string, beaconId: string): TargetOperationInput | undefined {
+    this.pruneTerminalRecords();
+    const requestId = this.taskRequests.get(taskId);
+    const internal = requestId ? this.operations.get(requestId) : undefined;
+    return internal?.record.mode === "beacon" && internal.record.target.id === beaconId
+      ? internal.expectedRequest
       : undefined;
   }
 
@@ -902,6 +938,7 @@ export class OperationEngine {
             internal.descriptor.id,
             internal.record.target.id,
             internal.pingNonce,
+            internal.expectedRequest,
           )) {
             releaseTaskReservation();
             return this.finish(
@@ -1014,6 +1051,10 @@ export class OperationEngine {
       this.finish(internal, "failed", "The target capability changed before dispatch");
       return null;
     }
+    if (!this.hasBeaconCommandCapability(internal.descriptor.id, current.summary)) {
+      this.finish(internal, "failed", "The beacon command capability changed before dispatch");
+      return null;
+    }
     if (internal.descriptor.id === "beacon.open-session") {
       try {
         requireAuthoritativeActiveC2(current);
@@ -1083,7 +1124,37 @@ export class OperationEngine {
         return this.host.client.psBeacon(targetRef.id, input.fullInfo, timeout);
       case "beacon.network.interfaces":
         return this.host.client.ifconfigBeacon(targetRef.id, timeout);
+      case "beacon.environment.list":
+        return this.host.client.envBeacon(targetRef.id, input.name ?? "", timeout);
+      case "beacon.identity.whoami":
+        return this.host.client.whoamiBeacon(targetRef.id, timeout);
+      case "beacon.network.netstat":
+        return this.host.client.netstatBeacon(targetRef.id, {
+          tcp: input.tcp, udp: input.udp, ip4: input.ip4, ip6: input.ip6, listen: input.listen,
+        }, timeout);
+      case "beacon.filesystem.mount":
+        return this.host.client.mountBeacon(targetRef.id, timeout);
+      case "beacon.filesystem.memfiles":
+        return this.host.client.memfilesBeacon(targetRef.id, timeout);
+      case "beacon.filesystem.cat":
+        return this.host.client.catBeacon(targetRef.id, input.path, timeout);
+      case "beacon.filesystem.head":
+        return this.host.client.headBeacon(targetRef.id, input.path,
+          input.bytes === undefined ? { lines: input.lines! } : { bytes: input.bytes }, timeout);
+      case "beacon.filesystem.tail":
+        return this.host.client.tailBeacon(targetRef.id, input.path, { bytes: input.bytes! }, timeout);
+      case "beacon.filesystem.grep":
+        return this.host.client.grepBeacon(targetRef.id, {
+          path: input.path, pattern: input.pattern, recursive: input.recursive,
+          before: input.before, after: input.after,
+        }, timeout);
     }
+  }
+
+  private hasBeaconCommandCapability(operationId: TargetOperationId, target: TargetSummary): boolean {
+    if (operationId === "beacon.identity.whoami" && target.os.trim().toLowerCase() !== "windows") return false;
+    const parityId = BEACON_M2_PARITY_IDS[operationId];
+    return parityId === undefined || beaconCommandCapability(parityId, target).available;
   }
 
   private async requestTaskCancellation(internal: InternalOperation): Promise<void> {
@@ -1665,6 +1736,15 @@ function decodeSynchronousDisposition(
     case "beacon.filesystem.ls":
     case "beacon.process.list":
     case "beacon.network.interfaces":
+    case "beacon.environment.list":
+    case "beacon.identity.whoami":
+    case "beacon.network.netstat":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
+    case "beacon.filesystem.cat":
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail":
+    case "beacon.filesystem.grep":
       throw new Error("Beacon read operations require asynchronous task decoding");
   }
 }
@@ -1693,6 +1773,15 @@ function reconciledMutationDisposition(operationId: TargetOperationInput["operat
     case "beacon.filesystem.ls":
     case "beacon.process.list":
     case "beacon.network.interfaces":
+    case "beacon.environment.list":
+    case "beacon.identity.whoami":
+    case "beacon.network.netstat":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
+    case "beacon.filesystem.cat":
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail":
+    case "beacon.filesystem.grep":
       return structuredResult("Operation reconciled", "The requested state was verified");
   }
 }
@@ -1761,6 +1850,16 @@ function successMessage(operationId: TargetOperationInput["operationId"]): strin
       return "The process listing request was submitted";
     case "beacon.network.interfaces":
       return "The network interface request was submitted";
+    case "beacon.environment.list":
+    case "beacon.identity.whoami":
+    case "beacon.network.netstat":
+    case "beacon.filesystem.mount":
+    case "beacon.filesystem.memfiles":
+    case "beacon.filesystem.cat":
+    case "beacon.filesystem.head":
+    case "beacon.filesystem.tail":
+    case "beacon.filesystem.grep":
+      return "The beacon read request was submitted";
   }
 }
 

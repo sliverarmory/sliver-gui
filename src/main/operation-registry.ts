@@ -20,7 +20,16 @@ export type OperationAdapterMethodId =
   | "pwdBeacon"
   | "lsBeacon"
   | "psBeacon"
-  | "ifconfigBeacon";
+  | "ifconfigBeacon"
+  | "envBeacon"
+  | "whoamiBeacon"
+  | "netstatBeacon"
+  | "mountBeacon"
+  | "memfilesBeacon"
+  | "catBeacon"
+  | "headBeacon"
+  | "tailBeacon"
+  | "grepBeacon";
 
 export type OperationRequestEncoderId =
   | "ping"
@@ -32,7 +41,16 @@ export type OperationRequestEncoderId =
   | "beacon-working-directory"
   | "beacon-directory-listing"
   | "beacon-process-list"
-  | "beacon-network-interfaces";
+  | "beacon-network-interfaces"
+  | "beacon-environment-list"
+  | "beacon-whoami"
+  | "beacon-netstat"
+  | "beacon-mount"
+  | "beacon-memfiles"
+  | "beacon-cat"
+  | "beacon-head"
+  | "beacon-tail"
+  | "beacon-grep";
 
 export type OperationResponseDecoderId =
   | "ping"
@@ -43,7 +61,16 @@ export type OperationResponseDecoderId =
   | "beacon-working-directory"
   | "beacon-directory-listing"
   | "beacon-process-list"
-  | "beacon-network-interfaces";
+  | "beacon-network-interfaces"
+  | "beacon-environment-list"
+  | "beacon-whoami"
+  | "beacon-netstat"
+  | "beacon-mount"
+  | "beacon-memfiles"
+  | "beacon-cat"
+  | "beacon-head"
+  | "beacon-tail"
+  | "beacon-grep";
 
 export type OperationExecutionMode = "synchronous-response" | "asynchronous-beacon-task";
 
@@ -124,6 +151,11 @@ const SMALL_RESULT_BOUNDS = Object.freeze({
   maximumTextCharacters: 16_384,
   maximumTableRows: 256,
   maximumStructuredFields: 64,
+} as const satisfies OperationResultBounds);
+
+const FILE_READ_RESULT_BOUNDS = Object.freeze({
+  ...SMALL_RESULT_BOUNDS,
+  maximumDecodedBytes: 128 * 1_024,
 } as const satisfies OperationResultBounds);
 
 const MUTATION_IDEMPOTENCY = Object.freeze({
@@ -378,7 +410,45 @@ const registry = {
       },
     },
   },
+  "beacon.environment.list": beaconRead("beacon.environment.list", "envBeacon", "beacon-environment-list", "table", 30),
+  "beacon.identity.whoami": beaconRead("beacon.identity.whoami", "whoamiBeacon", "beacon-whoami", "structured-detail", 30),
+  "beacon.network.netstat": beaconRead("beacon.network.netstat", "netstatBeacon", "beacon-netstat", "table", 60),
+  "beacon.filesystem.mount": beaconRead("beacon.filesystem.mount", "mountBeacon", "beacon-mount", "table", 30),
+  "beacon.filesystem.memfiles": beaconRead("beacon.filesystem.memfiles", "memfilesBeacon", "beacon-memfiles", "table", 30),
+  "beacon.filesystem.cat": beaconRead("beacon.filesystem.cat", "catBeacon", "beacon-cat", "inline-text", 60),
+  "beacon.filesystem.head": beaconRead("beacon.filesystem.head", "headBeacon", "beacon-head", "inline-text", 60),
+  "beacon.filesystem.tail": beaconRead("beacon.filesystem.tail", "tailBeacon", "beacon-tail", "inline-text", 60),
+  "beacon.filesystem.grep": beaconRead("beacon.filesystem.grep", "grepBeacon", "beacon-grep", "table", 60),
 } as const satisfies CompleteOperationRegistry;
+
+function beaconRead<Id extends TargetOperationId>(
+  id: Id,
+  adapterMethod: OperationAdapterMethodId,
+  codec: OperationRequestEncoderId & OperationResponseDecoderId,
+  disposition: OperationDispositionKind,
+  timeoutSeconds: 30 | 60,
+): CompiledOperationDescriptor & { readonly id: Id } {
+  return {
+    id,
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: ASYNC_READ_IDEMPOTENCY,
+    confirmation: "none",
+    disposition,
+    resultBounds: disposition === "inline-text" ? FILE_READ_RESULT_BOUNDS : SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod,
+        requestEncoder: codec,
+        responseDecoder: codec,
+        execution: "asynchronous-beacon-task",
+        timeout: timeoutSeconds === 30 ? THIRTY_SECOND_TIMEOUT : SIXTY_SECOND_TIMEOUT,
+        cancellation: "best-effort-beacon-task",
+        reconciliation: "beacon-task-state",
+      },
+    },
+  };
+}
 
 export const OPERATION_REGISTRY: CompleteOperationRegistry = deepFreeze(registry);
 
