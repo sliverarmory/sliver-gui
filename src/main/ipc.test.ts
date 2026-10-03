@@ -1224,6 +1224,26 @@ describe("trusted Electron IPC boundary", () => {
     expect(registrySelectTarget).not.toHaveBeenCalled();
   });
 
+  it("routes full task responses through the selected window with validated page offsets", async () => {
+    const getBeaconTaskResponse = vi.fn(async () => ({ ok: false as const, error: "response probe" }));
+    registerIpcHandlers(registryMock({ getBeaconTaskResponse }), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("sliver://app/index.html#/targets", 77);
+    const handler = electronMocks.handlers.get(IPC.getBeaconTaskResponse)!;
+    await handler(event, { taskId: "task_1", offset: 65_536 });
+    expect(getBeaconTaskResponse).toHaveBeenCalledExactlyOnceWith(77, "task_1", 65_536);
+    for (const input of [
+      { taskId: "task_1", beaconId: "other" },
+      { taskId: "task_1", offset: -1 },
+      { taskId: "task_1", offset: 0.1 },
+      { taskId: "../task_1" },
+    ]) expect(() => handler(event, input)).toThrow();
+    expect(() => handler(event)).toThrow();
+    expect(() => handler(event, { taskId: "task_1" }, "extra")).toThrow();
+    const { event: untrusted } = invokeEvent("https://example.invalid/index.html", 77);
+    expect(() => handler(untrusted, { taskId: "task_1" })).toThrow(/untrusted renderer/iu);
+    expect(getBeaconTaskResponse).toHaveBeenCalledTimes(1);
+  });
+
   it("accepts only main-issued target references and compiled operation identifiers", async () => {
     const listTargets = vi.fn(async () => ({ ok: true as const, value: { items: [], page: { limit: 100, total: 0, truncated: false } } }));
     const selectTarget = vi.fn(async () => ({ ok: false as const, error: "selection probe" }));
@@ -1302,6 +1322,66 @@ describe("trusted Electron IPC boundary", () => {
       query: "prod\0mac",
     })).toThrow(/invalid target catalog page request/i);
     expect(submitTargetOperation).toHaveBeenCalledOnce();
+  });
+
+  it("routes only closed beacon mutation review inputs and tokens", async () => {
+    const prepareBeaconMutation = vi.fn(async () => ({ ok: false as const, error: "review probe" }));
+    const executeBeaconMutation = vi.fn(async () => ({ ok: false as const, error: "execute probe" }));
+    const discardBeaconMutation = vi.fn(async () => ({ ok: false as const, error: "discard probe" }));
+    registerIpcHandlers(
+      registryMock({ prepareBeaconMutation, executeBeaconMutation, discardBeaconMutation }),
+      vi.fn(),
+      RENDERER_URL,
+    );
+    const { event } = invokeEvent("sliver://app/index.html#/targets", 77);
+    const mutation = {
+      operationId: "beacon.registry.write",
+      hive: "HKLM",
+      path: "Software\\Example",
+      key: "Enabled",
+      value: { type: "dword", value: 1 },
+    } as const;
+    const token = "8e577480-5dc2-4dde-aa58-23c8f1770627";
+
+    await electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(event, mutation);
+    await electronMocks.handlers.get(IPC.executeBeaconMutation)?.(event, { token });
+    await electronMocks.handlers.get(IPC.discardBeaconMutation)?.(event, { token });
+
+    expect(prepareBeaconMutation).toHaveBeenCalledExactlyOnceWith(77, mutation);
+    expect(executeBeaconMutation).toHaveBeenCalledExactlyOnceWith(77, token);
+    expect(discardBeaconMutation).toHaveBeenCalledExactlyOnceWith(77, token);
+
+    expect(() => electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(event, {
+      ...mutation,
+      targetId: "beacon_other",
+    })).toThrow(/unexpected/i);
+    expect(() => electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(event, {
+      ...mutation,
+      rpc: "RegistryWrite",
+    })).toThrow(/unexpected/i);
+    expect(() => electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(event, {
+      operationId: "beacon.registry.read",
+      hive: "HKLM",
+      path: "Software\\Example",
+      key: "Enabled",
+    })).toThrow(/does not require beacon mutation review/i);
+    expect(() => electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(event, mutation, mutation))
+      .toThrow(/beacon mutation input/i);
+    expect(() => electronMocks.handlers.get(IPC.executeBeaconMutation)?.(event, { token, targetId: "beacon_other" }))
+      .toThrow(/expected exactly these fields: token/i);
+    expect(() => electronMocks.handlers.get(IPC.discardBeaconMutation)?.(event, { token: "" }))
+      .toThrow(/token/i);
+
+    const untrusted = invokeEvent("sliver://app.evil.test/index.html#/targets", 88);
+    expect(() => electronMocks.handlers.get(IPC.prepareBeaconMutation)?.(untrusted.event, mutation))
+      .toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.executeBeaconMutation)?.(untrusted.event, { token }))
+      .toThrow(/untrusted renderer/i);
+    expect(() => electronMocks.handlers.get(IPC.discardBeaconMutation)?.(untrusted.event, { token }))
+      .toThrow(/untrusted renderer/i);
+    expect(prepareBeaconMutation).toHaveBeenCalledOnce();
+    expect(executeBeaconMutation).toHaveBeenCalledOnce();
+    expect(discardBeaconMutation).toHaveBeenCalledOnce();
   });
 
   it("routes only closed session-workbench operations and main-owned action plans", async () => {
@@ -2062,6 +2142,9 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     backgroundTarget: vi.fn(unavailable),
     setBeaconWatch: vi.fn(unavailable),
     submitTargetOperation: vi.fn(unavailable),
+    prepareBeaconMutation: vi.fn(unavailable),
+    executeBeaconMutation: vi.fn(unavailable),
+    discardBeaconMutation: vi.fn(unavailable),
     listTargetOperations: vi.fn(unavailable),
     getTargetOperation: vi.fn(unavailable),
     cancelTargetOperation: vi.fn(unavailable),
@@ -2069,6 +2152,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     executeTargetActionPlan: vi.fn(unavailable),
     listBeaconTasks: vi.fn(unavailable),
     getBeaconTask: vi.fn(unavailable),
+    getBeaconTaskResponse: vi.fn(unavailable),
     cancelBeaconTask: vi.fn(unavailable),
     runSessionWorkbench: vi.fn(unavailable),
     runDroppedSessionUpload: vi.fn(unavailable),

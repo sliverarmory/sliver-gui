@@ -1019,7 +1019,7 @@ function parseDestructiveInput(
   }
 }
 
-function parseRegistryWriteValue(value: unknown): SessionRegistryWriteValue {
+export function parseRegistryWriteValue(value: unknown): SessionRegistryWriteValue {
   const record = objectRecord(value, "Registry value");
   const type = requiredString(record, "type", 16);
   switch (type) {

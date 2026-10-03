@@ -3,7 +3,7 @@ import { sliverpb } from "sliver-script";
 import type { TargetOperationInput } from "../shared/operation-contracts.js";
 
 /**
- * Verify the server-saved request against the exact locally submitted M2 read.
+ * Verify the server-saved request against the exact locally submitted M2 operation.
  * DownloadReq is shared by cat, head, and tail, so its description alone is
  * never enough to choose a decoder or claim the task as this operation.
  * The server clears the nested BeaconID and SessionID before saving the task;
@@ -40,6 +40,16 @@ function beaconReadMessageType(operationId: TargetOperationInput["operationId"])
     case "beacon.filesystem.head":
     case "beacon.filesystem.tail": return 7;
     case "beacon.filesystem.grep": return 129;
+    case "beacon.registry.read": return 71;
+    case "beacon.registry.write": return 72;
+    case "beacon.registry.create": return 73;
+    case "beacon.registry.list-subkeys": return 88;
+    case "beacon.registry.list-values": return 89;
+    case "beacon.registry.delete": return 97;
+    case "beacon.service.stop": return 62;
+    case "beacon.service.list": return 130;
+    case "beacon.service.info": return 131;
+    case "beacon.service.start": return 132;
     default: throw new Error("This operation has no reviewed M2 request verifier");
   }
 }
@@ -115,10 +125,123 @@ function verifyNestedRequest(expected: TargetOperationInput, bytes: Buffer): voi
         decoded.LinesAfter !== expected.after) throw new Error("Grep request did not match");
       break;
     }
+    case "beacon.registry.read": {
+      const decoded = sliverpb.RegistryReadReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      if (decoded.Key !== expected.key) throw new Error("Registry value name did not match");
+      break;
+    }
+    case "beacon.registry.list-subkeys": {
+      const decoded = sliverpb.RegistrySubKeyListReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      break;
+    }
+    case "beacon.registry.list-values": {
+      const decoded = sliverpb.RegistryListValuesReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      break;
+    }
+    case "beacon.registry.write": {
+      const decoded = sliverpb.RegistryWriteReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      if (decoded.Key !== expected.key || !registryWriteMatches(decoded, expected.value)) {
+        throw new Error("Registry write request did not match the reviewed value");
+      }
+      break;
+    }
+    case "beacon.registry.create": {
+      const decoded = sliverpb.RegistryCreateKeyReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      if (decoded.Key !== expected.key) throw new Error("Registry key name did not match");
+      break;
+    }
+    case "beacon.registry.delete": {
+      const decoded = sliverpb.RegistryDeleteKeyReq.decode(bytes);
+      request = decoded.Request;
+      verifyRegistryLocation(decoded, expected);
+      if (decoded.Key !== expected.key) throw new Error("Registry key name did not match");
+      break;
+    }
+    case "beacon.service.list": {
+      const decoded = sliverpb.ServicesReq.decode(bytes);
+      request = decoded.Request;
+      if (decoded.Hostname !== (expected.hostname ?? "")) throw new Error("Service hostname did not match");
+      break;
+    }
+    case "beacon.service.info": {
+      const decoded = sliverpb.ServiceDetailReq.decode(bytes);
+      request = decoded.Request;
+      verifyServiceInfo(decoded.ServiceInfo, expected);
+      break;
+    }
+    case "beacon.service.start": {
+      const decoded = sliverpb.StartServiceByNameReq.decode(bytes);
+      request = decoded.Request;
+      verifyServiceInfo(decoded.ServiceInfo, expected);
+      break;
+    }
+    case "beacon.service.stop": {
+      const decoded = sliverpb.StopServiceReq.decode(bytes);
+      request = decoded.Request;
+      verifyServiceInfo(decoded.ServiceInfo, expected);
+      break;
+    }
     default:
       throw new Error("This operation has no reviewed M2 request verifier");
   }
   if (request?.Async !== true || request.BeaconID !== "" || request.SessionID !== "") {
     throw new Error("Task request did not match the server's saved beacon task shape");
+  }
+}
+
+function verifyRegistryLocation(
+  decoded: { Hive: string; Path: string; Hostname: string },
+  expected: Extract<TargetOperationInput, { operationId: `beacon.registry.${string}` }>,
+): void {
+  if (decoded.Hive !== expected.hive || decoded.Path !== expected.path ||
+    decoded.Hostname !== (expected.hostname ?? "")) {
+    throw new Error("Registry hive, path, or hostname did not match");
+  }
+}
+
+function registryWriteMatches(
+  decoded: sliverpb.RegistryWriteReq,
+  value: Extract<TargetOperationInput, { operationId: "beacon.registry.write" }>["value"],
+): boolean {
+  switch (value.type) {
+    case "string":
+      return decoded.Type === sliverpb.RegistryType.String && decoded.StringValue === value.value &&
+        decoded.ByteValue.length === 0 && decoded.DWordValue === 0 && decoded.QWordValue === "0";
+    case "binary": {
+      const expectedBytes = Buffer.from(value.hex, "hex");
+      try {
+        return decoded.Type === sliverpb.RegistryType.Binary && decoded.StringValue === "" &&
+          Buffer.from(decoded.ByteValue).equals(expectedBytes) && decoded.DWordValue === 0 &&
+          decoded.QWordValue === "0";
+      } finally {
+        expectedBytes.fill(0);
+        decoded.ByteValue.fill(0);
+      }
+    }
+    case "dword":
+      return decoded.Type === sliverpb.RegistryType.DWORD && decoded.StringValue === "" &&
+        decoded.ByteValue.length === 0 && decoded.DWordValue === value.value && decoded.QWordValue === "0";
+    case "qword":
+      return decoded.Type === sliverpb.RegistryType.QWORD && decoded.StringValue === "" &&
+        decoded.ByteValue.length === 0 && decoded.DWordValue === 0 && decoded.QWordValue === value.value;
+  }
+}
+
+function verifyServiceInfo(
+  decoded: sliverpb.ServiceInfoReq | undefined,
+  expected: Extract<TargetOperationInput, { operationId: "beacon.service.info" | "beacon.service.start" | "beacon.service.stop" }>,
+): void {
+  if (!decoded || decoded.ServiceName !== expected.name || decoded.Hostname !== (expected.hostname ?? "")) {
+    throw new Error("Service name or hostname did not match");
   }
 }

@@ -343,3 +343,12 @@ function inline(text: string, truncated = false): HistoricalTaskResult {
   const disposition: OperationDisposition = { kind: "inline-text", text, truncated };
   return { disposition };
 }
+
+// Shared by the full-response viewer so saved task types and their pinned
+// request/response codecs cannot drift from the historical preview decoder.
+export {
+  MESSAGE_SPECS as BEACON_TASK_MESSAGE_SPECS,
+  checkRequestEnvelope as verifyHistoricalBeaconTaskRequest,
+  responseCodec as historicalBeaconTaskResponseCodec,
+  zeroizeDecoded as zeroizeBeaconTaskDecodedResponse,
+};

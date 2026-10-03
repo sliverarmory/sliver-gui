@@ -30,7 +30,7 @@ Each package below has an ID for an issue or PR. `Planned` means no delivery cla
 | BC-05 | M2 read and inspection commands, plus option/paging follow-up for the existing four | Implemented | BC-04 | [Delivery record](bc-04-05-verification.md). 2026-10-01 local source: 12 new picker choices (nine task routes, three metadata facts), task-bound output, existing `ls`/`ps`/`ifconfig` local options, and 50-row paging/filtering over the bounded decoded preview. Pinned list RPCs provide no remote continuation. Live-target and packaged-app proof remain open. |
 | BC-06 | M2 transfers, native artifacts, and editor workflows | Planned | BC-04, BC-05 | — |
 | BC-07 | M2 filesystem, memfile, and process mutations | Planned | BC-04, BC-05 | — |
-| BC-08 | Windows Registry and service reads, then reviewed mutations | Planned | BC-04 | — |
+| BC-08 | Windows Registry and service reads, then reviewed mutations | Implemented | BC-04 | [Delivery record](bc-08-verification.md). 2026-10-02 local worktree from `a086429` (commit/PR pending): ten Windows command choices, exact task-bound output, one-use reviewed mutations; typecheck, full Vitest, protocol/parity, E2E build, and one focused Electron journey passed. Live Windows target and packaged-app proof remain open. |
 | BC-09 | Decide beacon eligibility of M5 networking and M8 extension rows | Planned | BC-01, pinned runtime evidence | — |
 | BC-10 | Cross-platform, fault, and packaged-app certification for delivered slices | Planned | Applicable packages above | — |
 

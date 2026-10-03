@@ -1,10 +1,15 @@
 import type {
   BeaconTaskDetail,
+  BeaconTaskResponse,
   BeaconTaskPage,
   BeaconTaskSummary,
+  BeaconMutationOperationInput,
+  BeaconMutationPlan,
+  BeaconMutationTokenInput,
   CancelBeaconTaskInput,
   CancelTargetOperationInput,
   GetBeaconTaskInput,
+  GetBeaconTaskResponseInput,
   ListBeaconTasksInput,
   OperationPageRequest,
   TargetOperationInput,
@@ -171,6 +176,9 @@ export const IPC_INVOKE = {
   backgroundTarget: "sliver:target:background",
   setBeaconWatch: "sliver:target:set-beacon-watch",
   submitTargetOperation: "sliver:operation:submit",
+  prepareBeaconMutation: "sliver:beacon-mutation:prepare",
+  executeBeaconMutation: "sliver:beacon-mutation:execute",
+  discardBeaconMutation: "sliver:beacon-mutation:discard",
   listTargetOperations: "sliver:operation:list",
   getTargetOperation: "sliver:operation:get",
   cancelTargetOperation: "sliver:operation:cancel",
@@ -178,6 +186,7 @@ export const IPC_INVOKE = {
   executeTargetActionPlan: "sliver:target:execute-action-plan",
   listBeaconTasks: "sliver:beacon-task:list",
   getBeaconTask: "sliver:beacon-task:get",
+  getBeaconTaskResponse: "sliver:beacon-task:response",
   cancelBeaconTask: "sliver:beacon-task:cancel",
   runSessionWorkbench: "sliver:session-workbench:run",
   openRemoteTextEditor: "sliver:text-editor:remote:open",
@@ -1015,6 +1024,18 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: TargetOperationInput];
     result: OperationResult<TargetOperationRecord>;
   };
+  [IPC.prepareBeaconMutation]: {
+    args: [input: BeaconMutationOperationInput];
+    result: OperationResult<BeaconMutationPlan>;
+  };
+  [IPC.executeBeaconMutation]: {
+    args: [input: BeaconMutationTokenInput];
+    result: OperationResult<TargetOperationRecord>;
+  };
+  [IPC.discardBeaconMutation]: {
+    args: [input: BeaconMutationTokenInput];
+    result: OperationResult;
+  };
   [IPC.listTargetOperations]: {
     args: [request: OperationPageRequest];
     result: OperationResult<TargetOperationPage>;
@@ -1042,6 +1063,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getBeaconTask]: {
     args: [input: GetBeaconTaskInput];
     result: OperationResult<BeaconTaskDetail>;
+  };
+  [IPC.getBeaconTaskResponse]: {
+    args: [input: GetBeaconTaskResponseInput];
+    result: OperationResult<BeaconTaskResponse>;
   };
   [IPC.cancelBeaconTask]: {
     args: [input: CancelBeaconTaskInput];

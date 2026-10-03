@@ -4487,6 +4487,56 @@ describe("connection registry with an injected Sliver client", () => {
     await expect(Promise.all(admitted)).resolves.toHaveLength(4);
   });
 
+  it("returns full task response pages only for the window's selected beacon", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_1", "async")];
+    client.taskState.set("beacon_1", [clientpb.BeaconTask.create({
+      ID: "full_response_task", BeaconID: "beacon_1", State: "completed", Description: "ExecuteReq",
+      CreatedAt: "1", SentAt: "2", CompletedAt: "3",
+      Response: Buffer.from(sliverpb.Execute.encode(sliverpb.Execute.create({
+        Stdout: Buffer.from("x".repeat(80_000) + "FULL_RESPONSE_TAIL"),
+      })).finish()),
+    })]);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await expect(registry.getBeaconTaskResponse(1, "full_response_task")).resolves.toMatchObject({ ok: false });
+    await registry.selectTarget(1, registry.snapshot(1).targetContext.selectableTargets[0]!);
+    const first = await registry.getBeaconTaskResponse(1, "full_response_task");
+    if (!first.ok || !first.value?.nextOffset) throw new Error("Expected first full response page");
+    expect(first.value).toMatchObject({ taskId: "full_response_task", beaconId: "beacon_1", offset: 0 });
+    const next = await registry.getBeaconTaskResponse(1, "full_response_task", first.value.nextOffset);
+    expect(next).toMatchObject({ ok: true, value: { text: expect.stringContaining("FULL_RESPONSE_TAIL") } });
+  });
+
+  it("discards a full response when the selected beacon changes during the fetch", async () => {
+    const client = new FakeSliverClient();
+    client.beaconState.Beacons = [beacon("beacon_a", "async-a"), beacon("beacon_b", "async-b")];
+    client.taskState.set("beacon_a", [clientpb.BeaconTask.create({
+      ID: "stale_response_task", BeaconID: "beacon_a", State: "completed", Description: "PwdReq",
+      CreatedAt: "1", SentAt: "2", CompletedAt: "3",
+      Response: Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({ Path: "/private-response" })).finish()),
+    })]);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const targets = registry.snapshot(1).targetContext.selectableTargets;
+    await registry.selectTarget(1, targets.find(({ id }) => id === "beacon_a")!);
+    const gate = deferred<void>();
+    const fetch = client.fetchBeaconTaskContent.getMockImplementation()!;
+    client.fetchBeaconTaskContent.mockImplementationOnce(async (...args) => {
+      await gate.promise;
+      return fetch(...args);
+    });
+    const pending = registry.getBeaconTaskResponse(1, "stale_response_task");
+    await vi.waitFor(() => expect(client.fetchBeaconTaskContent).toHaveBeenCalledOnce());
+    await registry.selectTarget(1, targets.find(({ id }) => id === "beacon_b")!);
+    gate.resolve(undefined);
+    const result = await pending;
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/selected beacon changed/iu) });
+    expect(result).not.toHaveProperty("value");
+  });
+
   it("keeps editable config operator metadata out of verified operation attribution", async () => {
     await writeFile(join(externalDirectory, "spoofed.cfg"), validConfig({ operator: "spoofed-verified-actor" }));
     const client = new FakeSliverClient();

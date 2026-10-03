@@ -3,10 +3,12 @@ import {
   timeoutSecondsToNanoseconds,
   withTimeoutSignal,
   type SliverClientConfig,
-  type sliverpb,
+  type SessionRegistryWriteValue,
+  sliverpb,
   type clientpb,
 } from "sliver-script";
 import { createHash } from "node:crypto";
+import type { SessionRegistryHive } from "../shared/session-contracts.js";
 
 /**
  * The complete, reviewed main-process Sliver surface.
@@ -174,6 +176,16 @@ export type SliverClientAdapter = Pick<
   headBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
   tailBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
   grepBeacon(beaconId: string, options: BeaconGrepOptions, timeoutSeconds: number): Promise<sliverpb.Grep>;
+  registryReadBeacon(beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number): Promise<sliverpb.RegistryRead>;
+  registryListSubkeysBeacon(beaconId: string, options: BeaconRegistryLocationOptions, timeoutSeconds: number): Promise<sliverpb.RegistrySubKeyList>;
+  registryListValuesBeacon(beaconId: string, options: BeaconRegistryLocationOptions, timeoutSeconds: number): Promise<sliverpb.RegistryValuesList>;
+  registryWriteBeacon(beaconId: string, options: BeaconRegistryWriteOptions, timeoutSeconds: number): Promise<sliverpb.RegistryWrite>;
+  registryCreateBeacon(beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number): Promise<sliverpb.RegistryCreateKey>;
+  registryDeleteBeacon(beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number): Promise<sliverpb.RegistryDeleteKey>;
+  servicesBeacon(beaconId: string, options: BeaconServicesOptions, timeoutSeconds: number): Promise<sliverpb.Services>;
+  serviceDetailBeacon(beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number): Promise<sliverpb.ServiceDetail>;
+  serviceStartBeacon(beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number): Promise<sliverpb.ServiceInfo>;
+  serviceStopBeacon(beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number): Promise<sliverpb.ServiceInfo>;
   /** Executes one main-selected Armory object through the fixed BOF RPC. */
   callBofSession(sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
   callBofBeacon(beaconId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
@@ -212,6 +224,29 @@ export interface BeaconGrepOptions {
   after: number;
 }
 
+export interface BeaconRegistryLocationOptions {
+  hive: SessionRegistryHive;
+  path: string;
+  hostname?: string;
+}
+
+export interface BeaconRegistryKeyOptions extends BeaconRegistryLocationOptions {
+  key: string;
+}
+
+/** Binary values are main-owned bytes; never send them through renderer IPC. */
+export interface BeaconRegistryWriteOptions extends BeaconRegistryKeyOptions {
+  value: SessionRegistryWriteValue;
+}
+
+export interface BeaconServicesOptions {
+  hostname?: string;
+}
+
+export interface BeaconServiceNameOptions extends BeaconServicesOptions {
+  name: string;
+}
+
 /** One byte past the maximum accepted complete text result detects truncation. */
 export const BEACON_TEXT_READ_PROBE_BYTES = 64 * 1024 + 1;
 export const BEACON_TEXT_READ_MAX_BYTES = BEACON_TEXT_READ_PROBE_BYTES - 1;
@@ -226,6 +261,8 @@ export const BOF_TASK_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const BOF_TASK_CONTENT_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BYTES;
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const TASK_DESCRIPTION = /^[A-Za-z][A-Za-z0-9_]{0,255}$/u;
+const REGISTRY_VALUE_MAX_BYTES = 4 * 1024 * 1024;
+const REGISTRY_HIVES = new Set<SessionRegistryHive>(["HKCU", "HKLM", "HKCR", "HKU", "HKCC"]);
 
 function beaconTaskRequest(beaconId: string, timeoutSeconds: number) {
   return {
@@ -241,6 +278,72 @@ function checkedPath(path: string): string {
     throw new Error("Invalid beacon file path");
   }
   return path;
+}
+
+function checkedRegistryLocation(options: BeaconRegistryLocationOptions): {
+  Hive: string; Path: string; Hostname: string;
+} {
+  if (!REGISTRY_HIVES.has(options.hive)) throw new Error("Unsupported beacon registry hive");
+  if (typeof options.path !== "string" || options.path.length > 4_096 || options.path.includes("\0")) {
+    throw new Error("Invalid beacon registry path");
+  }
+  return { Hive: options.hive, Path: options.path, Hostname: checkedHostname(options.hostname) };
+}
+
+function checkedRegistryKey(key: string, allowEmpty: boolean): string {
+  if (typeof key !== "string" || (!allowEmpty && key.length === 0) || key.length > 512 || key.includes("\0")) {
+    throw new Error("Invalid beacon registry key or value name");
+  }
+  return key;
+}
+
+function checkedHostname(hostname: string | undefined): string {
+  if (hostname === undefined) return "";
+  if (typeof hostname !== "string" || hostname.length > 255 || hostname.includes("\0")) {
+    throw new Error("Invalid remote hostname");
+  }
+  return hostname;
+}
+
+function checkedServiceName(name: string): string {
+  if (typeof name !== "string" || name.length === 0 || name.length > 512 || name.includes("\0")) {
+    throw new Error("Invalid Windows service name");
+  }
+  return name;
+}
+
+function beaconRegistryWriteFields(value: SessionRegistryWriteValue): {
+  StringValue: string; ByteValue: Buffer; DWordValue: number; QWordValue: string; Type: sliverpb.RegistryType;
+} {
+  switch (value?.type) {
+    case "string":
+      if (typeof value.value !== "string" || Buffer.byteLength(value.value) > REGISTRY_VALUE_MAX_BYTES) {
+        throw new Error("Invalid beacon registry string value");
+      }
+      return { StringValue: value.value, ByteValue: Buffer.alloc(0), DWordValue: 0,
+        QWordValue: "0", Type: sliverpb.RegistryType.String };
+    case "binary":
+      if (!Buffer.isBuffer(value.value) || value.value.length > REGISTRY_VALUE_MAX_BYTES) {
+        throw new Error("Invalid beacon registry binary value");
+      }
+      return { StringValue: "", ByteValue: Buffer.from(value.value), DWordValue: 0,
+        QWordValue: "0", Type: sliverpb.RegistryType.Binary };
+    case "dword":
+      if (!Number.isInteger(value.value) || value.value < 0 || value.value > 0xffff_ffff) {
+        throw new Error("Invalid beacon registry DWORD value");
+      }
+      return { StringValue: "", ByteValue: Buffer.alloc(0), DWordValue: value.value,
+        QWordValue: "0", Type: sliverpb.RegistryType.DWORD };
+    case "qword":
+      if (typeof value.value !== "string" || !/^\d+$/u.test(value.value) ||
+        value.value.length > 20 || BigInt(value.value) > 0xffff_ffff_ffff_ffffn) {
+        throw new Error("Invalid beacon registry QWORD value");
+      }
+      return { StringValue: "", ByteValue: Buffer.alloc(0), DWordValue: 0,
+        QWordValue: value.value, Type: sliverpb.RegistryType.QWORD };
+    default:
+      throw new Error("Unsupported beacon registry value type");
+  }
 }
 
 function checkedSliceCount(value: number, maximum: number, label: string): number {
@@ -305,7 +408,7 @@ function verifyBeaconTaskContent(
 }
 
 /**
- * Adds narrow passive inventory reads and the reviewed beacon-read wrappers.
+ * Adds narrow passive inventory reads and reviewed beacon task wrappers.
  * `interactBeacon` deliberately remains outside SliverClientAdapter.
  */
 export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
@@ -403,6 +506,70 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
         Request: beaconTaskRequest(beaconId, timeoutSeconds),
       }, { signal }));
     },
+    registryReadBeacon: (beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registryRead({
+        ...checkedRegistryLocation(options),
+        Key: checkedRegistryKey(options.key, true),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    registryListSubkeysBeacon: (beaconId: string, options: BeaconRegistryLocationOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registryListSubKeys({
+        ...checkedRegistryLocation(options),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    registryListValuesBeacon: (beaconId: string, options: BeaconRegistryLocationOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registryListValues({
+        ...checkedRegistryLocation(options),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    registryWriteBeacon: (beaconId: string, options: BeaconRegistryWriteOptions, timeoutSeconds: number) => {
+      const location = checkedRegistryLocation(options);
+      const key = checkedRegistryKey(options.key, true);
+      const fields = beaconRegistryWriteFields(options.value);
+      const dispose = (): void => { fields.ByteValue.fill(0); };
+      return withTimeoutSignal(timeoutSeconds, async (signal) => {
+        try {
+          return await client.rpc.registryWrite({
+            ...location, Key: key, ...fields,
+            Request: beaconTaskRequest(beaconId, timeoutSeconds),
+          }, { signal });
+        } finally {
+          dispose();
+        }
+      }).finally(dispose);
+    },
+    registryCreateBeacon: (beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registryCreateKey({
+        ...checkedRegistryLocation(options),
+        Key: checkedRegistryKey(options.key, false),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    registryDeleteBeacon: (beaconId: string, options: BeaconRegistryKeyOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.registryDeleteKey({
+        ...checkedRegistryLocation(options),
+        Key: checkedRegistryKey(options.key, false),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    servicesBeacon: (beaconId: string, options: BeaconServicesOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.services({
+        Hostname: checkedHostname(options.hostname),
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    serviceDetailBeacon: (beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.serviceDetail({
+        ServiceInfo: { Hostname: checkedHostname(options.hostname), ServiceName: checkedServiceName(options.name) },
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    serviceStartBeacon: (beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.startServiceByName({
+        ServiceInfo: { Hostname: checkedHostname(options.hostname), ServiceName: checkedServiceName(options.name) },
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    serviceStopBeacon: (beaconId: string, options: BeaconServiceNameOptions, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.stopService({
+        ServiceInfo: { Hostname: checkedHostname(options.hostname), ServiceName: checkedServiceName(options.name) },
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
     callBofSession: (sessionId: string, object: Buffer, argumentsBuffer: Buffer, entrypoint: string, timeoutSeconds: number) =>
       withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
         Name: createHash("sha256").update(object).digest("hex"),

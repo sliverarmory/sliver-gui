@@ -48,7 +48,10 @@ import {
 import {
   parseCancelBeaconTaskInput,
   parseCancelTargetOperationInput,
+  parseBeaconMutationInput,
+  parseBeaconMutationTokenInput,
   parseGetBeaconTaskInput,
+  parseGetBeaconTaskResponseInput,
   parseOperationPageRequest,
   parseTargetOperationInput,
 } from "../shared/operation-contracts.js";
@@ -244,6 +247,9 @@ export type IpcConnectionRegistry = Pick<
   | "backgroundTarget"
   | "setBeaconWatch"
   | "submitTargetOperation"
+  | "prepareBeaconMutation"
+  | "executeBeaconMutation"
+  | "discardBeaconMutation"
   | "listTargetOperations"
   | "getTargetOperation"
   | "cancelTargetOperation"
@@ -251,6 +257,7 @@ export type IpcConnectionRegistry = Pick<
   | "executeTargetActionPlan"
   | "listBeaconTasks"
   | "getBeaconTask"
+  | "getBeaconTaskResponse"
   | "cancelBeaconTask"
   | "runSessionWorkbench"
   | "runDroppedSessionUpload"
@@ -701,6 +708,15 @@ export function registerIpcHandlers(
   handleTrusted(IPC.submitTargetOperation, rendererUrl, parseTargetOperationArguments, ({ contentsId }, input) =>
     registry.submitTargetOperation(contentsId, input),
   );
+  handleTrusted(IPC.prepareBeaconMutation, rendererUrl, parseBeaconMutationArguments, ({ contentsId }, input) =>
+    registry.prepareBeaconMutation(contentsId, input),
+  );
+  handleTrusted(IPC.executeBeaconMutation, rendererUrl, parseBeaconMutationTokenArguments, ({ contentsId }, input) =>
+    registry.executeBeaconMutation(contentsId, input.token),
+  );
+  handleTrusted(IPC.discardBeaconMutation, rendererUrl, parseBeaconMutationTokenArguments, ({ contentsId }, input) =>
+    registry.discardBeaconMutation(contentsId, input.token),
+  );
   handleTrusted(IPC.listTargetOperations, rendererUrl, parseOperationPageArguments, ({ contentsId }, request) =>
     registry.listTargetOperations(contentsId, request),
   );
@@ -721,6 +737,9 @@ export function registerIpcHandlers(
   );
   handleTrusted(IPC.getBeaconTask, rendererUrl, parseBeaconTaskArguments, ({ contentsId }, input) =>
     registry.getBeaconTask(contentsId, input.taskId),
+  );
+  handleTrusted(IPC.getBeaconTaskResponse, rendererUrl, parseBeaconTaskResponseArguments, ({ contentsId }, input) =>
+    registry.getBeaconTaskResponse(contentsId, input.taskId, input.offset),
   );
   handleTrusted(IPC.cancelBeaconTask, rendererUrl, parseCancelBeaconTaskArguments, ({ contentsId }, input) =>
     registry.cancelBeaconTask(contentsId, input.taskId),
@@ -1325,6 +1344,16 @@ function parseTargetOperationArguments(args: readonly unknown[]): [input: Return
   return [parseTargetOperationInput(args[0])];
 }
 
+function parseBeaconMutationArguments(args: readonly unknown[]): [input: ReturnType<typeof parseBeaconMutationInput>] {
+  requireArgumentCount(args, 1, "beacon mutation input");
+  return [parseBeaconMutationInput(args[0])];
+}
+
+function parseBeaconMutationTokenArguments(args: readonly unknown[]): [input: ReturnType<typeof parseBeaconMutationTokenInput>] {
+  requireArgumentCount(args, 1, "beacon mutation token");
+  return [parseBeaconMutationTokenInput(args[0])];
+}
+
 function parseOperationPageArguments(args: readonly unknown[]): [input: ReturnType<typeof parseOperationPageRequest>] {
   requireArgumentCount(args, 1, "operation page request");
   return [parseOperationPageRequest(args[0])];
@@ -1353,6 +1382,11 @@ function parseExecuteTargetActionPlanArguments(args: readonly unknown[]): [input
 function parseBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<typeof parseGetBeaconTaskInput>] {
   requireArgumentCount(args, 1, "beacon task request");
   return [parseGetBeaconTaskInput(args[0])];
+}
+
+function parseBeaconTaskResponseArguments(args: readonly unknown[]): [input: ReturnType<typeof parseGetBeaconTaskResponseInput>] {
+  requireArgumentCount(args, 1, "beacon task response request");
+  return [parseGetBeaconTaskResponseInput(args[0])];
 }
 
 function parseCancelBeaconTaskArguments(args: readonly unknown[]): [input: ReturnType<typeof parseCancelBeaconTaskInput>] {

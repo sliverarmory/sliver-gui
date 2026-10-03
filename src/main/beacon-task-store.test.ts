@@ -829,7 +829,7 @@ describe("BeaconTaskStore", () => {
         expected: {
           kind: "structured-detail",
           fields: [{ label: "Path", value: "/tmp working" }],
-          truncated: true,
+          truncated: false,
         },
       },
       {
@@ -876,7 +876,7 @@ describe("BeaconTaskStore", () => {
           kind: "table",
           columns: ["PID", "PPID", "Executable", "Owner", "Architecture", "Session", "Command line"],
           rows: [[7, 1, "/usr/bin/test process", "user", "amd64", 2, "test --flag value"]],
-          truncated: true,
+          truncated: false,
         },
       },
       {
@@ -890,7 +890,7 @@ describe("BeaconTaskStore", () => {
           kind: "table",
           columns: ["Index", "Name", "MAC", "Addresses"],
           rows: [[3, "eth 0", "00:11:22:33:44:55", "10.0.0.1"]],
-          truncated: true,
+          truncated: false,
         },
       },
     ];
@@ -1629,7 +1629,7 @@ describe("BC-04 task-bound M2 read results", () => {
     const request = createRequest();
     const metadata = clientpb.BeaconTasks.create({ Tasks: [task("cat_exact", "completed", 10, "DownloadReq")] });
     const response = Buffer.from(sliverpb.Download.encode(sliverpb.Download.create({
-      Exists: true, Path: "/tmp/readme", Encoder: "gzip", Data: gzipSync(Buffer.from("hello\nbeacon")),
+      Exists: true, Path: "/tmp/readme", Encoder: "gzip", Data: gzipSync(Buffer.from("hello\r\nbeacon")),
     })).finish());
     const client = fakeClient(metadata, clientpb.BeaconTask.create({
       ...metadata.Tasks[0], Request: request, Response: response,
@@ -1746,5 +1746,243 @@ describe("BC-04 task-bound M2 read results", () => {
     expect(detail.disposition?.kind === "table" ? detail.disposition.rows.at(-1)?.[2] : undefined).toBe("needle 256");
     expect(request.every((byte) => byte === 0)).toBe(true);
     expect(response.every((byte) => byte === 0)).toBe(true);
+  });
+});
+
+describe("BC-08 task-bound Registry and service results", () => {
+  it("keeps a completed BC-08 task uncertain when its result availability is lost", async () => {
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [
+      task("bc08_no_result", "completed", 10, "RegistryReadReq"),
+      task("pwd_no_result", "completed", 11, "PwdReq"),
+    ] });
+    const client = fakeClient(metadata);
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    // Server normalization currently derives availability from completed state.
+    // Simulate an inconsistent catalog entry to guard the completion proof path.
+    const catalogs = Reflect.get(store, "catalogs") as Map<string, {
+      byId: Map<string, { resultAvailable: boolean }>;
+    }>;
+    const catalog = catalogs.get(beaconId)!;
+    catalog.byId.get("bc08_no_result")!.resultAvailable = false;
+    catalog.byId.get("pwd_no_result")!.resultAvailable = false;
+
+    const bc08 = await store.detail(beaconId, "bc08_no_result", () => ({
+      ownership: localOwnership,
+      operationId: "beacon.registry.read",
+      expectedRequest: { operationId: "beacon.registry.read", hive: "HKCU", path: "Software", key: "Name" },
+    }));
+    expect(bc08).toMatchObject({ state: "completed", resultAvailable: false, errorKind: "decode-uncertain" });
+    expect(bc08.disposition).toBeUndefined();
+
+    const original = await store.detail(beaconId, "pwd_no_result", () => ({
+      ownership: localOwnership, operationId: "beacon.filesystem.pwd",
+    }));
+    expect(original).toMatchObject({ state: "completed", resultAvailable: false });
+    expect(original.errorKind).toBeUndefined();
+    expect(client.fetchBeaconTaskContent).not.toHaveBeenCalled();
+  });
+
+  async function detailFor(
+    expectedRequest: TargetOperationInput,
+    description: string,
+    type: number,
+    requestData: Uint8Array,
+    responseData: Uint8Array,
+  ) {
+    const taskId = "bc08_task";
+    const metadata = clientpb.BeaconTasks.create({ Tasks: [task(taskId, "completed", 10, description)] });
+    const savedRequest = Buffer.from(sliverpb.Envelope.encode(sliverpb.Envelope.create({
+      Type: type, Data: Buffer.from(requestData),
+    })).finish());
+    const response = Buffer.from(responseData);
+    const client = fakeClient(metadata, clientpb.BeaconTask.create({
+      ...metadata.Tasks[0], Request: savedRequest, Response: response,
+    }));
+    const store = new BeaconTaskStore(client);
+    await store.refresh(beaconId);
+    const result = await store.detail(beaconId, taskId, () => ({
+      ownership: localOwnership, operationId: expectedRequest.operationId, expectedRequest,
+    }));
+    expect(savedRequest.every((byte) => byte === 0)).toBe(true);
+    expect(response.every((byte) => byte === 0)).toBe(true);
+    return result;
+  }
+
+  const savedTaskRequest = { Async: true, BeaconID: "", SessionID: "" };
+  const registryLocation = { Hive: "HKCU", Path: "Software\\Acme", Request: savedTaskRequest };
+  const expectedRegistryLocation = { hive: "HKCU", path: "Software\\Acme" } as const;
+
+  it("decodes string-only Registry reads without inventing a value type", async () => {
+    const expectedRequest = { operationId: "beacon.registry.read", ...expectedRegistryLocation, key: "Name" } as const;
+    const requestData = sliverpb.RegistryReadReq.encode(sliverpb.RegistryReadReq.create({
+      ...registryLocation, Key: "Name",
+    })).finish();
+    const responseData = sliverpb.RegistryRead.encode(sliverpb.RegistryRead.create({
+      Value: "Alice", Response: {},
+    })).finish();
+    const detail = await detailFor(expectedRequest, "RegistryReadReq", 71, requestData, responseData);
+    expect(detail.disposition).toMatchObject({
+      kind: "structured-detail", fields: [
+        { label: "Type", value: "Not reported by target" }, { label: "Value", value: "Alice" },
+      ],
+    });
+    expect(JSON.stringify(detail)).not.toContain("DWORD");
+
+    const unreviewed = await detailFor(expectedRequest, "RegistryReadReq", 71, requestData,
+      sliverpb.RegistryRead.encode(sliverpb.RegistryRead.create({
+        Value: "Alice", Binary: Buffer.from([0x01]), Type: sliverpb.RegistryType.Binary, Response: {},
+      })).finish());
+    expect(unreviewed.errorKind).toBe("decode-uncertain");
+  });
+
+  it("bounds Registry subkey and value listings and rejects target errors", async () => {
+    const lists = [
+      { operationId: "beacon.registry.list-subkeys", description: "RegistrySubKeyListReq", type: 88,
+        request: sliverpb.RegistrySubKeyListReq.encode(sliverpb.RegistrySubKeyListReq.create(registryLocation)).finish(),
+        response: sliverpb.RegistrySubKeyList.encode(sliverpb.RegistrySubKeyList.create({
+          Subkeys: Array.from({ length: 257 }, (_, index) => `sub-${index}`), Response: {},
+        })).finish() },
+      { operationId: "beacon.registry.list-values", description: "RegistryListValuesReq", type: 89,
+        request: sliverpb.RegistryListValuesReq.encode(sliverpb.RegistryListValuesReq.create(registryLocation)).finish(),
+        response: sliverpb.RegistryValuesList.encode(sliverpb.RegistryValuesList.create({
+          ValueNames: Array.from({ length: 257 }, (_, index) => `value-${index}`), Response: {},
+        })).finish() },
+    ] as const;
+    for (const entry of lists) {
+      const expected = { operationId: entry.operationId, ...expectedRegistryLocation };
+      const detail = await detailFor(expected, entry.description, entry.type, entry.request, entry.response);
+      expect(detail.disposition).toMatchObject({ kind: "table", truncated: true });
+      expect(detail.disposition?.kind === "table" ? detail.disposition.rows : []).toHaveLength(256);
+    }
+    const failed = await detailFor(
+      { operationId: "beacon.registry.list-subkeys", ...expectedRegistryLocation },
+      "RegistrySubKeyListReq", 88, lists[0].request,
+      sliverpb.RegistrySubKeyList.encode(sliverpb.RegistrySubKeyList.create({
+        Response: { Err: "private registry error" },
+      })).finish(),
+    );
+    expect(failed.errorKind).toBe("target-reported");
+    expect(JSON.stringify(failed)).not.toContain("private registry error");
+  });
+
+  it("renders partial service inventory and detail as bounded, explicit read views", async () => {
+    const service = { Name: "Spooler", DisplayName: "Print Spooler", Description: "Print jobs",
+      Status: 4, StartupType: 2, BinPath: "C:\\Windows\\spoolsv.exe", Account: "LocalSystem" };
+    const list = await detailFor(
+      { operationId: "beacon.service.list" }, "ServicesReq", 130,
+      sliverpb.ServicesReq.encode(sliverpb.ServicesReq.create({ Request: savedTaskRequest })).finish(),
+      sliverpb.Services.encode(sliverpb.Services.create({ Details: [service], Error: "private partial diagnostic", Response: {} })).finish(),
+    );
+    expect(list.disposition).toMatchObject({ kind: "table", rows: [[
+      "Spooler", "Print Spooler", "Running", "Automatic", "C:\\Windows\\spoolsv.exe", "LocalSystem",
+      "Print jobs", "Inventory may be incomplete",
+    ]] });
+    expect(JSON.stringify(list)).not.toContain("private partial diagnostic");
+
+    const boundedList = await detailFor(
+      { operationId: "beacon.service.list" }, "ServicesReq", 130,
+      sliverpb.ServicesReq.encode(sliverpb.ServicesReq.create({ Request: savedTaskRequest })).finish(),
+      sliverpb.Services.encode(sliverpb.Services.create({
+        Details: Array.from({ length: 257 }, (_, index) => ({ Name: `Service-${index}` })), Response: {},
+      })).finish(),
+    );
+    expect(boundedList.disposition).toMatchObject({ kind: "table", truncated: true });
+    expect(boundedList.disposition?.kind === "table" ? boundedList.disposition.rows : []).toHaveLength(256);
+
+    const info = await detailFor(
+      { operationId: "beacon.service.info", name: "Spooler" }, "ServiceDetailReq", 131,
+      sliverpb.ServiceDetailReq.encode(sliverpb.ServiceDetailReq.create({
+        ServiceInfo: { ServiceName: "Spooler" }, Request: savedTaskRequest,
+      })).finish(),
+      sliverpb.ServiceDetail.encode(sliverpb.ServiceDetail.create({
+        Detail: service, Message: "private partial diagnostic", Response: {},
+      })).finish(),
+    );
+    expect(info.disposition).toMatchObject({ kind: "structured-detail", fields: expect.arrayContaining([
+      { label: "Status", value: "Running" }, { label: "Warning", value: "Details may be incomplete" },
+    ]) });
+    expect(JSON.stringify(info)).not.toContain("private partial diagnostic");
+  });
+
+  it("does not turn empty service details or an empty partial inventory into a successful read", async () => {
+    const listRequest = sliverpb.ServicesReq.encode(sliverpb.ServicesReq.create({ Request: savedTaskRequest })).finish();
+    const list = await detailFor({ operationId: "beacon.service.list" }, "ServicesReq", 130, listRequest,
+      sliverpb.Services.encode(sliverpb.Services.create({ Error: "access denied", Response: {} })).finish());
+    expect(list.errorKind).toBe("target-reported");
+    const infoRequest = sliverpb.ServiceDetailReq.encode(sliverpb.ServiceDetailReq.create({
+      ServiceInfo: { ServiceName: "Spooler" }, Request: savedTaskRequest,
+    })).finish();
+    const info = await detailFor({ operationId: "beacon.service.info", name: "Spooler" }, "ServiceDetailReq", 131,
+      infoRequest, sliverpb.ServiceDetail.encode(sliverpb.ServiceDetail.create({ Response: {} })).finish());
+    expect(info.errorKind).toBe("target-reported");
+  });
+
+  it("treats all BC-08 mutation responses as handler acknowledgement requiring requery", async () => {
+    const cases = [
+      { expected: { operationId: "beacon.registry.write", ...expectedRegistryLocation, key: "Name",
+          value: { type: "string", value: "Alice" } }, description: "RegistryWriteReq", type: 72,
+        request: sliverpb.RegistryWriteReq.encode(sliverpb.RegistryWriteReq.create({
+          ...registryLocation, Key: "Name", Type: sliverpb.RegistryType.String, StringValue: "Alice",
+        })).finish(), response: sliverpb.RegistryWrite.encode(sliverpb.RegistryWrite.create({ Response: {} })).finish() },
+      { expected: { operationId: "beacon.registry.create", ...expectedRegistryLocation, key: "Child" },
+        description: "RegistryCreateKeyReq", type: 73,
+        request: sliverpb.RegistryCreateKeyReq.encode(sliverpb.RegistryCreateKeyReq.create({
+          ...registryLocation, Key: "Child",
+        })).finish(), response: sliverpb.RegistryCreateKey.encode(sliverpb.RegistryCreateKey.create({ Response: {} })).finish() },
+      { expected: { operationId: "beacon.registry.delete", ...expectedRegistryLocation, key: "Child" },
+        description: "RegistryDeleteKeyReq", type: 97,
+        request: sliverpb.RegistryDeleteKeyReq.encode(sliverpb.RegistryDeleteKeyReq.create({
+          ...registryLocation, Key: "Child",
+        })).finish(), response: sliverpb.RegistryDeleteKey.encode(sliverpb.RegistryDeleteKey.create({ Response: {} })).finish() },
+      { expected: { operationId: "beacon.service.start", name: "Spooler" }, description: "StartServiceByNameReq", type: 132,
+        request: sliverpb.StartServiceByNameReq.encode(sliverpb.StartServiceByNameReq.create({
+          ServiceInfo: { ServiceName: "Spooler" }, Request: savedTaskRequest,
+        })).finish(), response: sliverpb.ServiceInfo.encode(sliverpb.ServiceInfo.create({ Response: {} })).finish() },
+      { expected: { operationId: "beacon.service.stop", name: "Spooler" }, description: "StopServiceReq", type: 62,
+        request: sliverpb.StopServiceReq.encode(sliverpb.StopServiceReq.create({
+          ServiceInfo: { ServiceName: "Spooler" }, Request: savedTaskRequest,
+        })).finish(), response: sliverpb.ServiceInfo.encode(sliverpb.ServiceInfo.create({ Response: {} })).finish() },
+    ] as const;
+    for (const entry of cases) {
+      const detail = await detailFor(entry.expected as TargetOperationInput, entry.description, entry.type,
+        entry.request, entry.response);
+      expect(detail.disposition).toMatchObject({ kind: "structured-detail", fields: [
+        { label: "Handler", value: "Acknowledged" },
+        { label: "Remote state", value: "Not verified; requery the target" },
+      ] });
+      expect(JSON.stringify(detail)).not.toMatch(/was (written|created|deleted|started|stopped)/u);
+    }
+    // The pinned handler emits zero bytes on successful start/stop. This is a
+    // valid completed task, while actual service state still needs readback.
+    for (const entry of cases.slice(3)) {
+      const empty = await detailFor(entry.expected as TargetOperationInput, entry.description, entry.type,
+        entry.request, sliverpb.ServiceInfo.encode(sliverpb.ServiceInfo.create()).finish());
+      expect(empty.disposition).toMatchObject({ kind: "structured-detail", fields: [
+        { label: "Handler", value: "Returned without an error" },
+        { label: "Remote state", value: "Not verified; requery the target" },
+      ] });
+    }
+    const malformed = await detailFor(cases[3].expected as TargetOperationInput, "StartServiceByNameReq", 132,
+      cases[3].request, Buffer.from([0x08, 0x01]));
+    expect(malformed.errorKind).toBe("decode-uncertain");
+    const denied = await detailFor(cases[4].expected as TargetOperationInput, "StopServiceReq", 62,
+      cases[4].request, sliverpb.ServiceInfo.encode(sliverpb.ServiceInfo.create({
+        Response: { Err: "private access denied" },
+      })).finish());
+    expect(denied.errorKind).toBe("target-reported");
+    expect(JSON.stringify(denied)).not.toContain("private access denied");
+  });
+
+  it("rejects mismatched BC-08 provenance before decoding a successful response", async () => {
+    const wrongRequest = sliverpb.ServiceDetailReq.encode(sliverpb.ServiceDetailReq.create({
+      ServiceInfo: { ServiceName: "Other" }, Request: savedTaskRequest,
+    })).finish();
+    const detail = await detailFor({ operationId: "beacon.service.info", name: "Spooler" }, "ServiceDetailReq", 131,
+      wrongRequest, sliverpb.ServiceDetail.encode(sliverpb.ServiceDetail.create({
+        Detail: { Name: "Spooler" }, Response: {},
+      })).finish());
+    expect(detail.errorKind).toBe("decode-uncertain");
+    expect(detail.disposition).toBeUndefined();
   });
 });

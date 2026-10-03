@@ -15,6 +15,7 @@ import type { SessionWorkbenchOperationId } from "./session-contracts.js";
 
 import {
   BEACON_TASK_STATES,
+  BEACON_MUTATION_OPERATION_IDS,
   OPERATION_DISPOSITION_KINDS,
   OPERATION_INPUT_LIMITS,
   TARGET_OPERATION_IDS,
@@ -22,7 +23,10 @@ import {
   isTargetOperationId,
   parseCancelBeaconTaskInput,
   parseCancelTargetOperationInput,
+  parseBeaconMutationInput,
+  parseBeaconMutationTokenInput,
   parseGetBeaconTaskInput,
+  parseGetBeaconTaskResponseInput,
   parseOperationPageRequest,
   parseTargetOperationInput,
 } from "./operation-contracts.js";
@@ -49,6 +53,20 @@ describe("operation contracts", () => {
       "beacon.filesystem.head",
       "beacon.filesystem.tail",
       "beacon.filesystem.grep",
+      "beacon.registry.read",
+      "beacon.registry.list-subkeys",
+      "beacon.registry.list-values",
+      "beacon.registry.write",
+      "beacon.registry.create",
+      "beacon.registry.delete",
+      "beacon.service.list",
+      "beacon.service.info",
+      "beacon.service.start",
+      "beacon.service.stop",
+    ]);
+    expect(BEACON_MUTATION_OPERATION_IDS).toEqual([
+      "beacon.registry.write", "beacon.registry.create", "beacon.registry.delete",
+      "beacon.service.start", "beacon.service.stop",
     ]);
     expect(TARGET_OPERATION_STATES).toEqual([
       "queued",
@@ -163,6 +181,77 @@ describe("operation contracts", () => {
       .toThrow(/exactly/u);
   });
 
+  it("parses all ten BC-08 commands while bounding locations and typed Registry values", () => {
+    const location = { hive: "HKCU", path: "Software\\Acme", hostname: "host01" };
+    const valid = [
+      { operationId: "beacon.registry.read", ...location, key: "Name" },
+      { operationId: "beacon.registry.list-subkeys", ...location },
+      { operationId: "beacon.registry.list-values", ...location },
+      { operationId: "beacon.registry.write", ...location, key: "Name", value: { type: "string", value: "Alice" } },
+      { operationId: "beacon.registry.create", ...location, key: "Child" },
+      { operationId: "beacon.registry.delete", ...location, key: "Child" },
+      { operationId: "beacon.service.list", hostname: "host01" },
+      { operationId: "beacon.service.info", name: "Spooler", hostname: "host01" },
+      { operationId: "beacon.service.start", name: "Spooler", hostname: "host01" },
+      { operationId: "beacon.service.stop", name: "Spooler", hostname: "host01" },
+    ] as const;
+    for (const input of valid) expect(parseTargetOperationInput(input)).toEqual(input);
+    for (const input of valid.slice(3, 6).concat(valid.slice(8))) {
+      expect(parseBeaconMutationInput(input)).toEqual(input);
+    }
+    expect(() => parseBeaconMutationInput(valid[0])).toThrow(/does not require/u);
+    expect(parseBeaconMutationTokenInput({ token: "review_1" })).toEqual({ token: "review_1" });
+    expect(() => parseBeaconMutationTokenInput({ token: "review_1", targetId: "beacon_2" }))
+      .toThrow(/exactly/u);
+
+    const base = { operationId: "beacon.registry.write", hive: "HKCU", path: "Software\\Acme", key: "Name" };
+    for (const value of [
+      { type: "string", value: "hello" }, { type: "binary", hex: "00ff" },
+      { type: "dword", value: 0xffff_ffff }, { type: "qword", value: "18446744073709551615" },
+    ]) expect(parseTargetOperationInput({ ...base, value })).toMatchObject({ value });
+    expect(parseTargetOperationInput({ ...base, value: { type: "qword", value: "0001" } }))
+      .toMatchObject({ value: { type: "qword", value: "1" } });
+    expect(parseBeaconMutationInput({ ...base, value: { type: "qword", value: "0000" } }))
+      .toMatchObject({ value: { type: "qword", value: "0" } });
+    for (const value of [
+      { type: "binary", hex: "abc" }, { type: "dword", value: -1 },
+      { type: "qword", value: "18446744073709551616" }, { type: "string", value: "x".repeat(16_385) },
+    ]) expect(() => parseTargetOperationInput({ ...base, value })).toThrow();
+    expect(() => parseTargetOperationInput({ ...base, value: { type: "binary", hex: "aa".repeat(16_385) } }))
+      .toThrow(/write limit/u);
+  });
+
+  it("rejects BC-08 unknown fields, unsupported hives, NUL, and oversized names", () => {
+    const registry = { operationId: "beacon.registry.read", hive: "HKCU", path: "Software", key: "Name" };
+    expect(() => parseTargetOperationInput({ ...registry, rpc: "RegistryRead" })).toThrow(/unexpected/u);
+    expect(() => parseTargetOperationInput({ ...registry, hive: "HKZZ" })).toThrow(/not supported/u);
+    expect(() => parseTargetOperationInput({ ...registry, path: "x".repeat(4_097) })).toThrow();
+    expect(() => parseTargetOperationInput({ ...registry, key: "bad\0key" })).toThrow(/NUL/u);
+    expect(() => parseTargetOperationInput({ ...registry, hostname: "bad\0host" })).toThrow(/NUL/u);
+    expect(() => parseTargetOperationInput({ ...registry, hostname: "x".repeat(256) })).toThrow();
+    expect(() => parseTargetOperationInput({ operationId: "beacon.registry.list-subkeys", hive: "HKCU",
+      path: "Software", key: "unreviewed" })).toThrow(/unexpected/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.list", name: "Spooler" })).toThrow(/unexpected/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.start", name: "x".repeat(257) })).toThrow();
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.stop", name: "bad\0name" })).toThrow(/NUL/u);
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.info", name: "Spooler", targetId: "other" }))
+      .toThrow(/unexpected/u);
+  });
+
+  it("rejects ill-formed UTF-16 in BC-08 fields before protobuf encoding", () => {
+    const loneSurrogate = "\ud800";
+    const registry = { operationId: "beacon.registry.read", hive: "HKCU", path: "Software", key: "Name" };
+    expect(() => parseTargetOperationInput({ ...registry, path: loneSurrogate })).toThrow();
+    expect(() => parseTargetOperationInput({ ...registry, key: loneSurrogate })).toThrow();
+    expect(() => parseTargetOperationInput({ ...registry, hostname: loneSurrogate })).toThrow();
+    expect(() => parseTargetOperationInput({ operationId: "beacon.registry.write", hive: "HKCU",
+      path: "Software", key: "Name", value: { type: "string", value: loneSurrogate } })).toThrow();
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.info", name: loneSurrogate })).toThrow();
+    expect(() => parseTargetOperationInput({ operationId: "beacon.service.list", hostname: loneSurrogate })).toThrow();
+    expect(parseTargetOperationInput({ operationId: "beacon.service.info", name: "Svc\ud83d\ude00" }))
+      .toMatchObject({ name: "Svc\ud83d\ude00" });
+  });
+
   it("rejects an arbitrary method selector and every renderer-supplied policy field", () => {
     const forbiddenFields = [
       "rpc",
@@ -246,5 +335,20 @@ describe("operation contracts", () => {
     expect(parseCancelBeaconTaskInput({ taskId: "task_01-test" })).toEqual({ taskId: "task_01-test" });
     expect(() => parseGetBeaconTaskInput({ taskId: "../task" })).toThrow(/unsupported/u);
     expect(() => parseCancelBeaconTaskInput({ taskId: "task", force: true })).toThrow(/exactly/u);
+  });
+
+  it("accepts only task identity and a nonnegative integer response offset", () => {
+    expect(parseGetBeaconTaskResponseInput({ taskId: "task_1" })).toEqual({ taskId: "task_1" });
+    expect(parseGetBeaconTaskResponseInput({ taskId: "task_1", offset: 65_536 })).toEqual({ taskId: "task_1", offset: 65_536 });
+    for (const input of [
+      { taskId: "task_1", offset: -1 },
+      { taskId: "task_1", offset: 0.5 },
+      { taskId: "task_1", offset: Number.POSITIVE_INFINITY },
+      { taskId: "task_1", offset: Number.MAX_SAFE_INTEGER + 1 },
+      { taskId: "task_1", offset: "0" },
+      { taskId: "task_1", beaconId: "another_beacon" },
+      { taskId: "../task" },
+      {},
+    ]) expect(() => parseGetBeaconTaskResponseInput(input)).toThrow();
   });
 });

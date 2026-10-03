@@ -12,7 +12,7 @@ import type {
   TargetCapabilityState,
   TargetRef,
 } from "../../../shared/target-contracts";
-import type { BeaconTaskDetail, TargetOperationRecord } from "../../../shared/operation-contracts";
+import type { BeaconMutationPlan, BeaconTaskDetail, TargetOperationRecord } from "../../../shared/operation-contracts";
 import type {
   ExecutionActionPlan,
   ExecutionCapability,
@@ -256,6 +256,25 @@ function beaconExecutionPlan(): ExecutionActionPlan {
   };
 }
 
+function beaconMutationPlan(overrides: Partial<BeaconMutationPlan> = {}): BeaconMutationPlan {
+  return {
+    token: "reviewed-beacon-mutation",
+    expiresAt: "2026-08-15T23:00:00.000Z",
+    target: beaconRef,
+    targetName: beacon.name,
+    backend: executionBackend,
+    operationId: "beacon.registry.write",
+    summary: "Write a Windows registry value after beacon check-in.",
+    fields: [
+      { label: "Hive", value: "HKCU" },
+      { label: "Path", value: "Software\\Acme" },
+      { label: "Value name", value: "Mode" },
+    ],
+    payloadSha256: "d".repeat(64),
+    ...overrides,
+  };
+}
+
 const capabilities: TargetCapabilityState[] = [
   "target.ping",
   "target.rename",
@@ -429,6 +448,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     generate: vi.fn(failed),
     generateFromProfile: vi.fn(failed),
     getBeaconTask: vi.fn(failed),
+    getBeaconTaskResponse: vi.fn(failed),
     getLootDetail: vi.fn(failed),
     revealCredentialSecret: vi.fn(failed),
     getTerminalRuntime: vi.fn(failed),
@@ -505,6 +525,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     prepareStopAllJobs: vi.fn(failed),
     prepareStopJob: vi.fn(failed),
     prepareExecutionAction: vi.fn(failed),
+    prepareBeaconMutation: vi.fn(failed),
     prepareTargetAction: vi.fn(failed),
     prepareSessionDestructiveAction: vi.fn(failed),
     prepareSessionShell: vi.fn(failed),
@@ -525,6 +546,8 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     setStagedBuilds: vi.fn(failed),
     startListener: vi.fn(failed),
     submitTargetOperation: vi.fn(failed),
+    executeBeaconMutation: vi.fn(failed),
+    discardBeaconMutation: vi.fn(async () => ({ ok: true as const })),
     executeExecutionPlan: vi.fn(failed),
     discardExecutionPlan: vi.fn(failed),
     saveExecutionResult: vi.fn(failed),
@@ -1513,6 +1536,239 @@ describe("TargetsPage", () => {
     }));
   });
 
+  it("keeps BC-08 Registry and service commands unavailable on non-Windows beacons", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn();
+    const prepareBeaconMutation = vi.fn();
+    installAPI({ submitTargetOperation, prepareBeaconMutation });
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (id: string) => {
+      await user.click(within(command).getByRole("button", { name: /Command/i }));
+      const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === id);
+      expect(option).toBeDefined();
+      await user.click(option!);
+    };
+    await choose("beacon.registry.list-values");
+    expect(within(command).getByRole("button", { name: "Queue task" })).toBeDisabled();
+    expect(within(command).getByText("Registry and service commands require a Windows beacon.")).toBeInTheDocument();
+    await choose("beacon.service.stop");
+    expect(within(command).getByRole("button", { name: "Review task" })).toBeDisabled();
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+    expect(prepareBeaconMutation).not.toHaveBeenCalled();
+  });
+
+  it("queues BC-08 Windows Registry and service reads with typed locations", async () => {
+    const user = userEvent.setup();
+    const submitTargetOperation = vi.fn(async (input: { operationId: string }) => ({
+      ok: true as const,
+      value: operationRecord({ operationId: input.operationId as TargetOperationRecord["operationId"], target: beaconRef,
+        mode: "beacon", state: "submitted", taskId: `task-${input.operationId}` }),
+    }));
+    installAPI({ submitTargetOperation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    const choose = async (id: string) => {
+      await user.click(within(command).getByRole("button", { name: /Command/i }));
+      const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === id);
+      expect(option).toBeDefined();
+      await user.click(option!);
+    };
+    await choose("beacon.registry.list-subkeys");
+    await user.type(within(command).getByRole("textbox", { name: "Registry path" }), "Software\\Acme");
+    await user.type(within(command).getByRole("textbox", { name: "Host (optional)" }), "workstation-1");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({
+      operationId: "beacon.registry.list-subkeys", hive: "HKCU", path: "Software\\Acme", hostname: "workstation-1",
+    }));
+    await choose("beacon.registry.read");
+    await user.type(within(command).getByRole("textbox", { name: "Registry path" }), "Software\\Acme");
+    await user.type(within(command).getByRole("textbox", { name: "Value name" }), "Mode");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({
+      operationId: "beacon.registry.read", hive: "HKCU", path: "Software\\Acme", key: "Mode",
+    }));
+    await choose("beacon.service.list");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.service.list" }));
+    await choose("beacon.service.info");
+    await user.type(within(command).getByRole("textbox", { name: "Service name" }), "Spooler");
+    await user.click(within(command).getByRole("button", { name: "Queue task" }));
+    await waitFor(() => expect(submitTargetOperation).toHaveBeenLastCalledWith({ operationId: "beacon.service.info", name: "Spooler" }));
+  });
+
+  it("requires exact BC-08 mutation review, validates binary data, and discards canceled plans", async () => {
+    const user = userEvent.setup();
+    const firstPlan = beaconMutationPlan({ token: "first-reviewed-plan" });
+    const secondPlan = beaconMutationPlan({ token: "second-reviewed-plan" });
+    const prepareBeaconMutation = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: firstPlan })
+      .mockResolvedValueOnce({ ok: true, value: secondPlan });
+    const executeBeaconMutation = vi.fn().mockResolvedValue({ ok: true, value: operationRecord({
+      operationId: "beacon.registry.write", target: beaconRef, targetName: beacon.name,
+      mode: "beacon", state: "submitted", taskId: "task-registry-write",
+    }) });
+    const discardBeaconMutation = vi.fn().mockResolvedValue({ ok: true });
+    const submitTargetOperation = vi.fn();
+    installAPI({ prepareBeaconMutation, executeBeaconMutation, discardBeaconMutation, submitTargetOperation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Command/i }));
+    const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === "beacon.registry.write");
+    expect(option).toBeDefined();
+    await user.click(option!);
+    await user.type(within(command).getByRole("textbox", { name: "Registry path" }), "Software\\Acme");
+    await user.type(within(command).getByRole("textbox", { name: "Value name" }), "Mode");
+    await user.click(within(command).getByRole("button", { name: /Registry value type/ }));
+    await user.click(await screen.findByRole("option", { name: "Binary" }));
+    await user.type(within(command).getByRole("textbox", { name: "Hexadecimal bytes" }), "abc");
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    expect(within(command).getByRole("alert")).toHaveTextContent("contiguous even-length hexadecimal");
+    expect(prepareBeaconMutation).not.toHaveBeenCalled();
+    await user.clear(within(command).getByRole("textbox", { name: "Hexadecimal bytes" }));
+    await user.type(within(command).getByRole("textbox", { name: "Hexadecimal bytes" }), "AABB");
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    await waitFor(() => expect(prepareBeaconMutation).toHaveBeenCalledExactlyOnceWith({
+      operationId: "beacon.registry.write", hive: "HKCU", path: "Software\\Acme", key: "Mode", value: { type: "binary", hex: "aabb" },
+    }));
+    const review = await screen.findByRole("alertdialog", { name: "Queue this reviewed beacon mutation?" });
+    expect(within(review).getByText(beacon.name)).toBeInTheDocument();
+    expect(within(review).getByText(/Payload SHA-256/)).toBeInTheDocument();
+    expect(executeBeaconMutation).not.toHaveBeenCalled();
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+    await user.click(within(review).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(discardBeaconMutation).toHaveBeenCalledExactlyOnceWith({ token: "first-reviewed-plan" }));
+    expect(executeBeaconMutation).not.toHaveBeenCalled();
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    const nextReview = await screen.findByRole("alertdialog", { name: "Queue this reviewed beacon mutation?" });
+    await user.click(within(nextReview).getByRole("button", { name: "Queue reviewed task" }));
+    await waitFor(() => expect(executeBeaconMutation).toHaveBeenCalledExactlyOnceWith({ token: "second-reviewed-plan" }));
+    expect(submitTargetOperation).not.toHaveBeenCalled();
+    expect(within(command).getByRole("status", { name: "Beacon command status" })).toHaveTextContent("Verify the remote state after check-in");
+  });
+
+  it("identifies Registry delete as a value-first entry deletion before queueing", async () => {
+    const user = userEvent.setup();
+    const prepareBeaconMutation = vi.fn().mockResolvedValue({ ok: true, value: beaconMutationPlan({
+      operationId: "beacon.registry.delete",
+      summary: "Delete a Registry entry (value first, then subkey)",
+    }) });
+    installAPI({ prepareBeaconMutation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Command/i }));
+    const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === "beacon.registry.delete");
+    expect(option).toBeDefined();
+    expect(option).toHaveTextContent("Delete registry entry");
+    await user.click(option!);
+    expect(within(command).getByRole("textbox", { name: "Entry name" })).toBeInTheDocument();
+    expect(within(command).getByText(/deletes a value with this name first/i)).toBeInTheDocument();
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    expect(within(command).getByRole("alert")).toHaveTextContent("Enter an entry name.");
+    await user.type(within(command).getByRole("textbox", { name: "Entry name" }), "Mode");
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    await waitFor(() => expect(prepareBeaconMutation).toHaveBeenCalledExactlyOnceWith({
+      operationId: "beacon.registry.delete", hive: "HKCU", path: "", key: "Mode",
+    }));
+    const review = await screen.findByRole("alertdialog", { name: "Queue this reviewed beacon mutation?" });
+    expect(within(review).getByText(/deletes a value with this name first/i)).toBeInTheDocument();
+  });
+
+  it.each([
+    { typeLabel: "DWORD", field: "Unsigned 32-bit value", invalid: "4294967296", valid: "4294967295", value: { type: "dword", value: 4294967295 } },
+    { typeLabel: "QWORD", field: "Unsigned 64-bit value", invalid: "18446744073709551616", valid: "18446744073709551615", value: { type: "qword", value: "18446744073709551615" } },
+  ])("preserves typed $typeLabel BC-08 Registry writes through review", async ({ typeLabel, field, invalid, valid, value }) => {
+    const user = userEvent.setup();
+    const prepareBeaconMutation = vi.fn().mockResolvedValue({ ok: true, value: beaconMutationPlan() });
+    installAPI({ prepareBeaconMutation });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Command/i }));
+    const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === "beacon.registry.write");
+    expect(option).toBeDefined();
+    await user.click(option!);
+    await user.click(within(command).getByRole("button", { name: /Registry value type/ }));
+    await user.click(await screen.findByRole("option", { name: typeLabel }));
+    const input = within(command).getByRole("textbox", { name: field });
+    await user.type(input, invalid);
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    expect(within(command).getByRole("alert")).toHaveTextContent(`${typeLabel} must be an unsigned`);
+    expect(prepareBeaconMutation).not.toHaveBeenCalled();
+    await user.clear(input);
+    await user.type(input, valid);
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    await waitFor(() => expect(prepareBeaconMutation).toHaveBeenCalledExactlyOnceWith({
+      operationId: "beacon.registry.write", hive: "HKCU", path: "", key: "", value,
+    }));
+    expect(await screen.findByRole("alertdialog", { name: "Queue this reviewed beacon mutation?" })).toBeInTheDocument();
+  });
+
+  it("discards a BC-08 review prepared after the selected beacon changes", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<Awaited<ReturnType<SliverDesktopAPI["prepareBeaconMutation"]>>>();
+    const prepareBeaconMutation = vi.fn(() => pending.promise);
+    const discardBeaconMutation = vi.fn().mockResolvedValue({ ok: true });
+    const executeBeaconMutation = vi.fn();
+    installAPI({ prepareBeaconMutation, discardBeaconMutation, executeBeaconMutation });
+    const snapshot = switchableBeaconSnapshot("first");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    const view = render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const command = screen.getByRole("region", { name: "Beacon command" });
+    await user.click(within(command).getByRole("button", { name: /Command/i }));
+    const option = (await screen.findAllByRole("option")).find((item) => item.getAttribute("data-key") === "beacon.service.stop");
+    expect(option).toBeDefined();
+    await user.click(option!);
+    await user.type(within(command).getByRole("textbox", { name: "Service name" }), "Spooler");
+    await user.click(within(command).getByRole("button", { name: "Review task" }));
+    expect(prepareBeaconMutation).toHaveBeenCalledExactlyOnceWith({ operationId: "beacon.service.stop", name: "Spooler" });
+    const next = switchableBeaconSnapshot("second");
+    next.targetContext.activeTargetSummary = { ...secondBeacon, os: "windows" };
+    view.rerender(<TargetsPage expectedTarget={secondBeaconRef} mode="beacon" presentation="dedicated" snapshot={next} onSnapshot={vi.fn()} />);
+    await act(async () => pending.resolve({ ok: true, value: beaconMutationPlan({ operationId: "beacon.service.stop" }) }));
+    await waitFor(() => expect(discardBeaconMutation).toHaveBeenCalledExactlyOnceWith({ token: "reviewed-beacon-mutation" }));
+    expect(screen.queryByRole("alertdialog", { name: "Queue this reviewed beacon mutation?" })).not.toBeInTheDocument();
+    expect(executeBeaconMutation).not.toHaveBeenCalled();
+  });
+
+  it("shows BC-08 decoded read rows and keeps mutation results distinct from remote verification", async () => {
+    const serviceList = beaconTaskDetail({
+      taskId: "task-service-list",
+      description: "ServicesReq",
+      operationId: "beacon.service.list",
+      disposition: { kind: "table", columns: ["Name", "Status"], rows: [["Spooler", "Running"]], truncated: false },
+    });
+    const serviceStop = beaconTaskDetail({
+      taskId: "task-service-stop",
+      description: "StopServiceReq",
+      operationId: "beacon.service.stop",
+      disposition: { kind: "structured-detail", title: "Service action", fields: [{ label: "Name", value: "Spooler" }], truncated: false },
+    });
+    const tasks = [serviceList, serviceStop];
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: tasks, page: { limit: 100, total: 2, truncated: false } } }),
+      getBeaconTask: vi.fn(async ({ taskId }: { taskId: string }) => {
+        const task = tasks.find((item) => item.taskId === taskId);
+        return task ? { ok: true as const, value: task } : { ok: false as const, error: "Task not found" };
+      }),
+    });
+    const snapshot = targetSnapshot("beacon");
+    snapshot.targetContext.activeTargetSummary = { ...beacon, os: "windows" };
+    render(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
+    const list = await screen.findByRole("article", { name: "Task output task-service-list" });
+    expect(await within(list).findByText("Spooler")).toBeInTheDocument();
+    expect(within(list).getByText("Services")).toBeInTheDocument();
+    const stop = await screen.findByRole("article", { name: "Task output task-service-stop" });
+    expect(await within(stop).findByText(/Read the registry or service state again to verify the remote change/)).toBeInTheDocument();
+  });
+
   it("filters and pages decoded process rows within the same beacon task output", async () => {
     const user = userEvent.setup();
     const task = beaconTaskDetail({
@@ -1543,7 +1799,7 @@ describe("TargetsPage", () => {
     expect(within(output).getByText("process-54")).toBeInTheDocument();
     expect(within(output).queryByText("process-51")).not.toBeInTheDocument();
     expect(within(output).getByText(/Showing 1–1 of 1 decoded rows/)).toBeInTheDocument();
-    expect(within(output).getByText(/exceeded the bounded preview/)).toBeInTheDocument();
+    expect(within(output).getByText(/Preview shortened\. Open Details/)).toBeInTheDocument();
   });
 
   it("sorts only the decoded rows of one directory task", async () => {

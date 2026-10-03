@@ -280,6 +280,7 @@ const registryLayoutFixture = process.argv.includes("--registry-layout-fixture")
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
 const beaconsTableFixture = process.argv.includes("--beacons-table-fixture");
+const beaconResponseDetailsFixture = process.argv.includes("--beacon-response-details-fixture");
 const beaconManagementDenialFixture = process.argv.includes("--beacon-management-denial-fixture");
 const beaconExecutionFixture = process.argv.includes("--beacon-execution-fixture");
 const beaconBC03Fixture = process.argv.includes("--beacon-bc03-fixture");
@@ -1660,7 +1661,9 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async catBeacon(beaconId: string, path: string) {
       record("catBeacon");
       requireBeacon(beaconId);
-      const fixture = fakeBeaconTextTaskResult(path, "deterministic BC-05 cat output\n");
+      const fixture = fakeBeaconTextTaskResult(path, beaconResponseDetailsFixture
+        ? `DETAILS_TEXT_START\n${"Complete task response line.\n".repeat(3500)}DETAILS_TEXT_TAIL\n`
+        : "deterministic BC-05 cat output\n");
       return sliverpb.Download.create({
         Response: queueTask(beaconId, fixture.description, fixture.result, fakeBeaconDownloadRequest(beaconId, path, String(BEACON_TEXT_READ_PROBE_BYTES), "0")),
       });
@@ -1731,6 +1734,15 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       record("lsBeacon");
       requireBeacon(beaconId);
       const fixture = fakeBeaconLsTaskResult(path);
+      if (beaconResponseDetailsFixture) {
+        fixture.result = Buffer.from(sliverpb.Ls.encode(sliverpb.Ls.create({
+          Path: path || "/Users/e2e/workspace",
+          Exists: true,
+          Files: Array.from({ length: 300 }, (_, index) =>
+            fakeFile(`details-row-${String(index).padStart(3, "0")}.txt`, false, "16", "-rw-r--r--")),
+          Response: response(false),
+        })).finish());
+      }
       return sliverpb.Ls.create({
         Response: queueTask(beaconId, fixture.description, fixture.result, beaconTaskRequest(
           5, sliverpb.LsReq.encode(sliverpb.LsReq.create({ Path: path, Request: fakeBeaconRequest(beaconId) })).finish(),
@@ -2007,6 +2019,118 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
     async registryWriteSession() { return unsupported("registryWriteSession"); },
     async registryCreateKeySession() { return unsupported("registryCreateKeySession"); },
     async registryDeleteKeySession() { return unsupported("registryDeleteKeySession"); },
+    async registryReadBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryReadBeacon"]>[1]) {
+      record("registryReadBeacon");
+      requireBeacon(beaconId);
+      const result = sliverpb.RegistryRead.create({
+        Value: `fixture-registry-value-${options.key || "default"}`,
+        Response: response(false),
+      });
+      const request = sliverpb.RegistryReadReq.create({
+        Hive: options.hive, Path: options.path, Key: options.key,
+        Hostname: options.hostname ?? "", Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.RegistryRead.create({ Response: queueTask(beaconId, "RegistryReadReq",
+        Buffer.from(sliverpb.RegistryRead.encode(result).finish()), beaconTaskRequest(71, sliverpb.RegistryReadReq.encode(request).finish())) });
+    },
+    async registryListSubkeysBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryListSubkeysBeacon"]>[1]) {
+      record("registryListSubkeysBeacon");
+      requireBeacon(beaconId);
+      const result = sliverpb.RegistrySubKeyList.create({ Subkeys: ["FixtureChild", "FixtureSettings"], Response: response(false) });
+      const request = sliverpb.RegistrySubKeyListReq.create({
+        Hive: options.hive, Path: options.path, Hostname: options.hostname ?? "", Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.RegistrySubKeyList.create({ Response: queueTask(beaconId, "RegistrySubKeyListReq",
+        Buffer.from(sliverpb.RegistrySubKeyList.encode(result).finish()), beaconTaskRequest(88, sliverpb.RegistrySubKeyListReq.encode(request).finish())) });
+    },
+    async registryListValuesBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryListValuesBeacon"]>[1]) {
+      record("registryListValuesBeacon");
+      requireBeacon(beaconId);
+      const result = sliverpb.RegistryValuesList.create({ ValueNames: ["FixtureMode", ""], Response: response(false) });
+      const request = sliverpb.RegistryListValuesReq.create({
+        Hive: options.hive, Path: options.path, Hostname: options.hostname ?? "", Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.RegistryValuesList.create({ Response: queueTask(beaconId, "RegistryListValuesReq",
+        Buffer.from(sliverpb.RegistryValuesList.encode(result).finish()), beaconTaskRequest(89, sliverpb.RegistryListValuesReq.encode(request).finish())) });
+    },
+    async registryWriteBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryWriteBeacon"]>[1]) {
+      record("registryWriteBeacon");
+      requireBeacon(beaconId);
+      const value = options.value;
+      const request = sliverpb.RegistryWriteReq.create({
+        Hive: options.hive, Path: options.path, Key: options.key, Hostname: options.hostname ?? "",
+        StringValue: value.type === "string" ? value.value : "",
+        ByteValue: value.type === "binary" ? value.value : Buffer.alloc(0),
+        DWordValue: value.type === "dword" ? value.value : 0,
+        QWordValue: value.type === "qword" ? value.value : "0",
+        Type: value.type === "string" ? sliverpb.RegistryType.String
+          : value.type === "binary" ? sliverpb.RegistryType.Binary
+            : value.type === "dword" ? sliverpb.RegistryType.DWORD : sliverpb.RegistryType.QWORD,
+        Request: fakeBeaconRequest(beaconId),
+      });
+      const savedRequest = beaconTaskRequest(72, sliverpb.RegistryWriteReq.encode(request).finish());
+      const result = sliverpb.RegistryWrite.create({ Response: response(false) });
+      return sliverpb.RegistryWrite.create({ Response: queueTask(beaconId, "RegistryWriteReq",
+        Buffer.from(sliverpb.RegistryWrite.encode(result).finish()), savedRequest) });
+    },
+    async registryCreateBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryCreateBeacon"]>[1]) {
+      record("registryCreateBeacon");
+      requireBeacon(beaconId);
+      const request = sliverpb.RegistryCreateKeyReq.create({
+        Hive: options.hive, Path: options.path, Key: options.key, Hostname: options.hostname ?? "",
+        Request: fakeBeaconRequest(beaconId),
+      });
+      const result = sliverpb.RegistryCreateKey.create({ Response: response(false) });
+      return sliverpb.RegistryCreateKey.create({ Response: queueTask(beaconId, "RegistryCreateKeyReq",
+        Buffer.from(sliverpb.RegistryCreateKey.encode(result).finish()), beaconTaskRequest(73, sliverpb.RegistryCreateKeyReq.encode(request).finish())) });
+    },
+    async registryDeleteBeacon(beaconId: string, options: Parameters<SliverClientAdapter["registryDeleteBeacon"]>[1]) {
+      record("registryDeleteBeacon");
+      requireBeacon(beaconId);
+      const request = sliverpb.RegistryDeleteKeyReq.create({
+        Hive: options.hive, Path: options.path, Key: options.key, Hostname: options.hostname ?? "",
+        Request: fakeBeaconRequest(beaconId),
+      });
+      const result = sliverpb.RegistryDeleteKey.create({ Response: response(false) });
+      return sliverpb.RegistryDeleteKey.create({ Response: queueTask(beaconId, "RegistryDeleteKeyReq",
+        Buffer.from(sliverpb.RegistryDeleteKey.encode(result).finish()), beaconTaskRequest(97, sliverpb.RegistryDeleteKeyReq.encode(request).finish())) });
+    },
+    async servicesBeacon(beaconId: string, options: Parameters<SliverClientAdapter["servicesBeacon"]>[1]) {
+      record("servicesBeacon");
+      requireBeacon(beaconId);
+      const result = sliverpb.Services.create({ Details: [fakeBc08ServiceDetails("Spooler"), fakeBc08ServiceDetails("W32Time")], Response: response(false) });
+      const request = sliverpb.ServicesReq.create({ Hostname: options.hostname ?? "", Request: fakeBeaconRequest(beaconId) });
+      return sliverpb.Services.create({ Response: queueTask(beaconId, "ServicesReq",
+        Buffer.from(sliverpb.Services.encode(result).finish()), beaconTaskRequest(130, sliverpb.ServicesReq.encode(request).finish())) });
+    },
+    async serviceDetailBeacon(beaconId: string, options: Parameters<SliverClientAdapter["serviceDetailBeacon"]>[1]) {
+      record("serviceDetailBeacon");
+      requireBeacon(beaconId);
+      const result = sliverpb.ServiceDetail.create({ Detail: fakeBc08ServiceDetails(options.name), Response: response(false) });
+      const request = sliverpb.ServiceDetailReq.create({
+        ServiceInfo: { ServiceName: options.name, Hostname: options.hostname ?? "" }, Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.ServiceDetail.create({ Response: queueTask(beaconId, "ServiceDetailReq",
+        Buffer.from(sliverpb.ServiceDetail.encode(result).finish()), beaconTaskRequest(131, sliverpb.ServiceDetailReq.encode(request).finish())) });
+    },
+    async serviceStartBeacon(beaconId: string, options: Parameters<SliverClientAdapter["serviceStartBeacon"]>[1]) {
+      record("serviceStartBeacon");
+      requireBeacon(beaconId);
+      const request = sliverpb.StartServiceByNameReq.create({
+        ServiceInfo: { ServiceName: options.name, Hostname: options.hostname ?? "" }, Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.ServiceInfo.create({ Response: queueTask(beaconId, "StartServiceByNameReq",
+        Buffer.alloc(0), beaconTaskRequest(132, sliverpb.StartServiceByNameReq.encode(request).finish())) });
+    },
+    async serviceStopBeacon(beaconId: string, options: Parameters<SliverClientAdapter["serviceStopBeacon"]>[1]) {
+      record("serviceStopBeacon");
+      requireBeacon(beaconId);
+      const request = sliverpb.StopServiceReq.create({
+        ServiceInfo: { ServiceName: options.name, Hostname: options.hostname ?? "" }, Request: fakeBeaconRequest(beaconId),
+      });
+      return sliverpb.ServiceInfo.create({ Response: queueTask(beaconId, "StopServiceReq",
+        Buffer.alloc(0), beaconTaskRequest(62, sliverpb.StopServiceReq.encode(request).finish())) });
+    },
     async executeSession(sessionId, options, timeoutSeconds) {
       recordM4("executeSession");
       requireSession(sessionId);
@@ -2055,11 +2179,30 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Pid: 43_002,
         Response: response(false),
       });
+      const requestFields = {
+        Path: options.path,
+        Args: [...(options.args ?? [])],
+        Output: options.output !== false,
+        Stdout: options.stdoutPath ?? "",
+        Stderr: options.stderrPath ?? "",
+        Background: options.background ?? false,
+        PPid: options.parentPid ?? 0,
+        Request: fakeBeaconRequest(beaconId),
+      };
+      const request = !beaconResponseDetailsFixture ? undefined
+        : beaconExecutionFixture && beacon.OS === "windows"
+          ? beaconTaskRequest(70, sliverpb.ExecuteWindowsReq.encode(sliverpb.ExecuteWindowsReq.create({
+            ...requestFields, UseToken: options.useToken ?? false, HideWindow: options.hideWindow ?? false,
+          })).finish())
+          : beaconTaskRequest(44, sliverpb.ExecuteReq.encode(sliverpb.ExecuteReq.create({
+            ...requestFields, EnvInheritance: options.envInheritance ?? true, Env: { ...options.env },
+          })).finish());
       return sliverpb.Execute.create({
         Response: queueTask(
           beaconId,
           beaconExecutionFixture && beacon.OS === "windows" ? "ExecuteWindowsReq" : "ExecuteReq",
           Buffer.from(sliverpb.Execute.encode(completed).finish()),
+          request,
         ),
       });
     },
@@ -2644,7 +2787,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   }
 
   function queueTask(beaconId: string, description: string, result: Buffer, request?: Buffer) {
-    const id = `m1_task_${nextTaskId++}`;
+    const id = beaconResponseDetailsFixture ? randomUUID() : `m1_task_${nextTaskId++}`;
     const createdAt = epochSeconds();
     const task = clientpb.BeaconTask.create({
       ID: id,
@@ -2853,6 +2996,18 @@ function remoteParent(path: string): string {
   const normalized = path.replace(/\/+$/u, "");
   const separator = normalized.lastIndexOf("/");
   return separator <= 0 ? "/" : normalized.slice(0, separator);
+}
+
+function fakeBc08ServiceDetails(name: string): sliverpb.ServiceDetails {
+  return sliverpb.ServiceDetails.create({
+    Name: name,
+    DisplayName: name === "Spooler" ? "Print Spooler" : name === "W32Time" ? "Windows Time" : name,
+    Description: `Deterministic ${name} service`,
+    Status: 4,
+    StartupType: 2,
+    BinPath: `C:\\Windows\\System32\\${name.toLowerCase()}.exe`,
+    Account: "LocalSystem",
+  });
 }
 
 function fakeProcess(pid: number, executable: string, parentPid = 1) {

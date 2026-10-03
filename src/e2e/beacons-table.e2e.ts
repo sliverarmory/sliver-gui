@@ -615,6 +615,333 @@ test("BC-05 beacon reads use the command picker and exact task output", { timeou
   }
 });
 
+test("beacon Details render complete tables, file text, and execution streams in a wide modal", { timeout: 90_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-beacon-response-details-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  const screenshotDirectory = join(repositoryRoot, "artifacts", "e2e", "beacons-table");
+  await Promise.all([
+    mkdir(savedConfigDirectory, { recursive: true }),
+    mkdir(managedConfigDirectory, { recursive: true }),
+    mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
+    mkdir(screenshotDirectory, { recursive: true }),
+  ]);
+  await writeFile(join(savedConfigDirectory, "beacon-response-details.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+
+  let application: ElectronApplication | undefined;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--beacons-table-fixture",
+        "--beacon-response-details-fixture",
+        "--beacon-execution-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    const rendererErrors: string[] = [];
+    page.on("pageerror", (error) => rendererErrors.push(error.message));
+    const nativeWindow = await application.browserWindow(page);
+    await nativeWindow.evaluate((window) => window.setSize(1440, 950));
+    await page.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Beacons"]:visible').click();
+    await page.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
+    const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+    const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+    const dialog = page.getByRole("dialog", { name: "Task details", exact: true });
+
+    const selectCommand = async (label: string): Promise<void> => {
+      await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
+      const search = page.getByRole("searchbox", { name: "Search beacon commands", exact: true });
+      await search.fill(label);
+      await page.getByRole("option", { name: label === "Execution" ? /^Execution\b/u : new RegExp(`^${label} Filesystem\\b`, "u") }).click();
+      await page.keyboard.press("Escape");
+    };
+    const submitAndOpen = async (reviewed = false): Promise<{ taskId: string; preview: Locator }> => {
+      const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+      await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+      await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+      if (reviewed) {
+        const review = page.getByRole("alertdialog", { name: "Execute this reviewed action?", exact: true });
+        await review.getByRole("button", { name: "Execute", exact: true }).click();
+        await review.waitFor({ state: "hidden" });
+      }
+      const deadline = Date.now() + 10_000;
+      let task: { id: string; beaconId: string } | undefined;
+      while (!task && Date.now() < deadline) {
+        task = await application!.evaluate((_electron, existing) =>
+          globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => !existing.includes(candidate.id)), knownIds);
+        if (!task) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(task && task.beaconId === "m1_beacon", "the selected beacon must own the queued response");
+      assert.match(task.id, /^[0-9a-f-]{36}$/u, "the Details fixture must exercise a full task GUID");
+      await page.getByRole("tab", { name: "Task queue", exact: true }).click();
+      const row = queue.getByRole("row").filter({ hasText: task.id });
+      await row.getByText("Pending", { exact: true }).waitFor();
+      await application!.evaluate((_electron, taskId) => globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId), task.id);
+      await row.getByText("Completed", { exact: true }).waitFor();
+      await row.click();
+      const preview = page.getByRole("article", { name: `Task output ${task.id}`, exact: true });
+      await preview.getByRole("button", { name: "Details", exact: true }).waitFor();
+      assert.equal((await preview.innerText()).includes(task.id), false, "compact output must omit the task GUID");
+      await page.waitForFunction(() => {
+        const document = (globalThis as unknown as { document: { querySelector(selector: string): unknown } }).document;
+        return document.querySelector('[data-slot="toast"]') === null;
+      }, undefined, { timeout: 10_000 });
+      return { taskId: task.id, preview };
+    };
+    const assertModalLayout = async (width: number): Promise<void> => {
+      await nativeWindow.evaluate((window, nextWidth) => window.setSize(nextWidth, 950), width);
+      await page.waitForFunction((expectedWidth) => (
+        globalThis as unknown as { innerWidth: number }
+      ).innerWidth === expectedWidth, width);
+      const bounds = await dialog.boundingBox();
+      assert.ok(bounds, "the Details modal must have a measurable layout");
+      assert.ok(bounds.x >= 8 && bounds.x + bounds.width <= width - 8,
+        `the modal must fit the ${width}px viewport with side margins: ${JSON.stringify(bounds)}`);
+      assert.ok(bounds.y >= 0 && bounds.y + bounds.height <= 950,
+        `the modal must remain fully inside the viewport: ${JSON.stringify(bounds)}`);
+      if (width === 1440) assert.ok(bounds.width >= 1000, "the full output modal must use the available desktop width");
+      const overflow = await dialog.evaluate((element) => element.scrollWidth - element.clientWidth);
+      assert.ok(overflow <= 1, "the modal itself must not clip overflowing content horizontally");
+    };
+
+    await selectCommand("List directory");
+    const directory = await submitAndOpen();
+    await directory.preview.getByRole("cell", { name: "details-row-000.txt", exact: true }).waitFor();
+    assert.equal(await directory.preview.getByRole("cell", { name: "details-row-299.txt", exact: true }).count(), 0,
+      "the compact directory preview must remain limited to its first 256 rows");
+    await directory.preview.getByRole("button", { name: "Details", exact: true }).click();
+    await dialog.getByText("Task GUID", { exact: true }).waitFor();
+    await dialog.getByText(directory.taskId, { exact: true }).waitFor();
+    const directorySection = dialog.getByRole("region", { name: "Files", exact: true });
+    const directoryTable = directorySection.getByRole("table", { name: "Files", exact: true });
+    await directoryTable.getByRole("cell", { name: "details-row-000.txt", exact: true }).waitFor();
+    for (const column of ["Name", "Type", "Size", "Modified", "Mode"]) {
+      await directoryTable.getByRole("columnheader", { name: column, exact: true }).waitFor();
+    }
+    const directoryNames: string[] = [];
+    for (let pageNumber = 0; pageNumber < 3; pageNumber += 1) {
+      await directoryTable.getByRole("cell", { name: `details-row-${String(pageNumber * 100).padStart(3, "0")}.txt`, exact: true }).waitFor();
+      directoryNames.push(...await directoryTable.getByRole("cell", { name: /^details-row-\d{3}\.txt$/u }).allTextContents());
+      if (pageNumber < 2) await directorySection.getByRole("button", { name: "Next", exact: true }).click();
+    }
+    assert.equal(new Set(directoryNames).size, 300, "all 300 rows must be reachable through table paging");
+    await directoryTable.getByRole("cell", { name: "details-row-299.txt", exact: true }).waitFor();
+    assert.equal(await directorySection.getByRole("button", { name: "Next", exact: true }).isEnabled(), false);
+    await directorySection.getByRole("searchbox", { name: "Filter Files", exact: true }).fill("details-row-299.txt");
+    await directoryTable.getByRole("cell", { name: "details-row-299.txt", exact: true }).waitFor();
+    assert.equal(await directoryTable.getByRole("cell", { name: /^details-row-\d{3}\.txt$/u }).count(), 1,
+      "the full result filter must find a row beyond the compact preview limit");
+    assert.equal((await dialog.innerText()).includes('"Files":'), false, "Details must render a directory table instead of its JSON envelope");
+    await directorySection.getByRole("searchbox", { name: "Filter Files", exact: true }).fill("");
+    await directoryTable.getByRole("cell", { name: "details-row-000.txt", exact: true }).waitFor();
+    await assertModalLayout(1440);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-full-directory-response.png") });
+    await assertModalLayout(1024);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-full-directory-response-narrow.png") });
+    await assertModalLayout(1440);
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+
+    await selectCommand("Read file");
+    await composer.getByRole("textbox", { name: /^File path/u }).fill("/Users/e2e/workspace/full-response.txt");
+    const file = await submitAndOpen();
+    await file.preview.getByRole("button", { name: "Details", exact: true }).click();
+    await dialog.getByText(file.taskId, { exact: true }).waitFor();
+    const fileContents = dialog.locator('pre[aria-label="File contents"]');
+    await fileContents.filter({ hasText: "DETAILS_TEXT_TAIL" }).waitFor();
+    assert.equal(await fileContents.textContent(), `DETAILS_TEXT_START\n${"Complete task response line.\n".repeat(3500)}DETAILS_TEXT_TAIL\n`,
+      "Details must automatically load and render the exact multiline file, including its tail beyond 64K");
+    assert.equal(await dialog.getByRole("button", { name: "Next", exact: true }).count(), 0,
+      "text output must not require navigation through JSON character pages");
+    assert.equal((await dialog.innerText()).includes('"Data":'), false, "file output must omit the transport JSON envelope");
+    await assertModalLayout(1440);
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-full-text-response.png") });
+    await page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+
+    await selectCommand("Execution");
+    await composer.getByRole("tab", { name: "Process", exact: true }).waitFor();
+    await composer.getByRole("textbox", { name: /^Executable path/u }).fill("/usr/bin/printf");
+    await composer.getByRole("textbox", { name: "Arguments", exact: true }).fill("details");
+    const execution = await submitAndOpen(true);
+    await execution.preview.getByRole("button", { name: "Details", exact: true }).click();
+    try {
+      await dialog.locator('pre[aria-label="Standard output"]').waitFor();
+    } catch (error) {
+      throw new Error(`The process Details must render its output streams: ${await dialog.innerText()}`, { cause: error });
+    }
+    assert.equal(await dialog.locator('pre[aria-label="Standard output"]').textContent(), "deterministic M4 process stdout\n");
+    assert.equal(await dialog.locator('pre[aria-label="Standard error"]').textContent(), "deterministic beacon process stderr\n");
+    assert.equal((await dialog.innerText()).includes('"Stdout":'), false, "execution output must render decoded streams instead of JSON");
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-full-execution-response.png") });
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
+test("BC-08 beacon Registry and service tasks keep Windows review and task output bound", { timeout: 150_000 }, async () => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-beacon-bc08-e2e-"));
+  const savedConfigDirectory = join(temporaryRoot, "saved-configs");
+  const managedConfigDirectory = join(temporaryRoot, "managed-configs");
+  const userDataDirectory = join(temporaryRoot, "user-data");
+  const consoleClientRootDirectory = join(temporaryRoot, "sliver-client-root");
+  await Promise.all([
+    mkdir(savedConfigDirectory, { recursive: true }),
+    mkdir(managedConfigDirectory, { recursive: true }),
+    mkdir(userDataDirectory, { recursive: true }),
+    mkdir(consoleClientRootDirectory, { recursive: true }),
+  ]);
+  await writeFile(join(savedConfigDirectory, "beacon-bc08.cfg"), fakeOperatorConfig(), { mode: 0o600 });
+
+  let application: ElectronApplication | undefined;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${savedConfigDirectory}`,
+        `--managed-config-directory=${managedConfigDirectory}`,
+        `--user-data-directory=${userDataDirectory}`,
+        `--console-client-root-directory=${consoleClientRootDirectory}`,
+        "--beacons-table-fixture",
+        "--beacon-execution-fixture",
+      ],
+      bypassCSP: false,
+      chromiumSandbox: true,
+      cwd: repositoryRoot,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(15_000);
+    const rendererErrors: string[] = [];
+    page.on("pageerror", (error) => rendererErrors.push(error.message));
+    await page.getByRole("dialog", { name: "Saved configurations" })
+      .getByRole("button", { name: "Connect", exact: true }).click();
+    await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    await page.locator('[aria-label="Beacons"]:visible').click();
+    await page.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
+    const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
+    const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
+    const queueTab = page.getByRole("tab", { name: "Task queue", exact: true });
+    const selectCommand = async (label: string): Promise<void> => {
+      await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
+      await page.getByRole("searchbox", { name: "Search beacon commands", exact: true }).fill(label);
+      await page.getByRole("option", { name: new RegExp(`^${label}\\b`, "u") }).click();
+    };
+    const newTask = async (knownIds: string[], description: string): Promise<string> => {
+      const deadline = Date.now() + 10_000;
+      let task: { id: string; description: string; beaconId: string } | undefined;
+      while (!task && Date.now() < deadline) {
+        task = await application!.evaluate((_electron, before) =>
+          globalThis.__SLIVER_GUI_E2E_STATE__.tasks.find((candidate) => !before.includes(candidate.id)), knownIds);
+        if (!task) await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.ok(task, `${description} must queue an exact task: ${await composer.innerText()}`);
+      assert.equal(task.description, description);
+      assert.equal(task.beaconId, "windows_execution_beacon");
+      return task.id;
+    };
+    const completeAndOpen = async (taskId: string): Promise<Locator> => {
+      await queueTab.click();
+      const row = queue.getByRole("row").filter({ hasText: taskId });
+      await row.getByText("Pending", { exact: true }).waitFor();
+      await application!.evaluate((_electron, id) => globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(id), taskId);
+      await row.getByText("Completed", { exact: true }).waitFor();
+      await row.click();
+      await assertBeaconOutputFocus(page, taskId);
+      return page.getByRole("article", { name: `Task output ${taskId}`, exact: true });
+    };
+    const queueRead = async (description: string): Promise<Locator> => {
+      const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+      await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+      await composer.getByRole("button", { name: "Queue task", exact: true }).click();
+      return completeAndOpen(await newTask(knownIds, description));
+    };
+    const reviewMutation = async (description: string): Promise<Locator> => {
+      const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
+      await composer.getByRole("button", { name: "Review task", exact: true }).click();
+      const review = page.getByRole("alertdialog", { name: "Queue this reviewed beacon mutation?", exact: true });
+      await review.waitFor();
+      assert.deepEqual(await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id)), knownIds,
+        "review must not dispatch a beacon task before confirmation");
+      await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
+      await review.getByRole("button", { name: "Queue reviewed task", exact: true }).click();
+      return completeAndOpen(await newTask(knownIds, description));
+    };
+
+    await selectCommand("List registry subkeys");
+    await composer.getByText("Registry and service commands require a Windows beacon.", { exact: true }).waitFor();
+    assert.equal(await composer.getByRole("button", { name: "Queue task", exact: true }).isDisabled(), true);
+    assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.length), 0);
+
+    const breadcrumbs = page.getByRole("navigation", { name: "Beacon workspace breadcrumbs", exact: true });
+    await breadcrumbs.getByRole("button", { name: "Beacons, switch beacon", exact: true }).click();
+    await page.getByRole("menu", { name: "Beacons, switch beacon", exact: true })
+      .getByRole("menuitemradio", { name: /windows-execution-beacon/u }).click();
+    await page.getByRole("heading", { name: "windows-execution-beacon", exact: true }).waitFor();
+
+    await selectCommand("List registry subkeys");
+    await composer.getByRole("textbox", { name: "Registry path" }).fill("Software\\Fixture");
+    await composer.getByRole("textbox", { name: "Host (optional)" }).fill("fixture-host");
+    const subkeys = await queueRead("RegistrySubKeyListReq");
+    await subkeys.getByRole("cell", { name: "FixtureChild", exact: true }).waitFor();
+
+    await selectCommand("Read registry value");
+    await composer.getByRole("textbox", { name: "Registry path" }).fill("Software\\Fixture");
+    await composer.getByRole("textbox", { name: "Value name" }).fill("FixtureMode");
+    assert.match(await (await queueRead("RegistryReadReq")).innerText(), /fixture-registry-value-FixtureMode/u);
+
+    await selectCommand("List services");
+    const services = await queueRead("ServicesReq");
+    await services.getByRole("cell", { name: "Spooler", exact: true }).waitFor();
+    await services.getByRole("cell", { name: "Running", exact: true }).first().waitFor();
+
+    await selectCommand("Service information");
+    await composer.getByRole("textbox", { name: "Service name" }).fill("Spooler");
+    assert.match(await (await queueRead("ServiceDetailReq")).innerText(), /Print Spooler/u);
+
+    await selectCommand("Write registry value");
+    await composer.getByRole("textbox", { name: "Registry path" }).fill("Software\\Fixture");
+    await composer.getByRole("textbox", { name: "Value name" }).fill("FixtureMode");
+    await composer.getByRole("button", { name: /Registry value type/u }).click();
+    await page.getByRole("option", { name: "Binary", exact: true }).click();
+    await composer.getByRole("textbox", { name: "Hexadecimal bytes" }).fill("AABB");
+    const writeOutput = await reviewMutation("RegistryWriteReq");
+    assert.match(await writeOutput.innerText(), /Not verified; requery the target/u);
+    assert.match(await writeOutput.innerText(), /Read the registry or service state again/u);
+
+    await selectCommand("Stop service");
+    await composer.getByRole("textbox", { name: "Service name" }).fill("Spooler");
+    const stopOutput = await reviewMutation("StopServiceReq");
+    assert.match(await stopOutput.innerText(), /Not verified; requery the target/u);
+    assert.deepEqual(rendererErrors, []);
+  } finally {
+    await application?.close().catch(() => undefined);
+    await rm(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 async function managementOperations(page: Page): Promise<TargetOperationRecord[]> {
   return page.evaluate(async () => {
     const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;

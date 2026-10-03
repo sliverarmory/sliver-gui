@@ -179,6 +179,16 @@ const OPERATION_CAPABILITIES: Readonly<Record<TargetOperationId, TargetCapabilit
   "beacon.filesystem.head": "target.task.execute",
   "beacon.filesystem.tail": "target.task.execute",
   "beacon.filesystem.grep": "target.task.execute",
+  "beacon.registry.read": "target.task.execute",
+  "beacon.registry.list-subkeys": "target.task.execute",
+  "beacon.registry.list-values": "target.task.execute",
+  "beacon.registry.write": "target.task.execute",
+  "beacon.registry.create": "target.task.execute",
+  "beacon.registry.delete": "target.task.execute",
+  "beacon.service.list": "target.task.execute",
+  "beacon.service.info": "target.task.execute",
+  "beacon.service.start": "target.task.execute",
+  "beacon.service.stop": "target.task.execute",
 };
 
 export function TargetsPage({
@@ -2868,6 +2878,16 @@ function operationInputFromDraft(draft: OperationDraft): TargetOperationInput {
     case "beacon.filesystem.head":
     case "beacon.filesystem.tail":
     case "beacon.filesystem.grep":
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+    case "beacon.service.list":
+    case "beacon.service.info":
+    case "beacon.service.start":
+    case "beacon.service.stop":
       throw new Error("Use the beacon task workspace for this command.");
   }
 }

@@ -1,6 +1,6 @@
 import type { PageResult } from "./contracts.js";
 import type { ExecutionOperationId, ExecutionReadResult } from "./execution-contracts.js";
-import type { SessionWorkbenchOperationId } from "./session-contracts.js";
+import { parseRegistryWriteValue, type SessionRegistryHive, type SessionRegistryWriteValue, type SessionWorkbenchOperationId } from "./session-contracts.js";
 import type { TargetMode, TargetRef } from "./target-contracts.js";
 
 export type { TargetMode, TargetRef } from "./target-contracts.js";
@@ -25,6 +25,24 @@ export const TARGET_OPERATION_IDS = Object.freeze([
   "beacon.filesystem.head",
   "beacon.filesystem.tail",
   "beacon.filesystem.grep",
+  "beacon.registry.read",
+  "beacon.registry.list-subkeys",
+  "beacon.registry.list-values",
+  "beacon.registry.write",
+  "beacon.registry.create",
+  "beacon.registry.delete",
+  "beacon.service.list",
+  "beacon.service.info",
+  "beacon.service.start",
+  "beacon.service.stop",
+] as const);
+
+export const BEACON_MUTATION_OPERATION_IDS = Object.freeze([
+  "beacon.registry.write",
+  "beacon.registry.create",
+  "beacon.registry.delete",
+  "beacon.service.start",
+  "beacon.service.stop",
 ] as const);
 
 export type TargetOperationId = (typeof TARGET_OPERATION_IDS)[number];
@@ -122,6 +140,44 @@ export interface BeaconGrepOperationInput {
   after: number;
 }
 
+export interface BeaconRegistryLocation {
+  hive: SessionRegistryHive;
+  path: string;
+  hostname?: string;
+}
+
+export type BeaconRegistryOperationInput =
+  | ({ operationId: "beacon.registry.read"; key: string } & BeaconRegistryLocation)
+  | ({ operationId: "beacon.registry.list-subkeys" } & BeaconRegistryLocation)
+  | ({ operationId: "beacon.registry.list-values" } & BeaconRegistryLocation)
+  | ({ operationId: "beacon.registry.write"; key: string; value: SessionRegistryWriteValue } & BeaconRegistryLocation)
+  | ({ operationId: "beacon.registry.create"; key: string } & BeaconRegistryLocation)
+  | ({ operationId: "beacon.registry.delete"; key: string } & BeaconRegistryLocation);
+
+export type BeaconServiceOperationInput =
+  | { operationId: "beacon.service.list"; hostname?: string }
+  | { operationId: "beacon.service.info"; name: string; hostname?: string }
+  | { operationId: "beacon.service.start"; name: string; hostname?: string }
+  | { operationId: "beacon.service.stop"; name: string; hostname?: string };
+
+export type BeaconMutationOperationInput = Extract<BeaconRegistryOperationInput | BeaconServiceOperationInput,
+  { operationId: "beacon.registry.write" | "beacon.registry.create" | "beacon.registry.delete" |
+    "beacon.service.start" | "beacon.service.stop" }>;
+
+export interface BeaconMutationPlan {
+  token: string;
+  expiresAt: string;
+  target: TargetRef;
+  targetName: string;
+  backend: OperationBackendSummary;
+  operationId: BeaconMutationOperationInput["operationId"];
+  summary: string;
+  fields: StructuredDetailField[];
+  payloadSha256: string;
+}
+
+export interface BeaconMutationTokenInput { token: string }
+
 /**
  * The complete renderer-submittable operation surface. The selected target is
  * intentionally absent: the main process resolves it from the calling
@@ -144,7 +200,9 @@ export type TargetOperationInput =
   | BeaconNetstatOperationInput
   | BeaconTextFileOperationInput
   | BeaconFileEdgeOperationInput
-  | BeaconGrepOperationInput;
+  | BeaconGrepOperationInput
+  | BeaconRegistryOperationInput
+  | BeaconServiceOperationInput;
 
 export const TARGET_OPERATION_STATES = Object.freeze([
   "queued",
@@ -377,6 +435,21 @@ export interface GetBeaconTaskInput {
   taskId: string;
 }
 
+export interface GetBeaconTaskResponseInput extends GetBeaconTaskInput {
+  offset?: number;
+}
+
+/** A page of the complete main-decoded response, independent of preview limits. */
+export interface BeaconTaskResponse {
+  readonly beaconId: string;
+  readonly taskId: string;
+  format: "text" | "json" | "hex";
+  text: string;
+  offset: number;
+  totalCharacters: number;
+  nextOffset?: number;
+}
+
 export interface CancelBeaconTaskInput {
   taskId: string;
 }
@@ -411,6 +484,11 @@ export const OPERATION_INPUT_LIMITS = Object.freeze({
   beaconTextBytes: 65_536,
   beaconTextLines: 4_096,
   beaconGrepContextLines: 64,
+  beaconRegistryPathLength: 4_096,
+  beaconRegistryKeyLength: 512,
+  beaconRegistryValueBytes: 16_384,
+  beaconHostnameLength: 255,
+  beaconServiceNameLength: 256,
   maximumIntervalSeconds: 604_800,
   maximumDelaySeconds: 86_400,
   pageCursorLength: 256,
@@ -423,6 +501,22 @@ const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
 export function isTargetOperationId(value: unknown): value is TargetOperationId {
   return typeof value === "string" && (TARGET_OPERATION_IDS as readonly string[]).includes(value);
+}
+
+export function isBeaconMutationOperationId(value: unknown): value is BeaconMutationOperationInput["operationId"] {
+  return typeof value === "string" && (BEACON_MUTATION_OPERATION_IDS as readonly string[]).includes(value);
+}
+
+export function parseBeaconMutationInput(value: unknown): BeaconMutationOperationInput {
+  const input = parseTargetOperationInput(value);
+  if (!isBeaconMutationOperationId(input.operationId)) throw new TypeError("This command does not require beacon mutation review");
+  return input as BeaconMutationOperationInput;
+}
+
+export function parseBeaconMutationTokenInput(value: unknown): BeaconMutationTokenInput {
+  const record = requirePlainRecord(value, "beacon mutation token");
+  requireExactKeys(record, ["token"]);
+  return { token: parseIdentifier(record["token"], "token") };
 }
 
 export function parseTargetOperationInput(value: unknown): TargetOperationInput {
@@ -524,6 +618,92 @@ export function parseTargetOperationInput(value: unknown): TargetOperationInput 
       const after = requireInteger(record["after"], "after", 0, OPERATION_INPUT_LIMITS.beaconGrepContextLines);
       return { operationId, path, pattern, recursive: record["recursive"], before, after };
     }
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+      return parseBeaconRegistryInput(operationId, record);
+    case "beacon.service.list":
+    case "beacon.service.info":
+    case "beacon.service.start":
+    case "beacon.service.stop":
+      return parseBeaconServiceInput(operationId, record);
+  }
+}
+
+function parseBeaconRegistryInput(
+  operationId: BeaconRegistryOperationInput["operationId"],
+  record: Record<string, unknown>,
+): BeaconRegistryOperationInput {
+  const needsKey = operationId !== "beacon.registry.list-subkeys" && operationId !== "beacon.registry.list-values";
+  const needsValue = operationId === "beacon.registry.write";
+  requireAllowedKeys(record, ["operationId", "hive", "path", "hostname", ...(needsKey ? ["key"] : []), ...(needsValue ? ["value"] : [])]);
+  const hive = requireString(record["hive"], "hive", 4);
+  if (!["HKCU", "HKLM", "HKCR", "HKU", "HKCC"].includes(hive)) throw new TypeError("hive is not supported");
+  const path = requireString(record["path"], "path", OPERATION_INPUT_LIMITS.beaconRegistryPathLength, true);
+  if (path.includes("\0")) throw new TypeError("path must not contain NUL characters");
+  assertWellFormedUtf16(path, "path");
+  const hostname = parseOptionalBeaconHostname(record["hostname"]);
+  const location: BeaconRegistryLocation = { hive: hive as SessionRegistryHive, path, ...(hostname ? { hostname } : {}) };
+  if (!needsKey) return { operationId, ...location } as BeaconRegistryOperationInput;
+  const key = requireString(record["key"], "key", OPERATION_INPUT_LIMITS.beaconRegistryKeyLength,
+    operationId === "beacon.registry.read" || operationId === "beacon.registry.write");
+  if (key.includes("\0")) throw new TypeError("key must not contain NUL characters");
+  assertWellFormedUtf16(key, "key");
+  if (!needsValue) return { operationId, ...location, key } as BeaconRegistryOperationInput;
+  if (record["value"] === undefined) throw new TypeError("value is required");
+  const parsedValue = parseRegistryWriteValue(record["value"]);
+  // Protobuf uint64 decoding produces canonical decimal text. Keep the
+  // reviewed value in that form so saved-request verification remains exact
+  // when the operator enters leading zeroes.
+  const value = parsedValue.type === "qword"
+    ? { type: "qword" as const, value: BigInt(parsedValue.value).toString() }
+    : parsedValue;
+  if (value.type === "string") {
+    if (value.value.includes("\0")) throw new TypeError("Registry string value must not contain NUL characters");
+    assertWellFormedUtf16(value.value, "Registry string value");
+  }
+  const bytes = value.type === "binary" ? value.hex.length / 2 : value.type === "string" ?
+    new TextEncoder().encode(value.value).length : 8;
+  if (bytes > OPERATION_INPUT_LIMITS.beaconRegistryValueBytes) throw new TypeError("Registry value exceeds the beacon write limit");
+  return { operationId, ...location, key, value };
+}
+
+function parseBeaconServiceInput(
+  operationId: BeaconServiceOperationInput["operationId"],
+  record: Record<string, unknown>,
+): BeaconServiceOperationInput {
+  const needsName = operationId !== "beacon.service.list";
+  requireAllowedKeys(record, ["operationId", "hostname", ...(needsName ? ["name"] : [])]);
+  const hostname = parseOptionalBeaconHostname(record["hostname"]);
+  if (!needsName) return { operationId, ...(hostname ? { hostname } : {}) };
+  const name = requireString(record["name"], "name", OPERATION_INPUT_LIMITS.beaconServiceNameLength);
+  if (name.includes("\0")) throw new TypeError("name must not contain NUL characters");
+  assertWellFormedUtf16(name, "name");
+  return { operationId, name, ...(hostname ? { hostname } : {}) } as BeaconServiceOperationInput;
+}
+
+function parseOptionalBeaconHostname(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const hostname = requireString(value, "hostname", OPERATION_INPUT_LIMITS.beaconHostnameLength);
+  if (hostname.includes("\0")) throw new TypeError("hostname must not contain NUL characters");
+  assertWellFormedUtf16(hostname, "hostname");
+  return hostname;
+}
+
+function assertWellFormedUtf16(value: string, name: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const following = value.charCodeAt(++index);
+      if (following < 0xdc00 || following > 0xdfff || Number.isNaN(following)) {
+        throw new TypeError(`${name} must contain well-formed Unicode text`);
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw new TypeError(`${name} must contain well-formed Unicode text`);
+    }
   }
 }
 
@@ -559,6 +739,16 @@ export function parseGetBeaconTaskInput(value: unknown): GetBeaconTaskInput {
   const record = requirePlainRecord(value, "get beacon task input");
   requireExactKeys(record, ["taskId"]);
   return { taskId: parseIdentifier(record["taskId"], "taskId") };
+}
+
+export function parseGetBeaconTaskResponseInput(value: unknown): GetBeaconTaskResponseInput {
+  const record = requirePlainRecord(value, "get beacon task response input");
+  requireAllowedKeys(record, ["taskId", "offset"]);
+  const parsed: GetBeaconTaskResponseInput = { taskId: parseIdentifier(record["taskId"], "taskId") };
+  if (record["offset"] !== undefined) {
+    parsed.offset = requireInteger(record["offset"], "offset", 0, Number.MAX_SAFE_INTEGER);
+  }
+  return parsed;
 }
 
 export function parseCancelBeaconTaskInput(value: unknown): CancelBeaconTaskInput {

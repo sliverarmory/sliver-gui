@@ -651,6 +651,124 @@ describe("OperationEngine", () => {
     expect(harness.client.whoamiBeacon).toHaveBeenCalledWith(harness.active.ref.id, 30);
   });
 
+  const bc08Reads: Array<[TargetOperationInput, OperationClientMethod]> = [
+    [{ operationId: "beacon.registry.read", hive: "HKCU", path: "Software", key: "Name", hostname: "host01" }, "registryReadBeacon"],
+    [{ operationId: "beacon.registry.list-subkeys", hive: "HKCU", path: "Software", hostname: "host01" }, "registryListSubkeysBeacon"],
+    [{ operationId: "beacon.registry.list-values", hive: "HKCU", path: "Software", hostname: "host01" }, "registryListValuesBeacon"],
+    [{ operationId: "beacon.service.list", hostname: "host01" }, "servicesBeacon"],
+    [{ operationId: "beacon.service.info", name: "Spooler", hostname: "host01" }, "serviceDetailBeacon"],
+  ];
+
+  it.each(bc08Reads)("dispatches a Windows BC-08 read with exact task provenance for %s", async (input, method) => {
+    const harness = createHarness("beacon");
+    harness.active.summary.os = "windows";
+    harness.client[method].mockResolvedValueOnce(asyncResponse(`task_${method}`));
+    const submitted = await harness.engine.submit(input);
+    expect(submitted).toMatchObject({ state: "submitted", taskId: `task_${method}` });
+    expect(harness.client[method]).toHaveBeenCalledWith(harness.active.ref.id, input, 60);
+    expect(harness.engine.expectedRequestForTask(submitted.taskId!, harness.active.ref.id)).toEqual(input);
+    expect(harness.engine.requiresTaskResultVerification(submitted.taskId!, harness.active.ref.id)).toBe(true);
+    expect((await harness.engine.reconcileTask({
+      taskId: submitted.taskId!, beaconId: harness.active.ref.id, state: "completed",
+      disposition: { kind: "structured-detail", title: "Read result", fields: [], truncated: false },
+    }))?.state).toBe("completed");
+  });
+
+  it.each(bc08Reads)("rejects a BC-08 read outside its Windows capability for %s", async (input, method) => {
+    const harness = createHarness("beacon");
+    const record = await harness.engine.submit(input);
+    expect(record.state).toBe("failed");
+    expect(harness.client[method]).not.toHaveBeenCalled();
+  });
+
+  const bc08Mutations: Array<[TargetOperationInput, OperationClientMethod]> = [
+    [{ operationId: "beacon.registry.write", hive: "HKCU", path: "Software", key: "Name",
+      value: { type: "dword", value: 7 } }, "registryWriteBeacon"],
+    [{ operationId: "beacon.registry.create", hive: "HKCU", path: "Software", key: "Child" }, "registryCreateBeacon"],
+    [{ operationId: "beacon.registry.delete", hive: "HKCU", path: "Software", key: "Child" }, "registryDeleteBeacon"],
+    [{ operationId: "beacon.service.start", name: "Spooler" }, "serviceStartBeacon"],
+    [{ operationId: "beacon.service.stop", name: "Spooler" }, "serviceStopBeacon"],
+  ];
+
+  it.each(bc08Mutations)("requires a one-use BC-08 review before %s", async (input, method) => {
+    const harness = createHarness("beacon");
+    harness.active.summary.os = "windows";
+    await expect(harness.engine.submit(input)).rejects.toThrow(/one-use review/u);
+    expect(harness.client[method]).not.toHaveBeenCalled();
+    const plan = await harness.engine.prepareBeaconMutation(input as Extract<TargetOperationInput,
+      { operationId: "beacon.registry.write" | "beacon.registry.create" | "beacon.registry.delete" |
+        "beacon.service.start" | "beacon.service.stop" }>);
+    expect(plan).toMatchObject({
+      operationId: input.operationId, target: harness.active.ref, backend: harness.active.backend,
+      token: expect.any(String), payloadSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(harness.client[method]).not.toHaveBeenCalled();
+    const submitted = await harness.engine.executeBeaconMutation(plan.token);
+    expect(submitted).toMatchObject({ state: "submitted", operationId: input.operationId, taskId: "task_beacon" });
+    expect(harness.client[method]).toHaveBeenCalledWith(harness.active.ref.id, input, 60);
+    expect(harness.engine.expectedRequestForTask(submitted.taskId!, harness.active.ref.id)).toEqual(input);
+    await expect(harness.engine.executeBeaconMutation(plan.token)).rejects.toThrow(/expired/u);
+    const reconciled = await harness.engine.reconcileTask({
+      taskId: submitted.taskId!, beaconId: harness.active.ref.id, state: "completed",
+      disposition: { kind: "structured-detail", title: "Handler task", fields: [
+        { label: "Handler", value: "Returned without an error" },
+      ], truncated: false },
+    });
+    expect(reconciled).toMatchObject({
+      state: "partial", message: expect.stringContaining("requery"),
+    });
+    expect(harness.client[method]).toHaveBeenCalledOnce();
+  });
+
+  it("rejects stale BC-08 reviews after target, backend, expiry, or window teardown", async () => {
+    const input = { operationId: "beacon.service.stop", name: "Spooler" } as const;
+    for (const change of ["fingerprint", "backend", "expired", "closed"] as const) {
+      const harness = createHarness("beacon");
+      harness.active.summary.os = "windows";
+      const plan = await harness.engine.prepareBeaconMutation(input);
+      if (change === "fingerprint") harness.active.ref.fingerprint = "replacement-target";
+      if (change === "backend") harness.active.backend.configName = "replacement-backend";
+      if (change === "expired") harness.advance(120_001);
+      if (change === "closed") harness.engine.close();
+      await expect(harness.engine.executeBeaconMutation(plan.token)).rejects.toThrow();
+      expect(harness.client.serviceStopBeacon).not.toHaveBeenCalled();
+    }
+  });
+
+  it("rejects a reviewed BC-08 mutation if the backend changes after journal admission but before dispatch", async () => {
+    let harness!: ReturnType<typeof createHarness>;
+    harness = createHarness("beacon", { onChanged: (record) => {
+      if (record.operationId === "beacon.service.stop" && record.state === "queued") {
+        harness.active.backend.configName = "replacement-backend";
+      }
+    } });
+    harness.active.summary.os = "windows";
+    const plan = await harness.engine.prepareBeaconMutation({ operationId: "beacon.service.stop", name: "Spooler" });
+    expect(plan.backend.configName).toBe("M1 test");
+
+    const record = await harness.engine.executeBeaconMutation(plan.token);
+    expect(record).toMatchObject({
+      state: "target-disappeared",
+      message: expect.stringMatching(/reviewed backend changed before mutation dispatch/u),
+    });
+    expect(harness.assertTarget).toHaveBeenCalledOnce();
+    expect(harness.client.serviceStopBeacon).not.toHaveBeenCalled();
+    expect(harness.reserveTaskClaim).not.toHaveBeenCalled();
+  });
+
+  it("does not claim a BC-08 mutation task returned for another beacon", async () => {
+    const harness = createHarness("beacon");
+    harness.active.summary.os = "windows";
+    harness.client.serviceStartBeacon.mockResolvedValueOnce({
+      Response: { Err: "", Async: true, BeaconID: "another_beacon", TaskID: "cross_routed_start" },
+    });
+    const plan = await harness.engine.prepareBeaconMutation({ operationId: "beacon.service.start", name: "Spooler" });
+    const record = await harness.engine.executeBeaconMutation(plan.token);
+    expect(record.state).toBe("outcome-unknown");
+    expect(record.taskId).toBeUndefined();
+    expect(harness.engine.findByTask("cross_routed_start", harness.active.ref.id)).toBeUndefined();
+  });
+
   const originalM2Reads: Array<[TargetOperationInput, OperationClientMethod]> = [
     [{ operationId: "beacon.filesystem.pwd" }, "pwdBeacon"],
     [{ operationId: "beacon.filesystem.ls", path: "/tmp" }, "lsBeacon"],
@@ -1677,6 +1795,16 @@ function fakeClient(mode: TargetMode) {
     headBeacon: vi.fn(async () => defaultTask),
     tailBeacon: vi.fn(async () => defaultTask),
     grepBeacon: vi.fn(async () => defaultTask),
+    registryReadBeacon: vi.fn(async () => defaultTask),
+    registryListSubkeysBeacon: vi.fn(async () => defaultTask),
+    registryListValuesBeacon: vi.fn(async () => defaultTask),
+    registryWriteBeacon: vi.fn(async () => defaultTask),
+    registryCreateBeacon: vi.fn(async () => defaultTask),
+    registryDeleteBeacon: vi.fn(async () => defaultTask),
+    servicesBeacon: vi.fn(async () => defaultTask),
+    serviceDetailBeacon: vi.fn(async () => defaultTask),
+    serviceStartBeacon: vi.fn(async () => defaultTask),
+    serviceStopBeacon: vi.fn(async () => defaultTask),
   } as unknown as OperationEngineHost["client"] & Record<OperationClientMethod, ReturnType<typeof vi.fn>>;
 }
 
@@ -1720,7 +1848,17 @@ type OperationClientMethod =
   | "catBeacon"
   | "headBeacon"
   | "tailBeacon"
-  | "grepBeacon";
+  | "grepBeacon"
+  | "registryReadBeacon"
+  | "registryListSubkeysBeacon"
+  | "registryListValuesBeacon"
+  | "registryWriteBeacon"
+  | "registryCreateBeacon"
+  | "registryDeleteBeacon"
+  | "servicesBeacon"
+  | "serviceDetailBeacon"
+  | "serviceStartBeacon"
+  | "serviceStopBeacon";
 
 function resolvedTarget(mode: TargetMode): ResolvedOperationTarget {
   const summary = targetSummary(mode);
@@ -1846,5 +1984,15 @@ const _closedInputProof: TargetOperationInput[] = [
   { operationId: "beacon.filesystem.head", path: "/tmp/readme.txt", lines: 8 },
   { operationId: "beacon.filesystem.tail", path: "/tmp/readme.txt", bytes: 512 },
   { operationId: "beacon.filesystem.grep", path: "/tmp", pattern: "needle", recursive: true, before: 2, after: 3 },
+  { operationId: "beacon.registry.read", hive: "HKCU", path: "Software", key: "Name" },
+  { operationId: "beacon.registry.list-subkeys", hive: "HKCU", path: "Software" },
+  { operationId: "beacon.registry.list-values", hive: "HKCU", path: "Software" },
+  { operationId: "beacon.registry.write", hive: "HKCU", path: "Software", key: "Name", value: { type: "string", value: "x" } },
+  { operationId: "beacon.registry.create", hive: "HKCU", path: "Software", key: "Child" },
+  { operationId: "beacon.registry.delete", hive: "HKCU", path: "Software", key: "Child" },
+  { operationId: "beacon.service.list" },
+  { operationId: "beacon.service.info", name: "Spooler" },
+  { operationId: "beacon.service.start", name: "Spooler" },
+  { operationId: "beacon.service.stop", name: "Spooler" },
 ];
 void _closedInputProof;

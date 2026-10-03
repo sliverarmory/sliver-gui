@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 
 import type {
   BeaconTaskState,
+  BeaconMutationOperationInput,
+  BeaconMutationPlan,
   OperationActorSummary,
   OperationBackendSummary,
   OperationDisposition,
@@ -13,7 +15,7 @@ import type {
   TargetOperationRecord,
   TargetOperationState,
 } from "../shared/operation-contracts.js";
-import { parseTargetOperationInput } from "../shared/operation-contracts.js";
+import { isBeaconMutationOperationId, parseBeaconMutationInput, parseTargetOperationInput } from "../shared/operation-contracts.js";
 import type { SessionWorkbenchOperationId } from "../shared/session-contracts.js";
 import type {
   TargetCapabilityId,
@@ -40,6 +42,8 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 const MAX_MESSAGE_CHARACTERS = 512;
 const DEFAULT_EXTERNAL_TASK_TIMEOUT_SECONDS = 60;
+const BEACON_MUTATION_REVIEW_TTL_SECONDS = 120;
+const MAX_PENDING_BEACON_MUTATION_REVIEWS = 16;
 const TASK_IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/u;
 const BEACON_M2_PARITY_IDS: Readonly<Partial<Record<TargetOperationId, string>>> = Object.freeze({
   "beacon.filesystem.pwd": "implant.pwd",
@@ -55,6 +59,16 @@ const BEACON_M2_PARITY_IDS: Readonly<Partial<Record<TargetOperationId, string>>>
   "beacon.filesystem.head": "implant.head",
   "beacon.filesystem.tail": "implant.tail",
   "beacon.filesystem.grep": "implant.grep",
+  "beacon.registry.read": "implant.registry.read",
+  "beacon.registry.list-subkeys": "implant.registry.list-subkeys",
+  "beacon.registry.list-values": "implant.registry.list-values",
+  "beacon.registry.write": "implant.registry.write",
+  "beacon.registry.create": "implant.registry.create",
+  "beacon.registry.delete": "implant.registry.delete",
+  "beacon.service.list": "implant.services",
+  "beacon.service.info": "implant.services.info",
+  "beacon.service.start": "implant.services.start",
+  "beacon.service.stop": "implant.services.stop",
 });
 const EXISTING_M2_TRANSPORT_EXCEPTIONS = new Set<TargetOperationId>([
   "beacon.filesystem.pwd", "beacon.filesystem.ls", "beacon.process.list", "beacon.network.interfaces",
@@ -123,6 +137,16 @@ export interface OperationEngineHost {
     | "headBeacon"
     | "tailBeacon"
     | "grepBeacon"
+    | "registryReadBeacon"
+    | "registryListSubkeysBeacon"
+    | "registryListValuesBeacon"
+    | "registryWriteBeacon"
+    | "registryCreateBeacon"
+    | "registryDeleteBeacon"
+    | "servicesBeacon"
+    | "serviceDetailBeacon"
+    | "serviceStartBeacon"
+    | "serviceStopBeacon"
   >;
   ownerWindowId: number;
   resolveActiveTarget(): ResolvedOperationTarget | null | Promise<ResolvedOperationTarget | null>;
@@ -179,6 +203,13 @@ interface InternalOperation {
   };
 }
 
+interface PendingBeaconMutationReview {
+  input: BeaconMutationOperationInput;
+  target: TargetRef;
+  backend: OperationBackendSummary;
+  expiresAtMilliseconds: number;
+}
+
 interface ExternalOperation {
   sequence: number;
   record: TargetOperationRecord;
@@ -217,6 +248,7 @@ export class OperationEngine {
   private readonly operations = new Map<string, InternalOperation>();
   private readonly externalOperations = new Map<string, ExternalOperation>();
   private readonly taskRequests = new Map<string, string>();
+  private readonly beaconMutationReviews = new Map<string, PendingBeaconMutationReview>();
   private readonly terminalRecordLimit: number;
   private readonly recoverableTaskRecordLimit: number;
   private readonly recoverableTaskTtlMilliseconds: number;
@@ -252,11 +284,87 @@ export class OperationEngine {
     this.activeOperationLimit = activeOperationLimit;
   }
 
+  async prepareBeaconMutation(untrustedInput: BeaconMutationOperationInput): Promise<BeaconMutationPlan> {
+    this.assertOpen();
+    const input = parseBeaconMutationInput(untrustedInput);
+    const target = await this.host.resolveActiveTarget();
+    if (!target) throw new Error("Select an available beacon before reviewing a mutation");
+    validateResolvedTarget(target);
+    if (target.ref.mode !== "beacon") throw new Error("The selected target is not a beacon");
+    const descriptor = getOperationDescriptor(input.operationId);
+    if (descriptor.confirmation !== "beacon-mutation-plan" ||
+      !(await this.hasCapability(target, descriptor.capabilityId)) ||
+      !this.hasBeaconCommandCapability(input.operationId, target.summary)) {
+      throw new Error("This beacon mutation is unavailable for the selected target");
+    }
+    this.pruneBeaconMutationReviews();
+    if (this.beaconMutationReviews.size >= MAX_PENDING_BEACON_MUTATION_REVIEWS) {
+      throw new Error("Too many beacon mutations are awaiting review");
+    }
+    const token = randomUUID();
+    const expiresAtMilliseconds = this.nowMilliseconds() + BEACON_MUTATION_REVIEW_TTL_SECONDS * 1_000;
+    this.beaconMutationReviews.set(token, {
+      input,
+      target: cloneTargetRef(target.ref),
+      backend: cloneBackend(target.backend),
+      expiresAtMilliseconds,
+    });
+    const presentation = beaconMutationReviewPresentation(input);
+    return {
+      token,
+      expiresAt: new Date(expiresAtMilliseconds).toISOString(),
+      target: cloneTargetRef(target.ref),
+      targetName: boundedText(target.summary.name, MAX_MESSAGE_CHARACTERS),
+      backend: cloneBackend(target.backend),
+      operationId: input.operationId,
+      ...presentation,
+      payloadSha256: createHash("sha256").update(JSON.stringify(input)).digest("hex"),
+    };
+  }
+
+  async executeBeaconMutation(token: string): Promise<TargetOperationRecord> {
+    this.assertOpen();
+    const review = this.beaconMutationReviews.get(token);
+    this.beaconMutationReviews.delete(token);
+    if (!review || review.expiresAtMilliseconds <= this.nowMilliseconds()) {
+      throw new Error("The beacon mutation review expired; prepare it again");
+    }
+    const current = await this.host.resolveActiveTarget();
+    if (!current) throw new Error("The reviewed beacon is no longer selected");
+    validateResolvedTarget(current);
+    if (!sameTargetIdentity(current.ref, review.target) || !sameBackendIdentity(current.backend, review.backend)) {
+      throw new Error("The selected beacon or backend changed; review the mutation again");
+    }
+    return this.submitInternal(review.input, true, review);
+  }
+
+  discardBeaconMutation(token: string): void {
+    this.beaconMutationReviews.delete(token);
+  }
+
+  private pruneBeaconMutationReviews(): void {
+    const now = this.nowMilliseconds();
+    for (const [token, review] of this.beaconMutationReviews) {
+      if (review.expiresAtMilliseconds <= now) this.beaconMutationReviews.delete(token);
+    }
+  }
+
   /** Creates a journal record after resolving the active target, then dispatches it. */
   async submit(untrustedInput: TargetOperationInput): Promise<TargetOperationRecord> {
+    return this.submitInternal(untrustedInput, false);
+  }
+
+  private async submitInternal(
+    untrustedInput: TargetOperationInput,
+    reviewedMutation: boolean,
+    review?: PendingBeaconMutationReview,
+  ): Promise<TargetOperationRecord> {
     this.assertOpen();
     this.pruneTerminalRecords();
     const input = parseTargetOperationInput(untrustedInput);
+    if (isBeaconMutationOperationId(input.operationId) && !reviewedMutation) {
+      throw new Error("This beacon mutation requires a one-use review plan");
+    }
     const releaseAdmission = this.reserveActiveOperation();
     let activeTarget: ResolvedOperationTarget;
     let descriptor: CompiledOperationDescriptor;
@@ -267,6 +375,10 @@ export class OperationEngine {
         throw new Error("Select an available target before starting an operation");
       }
       validateResolvedTarget(resolvedTarget);
+      if (review && (!sameTargetIdentity(resolvedTarget.ref, review.target) ||
+        !sameBackendIdentity(resolvedTarget.backend, review.backend))) {
+        throw new Error("The selected beacon or backend changed; review the mutation again");
+      }
       activeTarget = resolvedTarget;
       descriptor = getOperationDescriptor(input.operationId);
       const requestId = this.createRequestId();
@@ -712,6 +824,8 @@ export class OperationEngine {
           if (this.closed) return this.publicRecord(internal.record);
           if (reconciliationError) {
             this.finish(internal, "partial", reconciliationError);
+          } else if (isBeaconMutationOperationId(internal.record.operationId)) {
+            this.finish(internal, "partial", "The beacon handler acknowledged the change; requery the Registry or service to verify its current state");
           } else {
             this.finish(internal, "completed", "The beacon task completed");
           }
@@ -832,6 +946,7 @@ export class OperationEngine {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.beaconMutationReviews.clear();
     for (const internal of this.operations.values()) {
       if (isTerminal(internal.record.state)) continue;
       if (internal.dispatchIssued) {
@@ -1057,6 +1172,11 @@ export class OperationEngine {
       this.finish(internal, "target-disappeared", "The selected target changed before dispatch");
       return null;
     }
+    if (isBeaconMutationOperationId(internal.record.operationId) &&
+      !sameBackendIdentity(current.backend, internal.record.backend)) {
+      this.finish(internal, "target-disappeared", "The reviewed backend changed before mutation dispatch");
+      return null;
+    }
     if (!(await this.hasCapability(current, internal.descriptor.capabilityId))) {
       this.finish(internal, "failed", "The target capability changed before dispatch");
       return null;
@@ -1158,6 +1278,34 @@ export class OperationEngine {
           path: input.path, pattern: input.pattern, recursive: input.recursive,
           before: input.before, after: input.after,
         }, timeout);
+      case "beacon.registry.read":
+        return this.host.client.registryReadBeacon(targetRef.id, input, timeout);
+      case "beacon.registry.list-subkeys":
+        return this.host.client.registryListSubkeysBeacon(targetRef.id, input, timeout);
+      case "beacon.registry.list-values":
+        return this.host.client.registryListValuesBeacon(targetRef.id, input, timeout);
+      case "beacon.registry.create":
+        return this.host.client.registryCreateBeacon(targetRef.id, input, timeout);
+      case "beacon.registry.delete":
+        return this.host.client.registryDeleteBeacon(targetRef.id, input, timeout);
+      case "beacon.registry.write": {
+        const value = input.value.type === "binary"
+          ? { type: "binary" as const, value: Buffer.from(input.value.hex, "hex") }
+          : input.value;
+        try {
+          return await this.host.client.registryWriteBeacon(targetRef.id, { ...input, value }, timeout);
+        } finally {
+          if (value.type === "binary") value.value.fill(0);
+        }
+      }
+      case "beacon.service.list":
+        return this.host.client.servicesBeacon(targetRef.id, input, timeout);
+      case "beacon.service.info":
+        return this.host.client.serviceDetailBeacon(targetRef.id, input, timeout);
+      case "beacon.service.start":
+        return this.host.client.serviceStartBeacon(targetRef.id, input, timeout);
+      case "beacon.service.stop":
+        return this.host.client.serviceStopBeacon(targetRef.id, input, timeout);
     }
   }
 
@@ -1761,6 +1909,16 @@ function decodeSynchronousDisposition(
     case "beacon.filesystem.head":
     case "beacon.filesystem.tail":
     case "beacon.filesystem.grep":
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+    case "beacon.service.list":
+    case "beacon.service.info":
+    case "beacon.service.start":
+    case "beacon.service.stop":
       throw new Error("Beacon read operations require asynchronous task decoding");
   }
 }
@@ -1798,7 +1956,18 @@ function reconciledMutationDisposition(operationId: TargetOperationInput["operat
     case "beacon.filesystem.head":
     case "beacon.filesystem.tail":
     case "beacon.filesystem.grep":
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.service.list":
+    case "beacon.service.info":
       return structuredResult("Operation reconciled", "The requested state was verified");
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+    case "beacon.service.start":
+    case "beacon.service.stop":
+      return structuredResult("Operation reconciled", "The handler response did not independently verify the remote state");
   }
 }
 
@@ -1876,6 +2045,18 @@ function successMessage(operationId: TargetOperationInput["operationId"]): strin
     case "beacon.filesystem.tail":
     case "beacon.filesystem.grep":
       return "The beacon read request was submitted";
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.service.list":
+    case "beacon.service.info":
+      return "The beacon read request was submitted";
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+    case "beacon.service.start":
+    case "beacon.service.stop":
+      return "The reviewed beacon change was submitted; verify its effect after task completion";
   }
 }
 
@@ -2045,6 +2226,48 @@ function sameTargetIdentity(left: TargetRef, right: TargetRef): boolean {
     && left.id === right.id
     && left.backendEpoch === right.backendEpoch
     && left.fingerprint === right.fingerprint;
+}
+
+function sameBackendIdentity(left: OperationBackendSummary, right: OperationBackendSummary): boolean {
+  return left.configId === right.configId && left.configName === right.configName &&
+    left.server === right.server && left.operator === right.operator && left.epoch === right.epoch;
+}
+
+function beaconMutationReviewPresentation(input: BeaconMutationOperationInput):
+  Pick<BeaconMutationPlan, "summary" | "fields"> {
+  if ("hive" in input) {
+    const fields: BeaconMutationPlan["fields"] = [
+      { label: "Hive", value: input.hive },
+      { label: "Path", value: input.path || "(root)" },
+      { label: "Key or value name", value: input.key || "(default value)" },
+      { label: "Host", value: input.hostname ?? "Selected beacon host" },
+    ];
+    if (input.operationId === "beacon.registry.write") {
+      const value = input.value;
+      const valueText = value.type === "binary" ? value.hex : value.type === "string" ? value.value : String(value.value);
+      const valueBytes = value.type === "binary" ? Buffer.from(value.hex, "hex") : Buffer.from(valueText, "utf8");
+      let valueDigest: string;
+      try {
+        valueDigest = createHash("sha256").update(valueBytes).digest("hex");
+      } finally {
+        valueBytes.fill(0);
+      }
+      fields.push({ label: "Value type", value: value.type });
+      fields.push({ label: "Value length", value: value.type === "binary" ? `${value.hex.length / 2} bytes` : `${valueText.length} characters` });
+      fields.push({ label: "Value input SHA-256", value: valueDigest });
+      if (value.type === "dword" || value.type === "qword") fields.push({ label: "Value", value: valueText });
+      return { summary: "Write a Registry value", fields };
+    }
+    if (input.operationId === "beacon.registry.create") return { summary: "Create a Registry key", fields };
+    return { summary: "Delete a Registry entry (value first, then subkey)", fields };
+  }
+  return {
+    summary: input.operationId === "beacon.service.start" ? "Start a Windows service" : "Stop a Windows service",
+    fields: [
+      { label: "Service", value: input.name },
+      { label: "Host", value: input.hostname ?? "Selected beacon host" },
+    ],
+  };
 }
 
 function validateResolvedTarget(target: ResolvedOperationTarget): void {

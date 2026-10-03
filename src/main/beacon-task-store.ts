@@ -7,6 +7,7 @@ import type {
   BeaconTaskDetail,
   BeaconTaskExecutionOutput,
   BeaconTaskPage,
+  BeaconTaskResponse,
   BeaconTaskState,
   BeaconTaskSummary,
   OperationOwnership,
@@ -20,6 +21,7 @@ import { decodeExecutionBeaconTask, EXECUTION_BEACON_TASK_DESCRIPTIONS, EXECUTIO
 import { ExecutionRemoteRejectedError } from "./execution-workbench.js";
 import { decodeHistoricalBeaconTask } from "./historical-beacon-task.js";
 import { verifyBeaconReadRequest } from "./beacon-read-request.js";
+import { decodeBeaconTaskResponse, pageBeaconTaskResponse } from "./beacon-task-response.js";
 import type { SliverClientAdapter } from "./sliver-client-adapter.js";
 
 const MAX_TASKS = 500;
@@ -70,6 +72,11 @@ const CANCELLABLE_TASK_DESCRIPTIONS = new Set([
   "MemfilesListReq",
   "DownloadReq",
   "GrepReq",
+  "RegistryReadReq",
+  "RegistrySubKeyListReq",
+  "RegistryListValuesReq",
+  "ServicesReq",
+  "ServiceDetailReq",
 ]);
 
 interface InternalTask {
@@ -151,12 +158,31 @@ const EXPECTED_DESCRIPTION_BY_OPERATION: Readonly<Partial<Record<TargetOperation
   "beacon.filesystem.head": "DownloadReq",
   "beacon.filesystem.tail": "DownloadReq",
   "beacon.filesystem.grep": "GrepReq",
+  "beacon.registry.read": "RegistryReadReq",
+  "beacon.registry.list-subkeys": "RegistrySubKeyListReq",
+  "beacon.registry.list-values": "RegistryListValuesReq",
+  "beacon.registry.write": "RegistryWriteReq",
+  "beacon.registry.create": "RegistryCreateKeyReq",
+  "beacon.registry.delete": "RegistryDeleteKeyReq",
+  "beacon.service.list": "ServicesReq",
+  "beacon.service.info": "ServiceDetailReq",
+  "beacon.service.start": "StartServiceByNameReq",
+  "beacon.service.stop": "StopServiceReq",
 });
 
 const NEW_M2_OPERATION_IDS = new Set<TargetOperationId>([
   "beacon.environment.list", "beacon.identity.whoami", "beacon.network.netstat",
   "beacon.filesystem.mount", "beacon.filesystem.memfiles", "beacon.filesystem.cat",
   "beacon.filesystem.head", "beacon.filesystem.tail", "beacon.filesystem.grep",
+  "beacon.registry.read", "beacon.registry.list-subkeys", "beacon.registry.list-values",
+  "beacon.registry.write", "beacon.registry.create", "beacon.registry.delete",
+  "beacon.service.list", "beacon.service.info", "beacon.service.start", "beacon.service.stop",
+]);
+
+const BC08_OPERATION_IDS = new Set<TargetOperationId>([
+  "beacon.registry.read", "beacon.registry.list-subkeys", "beacon.registry.list-values",
+  "beacon.registry.write", "beacon.registry.create", "beacon.registry.delete",
+  "beacon.service.list", "beacon.service.info", "beacon.service.start", "beacon.service.stop",
 ]);
 
 const EXTERNAL_OPERATION_BY_DESCRIPTION = new Map<string, TargetOperationId>(
@@ -306,10 +332,17 @@ export class BeaconTaskStore {
     if (executionOperationId) {
       return this.executionDetail(task, base, executionOperationId, attribution);
     }
-    if (!task.resultAvailable) return base;
-
     const operationId = attribution.operationId ?? EXTERNAL_OPERATION_BY_DESCRIPTION.get(task.description);
+    if (!task.resultAvailable) {
+      if (task.state === "completed" && operationId && BC08_OPERATION_IDS.has(operationId)) {
+        return detailError(base, operationId, "decode-uncertain", "The completed Registry or service task has no result available");
+      }
+      return base;
+    }
     if (!operationId) return this.historicalDetail(task, base);
+    if (BC08_OPERATION_IDS.has(operationId) && !attribution.expectedRequest) {
+      return detailError(base, operationId, "decode-uncertain", "The reviewed Registry or service request is unavailable");
+    }
     const expectedDescription = EXPECTED_DESCRIPTION_BY_OPERATION[operationId];
     if (attribution.operationId && task.description !== expectedDescription) {
       return detailError(
@@ -412,6 +445,71 @@ export class BeaconTaskStore {
       content.Request.fill(0);
       content.Response.fill(0);
     }
+    } finally {
+      this.detailAdmissions -= 1;
+    }
+  }
+
+  /** Fetch complete response pages on demand without retaining sensitive saved
+   * payloads in the metadata catalog or applying the task preview's limits. */
+  async response(
+    beaconId: string,
+    taskId: string,
+    offset = 0,
+    resolveOwnership: TaskOwnershipResolver = () => ({ ownership: UNKNOWN_OWNERSHIP }),
+  ): Promise<BeaconTaskResponse> {
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("The task response page offset is invalid");
+    const task = this.requireTask(beaconId, taskId);
+    if (!task.resultAvailable || task.state !== "completed") {
+      throw new Error("The selected task does not have a completed response available");
+    }
+    const attribution = resolveOwnership(task.taskId, task.beaconId);
+    if (attribution.operationId && task.description !== EXPECTED_DESCRIPTION_BY_OPERATION[attribution.operationId]) {
+      throw new Error("The task description did not match the locally submitted operation");
+    }
+    if (attribution.executionOperationId) {
+      const descriptions = attribution.executionOperationId === "bof.execute" ? ["CallExtensionReq"]
+        : EXECUTION_BEACON_TASK_DESCRIPTIONS[attribution.executionOperationId as keyof typeof EXECUTION_BEACON_TASK_DESCRIPTIONS];
+      if (!descriptions || !(descriptions as readonly string[]).includes(task.description)) {
+        throw new Error("The task description did not match the locally submitted operation");
+      }
+    }
+    if (attribution.operationId && BC08_OPERATION_IDS.has(attribution.operationId) && !attribution.expectedRequest) {
+      throw new Error("The reviewed Registry or service request is unavailable");
+    }
+    if (this.detailAdmissions >= MAX_CONCURRENT_TASK_DETAILS) {
+      throw new Error("Too many beacon task details are already being fetched; wait for one to finish");
+    }
+    this.detailAdmissions += 1;
+    const generation = this.storeGeneration;
+    try {
+      const content = await this.client.fetchBeaconTaskContent(task.beaconId, task.taskId, task.description);
+      try {
+        if (content.ID !== task.taskId || content.BeaconID !== task.beaconId ||
+          content.Description !== task.description || content.State.trim().toLowerCase() !== "completed") {
+          throw new Error("The server returned task content for a different resource, state, or description");
+        }
+        const current = this.requireTask(task.beaconId, task.taskId);
+        if (generation !== this.storeGeneration || current.state !== "completed" ||
+          current.description !== task.description || current.createdAt !== task.createdAt || current.completedAt !== task.completedAt) {
+          throw new Error("The selected task changed while its complete response was being fetched");
+        }
+        if (attribution.expectedRequest) {
+          if (attribution.expectedRequest.operationId !== attribution.operationId) {
+            throw new Error("The saved task request did not match the selected command");
+          }
+          try { verifyBeaconReadRequest(attribution.expectedRequest, content.Request); }
+          catch { throw new Error("The saved task request did not match the selected command"); }
+        }
+        if (attribution.operationId && requiresExactlyEmptyResponse(attribution.operationId) && content.Response.length !== 0) {
+          throw new Error("The beacon task result did not match the expected empty response");
+        }
+        const decoded = decodeBeaconTaskResponse(task.description, content.Request, content.Response, attribution.expectedPingNonce);
+        return pageBeaconTaskResponse(task.beaconId, task.taskId, decoded, offset);
+      } finally {
+        content.Request.fill(0);
+        content.Response.fill(0);
+      }
     } finally {
       this.detailAdmissions -= 1;
     }
@@ -1152,6 +1250,17 @@ function decodeDisposition(
       }
       return { kind: "table" as const, columns: ["Path", "Line", "Match", "Before", "After", "Binary"], rows, truncated };
     }
+    case "beacon.registry.read":
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+    case "beacon.registry.write":
+    case "beacon.registry.create":
+    case "beacon.registry.delete":
+    case "beacon.service.list":
+    case "beacon.service.info":
+    case "beacon.service.start":
+    case "beacon.service.stop":
+      return decodeBc08Disposition(operationId, response);
     case "target.rename":
       return {
         kind: "structured-detail" as const,
@@ -1160,6 +1269,166 @@ function decodeDisposition(
         truncated: false,
       };
   }
+}
+
+function decodeBc08Disposition(
+  operationId: Extract<TargetOperationId, `beacon.registry.${string}` | `beacon.service.${string}`>,
+  response: Buffer,
+) {
+  switch (operationId) {
+    case "beacon.registry.read": {
+      const decoded = decodeCanonical(sliverpb.RegistryRead, response);
+      try {
+        assertEmbeddedResponse(decoded.Response);
+        // The pinned response carries only Value and Response. The generated
+        // client accepts newer Binary/Type fields, but this route has no reviewed
+        // binary result disposition.
+        if (decoded.Binary.length !== 0 || decoded.Type !== sliverpb.RegistryType.Unknown) {
+          throw new Error("The Registry read returned an unreviewed value shape");
+        }
+        const value = boundedResultText(decoded.Value, MAX_RESULT_TEXT);
+        return {
+          kind: "structured-detail" as const,
+          title: "Registry value",
+          fields: [{ label: "Type", value: "Not reported by target" }, { label: "Value", value: value.value }],
+          truncated: value.changed,
+        };
+      } finally {
+        decoded.Binary.fill(0);
+      }
+    }
+    case "beacon.registry.list-subkeys": {
+      const decoded = decodeCanonical(sliverpb.RegistrySubKeyList, response);
+      assertEmbeddedResponse(decoded.Response);
+      let truncated = decoded.Subkeys.length > MAX_RESULT_ROWS;
+      const rows = decoded.Subkeys.slice(0, MAX_RESULT_ROWS).map((key) => {
+        const name = boundedResultText(key, 512);
+        truncated ||= name.changed;
+        return [name.value];
+      });
+      return { kind: "table" as const, columns: ["Subkey"], rows, truncated };
+    }
+    case "beacon.registry.list-values": {
+      const decoded = decodeCanonical(sliverpb.RegistryValuesList, response);
+      assertEmbeddedResponse(decoded.Response);
+      let truncated = decoded.ValueNames.length > MAX_RESULT_ROWS;
+      const rows = decoded.ValueNames.slice(0, MAX_RESULT_ROWS).map((value) => {
+        const name = boundedResultText(value, 512);
+        truncated ||= name.changed;
+        return [name.value];
+      });
+      return { kind: "table" as const, columns: ["Value name"], rows, truncated };
+    }
+    case "beacon.service.list": {
+      const decoded = decodeCanonical(sliverpb.Services, response);
+      assertEmbeddedResponse(decoded.Response);
+      if (decoded.Error && decoded.Details.length === 0) {
+        throw new TargetReportedTaskError("The beacon could not list services");
+      }
+      let truncated = decoded.Details.length > MAX_RESULT_ROWS;
+      const warning = decoded.Error ? "Inventory may be incomplete" : "";
+      const rows = decoded.Details.slice(0, MAX_RESULT_ROWS).map((service) => {
+        const text = (value: string, maximum = 512): string => {
+          const bounded = boundedResultText(value, maximum);
+          truncated ||= bounded.changed;
+          return bounded.value;
+        };
+        return [
+          text(service.Name), text(service.DisplayName), serviceStateLabel(service.Status),
+          serviceStartupLabel(service.StartupType), text(service.BinPath),
+          text(service.Account), text(service.Description, MAX_RESULT_TEXT), warning,
+        ];
+      });
+      return {
+        kind: "table" as const,
+        columns: ["Name", "Display name", "Status", "Startup", "Binary path", "Account", "Description", "Warning"],
+        rows,
+        truncated,
+      };
+    }
+    case "beacon.service.info": {
+      const decoded = decodeCanonical(sliverpb.ServiceDetail, response);
+      assertEmbeddedResponse(decoded.Response);
+      if (!decoded.Detail) throw new TargetReportedTaskError("The beacon returned no service details");
+      let truncated = false;
+      const text = (value: string, maximum = MAX_RESULT_TEXT): string => {
+        const bounded = boundedResultText(value, maximum);
+        truncated ||= bounded.changed;
+        return bounded.value;
+      };
+      const service = decoded.Detail;
+      return {
+        kind: "structured-detail" as const,
+        title: "Service details",
+        fields: [
+          { label: "Name", value: text(service.Name, 512) },
+          { label: "Display name", value: text(service.DisplayName, 512) },
+          { label: "Status", value: serviceStateLabel(service.Status) },
+          { label: "Startup", value: serviceStartupLabel(service.StartupType) },
+          { label: "Binary path", value: text(service.BinPath) },
+          { label: "Account", value: text(service.Account, 512) },
+          { label: "Description", value: text(service.Description) },
+          { label: "Warning", value: decoded.Message ? "Details may be incomplete" : "None" },
+        ],
+        truncated,
+      };
+    }
+    case "beacon.registry.write":
+      return acknowledgedBc08Mutation("Registry write", sliverpb.RegistryWrite, response);
+    case "beacon.registry.create":
+      return acknowledgedBc08Mutation("Registry create", sliverpb.RegistryCreateKey, response);
+    case "beacon.registry.delete":
+      return acknowledgedBc08Mutation("Registry delete", sliverpb.RegistryDeleteKey, response);
+    case "beacon.service.start":
+      if (response.length === 0) return emptyServiceMutationDisposition("Service start");
+      return acknowledgedBc08Mutation("Service start", sliverpb.ServiceInfo, response);
+    case "beacon.service.stop":
+      if (response.length === 0) return emptyServiceMutationDisposition("Service stop");
+      return acknowledgedBc08Mutation("Service stop", sliverpb.ServiceInfo, response);
+  }
+}
+
+function emptyServiceMutationDisposition(title: string) {
+  // The pinned Windows handler marshals an empty ServiceInfo on success and
+  // sets Response.Err only on failure. A completed, exact task with no bytes
+  // therefore reports no handler error, but provides no service state readback.
+  return {
+    kind: "structured-detail" as const,
+    title: `${title} task`,
+    fields: [
+      { label: "Handler", value: "Returned without an error" },
+      { label: "Remote state", value: "Not verified; requery the target" },
+    ],
+    truncated: false,
+  };
+}
+
+function acknowledgedBc08Mutation<Value extends { Response?: { Err: string } | undefined }>(
+  title: string,
+  codec: { decode(bytes: Uint8Array): Value; encode(value: Value): { finish(): Uint8Array } },
+  response: Buffer,
+) {
+  const decoded = decodeCanonical(codec, response);
+  assertEmbeddedResponse(decoded.Response);
+  return {
+    kind: "structured-detail" as const,
+    title: `${title} task`,
+    fields: [
+      { label: "Handler", value: "Acknowledged" },
+      { label: "Remote state", value: "Not verified; requery the target" },
+    ],
+    truncated: false,
+  };
+}
+
+function serviceStateLabel(status: number): string {
+  return ({ 1: "Stopped", 2: "Starting", 3: "Stopping", 4: "Running",
+    5: "Continuing", 6: "Pausing", 7: "Paused" } as Record<number, string>)[status] ?? `Unknown (${status})`;
+}
+
+function serviceStartupLabel(startup: number): string {
+  return ({ 0: "Boot", 1: "System", 2: "Automatic", 3: "Manual", 4: "Disabled" } as Record<number, string>)[startup] ??
+    `Unknown (${startup})`;
 }
 
 function maximumResponseBytes(operationId: TargetOperationId): number {
@@ -1245,6 +1514,9 @@ function allowsEmptyDecodedResponse(operationId: TargetOperationId, expectedRequ
   // An empty full environment listing is valid. For process, interface, and
   // socket listings, the pinned handlers can also emit no response on failure,
   // so an empty payload cannot establish a successful zero-row result.
+  if (operationId === "beacon.service.start" || operationId === "beacon.service.stop") {
+    return expectedRequest?.operationId === operationId;
+  }
   return operationId === "beacon.environment.list" &&
     expectedRequest?.operationId === "beacon.environment.list" && expectedRequest.name === undefined;
 }
@@ -1361,15 +1633,16 @@ function boundedText(value: string, maximum: number): string {
 }
 
 function boundedResultText(value: string, maximum: number): { value: string; changed: boolean } {
-  const bounded = boundedText(value, maximum);
-  return { value: bounded, changed: bounded !== value };
+  const normalized = value.replace(/[\p{Cc}\p{Cf}]/gu, " ").replace(/\s+/gu, " ").trim();
+  const bounded = [...normalized].slice(0, maximum).join("");
+  return { value: bounded, changed: bounded !== normalized };
 }
 
 function boundedInlineText(value: string, maximum: number): { value: string; changed: boolean } {
   const normalized = value.replace(/\r\n?/gu, "\n").replace(/[\p{Cc}\p{Cf}]/gu,
     (character) => character === "\n" || character === "\t" ? character : " ");
   const bounded = [...normalized].slice(0, maximum).join("");
-  return { value: bounded, changed: bounded !== value };
+  return { value: bounded, changed: bounded !== normalized };
 }
 
 function nonNegativeInteger(value: number): number | null {

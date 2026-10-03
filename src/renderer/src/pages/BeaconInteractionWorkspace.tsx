@@ -3,6 +3,7 @@ import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faBan,
+  faChevronDown,
   faClockRotateLeft,
   faFolderOpen,
   faListCheck,
@@ -16,6 +17,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 import type { Key } from "react-aria-components";
 import {
+  AlertDialog,
   Autocomplete,
   Button,
   Chip,
@@ -23,6 +25,7 @@ import {
   ListBox,
   SearchField,
   ScrollShadow,
+  Select,
   Switch,
   Tabs,
   Tooltip,
@@ -36,7 +39,10 @@ import { EmptyState } from "@heroui-pro/react/empty-state";
 import type { PageSummary } from "../../../shared/contracts";
 import type { BeaconSummary, TargetCapabilityId, TargetCapabilityState, TargetRef } from "../../../shared/target-contracts";
 import type { ExecutionReadResult } from "../../../shared/execution-contracts";
+import type { SessionRegistryHive, SessionRegistryWriteValue } from "../../../shared/session-contracts";
 import type {
+  BeaconMutationPlan,
+  BeaconMutationOperationInput,
   BeaconTaskDetail,
   BeaconTaskSummary,
   OperationDisposition,
@@ -47,6 +53,7 @@ import type {
 import { AreaField, Field } from "../components/FormControls";
 import { BeaconExecutionCommand, type BeaconExecutionCommandState, type BeaconExecutionSelection } from "./BeaconExecutionCommand";
 import { BeaconExecutionTaskOutput } from "./BeaconExecutionTaskOutput";
+import { BeaconTaskDetails } from "./BeaconTaskDetails";
 import { capabilityFor, formatTimestamp, operationStateLabel, taskStateColor } from "./target-page-model";
 import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 
@@ -68,6 +75,16 @@ export const BEACON_INTERACTION_COMMAND_IDS = [
   "beacon.filesystem.head",
   "beacon.filesystem.tail",
   "beacon.filesystem.grep",
+  "beacon.registry.list-subkeys",
+  "beacon.registry.list-values",
+  "beacon.registry.read",
+  "beacon.registry.create",
+  "beacon.registry.delete",
+  "beacon.registry.write",
+  "beacon.service.list",
+  "beacon.service.info",
+  "beacon.service.start",
+  "beacon.service.stop",
   "target.ping",
   "target.rename",
   "target.env-set",
@@ -86,7 +103,7 @@ export type BeaconInteractionCommandId = (typeof BEACON_INTERACTION_COMMAND_IDS)
 
 interface BeaconCommandPresentation {
   id: BeaconInteractionCommandId;
-  group: "Execution" | "Filesystem" | "Processes" | "Networking" | "Identity" | "Environment" | "Beacon";
+  group: "Execution" | "Filesystem" | "Processes" | "Networking" | "Identity" | "Environment" | "Registry" | "Services" | "Beacon";
   label: string;
   description: string;
   keywords: readonly string[];
@@ -146,6 +163,16 @@ const BEACON_COMMANDS: readonly BeaconCommandPresentation[] = [
   { id: "beacon.filesystem.head", group: "Filesystem", label: "Read file head", description: "Read the first lines or bytes of a file.", keywords: ["head", "file", "lines", "bytes"], icon: faFolderOpen },
   { id: "beacon.filesystem.tail", group: "Filesystem", label: "Read file tail", description: "Read the last bounded bytes of a file.", keywords: ["tail", "file", "bytes"], icon: faFolderOpen },
   { id: "beacon.filesystem.grep", group: "Filesystem", label: "Search files", description: "Search files for a pattern with bounded output.", keywords: ["grep", "search", "pattern"], icon: faFolderOpen },
+  { id: "beacon.registry.list-subkeys", group: "Registry", label: "List registry subkeys", description: "Read subkeys beneath a Windows registry path.", keywords: ["registry", "keys", "windows"], icon: faFolderOpen },
+  { id: "beacon.registry.list-values", group: "Registry", label: "List registry values", description: "Read value names at a Windows registry path.", keywords: ["registry", "values", "windows"], icon: faListCheck },
+  { id: "beacon.registry.read", group: "Registry", label: "Read registry value", description: "Read one Windows registry value.", keywords: ["registry", "read", "windows"], icon: faListCheck },
+  { id: "beacon.registry.create", group: "Registry", label: "Create registry key", description: "Review a new Windows registry subkey before queueing it.", keywords: ["registry", "create", "windows"], icon: faWrench },
+  { id: "beacon.registry.delete", group: "Registry", label: "Delete registry entry", description: "Review a value-first Windows Registry deletion before queueing it.", keywords: ["registry", "delete", "value", "subkey", "windows"], icon: faWrench },
+  { id: "beacon.registry.write", group: "Registry", label: "Write registry value", description: "Review an encoded Windows registry value before queueing it.", keywords: ["registry", "write", "windows"], icon: faWrench },
+  { id: "beacon.service.list", group: "Services", label: "List services", description: "Read the Windows service inventory.", keywords: ["services", "windows", "list"], icon: faListCheck },
+  { id: "beacon.service.info", group: "Services", label: "Service information", description: "Read details of a Windows service.", keywords: ["services", "windows", "info"], icon: faListCheck },
+  { id: "beacon.service.start", group: "Services", label: "Start service", description: "Review a Windows service start before queueing it.", keywords: ["services", "windows", "start"], icon: faWrench },
+  { id: "beacon.service.stop", group: "Services", label: "Stop service", description: "Review a Windows service stop before queueing it.", keywords: ["services", "windows", "stop"], icon: faWrench },
   {
     id: "target.ping",
     group: "Beacon",
@@ -252,6 +279,29 @@ const DEFAULT_READ_DRAFT: BeaconReadDraft = {
   listen: false,
 };
 
+interface BeaconWindowsDraft {
+  hive: SessionRegistryHive;
+  path: string;
+  key: string;
+  hostname: string;
+  serviceName: string;
+  valueType: SessionRegistryWriteValue["type"];
+  valueDraft: string;
+}
+
+const DEFAULT_WINDOWS_DRAFT: BeaconWindowsDraft = {
+  hive: "HKCU",
+  path: "",
+  key: "",
+  hostname: "",
+  serviceName: "",
+  valueType: "string",
+  valueDraft: "",
+};
+
+const REGISTRY_HIVES: readonly SessionRegistryHive[] = ["HKCU", "HKLM", "HKCR", "HKU", "HKCC"];
+const REGISTRY_VALUE_TYPES: readonly SessionRegistryWriteValue["type"][] = ["string", "binary", "dword", "qword"];
+
 const NETSTAT_OPTION_LABELS = {
   tcp: "TCP",
   udp: "UDP",
@@ -276,6 +326,16 @@ const COMMAND_CAPABILITIES: Readonly<Record<Exclude<BeaconInteractionCommandId, 
   "beacon.filesystem.head": "target.task.execute",
   "beacon.filesystem.tail": "target.task.execute",
   "beacon.filesystem.grep": "target.task.execute",
+  "beacon.registry.list-subkeys": "target.task.execute",
+  "beacon.registry.list-values": "target.task.execute",
+  "beacon.registry.read": "target.task.execute",
+  "beacon.registry.create": "target.task.execute",
+  "beacon.registry.delete": "target.task.execute",
+  "beacon.registry.write": "target.task.execute",
+  "beacon.service.list": "target.task.execute",
+  "beacon.service.info": "target.task.execute",
+  "beacon.service.start": "target.task.execute",
+  "beacon.service.stop": "target.task.execute",
   "target.ping": "target.ping",
   "target.rename": "target.rename",
   "target.env-set": "target.environment.write",
@@ -328,8 +388,11 @@ export function BeaconInteractionWorkspace({
   const [fullInfo, setFullInfo] = useState(false);
   const [managementDraft, setManagementDraft] = useState<BeaconManagementDraft>(DEFAULT_MANAGEMENT_DRAFT);
   const [readDraft, setReadDraft] = useState<BeaconReadDraft>(DEFAULT_READ_DRAFT);
+  const [windowsDraft, setWindowsDraft] = useState<BeaconWindowsDraft>(DEFAULT_WINDOWS_DRAFT);
   const [submitError, setSubmitError] = useState<string>();
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [reviewPlan, setReviewPlan] = useState<BeaconMutationPlan>();
+  const [isExecutingMutation, setIsExecutingMutation] = useState(false);
   const [submittedOperation, setSubmittedOperation] = useState<TargetOperationRecord>();
   const [executionState, setExecutionState] = useState<BeaconExecutionCommandState>({ isPending: false, isAvailable: false });
   const executionFormId = useId();
@@ -340,6 +403,13 @@ export function BeaconInteractionWorkspace({
   const jumpSequence = useRef(0);
   const identityRef = useRef(targetIdentity);
   identityRef.current = targetIdentity;
+  const mountedRef = useRef(true);
+  const commandRef = useRef(commandId);
+  commandRef.current = commandId;
+  const reviewPlanRef = useRef<BeaconMutationPlan | undefined>(undefined);
+  reviewPlanRef.current = reviewPlan;
+  const preparingMutationRef = useRef(false);
+  const executingMutationRef = useRef(false);
   const { entries: outputs, loadOutput } = useBeaconTaskOutputs(targetIdentity, tasks, taskView === "output", false);
   const { contains } = useFilter({ sensitivity: "base" });
   const command = BEACON_COMMANDS.find((item) => item.id === commandId) ?? BEACON_COMMANDS[0]!;
@@ -353,7 +423,8 @@ export function BeaconInteractionWorkspace({
     beacon.id === expectedTarget.id &&
     (isManagementCommand ? expectedTarget.mode === "beacon" : canQueue) &&
     (commandId !== "beacon.filesystem.memfiles" || beacon.os.toLocaleLowerCase() === "linux") &&
-    (commandId !== "beacon.identity.whoami" || beacon.os.toLocaleLowerCase() === "windows");
+    (commandId !== "beacon.identity.whoami" || beacon.os.toLocaleLowerCase() === "windows") &&
+    (!isBeaconWindowsCommandId(commandId) || beacon.os.toLocaleLowerCase() === "windows");
   const updatedOperation = submittedOperation && operationUpdates.find((operation) =>
     operation.requestId === submittedOperation.requestId &&
     sameTarget(operation.target, submittedOperation.target) &&
@@ -366,8 +437,16 @@ export function BeaconInteractionWorkspace({
     setFullInfo(false);
     setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
     setReadDraft(DEFAULT_READ_DRAFT);
+    setWindowsDraft(DEFAULT_WINDOWS_DRAFT);
     setSubmitError(undefined);
     setIsSubmitting(false);
+    setIsExecutingMutation(false);
+    preparingMutationRef.current = false;
+    executingMutationRef.current = false;
+    const stalePlan = reviewPlanRef.current;
+    reviewPlanRef.current = undefined;
+    setReviewPlan(undefined);
+    if (stalePlan) discardBeaconMutationPlan(stalePlan);
     setSubmittedOperation(undefined);
     setExecutionState({ isPending: false, isAvailable: false });
     setCancelingTaskIds(new Set());
@@ -375,6 +454,16 @@ export function BeaconInteractionWorkspace({
     setTaskView("output");
     setOutputJump(undefined);
   }, [targetIdentity]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const stalePlan = reviewPlanRef.current;
+      reviewPlanRef.current = undefined;
+      if (stalePlan) discardBeaconMutationPlan(stalePlan);
+    };
+  }, []);
 
   const selectTask = (task: BeaconTaskSummary): void => {
     setQueuedTaskId(undefined);
@@ -393,11 +482,12 @@ export function BeaconInteractionWorkspace({
   }, [queuedTaskId, loadOutput, tasks]);
 
   const submit = async (): Promise<void> => {
-    if (metadataFact) return;
+    if (metadataFact || !commandAvailable || isSubmitting || isExecutingMutation || preparingMutationRef.current) return;
     const submittedIdentity = targetIdentity;
+    const submittedCommand = commandId;
     let input: TargetOperationInput;
     try {
-      input = beaconCommandInput(commandId, path, fullInfo, managementDraft, readDraft);
+      input = beaconCommandInput(commandId, path, fullInfo, managementDraft, readDraft, windowsDraft);
       setSubmitError(undefined);
     } catch (validationError) {
       setSubmitError(errorMessage(validationError));
@@ -405,7 +495,24 @@ export function BeaconInteractionWorkspace({
     }
 
     setIsSubmitting(true);
+    if (isBeaconMutationCommandId(submittedCommand)) preparingMutationRef.current = true;
     try {
+      if (isBeaconMutationCommandId(submittedCommand)) {
+        const prepared = await window.sliver.prepareBeaconMutation(input as BeaconMutationOperationInput);
+        if (!mountedRef.current || identityRef.current !== submittedIdentity || commandRef.current !== submittedCommand) {
+          if (prepared.ok && prepared.value) discardBeaconMutationPlan(prepared.value);
+          return;
+        }
+        if (!prepared.ok || !prepared.value) throw new Error(prepared.error ?? "The beacon mutation could not be reviewed.");
+        if (prepared.value.operationId !== submittedCommand || !sameReviewTarget(prepared.value.target, expectedTarget) ||
+          prepared.value.backend.epoch !== expectedTarget.backendEpoch) {
+          discardBeaconMutationPlan(prepared.value);
+          throw new Error("The review no longer matches this command and beacon.");
+        }
+        reviewPlanRef.current = prepared.value;
+        setReviewPlan(prepared.value);
+        return;
+      }
       const result = await window.sliver.submitTargetOperation(input);
       if (identityRef.current !== submittedIdentity) return;
       if (!result.ok || !result.value) {
@@ -437,9 +544,57 @@ export function BeaconInteractionWorkspace({
       });
       onRefresh();
     } catch (submissionError) {
+      if (identityRef.current === submittedIdentity && commandRef.current === submittedCommand) setSubmitError(errorMessage(submissionError));
+    } finally {
+      if (isBeaconMutationCommandId(submittedCommand)) preparingMutationRef.current = false;
+      if (identityRef.current === submittedIdentity) setIsSubmitting(false);
+    }
+  };
+
+  const dismissReview = (): void => {
+    if (executingMutationRef.current) return;
+    const plan = reviewPlanRef.current;
+    reviewPlanRef.current = undefined;
+    setReviewPlan(undefined);
+    if (plan) discardBeaconMutationPlan(plan);
+  };
+
+  const confirmReview = async (): Promise<void> => {
+    const plan = reviewPlanRef.current;
+    if (!plan || executingMutationRef.current || !sameReviewTarget(plan.target, expectedTarget) ||
+      plan.operationId !== commandId || !commandAvailable) return;
+    const submittedIdentity = targetIdentity;
+    executingMutationRef.current = true;
+    setIsExecutingMutation(true);
+    setSubmitError(undefined);
+    try {
+      const result = await window.sliver.executeBeaconMutation({ token: plan.token });
+      if (!mountedRef.current || identityRef.current !== submittedIdentity || reviewPlanRef.current?.token !== plan.token) return;
+      reviewPlanRef.current = undefined;
+      setReviewPlan(undefined);
+      if (!result.ok || !result.value) throw new Error(result.error ?? "The reviewed beacon mutation could not be queued.");
+      if (result.value.operationId !== plan.operationId || !sameTarget(result.value.target, plan.target)) {
+        throw new Error("The queued result did not match the reviewed command and beacon.");
+      }
+      if (!onSubmitted(result.value)) return;
+      setSubmittedOperation(result.value);
+      if (!result.value.taskId) {
+        setSubmitError(result.value.message ?? "The operation has no exact beacon task ID, so queue insertion was not confirmed.");
+        return;
+      }
+      setQueuedTaskId(result.value.taskId);
+      toast.success("Task queued", { description: "The mutation result will appear after the beacon checks in." });
+      onRefresh();
+    } catch (submissionError) {
+      if (reviewPlanRef.current?.token === plan.token) {
+        reviewPlanRef.current = undefined;
+        setReviewPlan(undefined);
+        discardBeaconMutationPlan(plan);
+      }
       if (identityRef.current === submittedIdentity) setSubmitError(errorMessage(submissionError));
     } finally {
-      if (identityRef.current === submittedIdentity) setIsSubmitting(false);
+      executingMutationRef.current = false;
+      if (identityRef.current === submittedIdentity) setIsExecutingMutation(false);
     }
   };
 
@@ -477,11 +632,11 @@ export function BeaconInteractionWorkspace({
               fullWidth
               {...(isExecutionCommand ? { form: executionFormId } : {})}
               type={isExecutionCommand ? "submit" : "button"}
-              isDisabled={isExecutionCommand ? !executionState.isAvailable : !commandAvailable}
-              isPending={isExecutionCommand ? executionState.isPending : isSubmitting}
+              isDisabled={isExecutionCommand ? !executionState.isAvailable : !commandAvailable || reviewPlan !== undefined}
+              isPending={isExecutionCommand ? executionState.isPending : isSubmitting || isExecutingMutation}
               {...(isExecutionCommand ? {} : { onPress: () => void submit() })}
             >
-              <FontAwesomeIcon aria-hidden icon={faListCheck} /> {commandId === "target.rename" ? "Rename beacon" : "Queue task"}
+              <FontAwesomeIcon aria-hidden icon={faListCheck} /> {commandId === "target.rename" ? "Rename beacon" : isBeaconMutationCommandId(commandId) ? "Review task" : "Queue task"}
             </Button> : null}
             <Autocomplete
               fullWidth
@@ -493,9 +648,11 @@ export function BeaconInteractionWorkspace({
                 if (key === null || Array.isArray(key)) return;
                 const nextId = String(key);
                 if (!isBeaconInteractionCommandId(nextId)) return;
+                dismissReview();
                 setCommandId(nextId);
                 setManagementDraft(DEFAULT_MANAGEMENT_DRAFT);
                 setReadDraft({ ...DEFAULT_READ_DRAFT, count: nextId === "beacon.filesystem.tail" ? "4096" : "10", countBytes: nextId === "beacon.filesystem.tail" });
+                setWindowsDraft(DEFAULT_WINDOWS_DRAFT);
                 setExecutionState({ isPending: false, isAvailable: false });
                 setSubmitError(undefined);
               }}
@@ -650,6 +807,9 @@ export function BeaconInteractionWorkspace({
                       ))}
                     </div>
                   ) : null}
+                  {isBeaconWindowsCommandId(commandId) ? (
+                    <BeaconWindowsFields commandId={commandId} draft={windowsDraft} onChange={setWindowsDraft} />
+                  ) : null}
                 </div>
               ) : null}
             </div>}
@@ -662,13 +822,15 @@ export function BeaconInteractionWorkspace({
                   ? "Memory files require a Linux beacon."
                   : commandId === "beacon.identity.whoami" && beacon.os.toLocaleLowerCase() !== "windows"
                     ? "A token-owner task requires a Windows beacon."
+                    : isBeaconWindowsCommandId(commandId) && beacon.os.toLocaleLowerCase() !== "windows"
+                      ? "Registry and service commands require a Windows beacon."
                     : isManagementCommand
                   ? capability?.reason?.message ?? "This command is unavailable for the selected beacon."
                   : unavailableReason ?? capability?.reason?.message ?? "Task execution is unavailable for this beacon."}
               </p>
             ) : null}
             {submitError ? <p className="rounded-xl bg-danger-soft px-3 py-2 text-xs text-danger-soft-foreground" role="alert">{submitError}</p> : null}
-            {isManagementCommand && latestOperation?.operationId === commandId ? (
+            {(isManagementCommand || isBeaconMutationCommandId(commandId)) && latestOperation?.operationId === commandId ? (
               <p
                 aria-label="Beacon command status"
                 className={`text-xs leading-relaxed ${latestOperation.state === "failed" || latestOperation.state === "target-disappeared"
@@ -681,6 +843,7 @@ export function BeaconInteractionWorkspace({
                 {command.label} · {operationStateLabel(latestOperation.state)} · Request ID: {latestOperation.requestId}
                 {latestOperation.taskId ? ` · Task ID: ${latestOperation.taskId}` : ""}
                 {latestOperation.message ? ` · ${latestOperation.message}` : ""}
+                {isBeaconMutationCommandId(commandId) ? " · Verify the remote state after check-in." : ""}
               </p>
             ) : null}
           </div>
@@ -726,7 +889,110 @@ export function BeaconInteractionWorkspace({
           </Tabs.Panel>
         </Tabs>
       </section>
+      <BeaconMutationReviewDialog isExecuting={isExecutingMutation} plan={reviewPlan} onCancel={dismissReview} onConfirm={() => void confirmReview()} />
     </div>
+  );
+}
+
+function BeaconWindowsFields({ commandId, draft, onChange }: {
+  commandId: BeaconWindowsCommandId;
+  draft: BeaconWindowsDraft;
+  onChange: React.Dispatch<React.SetStateAction<BeaconWindowsDraft>>;
+}): React.JSX.Element {
+  const registry = commandId.startsWith("beacon.registry.");
+  const write = commandId === "beacon.registry.write";
+  const keyName = commandId === "beacon.registry.create" ? "Subkey name" :
+    commandId === "beacon.registry.delete" ? "Entry name" : "Value name";
+  const showKey = commandId === "beacon.registry.read" || write ||
+    commandId === "beacon.registry.create" || commandId === "beacon.registry.delete";
+  return (
+    <div className="space-y-3">
+      {registry ? (
+        <>
+          <Select aria-label="Registry hive" value={draft.hive} variant="secondary" onChange={(key) => {
+            const next = String(key);
+            if (REGISTRY_HIVES.some((hive) => hive === next)) onChange((current) => ({ ...current, hive: next as SessionRegistryHive }));
+          }}>
+            <Label>Registry hive</Label>
+            <Select.Trigger><Select.Value /><Select.Indicator><FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} /></Select.Indicator></Select.Trigger>
+            <Select.Popover><ListBox>{REGISTRY_HIVES.map((hive) => <ListBox.Item id={hive} key={hive} textValue={hive}>{hive}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+          </Select>
+          <Field label="Registry path" mono value={draft.path} onChange={(path) => onChange((current) => ({ ...current, path }))}
+            description="Path below the selected hive; leave empty for its root." />
+          {showKey ? <Field label={keyName} mono value={draft.key} onChange={(key) => onChange((current) => ({ ...current, key }))}
+            description={write || commandId === "beacon.registry.read" ? "Leave empty for the default value." : "Name directly beneath the registry path."} /> : null}
+          {commandId === "beacon.registry.delete" ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs leading-relaxed text-warning-soft-foreground">
+            Sliver deletes a value with this name first. It deletes the subkey only when no value by that name exists.
+          </p> : null}
+          {write ? (
+            <>
+              <Select aria-label="Registry value type" value={draft.valueType} variant="secondary" onChange={(key) => {
+                const next = String(key);
+                if (REGISTRY_VALUE_TYPES.some((type) => type === next)) onChange((current) => ({ ...current, valueType: next as SessionRegistryWriteValue["type"], valueDraft: "" }));
+              }}>
+                <Label>Registry value type</Label>
+                <Select.Trigger><Select.Value /><Select.Indicator><FontAwesomeIcon aria-hidden className="size-3" icon={faChevronDown} /></Select.Indicator></Select.Trigger>
+                <Select.Popover><ListBox>{REGISTRY_VALUE_TYPES.map((type) => <ListBox.Item id={type} key={type} textValue={type}>{type === "dword" || type === "qword" ? type.toUpperCase() : type === "binary" ? "Binary" : "String"}<ListBox.ItemIndicator /></ListBox.Item>)}</ListBox></Select.Popover>
+              </Select>
+              {draft.valueType === "string" || draft.valueType === "binary"
+                ? <AreaField label={draft.valueType === "binary" ? "Hexadecimal bytes" : "String value"} mono rows={3} value={draft.valueDraft} onChange={(valueDraft) => onChange((current) => ({ ...current, valueDraft }))} />
+                : <Field label={draft.valueType === "dword" ? "Unsigned 32-bit value" : "Unsigned 64-bit value"} mono value={draft.valueDraft} onChange={(valueDraft) => onChange((current) => ({ ...current, valueDraft }))} />}
+            </>
+          ) : null}
+        </>
+      ) : commandId !== "beacon.service.list" ? (
+        <Field label="Service name" mono required value={draft.serviceName} onChange={(serviceName) => onChange((current) => ({ ...current, serviceName }))} />
+      ) : null}
+      <Field label="Host (optional)" mono value={draft.hostname} onChange={(hostname) => onChange((current) => ({ ...current, hostname }))}
+        description="Leave empty to use the beacon host." />
+    </div>
+  );
+}
+
+function BeaconMutationReviewDialog({ plan, isExecuting, onCancel, onConfirm }: {
+  plan: BeaconMutationPlan | undefined;
+  isExecuting: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}): React.JSX.Element {
+  return (
+    <AlertDialog.Backdrop isOpen={plan !== undefined} onOpenChange={(open) => { if (!open && !isExecuting) onCancel(); }} variant="blur">
+      <AlertDialog.Container placement="center" size="lg">
+        <AlertDialog.Dialog className="sm:max-w-2xl">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="danger"><FontAwesomeIcon aria-hidden icon={faTriangleExclamation} /></AlertDialog.Icon>
+            <AlertDialog.Heading>Queue this reviewed beacon mutation?</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            {plan ? <div className="space-y-4 text-sm">
+              <p className="leading-6 text-foreground">{plan.summary}</p>
+              {plan.operationId === "beacon.registry.delete" ? <p className="rounded-xl bg-warning-soft px-3 py-2 text-xs leading-relaxed text-warning-soft-foreground">
+                Sliver deletes a value with this name first. It deletes the subkey only when no value by that name exists.
+              </p> : null}
+              <section aria-label="Reviewed beacon" className="rounded-xl border border-separator bg-default px-4 py-3">
+                <p className="font-medium text-foreground">{plan.targetName}</p>
+                <p className="mt-1 break-all font-mono text-xs text-muted">{plan.target.mode}:{plan.target.id} · {plan.target.fingerprint}</p>
+                <p className="mt-1 text-xs text-muted">{plan.backend.operator}@{plan.backend.server} · epoch {plan.backend.epoch}</p>
+              </section>
+              <dl aria-label="Reviewed mutation fields" className="grid gap-x-5 gap-y-3 sm:grid-cols-2">
+                {plan.fields.map((field, index) => (
+                  <div className="min-w-0" key={`${field.label}-${index}`}>
+                    <dt className="text-xs text-muted">{field.label}</dt>
+                    <dd className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-foreground">{String(field.value ?? "")}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="break-all font-mono text-[11px] text-muted">Payload SHA-256 {plan.payloadSha256}</p>
+              <p className="text-xs text-muted">Review expires {new Date(plan.expiresAt).toLocaleTimeString()}. Queueing confirms receipt by the server; inspect the task result and requery the remote state after check-in.</p>
+            </div> : null}
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button isDisabled={isExecuting} size="sm" variant="tertiary" onPress={onCancel}>Cancel</Button>
+            <Button isPending={isExecuting} size="sm" variant="danger" onPress={onConfirm}>Queue reviewed task</Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
   );
 }
 
@@ -1043,7 +1309,7 @@ function BeaconTaskOutputList({
   );
 }
 
-function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetry }: {
+export function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetry }: {
   output: BeaconTaskOutputEntry;
   isCanceling: boolean;
   onCancel: (task: BeaconTaskDetail) => void;
@@ -1056,9 +1322,11 @@ function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetry }: {
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-foreground">{output.task.description || (task ? operationResultTitle(task) : "Beacon task")}</h3>
-          <p className="mt-1 truncate font-mono text-[11px] text-muted" title={output.task.taskId}>{output.task.taskId}</p>
         </div>
-        <Chip color={taskStateColor(task?.state ?? output.task.state)} size="sm" variant="soft">{stateLabel(task?.state ?? output.task.state)}</Chip>
+        <div className="flex shrink-0 items-center gap-2">
+          <BeaconTaskDetails key={`${output.task.beaconId}:${output.task.taskId}`} task={task ?? output.task} />
+          <Chip color={taskStateColor(task?.state ?? output.task.state)} size="sm" variant="soft">{stateLabel(task?.state ?? output.task.state)}</Chip>
+        </div>
       </div>
       {output.isLoading ? <p className="text-xs text-muted" role="status">Loading task output…</p> : null}
       {!task && !output.isLoading && !output.error ? (
@@ -1130,6 +1398,21 @@ function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Eleme
   }
   if (operationId === "beacon.filesystem.cat" || operationId === "beacon.filesystem.head" || operationId === "beacon.filesystem.tail") {
     return <TextResult disposition={task.disposition} title={operationResultTitle(task)} />;
+  }
+  if (operationId === "beacon.registry.list-subkeys" || operationId === "beacon.registry.list-values") {
+    return <TableResult description="Registry entries returned by this beacon task." disposition={task.disposition}
+      emptyLabel={operationId === "beacon.registry.list-subkeys" ? "No subkeys were returned." : "No values were returned."}
+      icon={faFolderOpen} title={operationResultTitle(task)} />;
+  }
+  if (operationId === "beacon.service.list") {
+    return <TableResult description="Windows services captured when the beacon executed the task." disposition={task.disposition}
+      emptyLabel="No services were returned." icon={faListCheck} title="Services" />;
+  }
+  if (operationId === "beacon.registry.create" || operationId === "beacon.registry.delete" || operationId === "beacon.registry.write" ||
+    operationId === "beacon.service.start" || operationId === "beacon.service.stop") {
+    return <div className="space-y-2"><GenericDisposition disposition={task.disposition} />
+      <p className="text-xs text-muted">This task result describes the reported action. Read the registry or service state again to verify the remote change.</p>
+    </div>;
   }
   return <GenericDisposition disposition={task.disposition} />;
 }
@@ -1648,11 +1931,27 @@ function ResultMeta({ label, value }: { label: string; value: string }): React.J
 }
 
 function TruncatedNotice(): React.JSX.Element {
-  return <p className="mt-2 text-xs text-warning">The server result exceeded the bounded preview and was truncated.</p>;
+  return <p className="mt-2 text-xs text-warning">Preview shortened. Open Details to view the full output.</p>;
 }
 
 function isBeaconInteractionCommandId(value: string): value is BeaconInteractionCommandId {
   return (BEACON_INTERACTION_COMMAND_IDS as readonly string[]).includes(value);
+}
+
+type BeaconWindowsCommandId = Extract<BeaconInteractionCommandId, `beacon.registry.${string}` | `beacon.service.${string}`>;
+type BeaconMutationCommandId = BeaconMutationOperationInput["operationId"];
+
+function isBeaconWindowsCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconWindowsCommandId {
+  return commandId.startsWith("beacon.registry.") || commandId.startsWith("beacon.service.");
+}
+
+function isBeaconMutationCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconMutationCommandId {
+  return commandId === "beacon.registry.write" || commandId === "beacon.registry.create" ||
+    commandId === "beacon.registry.delete" || commandId === "beacon.service.start" || commandId === "beacon.service.stop";
+}
+
+function discardBeaconMutationPlan(plan: BeaconMutationPlan): void {
+  void window.sliver.discardBeaconMutation({ token: plan.token }).catch(() => undefined);
 }
 
 function isBeaconExecutionCommandId(commandId: BeaconInteractionCommandId): commandId is BeaconExecutionSelection {
@@ -1692,6 +1991,10 @@ function sameTarget(left: TargetRef, right: TargetRef): boolean {
     left.backendEpoch === right.backendEpoch && left.fingerprint === right.fingerprint;
 }
 
+function sameReviewTarget(left: TargetRef, right: TargetRef): boolean {
+  return sameTarget(left, right) && left.domainRevision === right.domainRevision;
+}
+
 function optionalInteger(value: string, label: string, minimum: number): number | undefined {
   if (!value.trim()) return undefined;
   return requiredInteger(value, label, minimum);
@@ -1709,6 +2012,7 @@ function beaconCommandInput(
   fullInfo: boolean,
   management: BeaconManagementDraft,
   read: BeaconReadDraft,
+  windows: BeaconWindowsDraft,
 ): TargetOperationInput {
   switch (commandId) {
     case "execution":
@@ -1775,6 +2079,32 @@ function beaconCommandInput(
       if (before > 64 || after > 64) throw new Error("Context must be 64 lines or fewer per side.");
       return { operationId: commandId, path: filePath, pattern, recursive: read.recursive, before, after };
     }
+    case "beacon.registry.list-subkeys":
+    case "beacon.registry.list-values":
+      return { operationId: commandId, hive: windows.hive, path: windows.path.trim(), ...optionalBeaconHostname(windows.hostname) };
+    case "beacon.registry.read":
+      return { operationId: commandId, hive: windows.hive, path: windows.path.trim(), key: windows.key,
+        ...optionalBeaconHostname(windows.hostname) };
+    case "beacon.registry.create":
+    case "beacon.registry.delete": {
+      const key = windows.key.trim();
+      if (!key) throw new Error(commandId === "beacon.registry.delete" ? "Enter an entry name." : "Enter a subkey name.");
+      return { operationId: commandId, hive: windows.hive, path: windows.path.trim(), key,
+        ...optionalBeaconHostname(windows.hostname) };
+    }
+    case "beacon.registry.write":
+      return { operationId: commandId, hive: windows.hive, path: windows.path.trim(), key: windows.key,
+        value: registryWriteValueFromDraft(windows.valueType, windows.valueDraft),
+        ...optionalBeaconHostname(windows.hostname) };
+    case "beacon.service.list":
+      return { operationId: commandId, ...optionalBeaconHostname(windows.hostname) };
+    case "beacon.service.info":
+    case "beacon.service.start":
+    case "beacon.service.stop": {
+      const name = windows.serviceName.trim();
+      if (!name) throw new Error("Enter a service name.");
+      return { operationId: commandId, name, ...optionalBeaconHostname(windows.hostname) };
+    }
     case "target.ping":
       return { operationId: commandId };
     case "target.rename": {
@@ -1808,6 +2138,28 @@ function beaconCommandInput(
     }
     case "beacon.open-session":
       return { operationId: commandId, delaySeconds: requiredInteger(management.delaySeconds, "Delay seconds", 0) };
+  }
+}
+
+function optionalBeaconHostname(value: string): { hostname?: string } {
+  const hostname = value.trim();
+  return hostname ? { hostname } : {};
+}
+
+function registryWriteValueFromDraft(type: SessionRegistryWriteValue["type"], draft: string): SessionRegistryWriteValue {
+  if (draft.includes("\0")) throw new Error("Registry values cannot contain null characters.");
+  if (draft.length > 65_536) throw new Error("Registry values are limited to 65,536 characters.");
+  switch (type) {
+    case "string": return { type, value: draft };
+    case "binary":
+      if (!/^(?:[0-9a-f]{2})*$/iu.test(draft)) throw new Error("Binary data must be contiguous even-length hexadecimal.");
+      return { type, hex: draft.toLocaleLowerCase() };
+    case "dword":
+      if (!/^\d+$/u.test(draft) || Number(draft) > 0xffff_ffff) throw new Error("DWORD must be an unsigned 32-bit decimal integer.");
+      return { type, value: Number(draft) };
+    case "qword":
+      if (!/^\d{1,20}$/u.test(draft) || BigInt(draft) > 0xffff_ffff_ffff_ffffn) throw new Error("QWORD must be an unsigned 64-bit decimal integer.");
+      return { type, value: draft };
   }
 }
 

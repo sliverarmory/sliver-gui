@@ -36,6 +36,16 @@ const REVIEWED_ADAPTER_METHODS = {
   "beacon.filesystem.head": { beacon: "headBeacon" },
   "beacon.filesystem.tail": { beacon: "tailBeacon" },
   "beacon.filesystem.grep": { beacon: "grepBeacon" },
+  "beacon.registry.read": { beacon: "registryReadBeacon" },
+  "beacon.registry.list-subkeys": { beacon: "registryListSubkeysBeacon" },
+  "beacon.registry.list-values": { beacon: "registryListValuesBeacon" },
+  "beacon.registry.write": { beacon: "registryWriteBeacon" },
+  "beacon.registry.create": { beacon: "registryCreateBeacon" },
+  "beacon.registry.delete": { beacon: "registryDeleteBeacon" },
+  "beacon.service.list": { beacon: "servicesBeacon" },
+  "beacon.service.info": { beacon: "serviceDetailBeacon" },
+  "beacon.service.start": { beacon: "serviceStartBeacon" },
+  "beacon.service.stop": { beacon: "serviceStopBeacon" },
 } as const satisfies Record<TargetOperationId, Partial<Record<TargetMode, OperationAdapterMethodId>>>;
 
 describe("compiled operation registry", () => {
@@ -80,6 +90,11 @@ describe("compiled operation registry", () => {
       "beacon.filesystem.head",
       "beacon.filesystem.tail",
       "beacon.filesystem.grep",
+      "beacon.registry.read",
+      "beacon.registry.list-subkeys",
+      "beacon.registry.list-values",
+      "beacon.service.list",
+      "beacon.service.info",
     ] as const;
     for (const operationId of beaconReadIds) {
       expect(getOperationDescriptor(operationId).idempotency).toEqual({
@@ -110,7 +125,9 @@ describe("compiled operation registry", () => {
         descriptor.id !== "beacon.reconfigure"
       ) {
         expect(descriptor.bindings.beacon.execution).toBe("asynchronous-beacon-task");
-        expect(descriptor.bindings.beacon.cancellation).toBe("best-effort-beacon-task");
+        expect(descriptor.bindings.beacon.cancellation).toBe(
+          descriptor.confirmation === "beacon-mutation-plan" ? "not-supported" : "best-effort-beacon-task",
+        );
       }
     }
     expect(OPERATION_REGISTRY["target.rename"].bindings.beacon).toMatchObject({
@@ -125,7 +142,11 @@ describe("compiled operation registry", () => {
 
   it("keeps request encoding, decoding, timeout, capability, and disposition policy compiled and bounded", () => {
     for (const descriptor of Object.values(OPERATION_REGISTRY)) {
-      expect(descriptor.confirmation).toBe("none");
+      expect(descriptor.confirmation).toBe(
+        ["beacon.registry.write", "beacon.registry.create", "beacon.registry.delete",
+          "beacon.service.start", "beacon.service.stop"].includes(descriptor.id)
+          ? "beacon-mutation-plan" : "none",
+      );
       expect(descriptor.capabilityId).toMatch(/^(target|beacon)\./u);
       expect(descriptor.resultBounds.maximumDecodedBytes).toBeLessThanOrEqual(128 * 1_024);
       if (descriptor.resultBounds.maximumDecodedBytes > 64 * 1_024) {
@@ -139,6 +160,19 @@ describe("compiled operation registry", () => {
         expect(binding?.requestEncoder).toBeTruthy();
         expect(binding?.responseDecoder).toBeTruthy();
       }
+    }
+  });
+
+  it("keeps BC-08 mutations reviewed, single dispatch, and readback limited", () => {
+    for (const id of ["beacon.registry.write", "beacon.registry.create", "beacon.registry.delete",
+      "beacon.service.start", "beacon.service.stop"] as const) {
+      const descriptor = getOperationDescriptor(id);
+      expect(descriptor.modes).toEqual(["beacon"]);
+      expect(descriptor.idempotency).toEqual({ class: "unconfirmed-mutation", maxAutomaticRetries: 0 });
+      expect(descriptor.confirmation).toBe("beacon-mutation-plan");
+      expect(descriptor.bindings.beacon).toMatchObject({
+        execution: "asynchronous-beacon-task", cancellation: "not-supported", reconciliation: "beacon-task-state",
+      });
     }
   });
 

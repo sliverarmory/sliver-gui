@@ -40,6 +40,16 @@ const OPERATION_LABELS: Readonly<Record<TargetOperationId, string>> = {
   "beacon.filesystem.head": "Read file head",
   "beacon.filesystem.tail": "Read file tail",
   "beacon.filesystem.grep": "Search files",
+  "beacon.registry.read": "Read registry value",
+  "beacon.registry.list-subkeys": "List registry subkeys",
+  "beacon.registry.list-values": "List registry values",
+  "beacon.registry.write": "Write registry value",
+  "beacon.registry.create": "Create registry key",
+  "beacon.registry.delete": "Delete registry entry",
+  "beacon.service.list": "List services",
+  "beacon.service.info": "Read service details",
+  "beacon.service.start": "Start service",
+  "beacon.service.stop": "Stop service",
 };
 
 const SESSION_OPERATION_LABELS = {

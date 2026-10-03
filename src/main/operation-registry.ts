@@ -29,7 +29,17 @@ export type OperationAdapterMethodId =
   | "catBeacon"
   | "headBeacon"
   | "tailBeacon"
-  | "grepBeacon";
+  | "grepBeacon"
+  | "registryReadBeacon"
+  | "registryListSubkeysBeacon"
+  | "registryListValuesBeacon"
+  | "registryWriteBeacon"
+  | "registryCreateBeacon"
+  | "registryDeleteBeacon"
+  | "servicesBeacon"
+  | "serviceDetailBeacon"
+  | "serviceStartBeacon"
+  | "serviceStopBeacon";
 
 export type OperationRequestEncoderId =
   | "ping"
@@ -50,7 +60,17 @@ export type OperationRequestEncoderId =
   | "beacon-cat"
   | "beacon-head"
   | "beacon-tail"
-  | "beacon-grep";
+  | "beacon-grep"
+  | "beacon-registry-read"
+  | "beacon-registry-list-subkeys"
+  | "beacon-registry-list-values"
+  | "beacon-registry-write"
+  | "beacon-registry-create"
+  | "beacon-registry-delete"
+  | "beacon-service-list"
+  | "beacon-service-info"
+  | "beacon-service-start"
+  | "beacon-service-stop";
 
 export type OperationResponseDecoderId =
   | "ping"
@@ -70,7 +90,17 @@ export type OperationResponseDecoderId =
   | "beacon-cat"
   | "beacon-head"
   | "beacon-tail"
-  | "beacon-grep";
+  | "beacon-grep"
+  | "beacon-registry-read"
+  | "beacon-registry-list-subkeys"
+  | "beacon-registry-list-values"
+  | "beacon-registry-write"
+  | "beacon-registry-create"
+  | "beacon-registry-delete"
+  | "beacon-service-list"
+  | "beacon-service-info"
+  | "beacon-service-start"
+  | "beacon-service-stop";
 
 export type OperationExecutionMode = "synchronous-response" | "asynchronous-beacon-task";
 
@@ -83,7 +113,7 @@ export type OperationReconciliationPolicy =
   | "environment-read"
   | "task-delivery-only";
 
-export type OperationConfirmationPolicy = "none" | "target-action-plan";
+export type OperationConfirmationPolicy = "none" | "target-action-plan" | "beacon-mutation-plan";
 
 export type OperationIdempotencyPolicy =
   | {
@@ -419,7 +449,44 @@ const registry = {
   "beacon.filesystem.head": beaconRead("beacon.filesystem.head", "headBeacon", "beacon-head", "inline-text", 60),
   "beacon.filesystem.tail": beaconRead("beacon.filesystem.tail", "tailBeacon", "beacon-tail", "inline-text", 60),
   "beacon.filesystem.grep": beaconRead("beacon.filesystem.grep", "grepBeacon", "beacon-grep", "table", 60),
+  "beacon.registry.read": beaconRead("beacon.registry.read", "registryReadBeacon", "beacon-registry-read", "structured-detail", 60),
+  "beacon.registry.list-subkeys": beaconRead("beacon.registry.list-subkeys", "registryListSubkeysBeacon", "beacon-registry-list-subkeys", "table", 60),
+  "beacon.registry.list-values": beaconRead("beacon.registry.list-values", "registryListValuesBeacon", "beacon-registry-list-values", "table", 60),
+  "beacon.registry.write": beaconMutation("beacon.registry.write", "registryWriteBeacon", "beacon-registry-write"),
+  "beacon.registry.create": beaconMutation("beacon.registry.create", "registryCreateBeacon", "beacon-registry-create"),
+  "beacon.registry.delete": beaconMutation("beacon.registry.delete", "registryDeleteBeacon", "beacon-registry-delete"),
+  "beacon.service.list": beaconRead("beacon.service.list", "servicesBeacon", "beacon-service-list", "table", 60),
+  "beacon.service.info": beaconRead("beacon.service.info", "serviceDetailBeacon", "beacon-service-info", "structured-detail", 60),
+  "beacon.service.start": beaconMutation("beacon.service.start", "serviceStartBeacon", "beacon-service-start"),
+  "beacon.service.stop": beaconMutation("beacon.service.stop", "serviceStopBeacon", "beacon-service-stop"),
 } as const satisfies CompleteOperationRegistry;
+
+function beaconMutation<Id extends TargetOperationId>(
+  id: Id,
+  adapterMethod: OperationAdapterMethodId,
+  codec: OperationRequestEncoderId & OperationResponseDecoderId,
+): CompiledOperationDescriptor & { readonly id: Id } {
+  return {
+    id,
+    modes: ["beacon"],
+    capabilityId: "target.task.execute",
+    idempotency: MUTATION_IDEMPOTENCY,
+    confirmation: "beacon-mutation-plan",
+    disposition: "structured-detail",
+    resultBounds: SMALL_RESULT_BOUNDS,
+    bindings: {
+      beacon: {
+        adapterMethod,
+        requestEncoder: codec,
+        responseDecoder: codec,
+        execution: "asynchronous-beacon-task",
+        timeout: SIXTY_SECOND_TIMEOUT,
+        cancellation: "not-supported",
+        reconciliation: "beacon-task-state",
+      },
+    },
+  };
+}
 
 function beaconRead<Id extends TargetOperationId>(
   id: Id,

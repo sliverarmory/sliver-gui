@@ -96,7 +96,10 @@ import {
   type StopReversePortForwardInput,
 } from "../shared/network-forwarding-contracts.js";
 import type {
+  BeaconMutationOperationInput,
+  BeaconMutationPlan,
   BeaconTaskDetail,
+  BeaconTaskResponse,
   BeaconTaskPage,
   BeaconTaskSummary,
   BeaconTasksInvalidationReason,
@@ -1558,6 +1561,57 @@ export class ConnectionRegistry {
     }
   }
 
+  async prepareBeaconMutation(
+    contentsId: number,
+    input: BeaconMutationOperationInput,
+  ): Promise<OperationResult<BeaconMutationPlan>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const context = this.requireWindow(contentsId);
+      const engine = this.requireOperationEngine(contentsId, context, pool);
+      const plan = await engine.prepareBeaconMutation(input);
+      assertBinding();
+      return plan;
+    });
+  }
+
+  async executeBeaconMutation(
+    contentsId: number,
+    token: string,
+  ): Promise<OperationResult<TargetOperationRecord>> {
+    try {
+      const context = this.requireWindow(contentsId);
+      const poolKey = context.poolKey;
+      const pool = poolKey ? this.pools.get(poolKey) : undefined;
+      if (!pool || !new Set(["connected", "degraded", "reconnecting"]).has(pool.snapshot.connection.status)) {
+        throw new Error("Connect to a Sliver server first");
+      }
+      const epoch = pool.epoch;
+      const attempt = context.connectionAttempt;
+      const bindingCurrent = (): boolean =>
+        this.windows.get(contentsId) === context && context.poolKey === poolKey &&
+        context.connectionAttempt === attempt && this.pools.get(poolKey!) === pool && pool.epoch === epoch;
+      const engine = this.requireOperationEngine(contentsId, context, pool);
+      if (!bindingCurrent()) throw new Error("The backend connection changed before mutation dispatch");
+      const operation = await engine.executeBeaconMutation(token);
+      if (bindingCurrent() && operation.taskId) {
+        this.pushBeaconTasksInvalidated(contentsId, operation.target);
+        this.ensureOperationReconciliation(contentsId);
+      }
+      return { ok: true, value: operation };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
+  async discardBeaconMutation(contentsId: number, token: string): Promise<OperationResult> {
+    try {
+      this.requireWindow(contentsId).operationEngine?.discardBeaconMutation(token);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    }
+  }
+
   async listTargetOperations(
     contentsId: number,
     request: OperationPageRequest,
@@ -1695,6 +1749,51 @@ export class ConnectionRegistry {
       });
     } finally {
       context.taskDetailAdmissions.delete(admissionId);
+    }
+  }
+
+  async getBeaconTaskResponse(
+    contentsId: number,
+    taskId: string,
+    offset = 0,
+  ): Promise<OperationResult<BeaconTaskResponse>> {
+    let admittedContext: WindowContext | undefined;
+    const admissionId = randomUUID();
+    try {
+      const context = this.requireWindow(contentsId);
+      if (context.taskDetailAdmissions.size >= MAX_WINDOW_TASK_DETAIL_REQUESTS) {
+        throw new Error("Too many beacon task details are already being fetched in this window");
+      }
+      context.taskDetailAdmissions.add(admissionId);
+      admittedContext = context;
+      return await this.withPool(contentsId, async (pool, assertBinding) => {
+        const { target } = this.requireSelectedBeacon(contentsId, pool);
+        const selectedTarget = target.ref;
+        const assertSelectedTarget = (): void => {
+          assertBinding();
+          if (!context.activeTarget || !sameTargetRefIdentity(context.activeTarget, selectedTarget)) {
+            throw new Error("The selected beacon changed while its task response was loading");
+          }
+        };
+        await pool.beaconTasks.refresh(
+          target.target.id,
+          [taskId, ...localTaskIdsForBeacon(context, target.target.id)],
+          pool.recoverableTaskIdsForBeacon(target.target.id),
+        );
+        assertSelectedTarget();
+        const response = await pool.beaconTasks.response(
+          target.target.id,
+          taskId,
+          offset,
+          this.taskOwnershipResolver(context),
+        );
+        assertSelectedTarget();
+        return response;
+      });
+    } catch (error) {
+      return { ok: false, error: errorMessage(error) };
+    } finally {
+      admittedContext?.taskDetailAdmissions.delete(admissionId);
     }
   }
 

@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
-import { clientpb, type SliverClient } from "sliver-script";
+import { clientpb, sliverpb, type SliverClient } from "sliver-script";
 
 import {
   adaptSliverClient,
@@ -47,6 +47,114 @@ describe("SliverClientAdapter passive topology inventory", () => {
     expect(interactBeacon).not.toHaveBeenCalled();
     expectTypeOf<Parameters<NonNullable<SliverClientAdapter["getPivotGraph"]>>>().toEqualTypeOf<[]>();
     expectTypeOf<SliverClientAdapter>().not.toHaveProperty("rpc");
+  });
+});
+
+describe("SliverClientAdapter BC-08 beacon tasks", () => {
+  it("queues fixed Registry and service RPCs with the exact beacon request and preserves acknowledgements", async () => {
+    const acknowledgement = { Response: { Async: true, BeaconID: "beacon-1", TaskID: "task-1" } };
+    const registryRead = vi.fn(async () => acknowledgement);
+    const registryListSubKeys = vi.fn(async () => acknowledgement);
+    const registryListValues = vi.fn(async () => acknowledgement);
+    const registryCreateKey = vi.fn(async () => acknowledgement);
+    const registryDeleteKey = vi.fn(async () => acknowledgement);
+    const services = vi.fn(async () => acknowledgement);
+    const serviceDetail = vi.fn(async () => acknowledgement);
+    const startServiceByName = vi.fn(async () => acknowledgement);
+    const stopService = vi.fn(async () => acknowledgement);
+    const interactBeacon = vi.fn();
+    const adapter = adaptSliverClient({
+      rpc: { registryRead, registryListSubKeys, registryListValues, registryCreateKey,
+        registryDeleteKey, services, serviceDetail, startServiceByName, stopService },
+      interactBeacon,
+    } as unknown as SliverClient);
+    const location = { hive: "HKCU" as const, path: "Software\\Example", hostname: "remote.example" };
+    const key = { ...location, key: "" };
+
+    await expect(adapter.registryReadBeacon("beacon-1", key, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.registryListSubkeysBeacon("beacon-1", location, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.registryListValuesBeacon("beacon-1", location, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.registryCreateBeacon("beacon-1", { ...key, key: "Child" }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.registryDeleteBeacon("beacon-1", { ...key, key: "Child" }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.servicesBeacon("beacon-1", { hostname: "remote.example" }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.serviceDetailBeacon("beacon-1", { name: "Spooler" }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.serviceStartBeacon("beacon-1", { name: "Spooler" }, 30)).resolves.toBe(acknowledgement);
+    await expect(adapter.serviceStopBeacon("beacon-1", { name: "Spooler" }, 30)).resolves.toBe(acknowledgement);
+
+    const request = { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" };
+    const signal = { signal: expect.any(AbortSignal) };
+    const wireLocation = { Hive: "HKCU", Path: "Software\\Example", Hostname: "remote.example" };
+    expect(registryRead).toHaveBeenCalledExactlyOnceWith({ ...wireLocation, Key: "", Request: request }, signal);
+    expect(registryListSubKeys).toHaveBeenCalledExactlyOnceWith({ ...wireLocation, Request: request }, signal);
+    expect(registryListValues).toHaveBeenCalledExactlyOnceWith({ ...wireLocation, Request: request }, signal);
+    expect(registryCreateKey).toHaveBeenCalledExactlyOnceWith({ ...wireLocation, Key: "Child", Request: request }, signal);
+    expect(registryDeleteKey).toHaveBeenCalledExactlyOnceWith({ ...wireLocation, Key: "Child", Request: request }, signal);
+    expect(services).toHaveBeenCalledExactlyOnceWith({ Hostname: "remote.example", Request: request }, signal);
+    for (const rpc of [serviceDetail, startServiceByName, stopService]) {
+      expect(rpc).toHaveBeenCalledExactlyOnceWith({
+        ServiceInfo: { Hostname: "", ServiceName: "Spooler" }, Request: request,
+      }, signal);
+    }
+    expect(interactBeacon).not.toHaveBeenCalled();
+  });
+
+  it("encodes typed Registry writes and clears temporary binary bytes", async () => {
+    const acknowledgement = { Response: { Async: true, BeaconID: "beacon-1", TaskID: "task-1" } };
+    const requests: Array<{ ByteValue: Buffer; Type: number; StringValue: string; DWordValue: number; QWordValue: string }> = [];
+    const wireBytes: Buffer[] = [];
+    const registryWrite = vi.fn(async (request: typeof requests[number], _options: unknown) => {
+      requests.push(request);
+      wireBytes.push(Buffer.from(request.ByteValue));
+      return acknowledgement;
+    });
+    const adapter = adaptSliverClient({ rpc: { registryWrite } } as unknown as SliverClient);
+    const location = { hive: "HKLM" as const, path: "Software", key: "Setting" };
+    const original = Buffer.from([0x00, 0xff, 0x20]);
+
+    for (const value of [
+      { type: "binary" as const, value: original },
+      { type: "string" as const, value: "" },
+      { type: "dword" as const, value: 0xffff_ffff },
+      { type: "qword" as const, value: "18446744073709551615" },
+    ]) {
+      await expect(adapter.registryWriteBeacon("beacon-1", { ...location, value }, 45))
+        .resolves.toBe(acknowledgement);
+    }
+
+    expect(requests.map((request) => request.Type)).toEqual([
+      sliverpb.RegistryType.Binary, sliverpb.RegistryType.String,
+      sliverpb.RegistryType.DWORD, sliverpb.RegistryType.QWORD,
+    ]);
+    expect(requests.map((request) => [request.StringValue, request.DWordValue, request.QWordValue]))
+      .toEqual([["", 0, "0"], ["", 0, "0"], ["", 0xffff_ffff, "0"], ["", 0, "18446744073709551615"]]);
+    expect(requests.every((request) =>
+      "Request" in request &&
+      JSON.stringify(request.Request) === JSON.stringify({
+        Async: true, Timeout: "44999999999", BeaconID: "beacon-1", SessionID: "",
+      }))).toBe(true);
+    expect(wireBytes[0]).toEqual(Buffer.from([0x00, 0xff, 0x20]));
+    expect(original).toEqual(Buffer.from([0x00, 0xff, 0x20]));
+    expect(requests[0]!.ByteValue).toEqual(Buffer.alloc(3));
+    expect(registryWrite.mock.calls.every(([, options]) =>
+      (options as { signal?: unknown })?.signal instanceof AbortSignal)).toBe(true);
+  });
+
+  it("rejects invalid BC-08 options before queueing a task", async () => {
+    const registryRead = vi.fn();
+    const registryWrite = vi.fn();
+    const serviceDetail = vi.fn();
+    const adapter = adaptSliverClient({ rpc: { registryRead, registryWrite, serviceDetail } } as unknown as SliverClient);
+
+    await expect(adapter.registryReadBeacon("beacon-1", { hive: "HKCU", path: "a\0b", key: "x" }, 30))
+      .rejects.toThrow("Invalid beacon registry path");
+    expect(() => adapter.registryWriteBeacon("beacon-1", {
+      hive: "HKCU", path: "", key: "", value: { type: "qword", value: "18446744073709551616" },
+    }, 30)).toThrow("Invalid beacon registry QWORD value");
+    await expect(adapter.serviceDetailBeacon("beacon-1", { name: "" }, 30))
+      .rejects.toThrow("Invalid Windows service name");
+    expect(registryRead).not.toHaveBeenCalled();
+    expect(registryWrite).not.toHaveBeenCalled();
+    expect(serviceDetail).not.toHaveBeenCalled();
   });
 });
 

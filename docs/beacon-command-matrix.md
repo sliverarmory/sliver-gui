@@ -55,7 +55,15 @@ The table covers each of the 45 M2 beacon-visible rows exactly once. `W`, `L`, a
 | `registry.read.hive` | `RegistryReadHiveReq` → `RegistryReadHive` | W | Compressed hive bytes need native artifact handling; local save/loot are not wire fields. |
 | `registry.create`, `registry.delete`, `registry.write` | `RegistryCreateKeyReq` → `RegistryCreateKey`; `RegistryDeleteKeyReq` → `RegistryDeleteKey`; `RegistryWriteReq` → `RegistryWrite` | W | Registry key, hostname, and typed value fields reach wire. `registry.write --path` is a local binary input path, not the request's Registry key path. Responses acknowledge handler execution, not read-back. |
 | `services`, `services.info` | `ServicesReq` → `Services`; `ServiceDetailReq` → `ServiceDetail` | W | Optional hostname/service name reach wire; list is invokable and unpaged. |
-| `services.start`, `services.stop` | `StartServiceByNameReq` → `ServiceInfo`; `StopServiceReq` → `ServiceInfo` | W | Hostname/service name reach wire; `ServiceInfo` supplies a response envelope, not verified service state. |
+| `services.start`, `services.stop` | `StartServiceByNameReq` → `ServiceInfo`; `StopServiceReq` → `ServiceInfo` | W | Hostname/service name reach wire. The pinned Windows handlers marshal an empty `ServiceInfo` on success and include `Response.Err` on failure; neither proves later service state. |
+
+## BC-08 delivery boundary
+
+The interactive beacon picker now has ten invokable Windows Registry and service commands: three Registry reads, three reviewed Registry mutations, two service reads, and reviewed service start/stop. The `registry` row remains navigation only. `registry.read.hive` remains in BC-06 because its compressed binary result needs a native artifact path. Every BC-08 task uses a named main-process adapter and a saved-request check for its exact operation, target, options, task ID, description, and response before decoded output is shown.
+
+The task preview accepts at most 64 KiB of encoded response, returns at most 256 rows, and bounds text fields to 4 KiB. A Registry write accepts at most 16 KiB of value input with explicit string, binary, DWORD, or QWORD encoding. The pinned Registry read response reports only a string `Value`; the UI does not infer its Registry type or offer a binary export. List paging is local to the bounded preview, as the pinned RPCs have no continuation token. A Registry delete tries a named value before a same-named subkey, and the review surface states that order.
+
+Mutation plans are one-use, expire after two minutes, and are bound to the selected beacon and backend identity. The dispatcher does not replay an uncertain mutation request. A completed handler task leaves the journal in `partial` with a requery prompt because no mutation result independently proves remote state. The empty successful service start/stop response is accepted only with the exact locally saved request. Fixture tests cover this delivery; live Windows target and packaged-app proof remain open under BC-10.
 
 ## Other beacon-labeled rows
 
