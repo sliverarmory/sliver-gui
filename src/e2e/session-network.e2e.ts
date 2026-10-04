@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-test("Session network, process details, and zoom controls", { timeout: 120_000 }, async () => {
+test("Session network, process details, and zoom controls", { timeout: 120_000 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporaryRoot = await mkdtemp(join(tmpdir(), "sliver-gui-network-e2e-"));
   const savedConfigDirectory = join(temporaryRoot, "saved-configs");
@@ -26,6 +26,8 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
   let application: ElectronApplication | undefined;
   let page: Page | undefined;
   const rendererErrors: string[] = [];
+  const stopApplication = (): void => { application?.process().kill("SIGTERM"); };
+  context.signal.addEventListener("abort", stopApplication, { once: true });
   try {
     application = await electron.launch({
       args: [
@@ -330,23 +332,36 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
     throw error;
   } finally {
     await application?.close().catch(() => undefined);
+    context.signal.removeEventListener("abort", stopApplication);
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 });
 
 async function settleVisualTransitions(locator: Locator): Promise<void> {
-  await locator.evaluate(async (element) => {
-    const view = element.ownerDocument.defaultView;
-    if (!view) return;
-    await new Promise<void>((resolve) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())));
-    const animations = element.ownerDocument.getAnimations() as Array<{
-      effect: { getComputedTiming(): { iterations: number } } | null;
-      finished: Promise<unknown>;
-    }>;
-    await Promise.all(animations
-      .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
-      .map((animation) => animation.finished.catch(() => undefined)));
-  });
+  const handle = await locator.elementHandle();
+  try {
+    await locator.page().waitForFunction(async (element) => {
+      if (!element) return false;
+      const document = element.ownerDocument;
+      const view = document.defaultView;
+      if (!view) return true;
+      await new Promise<void>((resolve) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolve())));
+      // ScrollShadow's scroll-driven animations can have one iteration without
+      // ever finishing. Only time-driven visual transitions need to settle.
+      const animations = document.getAnimations() as Array<{
+        effect: { getComputedTiming(): { iterations: number } } | null;
+        pending: boolean;
+        playState: string;
+        timeline: unknown;
+      }>;
+      return animations.every((animation) =>
+        animation.timeline !== document.timeline ||
+        animation.effect?.getComputedTiming().iterations === Infinity ||
+        (!animation.pending && animation.playState !== "running"));
+    }, handle, { timeout: 5_000 });
+  } finally {
+    await handle?.dispose();
+  }
 }
 
 async function assertContextMenuPosition(
