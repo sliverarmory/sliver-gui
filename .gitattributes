@@ -1,0 +1,2 @@
+# Digest-bound Sliver console sources must retain their reviewed bytes on every host.
+protocol/sliver-console-overlay/** text eol=lf

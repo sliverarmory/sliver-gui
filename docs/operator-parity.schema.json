@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sliverarmory/sliver-gui/docs/operator-parity.schema.json",
+  "title": "Sliver GUI operator parity artifacts",
+  "oneOf": [
+    { "$ref": "#/$defs/generatedInventory" },
+    { "$ref": "#/$defs/reviewedAnnotations" }
+  ],
+  "$defs": {
+    "status": {
+      "enum": [
+        "planned",
+        "in-progress",
+        "complete",
+        "deferred",
+        "operator-out-of-scope",
+        "upstream-blocked",
+        "unreachable"
+      ]
+    },
+    "restrictions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetModes", "targetOperatingSystems", "transports"],
+      "properties": {
+        "targetModes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "targetOperatingSystems": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "transports": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "restrictionEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetModes", "targetOperatingSystems", "transports"],
+      "properties": {
+        "targetModes": { "type": "string", "minLength": 1 },
+        "targetOperatingSystems": { "type": "string", "minLength": 1 },
+        "transports": { "type": "string", "minLength": 1 }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "line", "symbol", "key"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 0 },
+        "symbol": { "type": "string", "minLength": 1 },
+        "key": { "type": "string", "minLength": 1 }
+      }
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type", "default", "usage", "required", "persistent"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "shorthand": { "type": "string" },
+        "type": { "type": "string", "minLength": 1 },
+        "default": { "type": "string" },
+        "usage": { "type": "string" },
+        "required": { "type": "boolean" },
+        "persistent": { "type": "boolean" },
+        "annotations": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "generatedCommand": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "baselineCommit", "surface", "path", "use", "aliases", "summary", "hidden", "deprecated",
+        "source", "restrictions", "options", "upstreamAnnotations", "restrictionEvidence", "fingerprint", "gateFingerprint"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "baselineCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "surface": { "enum": ["server", "implant", "root"] },
+        "path": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "use": { "type": "string", "minLength": 1 },
+        "aliases": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "summary": { "type": "string" },
+        "hidden": { "type": "boolean" },
+        "deprecated": { "type": "string" },
+        "source": { "$ref": "#/$defs/source" },
+        "restrictions": { "$ref": "#/$defs/restrictions" },
+        "options": { "type": "array", "items": { "$ref": "#/$defs/option" } },
+        "upstreamAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+        "restrictionEvidence": { "$ref": "#/$defs/restrictionEvidence" },
+        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "gateFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "annotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "operatorScope", "status", "milestone", "restrictionReview", "restrictionEvidenceReview",
+        "meaningfulModes", "meaningfulOptions", "dependencies", "guiSurface", "testIds", "notes"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "operatorScope": { "type": "boolean" },
+        "status": { "$ref": "#/$defs/status" },
+        "milestone": { "type": "string", "minLength": 1 },
+        "restrictionReview": { "$ref": "#/$defs/restrictions" },
+        "restrictionEvidenceReview": { "$ref": "#/$defs/restrictionEvidence" },
+        "meaningfulModes": { "type": "array", "items": { "type": "string" } },
+        "meaningfulOptions": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "dependencies": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "guiSurface": { "type": "string", "minLength": 1 },
+        "testIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "scopeDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "milestone", "operatorScope", "notes"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/status" },
+        "milestone": { "type": "string", "minLength": 1 },
+        "operatorScope": { "type": "boolean" },
+        "notes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "generatedInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatorVersion", "baseline", "discoveryRules", "dynamicAudit", "commands"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "generatorVersion": { "const": 1 },
+        "baseline": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "commit", "tree", "sources"],
+          "properties": {
+            "repository": { "type": "string", "format": "uri" },
+            "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "tree": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "sources": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } }
+          }
+        },
+        "discoveryRules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["roots", "excludedGeneratedNodes", "thirdPartyNamesAreStaticRequirements", "restrictionModel"],
+          "properties": {
+            "roots": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "type": "string" } },
+            "excludedGeneratedNodes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string" } },
+            "thirdPartyNamesAreStaticRequirements": { "const": false },
+            "restrictionModel": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["implantDefault", "serverDefault", "runtimeCaveat"],
+              "properties": {
+                "implantDefault": { "type": "string", "minLength": 1 },
+                "serverDefault": { "type": "string", "minLength": 1 },
+                "runtimeCaveat": { "type": "string", "minLength": 1 }
+              }
+            }
+          }
+        },
+        "dynamicAudit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fixtureVersion", "representativeAlias", "representativeExtension", "addedNodes"],
+          "properties": {
+            "fixtureVersion": { "const": 1 },
+            "representativeAlias": { "type": "string", "minLength": 1 },
+            "representativeExtension": { "type": "string", "minLength": 1 },
+            "addedNodes": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/generatedCommand" } }
+          }
+        },
+        "commands": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/generatedCommand" } }
+      }
+    },
+    "reviewedAnnotations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "baselineCommit", "reviewVersion", "reviewPolicy", "scopeDecisions", "commands"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "baselineCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "reviewVersion": { "type": "integer", "minimum": 1 },
+        "reviewPolicy": { "type": "string", "minLength": 1 },
+        "scopeDecisions": { "type": "array", "items": { "$ref": "#/$defs/scopeDecision" } },
+        "commands": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/annotation" } }
+      }
+    }
+  }
+}

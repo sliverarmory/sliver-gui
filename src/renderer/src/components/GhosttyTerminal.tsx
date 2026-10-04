@@ -1,0 +1,681 @@
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import {
+  FitAddon,
+  Ghostty,
+  Terminal,
+  type IDisposable,
+  type ITheme,
+} from "ghostty-web";
+
+import { STREAM_MAX_FRAME_BYTES, STREAM_MAX_TERMINAL_DIMENSION } from "../../../shared/stream-contracts";
+
+import { TerminalOutputSanitizer } from "./terminal-output-sanitizer";
+import { GhosttyTerminalClipboard } from "./GhosttyTerminalClipboard";
+import { PipedWindowsShellInput } from "./piped-windows-shell-input";
+
+const MIN_TERMINAL_DIMENSION = 1;
+const RESIZE_DEBOUNCE_MS = 100;
+const RESPONSE_BUDGET_WINDOW_MS = 1_000;
+const DEFAULT_TERMINAL_RESPONSE_BUDGET_BYTES = 4 * 1024;
+const MAX_TERMINAL_RESPONSE_BUDGET_BYTES = 64 * 1024;
+const MAX_PENDING_OUTPUT_BYTES = 256 * 1024;
+const MAX_EXPLICIT_TEXT_BYTES = 64 * 1024;
+const MAX_OPERATOR_FRAME_BYTES = MAX_EXPLICIT_TEXT_BYTES + 32;
+const MAX_APPEARANCE_REPLAY_BYTES = 4 * 1024 * 1024;
+const MAX_APPEARANCE_REPLAY_CHUNKS = 2_048;
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+
+export type GhosttyTerminalInputSource = "operator" | "terminal-response";
+
+export interface GhosttyTerminalTransportSubscription {
+  onOutput: (bytes: Uint8Array) => void;
+  onClose: (reason?: string) => void;
+}
+
+export interface GhosttyTerminalTransport {
+  send: (bytes: Uint8Array, source: GhosttyTerminalInputSource) => void;
+  resize: (cols: number, rows: number) => void;
+  subscribe: (subscription: GhosttyTerminalTransportSubscription) => () => void;
+}
+
+export interface GhosttyTerminalHandle {
+  focus: () => void;
+  getSelection: () => string;
+  paste: (text: string) => void;
+}
+
+export interface GhosttyTerminalAppearance {
+  cursorBlink?: boolean;
+  cursorStyle?: "block" | "underline" | "bar";
+  fontFamily?: string;
+  fontSize?: number;
+  scrollback?: number;
+  smoothScrollDuration?: number;
+  theme?: ITheme & { backgroundOpacity?: number };
+}
+
+export interface GhosttyTerminalProps {
+  wasmBytes: ArrayBuffer | Uint8Array;
+  transport: GhosttyTerminalTransport;
+  appearance?: GhosttyTerminalAppearance;
+  ariaLabel?: string;
+  className?: string;
+  disableInput?: boolean;
+  enableClipboard?: boolean;
+  pipedWindowsInput?: boolean;
+  terminalResponseBudgetBytes?: number;
+  onClipboardPaste?: (text: string) => void | Promise<void>;
+  onClose?: (reason?: string) => void;
+  onError?: (error: Error) => void;
+  onReady?: () => void;
+}
+
+type TerminalState = "loading" | "ready" | "closed" | "failed";
+
+/**
+ * A renderer-only Ghostty boundary. It consumes caller-supplied, pinned WASM
+ * bytes without invoking Ghostty.load/init (and therefore without fetch), owns
+ * one isolated WASM instance per mount, and exposes no terminal host callback.
+ */
+export const GhosttyTerminal = forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(
+  function GhosttyTerminal(
+    {
+      appearance,
+      ariaLabel = "Interactive session terminal",
+      className,
+      disableInput = false,
+      enableClipboard = false,
+      pipedWindowsInput = false,
+      onClipboardPaste,
+      onClose,
+      onError,
+      onReady,
+      terminalResponseBudgetBytes,
+      transport,
+      wasmBytes,
+    },
+    forwardedRef,
+  ): React.JSX.Element {
+    const hostRef = useRef<HTMLDivElement>(null);
+    const terminalRef = useRef<Terminal | undefined>(undefined);
+    const fitAddonRef = useRef<FitAddon | undefined>(undefined);
+    const appearanceRef = useLatest(appearance);
+    const ariaLabelRef = useLatest(ariaLabel);
+    const onCloseRef = useLatest(onClose);
+    const onErrorRef = useLatest(onError);
+    const onReadyRef = useLatest(onReady);
+    const [terminalState, setTerminalState] = useState<TerminalState>("loading");
+    // A theme change recreates the pinned WASM parser, whose color palette is
+    // immutable. Retain bounded, already-sanitized output for visual replay;
+    // never retain output across different connections or runtime instances.
+    const appearanceReplay = useMemo(() => ({
+      chunks: [] as Uint8Array[], bytes: 0, closed: false, sanitizer: new TerminalOutputSanitizer(),
+    }), [transport, wasmBytes]);
+    useEffect(() => () => {
+      for (const chunk of appearanceReplay.chunks) chunk.fill(0);
+      appearanceReplay.chunks.length = 0;
+      appearanceReplay.bytes = 0;
+      appearanceReplay.sanitizer.reset();
+    }, [appearanceReplay]);
+
+    const terminalHandle = useMemo<GhosttyTerminalHandle>(() => ({
+      focus: () => terminalRef.current?.focus(),
+      getSelection: () => boundedText(terminalRef.current?.getSelection() ?? ""),
+      paste: (text: string) => {
+        const bytes = textEncoder.encode(text);
+        if (text.includes("\0")) throw new Error("Terminal paste cannot contain NUL bytes");
+        if (bytes.byteLength > MAX_EXPLICIT_TEXT_BYTES) {
+          throw new RangeError(`Terminal paste exceeds ${MAX_EXPLICIT_TEXT_BYTES} bytes`);
+        }
+        terminalRef.current?.paste(text);
+      },
+    }), []);
+    useImperativeHandle(forwardedRef, () => terminalHandle, [terminalHandle]);
+
+    useEffect(() => {
+      const host = hostRef.current;
+      if (!host) return;
+
+      let disposed = false;
+      let streamClosed = appearanceReplay.closed;
+      let terminal: Terminal | undefined;
+      let fitAddon: FitAddon | undefined;
+      let fitResizeObserver: ResizeObserver | undefined;
+      let fitResizeTimer: ReturnType<typeof setTimeout> | undefined;
+      let inputSubscription: IDisposable | undefined;
+      let resizeSubscription: IDisposable | undefined;
+      let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+      let pendingResize: { cols: number; rows: number } | undefined;
+      let lastResize: { cols: number; rows: number } | undefined;
+      let remoteWriteDepth = 0;
+      let currentWriteResponseBytes = 0;
+      let replayingAppearance = false;
+      let responseWindowStartedAt = Date.now();
+      let responseWindowBytes = 0;
+      let pendingOutputBytes = 0;
+      const pendingOutput: Uint8Array[] = [];
+      const sanitizer = appearanceReplay.sanitizer;
+      const responseBudget = normalizedResponseBudget(terminalResponseBudgetBytes);
+      setTerminalState("loading");
+
+      const reportError = (error: unknown): void => {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        onErrorRef.current?.(normalized);
+      };
+      const windowsInput = pipedWindowsInput ? new PipedWindowsShellInput() : undefined;
+
+      const denyModifiedLink = (event: MouseEvent): void => {
+        if (!event.ctrlKey && !event.metaKey) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      const denyNativeTransfer = (event: Event): void => {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      };
+      const keepApplicationContextMenu = (event: Event): void => {
+        // Ancestor capture listeners have already recorded the trusted target.
+        // Leave Chromium's native context-menu default intact, but skip
+        // Ghostty's canvas handler: it focuses/scrolls a hidden textarea to
+        // offer browser clipboard actions, dismissing our application menu.
+        event.stopImmediatePropagation();
+      };
+      const keepHiddenInputScroll = (event: Event): void => {
+        if (!(event.target instanceof HTMLTextAreaElement) || event.target.parentElement !== host) return;
+        // Ghostty's hidden input scrolls when selection/focus changes. These
+        // internal scrolls must not reach the menu's window-capture dismissal
+        // listener; visible terminal, document, and window scrolling still do.
+        event.stopImmediatePropagation();
+      };
+
+      host.addEventListener("click", denyModifiedLink, true);
+      host.addEventListener("auxclick", denyModifiedLink, true);
+      host.addEventListener("copy", denyNativeTransfer, true);
+      host.addEventListener("cut", denyNativeTransfer, true);
+      host.addEventListener("paste", denyNativeTransfer, true);
+      window.addEventListener("scroll", keepHiddenInputScroll, true);
+      if (enableClipboard) {
+        host.addEventListener("contextmenu", keepApplicationContextMenu, true);
+      }
+
+      const sendTerminalData = (data: string): void => {
+        if (disposed || streamClosed || replayingAppearance) return;
+
+        if (remoteWriteDepth > 0) {
+          // A piped PowerShell cannot consume terminal device replies. Ghostty
+          // may synchronously emit them while rendering remote output.
+          if (windowsInput) return;
+          const bytes = textEncoder.encode(data);
+          const now = Date.now();
+          if (now - responseWindowStartedAt >= RESPONSE_BUDGET_WINDOW_MS) {
+            responseWindowStartedAt = now;
+            responseWindowBytes = 0;
+          }
+          if (
+            bytes.byteLength === 0 ||
+            currentWriteResponseBytes + bytes.byteLength > responseBudget ||
+            responseWindowBytes + bytes.byteLength > responseBudget
+          ) return;
+
+          currentWriteResponseBytes += bytes.byteLength;
+          responseWindowBytes += bytes.byteLength;
+          transport.send(bytes, "terminal-response");
+          return;
+        }
+
+        const bytes = textEncoder.encode(windowsInput?.accept(data) ?? data);
+        if (bytes.byteLength === 0) return;
+        if (windowsInput) {
+          // A reviewed paste can contain several bounded command lines. Send
+          // its adapted bytes as wire-sized slices instead of dropping it.
+          for (let offset = 0; offset < bytes.byteLength; offset += STREAM_MAX_FRAME_BYTES) {
+            transport.send(bytes.subarray(offset, offset + STREAM_MAX_FRAME_BYTES), "operator");
+          }
+          bytes.fill(0);
+          return;
+        }
+        if (bytes.byteLength > MAX_OPERATOR_FRAME_BYTES) return;
+        transport.send(bytes, "operator");
+      };
+
+      const writeRemoteOutput = (bytes: Uint8Array): void => {
+        if (!terminal || disposed || bytes.byteLength === 0) return;
+        const copy = bytes.slice();
+        appearanceReplay.chunks.push(copy);
+        appearanceReplay.bytes += copy.byteLength;
+        while (appearanceReplay.bytes > MAX_APPEARANCE_REPLAY_BYTES || appearanceReplay.chunks.length > MAX_APPEARANCE_REPLAY_CHUNKS) {
+          const expired = appearanceReplay.chunks.shift();
+          if (!expired) break;
+          appearanceReplay.bytes -= expired.byteLength;
+          expired.fill(0);
+        }
+        currentWriteResponseBytes = 0;
+        remoteWriteDepth += 1;
+        try {
+          terminal.write(bytes);
+        } finally {
+          remoteWriteDepth -= 1;
+        }
+      };
+
+      const queueFilteredOutput = (filtered: Uint8Array): void => {
+        if (terminal) {
+          writeRemoteOutput(filtered);
+          return;
+        }
+        if (pendingOutputBytes + filtered.byteLength > MAX_PENDING_OUTPUT_BYTES) {
+          filtered.fill(0);
+          reportError(new Error("Terminal output arrived faster than the runtime could initialize"));
+          return;
+        }
+        pendingOutput.push(filtered);
+        pendingOutputBytes += filtered.byteLength;
+      };
+
+      const queueOrWriteOutput = (bytes: Uint8Array): void => {
+        const filtered = sanitizer.filter(bytes);
+        if (filtered.byteLength > 0) queueFilteredOutput(filtered);
+      };
+
+      const flushSanitizer = (): void => {
+        const trailing = sanitizer.finish();
+        if (trailing.byteLength > 0) queueFilteredOutput(trailing);
+      };
+
+      const unsubscribeTransport = transport.subscribe({
+        onOutput: (bytes) => {
+          if (!disposed && !streamClosed) queueOrWriteOutput(bytes);
+        },
+        onClose: (reason) => {
+          if (disposed || streamClosed) return;
+          flushSanitizer();
+          streamClosed = true;
+          appearanceReplay.closed = true;
+          windowsInput?.reset();
+          setTerminalState("closed");
+          onCloseRef.current?.(reason);
+        },
+      });
+
+      const scheduleResize = (cols: number, rows: number): void => {
+        if (disposed || streamClosed) return;
+        const next = {
+          cols: clampDimension(cols),
+          rows: clampDimension(rows),
+        };
+        if (
+          (lastResize?.cols === next.cols && lastResize.rows === next.rows) ||
+          (pendingResize?.cols === next.cols && pendingResize.rows === next.rows)
+        ) return;
+
+        pendingResize = next;
+        if (resizeTimer) clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+          resizeTimer = undefined;
+          if (disposed || streamClosed || !pendingResize) return;
+          const size = pendingResize;
+          pendingResize = undefined;
+          if (lastResize?.cols === size.cols && lastResize.rows === size.rows) return;
+          lastResize = size;
+          transport.resize(size.cols, size.rows);
+        }, RESIZE_DEBOUNCE_MS);
+      };
+
+      const initialize = async (): Promise<void> => {
+        const ownedWasmBytes = copyBytes(wasmBytes);
+        let wasmModule: WebAssembly.Module;
+        try {
+          wasmModule = await WebAssembly.compile(ownedWasmBytes);
+        } finally {
+          ownedWasmBytes.fill(0);
+        }
+        if (disposed) return;
+
+        const wasmInstance = await WebAssembly.instantiate(wasmModule, {
+          env: {
+            // Do not bridge Ghostty/WASM log strings into the renderer console.
+            log: () => undefined,
+          },
+        });
+        if (disposed) return;
+
+        const currentAppearance = appearanceRef.current;
+        const fontFamily = currentAppearance?.fontFamily ?? '"Fira Code", monospace';
+        const fontSize = boundedNumber(currentAppearance?.fontSize, 8, 32, 13);
+        await loadTerminalFont(fontFamily, fontSize);
+        if (disposed) return;
+
+        const ghostty = new Ghostty(wasmInstance);
+        terminal = new Terminal({
+          allowTransparency: (currentAppearance?.theme?.backgroundOpacity ?? 1) < 1,
+          cursorBlink: currentAppearance?.cursorBlink ?? true,
+          cursorStyle: currentAppearance?.cursorStyle ?? "block",
+          disableStdin: disableInput,
+          fontFamily,
+          fontSize,
+          ghostty,
+          scrollback: boundedNumber(currentAppearance?.scrollback, 0, 50_000, 5_000),
+          smoothScrollDuration: boundedNumber(
+            currentAppearance?.smoothScrollDuration,
+            0,
+            1_000,
+            0,
+          ),
+          ...(currentAppearance?.theme ? { theme: canvasTerminalTheme(currentAppearance.theme) } : {}),
+        });
+        terminalRef.current = terminal;
+        if (!disableInput) inputSubscription = terminal.onData(sendTerminalData);
+        resizeSubscription = terminal.onResize(({ cols, rows }) => scheduleResize(cols, rows));
+        fitAddon = new FitAddon();
+        fitAddonRef.current = fitAddon;
+        terminal.loadAddon(fitAddon);
+        const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+        // Pinned Ghostty open() calls focus(), which also schedules another
+        // focus for the next tick. Suppress only this initialization call;
+        // blur cannot cancel it. Restore normal explicit focus immediately.
+        const explicitFocus = terminal.focus;
+        terminal.focus = () => undefined;
+        try {
+          terminal.open(host);
+        } finally {
+          terminal.focus = explicitFocus;
+        }
+        disablePinnedGhosttyAutoCopy(terminal);
+        host.setAttribute("aria-label", ariaLabelRef.current);
+        if (disableInput) host.setAttribute("aria-readonly", "true");
+        // Defensively restore workspace focus if open directly displaces it,
+        // while preserving deliberate focus already inside the terminal.
+        if (!host.contains(previousFocus ?? null) && host.contains(document.activeElement)) {
+          terminal.blur();
+          const currentFocus = document.activeElement;
+          if (previousFocus?.isConnected &&
+            (currentFocus === document.body || currentFocus === document.documentElement || host.contains(currentFocus))) {
+            previousFocus.focus({ preventScroll: true });
+          }
+        }
+        fitAddon.fit();
+        // ghostty-web drops ResizeObserver notifications while its fit() call
+        // holds a short resize guard. A pane can grow during that window and
+        // leave the canvas (including its painted scrollbar) at the old size.
+        // Observe the host ourselves so every size change gets a trailing fit.
+        fitResizeObserver = new ResizeObserver(() => {
+          if (fitResizeTimer) clearTimeout(fitResizeTimer);
+          fitResizeTimer = setTimeout(() => {
+            fitResizeTimer = undefined;
+            if (!disposed) fitAddon?.fit();
+          }, RESIZE_DEBOUNCE_MS);
+        });
+        fitResizeObserver.observe(host);
+
+        replayingAppearance = true;
+        try {
+          for (const previous of appearanceReplay.chunks) terminal.write(previous);
+        } finally {
+          replayingAppearance = false;
+        }
+        for (const pending of pendingOutput.splice(0)) {
+          pendingOutputBytes -= pending.byteLength;
+          writeRemoteOutput(pending);
+          pending.fill(0);
+        }
+        scheduleResize(terminal.cols, terminal.rows);
+        if (disposed) return;
+        setTerminalState(streamClosed ? "closed" : "ready");
+        onReadyRef.current?.();
+      };
+
+      void initialize().catch((error: unknown) => {
+        if (disposed) return;
+        fitResizeObserver?.disconnect();
+        if (fitResizeTimer) clearTimeout(fitResizeTimer);
+        inputSubscription?.dispose();
+        resizeSubscription?.dispose();
+        terminalRef.current = undefined;
+        fitAddonRef.current = undefined;
+        terminal?.dispose();
+        terminal = undefined;
+        setTerminalState("failed");
+        reportError(error);
+      });
+
+      return () => {
+        disposed = true;
+        windowsInput?.reset();
+        unsubscribeTransport();
+        if (resizeTimer) clearTimeout(resizeTimer);
+        fitResizeObserver?.disconnect();
+        if (fitResizeTimer) clearTimeout(fitResizeTimer);
+        inputSubscription?.dispose();
+        resizeSubscription?.dispose();
+        terminalRef.current = undefined;
+        fitAddonRef.current = undefined;
+        terminal?.dispose();
+        terminal = undefined;
+        fitAddon = undefined;
+        for (const pending of pendingOutput) pending.fill(0);
+        pendingOutput.length = 0;
+        pendingOutputBytes = 0;
+        host.removeEventListener("click", denyModifiedLink, true);
+        host.removeEventListener("auxclick", denyModifiedLink, true);
+        host.removeEventListener("copy", denyNativeTransfer, true);
+        host.removeEventListener("cut", denyNativeTransfer, true);
+        host.removeEventListener("paste", denyNativeTransfer, true);
+        host.removeEventListener("contextmenu", keepApplicationContextMenu, true);
+        window.removeEventListener("scroll", keepHiddenInputScroll, true);
+      };
+    }, [
+      appearance?.scrollback,
+      appearance?.theme,
+      appearanceReplay,
+      ariaLabelRef,
+      disableInput,
+      enableClipboard,
+      pipedWindowsInput,
+      onCloseRef,
+      onErrorRef,
+      onReadyRef,
+      terminalResponseBudgetBytes,
+      transport,
+      wasmBytes,
+    ]);
+
+    useEffect(() => {
+      hostRef.current?.setAttribute("aria-label", ariaLabel);
+    }, [ariaLabel]);
+
+    useEffect(() => {
+      const terminal = terminalRef.current;
+      if (!terminal) return;
+      let cancelled = false;
+      const fontFamily = appearance?.fontFamily ?? '"Fira Code", monospace';
+      const fontSize = boundedNumber(appearance?.fontSize, 8, 32, 13);
+      const fontChanged = terminal.options.fontFamily !== fontFamily ||
+        terminal.options.fontSize !== fontSize;
+      terminal.options.cursorBlink = appearance?.cursorBlink ?? true;
+      terminal.options.cursorStyle = appearance?.cursorStyle ?? "block";
+      terminal.options.smoothScrollDuration = boundedNumber(
+        appearance?.smoothScrollDuration,
+        0,
+        1_000,
+        0,
+      );
+      terminal.options.fontFamily = fontFamily;
+      terminal.options.fontSize = fontSize;
+      if (fontChanged) fitAddonRef.current?.fit();
+
+      void loadTerminalFont(fontFamily, fontSize).then(() => {
+        if (cancelled || terminalRef.current !== terminal || !fontChanged) return;
+        fitAddonRef.current?.fit();
+      });
+
+      return () => {
+        cancelled = true;
+      };
+    }, [
+      appearance?.cursorBlink,
+      appearance?.cursorStyle,
+      appearance?.fontFamily,
+      appearance?.fontSize,
+      appearance?.smoothScrollDuration,
+      terminalState,
+    ]);
+
+    const content = (
+      <div
+        className={["relative h-full min-h-0 w-full overflow-hidden font-mono", className]
+          .filter(Boolean)
+          .join(" ")}
+        data-terminal-state={terminalState}
+        style={{ backgroundColor: terminalContainerBackground(appearance) }}
+      >
+        {/* Ghostty draws its cursor on the canvas; suppress Chromium's native
+            caret on the focused contenteditable host so only one cursor is visible. */}
+        <div
+          ref={hostRef}
+          aria-busy={terminalState === "loading"}
+          aria-label={ariaLabel}
+          className="absolute inset-0 min-h-0 overflow-hidden"
+          data-application-context-menu-policy="inspect-only"
+          style={{
+            backgroundColor: terminalHostBackground(appearance),
+            caretColor: "transparent",
+          }}
+        />
+        {terminalState === "failed" ? (
+          <p className="absolute inset-0 grid place-items-center text-sm text-danger" role="alert">
+            Terminal runtime unavailable
+          </p>
+        ) : null}
+      </div>
+    );
+    return enableClipboard ? (
+      <GhosttyTerminalClipboard
+        canPaste={terminalState === "ready" && !disableInput}
+        getSelection={terminalHandle.getSelection}
+        hostRef={hostRef}
+        {...(onClipboardPaste === undefined ? {} : { onPasteText: onClipboardPaste })}
+        paste={terminalHandle.paste}
+        terminal={terminalRef.current}
+      >
+        {content}
+      </GhosttyTerminalClipboard>
+    ) : content;
+  },
+);
+
+function useLatest<T>(value: T): RefObject<T> {
+  const ref = useRef(value);
+  ref.current = value;
+  return ref;
+}
+
+function copyBytes(bytes: ArrayBuffer | Uint8Array): Uint8Array<ArrayBuffer> {
+  const copy = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+  copy.set(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes));
+  return copy;
+}
+
+function clampDimension(value: number): number {
+  if (!Number.isFinite(value)) return MIN_TERMINAL_DIMENSION;
+  return Math.max(
+    MIN_TERMINAL_DIMENSION,
+    Math.min(STREAM_MAX_TERMINAL_DIMENSION, Math.trunc(value)),
+  );
+}
+
+function normalizedResponseBudget(value: number | undefined): number {
+  return boundedNumber(
+    value,
+    1,
+    MAX_TERMINAL_RESPONSE_BUDGET_BYTES,
+    DEFAULT_TERMINAL_RESPONSE_BUDGET_BYTES,
+  );
+}
+
+function boundedNumber(
+  value: number | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.max(minimum, Math.min(maximum, Math.trunc(value)));
+}
+
+function boundedText(value: string): string {
+  const bytes = textEncoder.encode(value);
+  if (bytes.byteLength <= MAX_EXPLICIT_TEXT_BYTES) return value;
+  return textDecoder.decode(bytes.subarray(0, MAX_EXPLICIT_TEXT_BYTES));
+}
+
+function terminalContainerBackground(appearance: GhosttyTerminalAppearance | undefined): string {
+  return (appearance?.theme?.backgroundOpacity ?? 1) < 1
+    ? "transparent"
+    : appearance?.theme?.background ?? "#1e1e1e";
+}
+
+function canvasTerminalTheme(theme: NonNullable<GhosttyTerminalAppearance["theme"]>): NonNullable<GhosttyTerminalAppearance["theme"]> {
+  // The host covers the full area, including space outside fitted cell rows and
+  // columns. Paint its tint once; the canvas only paints glyphs and explicit
+  // colored cells above it, avoiding both seams and stacked translucent fills.
+  return (theme.backgroundOpacity ?? 1) < 1 ? { ...theme, backgroundOpacity: 0 } : theme;
+}
+
+function terminalHostBackground(appearance: GhosttyTerminalAppearance | undefined): string {
+  const background = appearance?.theme?.background ?? "#1e1e1e";
+  const opacity = appearance?.theme?.backgroundOpacity ?? 1;
+  if (opacity >= 1) return background;
+  const hex = /^#([a-f\d]{6})$/iu.exec(background)?.[1];
+  if (hex) {
+    const color = Number.parseInt(hex, 16);
+    return `rgba(${color >> 16}, ${(color >> 8) & 255}, ${color & 255}, ${opacity})`;
+  }
+  return `color-mix(in srgb, ${background} ${opacity * 100}%, transparent)`;
+}
+
+async function loadTerminalFont(fontFamily: string, fontSize: number): Promise<void> {
+  if (!("fonts" in document) || typeof document.fonts.load !== "function") return;
+  try {
+    await document.fonts.load(`${fontSize}px ${fontFamily}`);
+  } catch {
+    // An unavailable optional face falls back to the final monospace family.
+  }
+}
+
+/**
+ * ghostty-web 0.4.0's SelectionManager copies directly through
+ * navigator.clipboard on mouseup and double-click. That bypasses DOM copy
+ * event mediation, so neutralize the exact pinned internal seam while keeping
+ * selection itself available to the parent-owned explicit Copy action. Fail
+ * closed if a package update changes the reviewed shape.
+ */
+function disablePinnedGhosttyAutoCopy(terminal: Terminal): void {
+  const selectionManager = (
+    terminal as unknown as {
+      selectionManager?: {
+        copyToClipboard?: unknown;
+      };
+    }
+  ).selectionManager;
+
+  if (!selectionManager || typeof selectionManager.copyToClipboard !== "function") {
+    throw new Error("Unsupported Ghostty selection manager; automatic copy was not disabled");
+  }
+
+  Object.defineProperty(selectionManager, "copyToClipboard", {
+    configurable: false,
+    enumerable: false,
+    value: () => Promise.resolve(),
+    writable: false,
+  });
+}

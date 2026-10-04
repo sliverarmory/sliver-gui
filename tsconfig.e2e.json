@@ -1,0 +1,22 @@
+{
+  "extends": "./tsconfig.node.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "noEmit": false,
+    "outDir": ".e2e-dist",
+    "rootDir": ".",
+    "sourceMap": false,
+    "tsBuildInfoFile": ".e2e-dist/tsconfig.tsbuildinfo"
+  },
+  "include": [
+    "src/e2e/**/*.ts",
+    "src/main/**/*.ts",
+    "src/preload/**/*.ts",
+    "src/shared/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx"
+  ]
+}

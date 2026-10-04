@@ -1,0 +1,126 @@
+{
+  "schemaVersion": 1,
+  "defaultFontId": "fira-code",
+  "fonts": [
+    {
+      "id": "fira-code",
+      "family": "Fira Code",
+      "version": "6.2",
+      "license": "OFL-1.1",
+      "copyrightNotice": "Copyright (c) 2014, The Fira Code Project Authors (https://github.com/tonsky/FiraCode)",
+      "licenseUrl": "https://github.com/tonsky/FiraCode/blob/eee6db993696aba61ff4eef03698e2987d79910c/LICENSE",
+      "repository": "https://github.com/tonsky/FiraCode",
+      "tag": "6.2",
+      "commit": "eee6db993696aba61ff4eef03698e2987d79910c",
+      "archive": {
+        "url": "https://github.com/tonsky/FiraCode/releases/download/6.2/Fira_Code_v6.2.zip",
+        "size": 2462987,
+        "sha256": "0949915ba8eb24d89fd93d10a7ff623f42830d7c5ffc3ecbf960e4ecad3e3e79"
+      },
+      "files": [
+        {
+          "path": "src/renderer/src/assets/fonts/fira-code/FiraCode-VF.woff2",
+          "sourcePath": "woff2/FiraCode-VF.woff2",
+          "size": 113088,
+          "sha256": "408e876a202f15ea6ee307a70a65cf40ceb222c589a0b17e0a3a371db96dd49f"
+        }
+      ]
+    },
+    {
+      "id": "jetbrains-mono",
+      "family": "JetBrains Mono",
+      "version": "2.304",
+      "license": "OFL-1.1",
+      "copyrightNotice": "Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)",
+      "licenseUrl": "https://github.com/JetBrains/JetBrainsMono/blob/cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9/OFL.txt",
+      "repository": "https://github.com/JetBrains/JetBrainsMono",
+      "tag": "v2.304",
+      "commit": "cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9",
+      "releaseUrl": "https://github.com/JetBrains/JetBrainsMono/releases/download/v2.304/JetBrainsMono-2.304.zip",
+      "files": [
+        {
+          "path": "src/renderer/src/assets/fonts/jetbrains-mono/JetBrainsMono-Regular.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9/fonts/webfonts/JetBrainsMono-Regular.woff2",
+          "size": 92164,
+          "sha256": "a9cb1cd82332b23a47e3a1239d25d13c86d16c4220695e34b243effa999f45f2"
+        },
+        {
+          "path": "src/renderer/src/assets/fonts/jetbrains-mono/JetBrainsMono-Bold.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9/fonts/webfonts/JetBrainsMono-Bold.woff2",
+          "size": 94588,
+          "sha256": "c503cc5ec5f8b2c7666b7ecda1adf44bd45f2e6579b2eba0fc292150416588a2"
+        },
+        {
+          "path": "src/renderer/src/assets/fonts/jetbrains-mono/JetBrainsMono-Italic.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9/fonts/webfonts/JetBrainsMono-Italic.woff2",
+          "size": 95864,
+          "sha256": "cb6a1b246318ed3885d7dffa14a2609297fe80e9b8e500bea33b52fa312a36a4"
+        },
+        {
+          "path": "src/renderer/src/assets/fonts/jetbrains-mono/JetBrainsMono-BoldItalic.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/cd5227bd1f61dff3bbd6c814ceaf7ffd95e947d9/fonts/webfonts/JetBrainsMono-BoldItalic.woff2",
+          "size": 98152,
+          "sha256": "3a013466c0eee979fb9d42c2d7a8887cd3645dc8b897cfc5b71781cf982efc5a"
+        }
+      ]
+    },
+    {
+      "id": "cascadia-mono",
+      "family": "Cascadia Mono",
+      "version": "2407.24",
+      "license": "OFL-1.1",
+      "copyrightNotice": "Copyright (c) 2019 - Present, Microsoft Corporation, with Reserved Font Name Cascadia Code.",
+      "reservedFontNames": ["Cascadia Code"],
+      "licenseUrl": "https://github.com/microsoft/cascadia-code/blob/56bcca3f2c1e4cb19458954f0e2bb4635960df91/LICENSE",
+      "repository": "https://github.com/microsoft/cascadia-code",
+      "tag": "v2407.24",
+      "commit": "56bcca3f2c1e4cb19458954f0e2bb4635960df91",
+      "archive": {
+        "url": "https://github.com/microsoft/cascadia-code/releases/download/v2407.24/CascadiaCode-2407.24.zip",
+        "size": 150454761,
+        "sha256": "e67a68ee3386db63f48b9054bd196ea752bc6a4ebb4df35adce6733da50c8474"
+      },
+      "files": [
+        {
+          "path": "src/renderer/src/assets/fonts/cascadia-mono/CascadiaMono.woff2",
+          "sourcePath": "woff2/CascadiaMono.woff2",
+          "size": 210484,
+          "sha256": "7d4986a68fbbd674c90cdd8cd5d4a28c698640d3472572b006d2978006049799"
+        },
+        {
+          "path": "src/renderer/src/assets/fonts/cascadia-mono/CascadiaMonoItalic.woff2",
+          "sourcePath": "woff2/CascadiaMonoItalic.woff2",
+          "size": 153708,
+          "sha256": "c00f68dbd1b860cd5634e7c446d6fe68fd7f64e18ce3eb8ef7e52cd27f27116a"
+        }
+      ]
+    },
+    {
+      "id": "source-code-pro",
+      "family": "Source Code Pro",
+      "version": "2.042R-u/1.062R-i/1.026R-vf",
+      "license": "OFL-1.1",
+      "copyrightNotice": "© 2023 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'. All Rights Reserved. Source is a trademark of Adobe in the United States and/or other countries.",
+      "reservedFontNames": ["Source"],
+      "licenseUrl": "https://github.com/adobe-fonts/source-code-pro/blob/d3f1a5962cde503f9409c21e58527611d4a19ef1/LICENSE.md",
+      "repository": "https://github.com/adobe-fonts/source-code-pro",
+      "tag": "2.042R-u/1.062R-i/1.026R-vf",
+      "commit": "d3f1a5962cde503f9409c21e58527611d4a19ef1",
+      "releaseUrl": "https://github.com/adobe-fonts/source-code-pro/releases/download/2.042R-u/1.062R-i/1.026R-vf/WOFF2-source-code-pro-2.042R-u_1.062R-i_1.026Rvf.zip",
+      "files": [
+        {
+          "path": "src/renderer/src/assets/fonts/source-code-pro/SourceCodeVF-Upright.ttf.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/adobe-fonts/source-code-pro/d3f1a5962cde503f9409c21e58527611d4a19ef1/WOFF2/VF/SourceCodeVF-Upright.ttf.woff2",
+          "size": 90124,
+          "sha256": "d95dc751b4d82141259f5c00c9838addaadd3b4eac30dd7db4a0da4921d77792"
+        },
+        {
+          "path": "src/renderer/src/assets/fonts/source-code-pro/SourceCodeVF-Italic.ttf.woff2",
+          "sourceUrl": "https://raw.githubusercontent.com/adobe-fonts/source-code-pro/d3f1a5962cde503f9409c21e58527611d4a19ef1/WOFF2/VF/SourceCodeVF-Italic.ttf.woff2",
+          "size": 75316,
+          "sha256": "720e47a2e54568db2908bfbb32894c1c298fd948cc8942426987c2d29f7ebd9e"
+        }
+      ]
+    }
+  ]
+}

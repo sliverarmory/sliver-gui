@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "component": "sliver-client console",
+  "source": {
+    "repository": "https://github.com/BishopFox/sliver.git",
+    "commit": "f8430cecf7ceb5cb332c84fb36aba9b75188802d",
+    "tree": "430f88ba6707f253c628022e201084657ac5a3c2",
+    "entrypoint": "./client",
+    "module": "github.com/bishopfox/sliver",
+    "commandPackage": "github.com/bishopfox/sliver/client",
+    "license": "GPL-3.0-or-later",
+    "licenseFile": "LICENSE",
+    "licenseSha256": "8b1ba204bb69a0ade2bfcf65ef294a920f6bb361b317dba43c7ef29d96332b9b",
+    "correspondingSource": "https://github.com/BishopFox/sliver/tree/f8430cecf7ceb5cb332c84fb36aba9b75188802d"
+  },
+  "toolchain": {
+    "go": "go1.27.1"
+  },
+  "build": {
+    "moduleMode": "vendor",
+    "cgoEnabled": false,
+    "trimpath": true,
+    "tags": [
+      "go_sqlite",
+      "client"
+    ],
+    "stripped": true,
+    "targets": [
+      "darwin/amd64",
+      "darwin/arm64",
+      "linux/amd64",
+      "windows/amd64"
+    ],
+    "overlay": {
+      "format": "go-build-overlay-v1",
+      "correspondingSource": {
+        "repository": "https://github.com/sliverarmory/sliver-gui",
+        "packageVersion": "0.1.0",
+        "tag": "v0.1.0",
+        "archive": "https://github.com/sliverarmory/sliver-gui/archive/refs/tags/v0.1.0.tar.gz"
+      },
+      "files": [
+        {
+          "sourcePath": "client/cli/config.go",
+          "replacementPath": "protocol/sliver-console-overlay/client/cli/config.go",
+          "baseSha256": "e427ad862b7e3f5f23e7e6877b36d02b7d5b931437258883fc16ed6573d5851c",
+          "sha256": "cc28a287eb7c09b1a4797b9ef1beeb0505047093489f2163014bb5ebf10e256b",
+          "review": "Honor an explicit SLIVER_CLIENT_CONFIG path before the standard normal-console profile selection without changing the unset fallback."
+        },
+        {
+          "sourcePath": "client/cli/console.go",
+          "replacementPath": "protocol/sliver-console-overlay/client/cli/console.go",
+          "baseSha256": "34da06225ff438817523d56bb5bd981a7b753601e34bea4581d57797817c4c30",
+          "sha256": "5ab664f7c968cd0e75fc3f552b95132898f69649aa652dd39207b1ca477e4d34",
+          "review": "Avoid enumerating unrelated shared-root profiles when SLIVER_CLIENT_CONFIG is explicit; retain the original empty-root precheck when it is unset."
+        },
+        {
+          "sourcePath": "client/console/console.go",
+          "replacementPath": "protocol/sliver-console-overlay/client/console/console.go",
+          "baseSha256": "3d7dddfddf5717d2665bf64f14a6313ec274fdb18934de2f110a88122f669bd7",
+          "sha256": "45b94482121779b61179f69c10c72c3f581e328ab6fbabc2de54ce715bb9567b",
+          "review": "Let the GUI force in-memory console logging off and place command history in its private workspace while the rest of the client root remains shared."
+        }
+      ]
+    },
+    "macosArtifact": "universal Mach-O assembled from the pinned amd64 and arm64 builds"
+  },
+  "packaging": {
+    "generatedDirectory": "native/sliver-console",
+    "resourceDirectory": "sliver-console",
+    "executableBaseName": "sliver-client",
+    "buildRecord": "provenance.json"
+  }
+}

@@ -1,0 +1,5609 @@
+// @vitest-environment node
+
+import { createHash, generateKeyPairSync } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import ssh2 from "ssh2";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { CloudDnsProvider, CloudDnsZone, CloudDnsRecord, CloudDnsRecordSpec } from "../shared/cloud-dns-contracts.js";
+import { CLOUD_DEPLOYMENT_STATUSES } from "../shared/cloud-deployment-contracts.js";
+import { AwsConsoleLoginError } from "./cloud/aws-console-login.js";
+import type {
+  AwsConsoleLoginSession,
+  AwsFirewallRule,
+  AwsFirewallRuleSpec,
+  AwsFirewallSnapshot,
+  AzureBrowserLoginSession,
+  AzureFirewallRule,
+  AzureFirewallRuleSpec,
+  AzureFirewallSnapshot,
+  AzureCliAccountSummary,
+  CloudDeploymentRecord,
+  CreateAwsCloudDeploymentInput,
+  CreateAzureCloudDeploymentInput,
+  ResolvedAwsCloudCredentialInput,
+  ResolvedAzureCloudCredentialInput,
+} from "../shared/cloud-deployment-contracts.js";
+import type { CloudDeploymentChangeScope } from "../shared/cloud-deployment-ipc.js";
+import {
+  cloudRequiredPermissions,
+  createCloudPermissionEvaluation,
+} from "../shared/cloud-provider-permissions.js";
+import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
+import { CloudDeploymentStore } from "./cloud-deployment-store.js";
+import { SoftwareDeploymentStore } from "./software-deployment-store.js";
+import type { LocalRedirectorRecord, SoftwareInstallProgress } from "../shared/software-deployment-contracts.js";
+import type {
+  LocalRedirectorInstallInput,
+  LocalRedirectorOutputHandler,
+  LocalRedirectorVerifyInput,
+} from "./cloud/local-redirector-deployer.js";
+import {
+  CloudDeploymentService,
+  type CloudAwsProvider,
+  type CloudAwsConsoleLogin,
+  type CloudAwsProfileSource,
+  type CloudAzureAccountSource,
+  type CloudAzureBrowserLogin,
+  type CloudAzureProvider,
+  type CloudPrivateKeyCapabilities,
+  type CloudOperatorDirectoryClient,
+  type CloudSshTerminalStarter,
+  type CloudSliverProvisioner,
+  type CloudDeploymentServiceOptions,
+  type CloudLocalRedirectorDeployer,
+  type CloudSliverListenerClient,
+} from "./cloud-deployment-service.js";
+import type { ConsolePortRuntime } from "./console-port-session.js";
+import { SshHostKeyStore } from "./ssh-host-key-store.js";
+import {
+  SshIdentityStore,
+  type MaterializedSshIdentity,
+  type SshIdentityMaterializer,
+} from "./ssh-identity-store.js";
+import { SshTerminalStartError } from "./ssh-terminal-runtime.js";
+import type { AwsEc2Credentials, AwsEc2DeploymentResource } from "./cloud/aws-ec2-provider.js";
+import type { AzureVmDeploymentResource, AzureVmProviderConnection } from "./cloud/azure-vm-provider.js";
+import { generateEd25519SshKeyPair } from "./cloud/ssh-key-generator.js";
+import { SliverOperatorCreationError } from "./cloud/sliver-provisioner.js";
+
+const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
+const SECOND_DEPLOYMENT_ID = "55555555-5555-4555-8555-555555555555";
+const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
+const MISSING_CREDENTIAL_ID = "66666666-6666-4666-8666-666666666666";
+const DESTROY_TOKEN = "33333333-3333-4333-8333-333333333333";
+const FIREWALL_RULE_ID = "sgr-0123456789abcdef0";
+const AZURE_SUBSCRIPTION_ID = "77777777-7777-4777-8777-777777777777";
+const AZURE_TENANT_ID = "88888888-8888-4888-8888-888888888888";
+const AZURE_RESOURCE_GROUP = "sliver-gui-test";
+const AZURE_RESOURCE_GROUP_ID =
+  `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}`;
+const AZURE_NSG_ID =
+  `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/networkSecurityGroups/sliver-nsg-${DEPLOYMENT_ID}`;
+const AZURE_FIREWALL_RULE_ID = `${AZURE_NSG_ID}/securityRules/operator-api`;
+const NOW = new Date("2026-09-06T18:00:00.000Z");
+const TEST_SSH_PRIVATE_KEY = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+  privateKeyEncoding: { type: "pkcs1", format: "pem" },
+  publicKeyEncoding: { type: "spki", format: "pem" },
+}).privateKey;
+
+let temporaryDirectory = "";
+let rootDirectory = "";
+let operatorConfigDirectory = "";
+
+beforeEach(async () => {
+  temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-gui-cloud-service-"));
+  rootDirectory = join(temporaryDirectory, ".sliver-client", "gui", "cloud-deployment", "v1");
+  operatorConfigDirectory = join(temporaryDirectory, ".sliver-client", "configs");
+});
+
+afterEach(async () => {
+  if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+});
+
+describe("CloudDeploymentService DNS management", () => {
+  const record: CloudDnsRecordSpec = { name: "www", type: "A", ttl: 300, values: ["203.0.113.10"] };
+  const zone: CloudDnsZone = { id: "ZEXAMPLE", name: "example.test", provider: "aws", private: false, recordCount: 1, resourceGroupName: null };
+  const listedRecord: CloudDnsRecord = { id: "www.example.test.|A", zoneId: zone.id, zoneName: zone.name, name: "www", type: "A", ttl: 300, values: record.values, editable: true, readOnlyReason: null, version: "a".repeat(64) };
+
+  async function fixture(provider: "aws" | "azure" = "aws") {
+    const deps = await dependencies();
+    await deps.vault.create(provider === "aws" ? awsCredential() : azureCredential());
+    const dns = {
+      listZones: vi.fn<CloudDnsProvider["listZones"]>(async () => [{ ...zone, provider }]),
+      listRecords: vi.fn<CloudDnsProvider["listRecords"]>(async () => [listedRecord]),
+      createRecord: vi.fn<CloudDnsProvider["createRecord"]>(async () => undefined),
+      updateRecord: vi.fn<CloudDnsProvider["updateRecord"]>(async () => undefined),
+      deleteRecord: vi.fn<CloudDnsProvider["deleteRecord"]>(async () => undefined),
+      dispose: vi.fn(),
+    } satisfies CloudDnsProvider;
+    const awsDnsProviderFactory = vi.fn(() => dns);
+    const azureDnsProviderFactory = vi.fn(() => dns);
+    const service = await CloudDeploymentService.create({
+      ...deps, rootDirectory, operatorConfigDirectory, provisioner: fakeProvisioner(),
+      awsDnsProviderFactory, azureDnsProviderFactory,
+      azureCliCredentialFactory: () => ({ getToken: async () => ({ token: "test-token", expiresOnTimestamp: NOW.getTime() + 60_000 }) }),
+    });
+    return { ...deps, service, dns, awsDnsProviderFactory, azureDnsProviderFactory };
+  }
+
+  it.each(["aws", "azure"] as const)("routes %s DNS through the credential vault without requiring a deployment", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    try {
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toEqual({ ok: true, value: [{ ...zone, provider }] });
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: zone.id })).resolves.toEqual({ ok: true, value: [listedRecord] });
+      expect(f.dns.listRecords).toHaveBeenCalledExactlyOnceWith(zone.id);
+      expect(provider === "aws" ? f.awsDnsProviderFactory : f.azureDnsProviderFactory).toHaveBeenCalledTimes(2);
+      expect(provider === "aws" ? f.azureDnsProviderFactory : f.awsDnsProviderFactory).not.toHaveBeenCalled();
+      if (provider === "aws") expect(f.awsDnsProviderFactory).toHaveBeenCalledWith(expect.objectContaining({ region: "us-west-2", credentials: { accessKeyId: "AKIAEXAMPLE00000001", secretAccessKey: "secret-cloud-value" } }));
+      else expect(f.azureDnsProviderFactory).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, credential: expect.objectContaining({ getToken: expect.any(Function) }) }));
+      expect(f.store.getState()).toBe(before);
+      expect(f.dns.dispose).toHaveBeenCalledTimes(2);
+    } finally { f.service.dispose(); }
+  });
+
+  it("forwards validated DNS changes and expected versions without changing deployments", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    const identity = { credentialId: CREDENTIAL_ID, zoneId: zone.id };
+    const existing = { ...identity, recordId: listedRecord.id, expectedVersion: listedRecord.version };
+    try {
+      await expect(f.service.createDnsRecord({ ...identity, record })).resolves.toEqual({ ok: true });
+      await expect(f.service.updateDnsRecord({ ...existing, record })).resolves.toEqual({ ok: true });
+      await expect(f.service.deleteDnsRecord(existing)).resolves.toEqual({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(zone.id, record);
+      expect(f.dns.updateRecord).toHaveBeenCalledExactlyOnceWith(zone.id, listedRecord.id, listedRecord.version, record);
+      expect(f.dns.deleteRecord).toHaveBeenCalledExactlyOnceWith(zone.id, listedRecord.id, listedRecord.version);
+      expect(f.store.getState()).toBe(before);
+      expect(f.dns.dispose).toHaveBeenCalledTimes(3);
+    } finally { f.service.dispose(); }
+  });
+
+  it("aggregates all zones with at most four concurrent reads and keeps zone order", async () => {
+    const f = await fixture();
+    const zones = Array.from({ length: 7 }, (_, index) => ({ ...zone, id: `Z${index}` }));
+    f.dns.listZones.mockResolvedValue(zones);
+    let active = 0;
+    let maximum = 0;
+    f.dns.listRecords.mockImplementation(async (zoneId) => {
+      maximum = Math.max(maximum, ++active);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      active--;
+      return [{ ...listedRecord, zoneId }];
+    });
+    try {
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toEqual({ ok: true, value: zones.map(({ id }) => ({ ...listedRecord, zoneId: id })) });
+      expect(maximum).toBe(4);
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("stops all-zone work at the aggregate deadline without returning partial results", async () => {
+    const f = await fixture();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+    f.dns.listZones.mockResolvedValue(Array.from({ length: 8 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+    f.dns.listRecords.mockImplementation(async () => {
+      if (f.dns.listRecords.mock.calls.length === 4) clock.mockReturnValue(120_001);
+      return [listedRecord];
+    });
+    try {
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("120-second time limit") });
+      expect(f.dns.listRecords).toHaveBeenCalledTimes(4);
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); f.service.dispose(); }
+  });
+
+  it("rejects incomplete all-zone results, redacts secrets, and drains in-flight reads before disposal", async () => {
+    const f = await fixture();
+    f.dns.listZones.mockResolvedValue([zone, { ...zone, id: "ZOTHER" }]);
+    const pending = deferred<readonly CloudDnsRecord[]>();
+    f.dns.listRecords.mockImplementation(async (zoneId) => {
+      if (zoneId === zone.id) throw new Error("DNS unavailable secret-cloud-value");
+      return pending.promise;
+    });
+    try {
+      const result = f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null });
+      await vi.waitFor(() => expect(f.dns.listRecords).toHaveBeenCalledTimes(2));
+      expect(f.dns.dispose).not.toHaveBeenCalled();
+      pending.resolve([listedRecord]);
+      await expect(result).resolves.toEqual({ ok: false, error: "DNS unavailable [redacted]" });
+      expect(f.dns.dispose).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("bounds zone and record listings without silently truncating", async () => {
+    const f = await fixture();
+    f.dns.listZones.mockResolvedValue(Array.from({ length: 201 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+    try {
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true, value: expect.any(Array) });
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("individual zone") });
+      expect(f.dns.listRecords).not.toHaveBeenCalled();
+      f.dns.listZones.mockResolvedValue(Array.from({ length: 1_001 }, (_, index) => ({ ...zone, id: `Z${index}` })));
+      await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("1000-zone limit") });
+      f.dns.listRecords.mockResolvedValue(Array.from({ length: 20_001 }, () => listedRecord));
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: zone.id })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("20000-record limit") });
+      f.dns.listZones.mockResolvedValue([zone, { ...zone, id: "ZOTHER" }]);
+      f.dns.listRecords.mockResolvedValue(Array.from({ length: 10_001 }, () => listedRecord));
+      await expect(f.service.listDnsRecords({ credentialId: CREDENTIAL_ID, zoneId: null })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("20000-record limit") });
+    } finally { f.service.dispose(); }
+  });
+
+  it("rejects invalid, missing, and disposed credentials before provider access", async () => {
+    const f = await fixture();
+    await expect(f.service.listDnsZones({ credentialId: "invalid" })).resolves.toMatchObject({ ok: false });
+    await expect(f.service.listDnsZones({ credentialId: MISSING_CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: "The cloud credential no longer exists" });
+    f.service.dispose();
+    await expect(f.service.listDnsZones({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("disposed") });
+    expect(f.awsDnsProviderFactory).not.toHaveBeenCalled();
+    expect(f.azureDnsProviderFactory).not.toHaveBeenCalled();
+  });
+});
+
+describe("CloudDeploymentService", () => {
+  it("resolves managed provenance from current local state without credentials, snapshots, or provider calls", async () => {
+    const { store, safeStorage, vault } = await dependencies();
+    const awsProviderFactory = vi.fn(() => { throw new Error("Unexpected AWS provider access"); });
+    const azureProviderFactory = vi.fn(() => { throw new Error("Unexpected Azure provider access"); });
+    const listProfiles = vi.fn(async () => []);
+    const credentialProvider = vi.fn(async () => { throw new Error("Unexpected profile access"); });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      awsProviderFactory,
+      azureProviderFactory,
+      awsProfileSource: { list: listProfiles, credentialProvider },
+      provisioner: fakeProvisioner(),
+    });
+    const getSnapshot = vi.spyOn(service, "getSnapshot");
+    const listCredentials = vi.spyOn(vault, "list");
+    const readCredential = vi.spyOn(vault, "withCredential");
+    const configDigest = "a".repeat(64);
+
+    try {
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+      const created = await store.create(awsDeployment());
+      if (!created.ok) throw new Error(created.error);
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+
+      for (const status of CLOUD_DEPLOYMENT_STATUSES) {
+        const updated = await store.update({
+          expectedRevision: store.getState().revision,
+          deployment: {
+            ...created.value.deployment,
+            name: `Server ${status}`,
+            status,
+            operatorConfigFileName: "private-operator.cfg",
+            operatorConfigDigest: configDigest,
+          },
+        });
+        if (!updated.ok) throw new Error(updated.error);
+        const state = store.getState();
+        expect(service.resolveManagedServer(configDigest)).toEqual({
+          deploymentId: DEPLOYMENT_ID,
+          provider: "aws",
+          name: `Server ${status}`,
+          overview: {
+            cloud: { provider: "aws", vpcId: "vpc-0123456789abcdef0" },
+            redirectors: [],
+            region: "us-west-2",
+            size: "t3.small",
+            instanceName: `Server ${status}`,
+            subnetId: "subnet-a0000000000000000",
+            instanceState: "unknown",
+            health: "unknown",
+            publicIpAddress: null,
+            privateIpAddress: null,
+            updatedAt: updated.value.deployment.updatedAt,
+          },
+        });
+        expect(store.getState()).toBe(state);
+      }
+
+      const deleted = await store.delete({
+        expectedRevision: store.getState().revision,
+        deploymentId: DEPLOYMENT_ID,
+      });
+      expect(deleted.ok).toBe(true);
+      expect(service.resolveManagedServer(configDigest)).toBeNull();
+      expect(getSnapshot).not.toHaveBeenCalled();
+      expect(listCredentials).not.toHaveBeenCalled();
+      expect(readCredential).not.toHaveBeenCalled();
+      expect(listProfiles).not.toHaveBeenCalled();
+      expect(credentialProvider).not.toHaveBeenCalled();
+      expect(awsProviderFactory).not.toHaveBeenCalled();
+      expect(azureProviderFactory).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+    expect(service.resolveManagedServer(configDigest)).toBeNull();
+  });
+
+  it("adds only the associated deployment's saved redirectors to the Overview summary", async () => {
+    const { store, safeStorage, vault } = await dependencies();
+    const softwareStore = await SoftwareDeploymentStore.load(rootDirectory);
+    const service = await CloudDeploymentService.create({
+      rootDirectory, operatorConfigDirectory, safeStorage, store, vault, softwareStore,
+      provisioner: fakeProvisioner(),
+    });
+    const digest = "a".repeat(64);
+    try {
+      const created = await store.create(awsDeployment());
+      if (!created.ok) throw new Error(created.error);
+      const updated = await store.update({ expectedRevision: store.getState().revision,
+        deployment: { ...created.value.deployment, operatorConfigFileName: "private-operator.cfg", operatorConfigDigest: digest },
+      });
+      if (!updated.ok) throw new Error(updated.error);
+      const own = softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID);
+      const unrelated = softwareRecord("fb94b349-b76a-435c-923e-2b185b2a1dd1", SECOND_DEPLOYMENT_ID);
+      await softwareStore.put(own, 0);
+      await softwareStore.put(unrelated, 1);
+
+      const resolved = service.resolveManagedServer(digest);
+      expect(resolved?.overview?.redirectors).toEqual([{
+        id: own.id, recipeId: "caddy", status: "active", publicUrl: own.publicUrl,
+        publicIp: own.publicIp, domains: own.domains, listener: own.listener, lastCheckedAt: own.lastCheckedAt,
+      }]);
+      expect(JSON.stringify(resolved)).not.toContain(unrelated.id);
+      expect(JSON.stringify(resolved)).not.toContain(own.serviceName);
+    } finally { service.dispose(); }
+  });
+
+  it("stages native Azure subscriptions and saves only an owner-bound selected credential", async () => {
+    const session = azureAuthSession("initial");
+    const login = vi.fn(async () => ({ session, subscriptions: [azureAccount()] }));
+    const getToken = vi.fn(async () => ({ session, token: "native-arm-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, azureAccounts, cliGetToken, connections } = await azureAuthService({ login, getToken });
+    const staged = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 42);
+    if (!staged.ok) throw new Error(staged.error);
+    expect(JSON.stringify(staged)).not.toMatch(/initial-refresh|cache|home-account/u);
+    expect(await vault.list()).toEqual([]);
+    await expect(service.createCredential(azureNativeInput(staged.value.token), undefined, 99)).resolves.toMatchObject({ ok: false });
+    const created = await service.createCredential(azureNativeInput(staged.value.token), undefined, 42);
+    expect(created).toMatchObject({ ok: true, value: { authentication: "login", loginAccountId: session.homeAccountId } });
+    await expect(service.createCredential(azureNativeInput(staged.value.token), undefined, 42)).resolves.toMatchObject({ ok: false });
+    expect(azureAccounts.list).not.toHaveBeenCalled();
+    const key = await vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.sshPrivateKey);
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(cliGetToken).not.toHaveBeenCalled();
+    const connection = connections[0];
+    if (!connection) throw new Error("Missing credential connection");
+    await expect(connection.credential.getToken("https://graph.microsoft.com/.default")).rejects.toThrow(/Resource Manager/u);
+    await expect(connection.credential.getToken("https://management.azure.com/.default", { tenantId: AZURE_SUBSCRIPTION_ID })).rejects.toThrow(/different tenant/u);
+    expect(getToken).toHaveBeenCalledOnce();
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toEqual(created);
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.sshPrivateKey)).resolves.toBe(key);
+    expect(login).toHaveBeenLastCalledWith(AZURE_TENANT_ID, session.clientId, expect.any(AbortSignal));
+    service.dispose();
+  });
+
+  it("requires interactive sign-in for native Azure claims challenges while allowing valid CLI tokens", async () => {
+    const session = azureAuthSession("cached");
+    const getToken = vi.fn(async () => ({ session, token: "cached-native-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, connections, cliGetToken } = await azureAuthService({ login: vi.fn(), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, authentication: "login", loginSession: session } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    const connection = connections[0];
+    if (!connection) throw new Error("Missing credential connection");
+    getToken.mockClear();
+    const scopes = "https://management.azure.com/.default";
+    const options = { claims: JSON.stringify({ access_token: { nbf: { essential: true } } }) };
+    await expect(connection.credential.getToken(scopes, options)).rejects.toMatchObject({
+      code: "login-required", message: "Azure requires interactive authentication. Use Azure Login to sign in again.",
+    });
+    expect(getToken).not.toHaveBeenCalled();
+    await vault.delete(CREDENTIAL_ID);
+    await vault.create({ ...input, secret: { ...input.secret, loginSession: session } });
+    await expect(connection.credential.getToken(scopes, options)).resolves.toMatchObject({ token: "cli-token" });
+    expect(cliGetToken).toHaveBeenCalledWith(scopes, options);
+    expect(getToken).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("expires Azure login selections, cancels staged capabilities, and verifies subscription membership", async () => {
+    let now = NOW.getTime();
+    const session = azureAuthSession("staged");
+    const { service, vault } = await azureAuthService({ login: async () => ({ session, subscriptions: [azureAccount()] }), getToken: vi.fn() }, { now: () => now });
+    const first = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!first.ok) throw new Error(first.error);
+    now += 10 * 60_000;
+    await expect(service.createCredential(azureNativeInput(first.value.token), undefined, 3)).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Sign in again/u) });
+    const cancelled = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!cancelled.ok) throw new Error(cancelled.error);
+    service.cancelAzureLogin(3);
+    await expect(service.createCredential(azureNativeInput(cancelled.value.token), undefined, 3)).resolves.toMatchObject({ ok: false });
+    const invalid = await service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 3);
+    if (!invalid.ok) throw new Error(invalid.error);
+    await expect(service.createCredential({ ...azureNativeInput(invalid.value.token), subscriptionId: CREDENTIAL_ID }, undefined, 3)).resolves.toMatchObject({ ok: false });
+    await expect(service.createCredential(azureNativeInput(invalid.value.token), undefined, 3)).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("discards a late Azure browser result after owner cancellation", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; subscriptions: readonly AzureCliAccountSummary[] }>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    const beginning = service.beginAzureLogin({ tenantId: null, clientId: null }, undefined, 4);
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    service.cancelAzureLogin(4);
+    pending.resolve({ session: azureAuthSession("late"), subscriptions: [azureAccount()] });
+    await expect(beginning).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("prefers a valid Azure CLI token and persists one native cache rotation when CLI access expires", async () => {
+    const original = azureAuthSession("old");
+    const rotated = azureAuthSession("rotated");
+    const getToken = vi.fn(async () => ({ session: rotated, token: "native-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+    const { service, vault, safeStorage, cliGetToken } = await azureAuthService({ login: vi.fn(), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, loginSession: original } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(cliGetToken).toHaveBeenCalledOnce();
+    expect(getToken).not.toHaveBeenCalled();
+    cliGetToken.mockResolvedValue({ token: "expired-cli-token", expiresOnTimestamp: NOW.getTime() - 1 });
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(getToken).toHaveBeenCalledOnce();
+    const reopened = new CloudCredentialVault(rootDirectory, safeStorage);
+    await expect(reopened.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(rotated.cache);
+    expect((await reopened.list())[0]).not.toHaveProperty("authentication");
+    reopened.dispose();
+    service.dispose();
+  });
+
+  it("binds Azure CLI reauthentication to tenant and subscription, then pins the browser account", async () => {
+    const original = azureAuthSession("original");
+    const login = vi.fn(async () => ({ session: original, subscriptions: [azureAccount()] }));
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    await vault.create(azureCredential());
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true, value: { loginAccountId: original.homeAccountId } });
+    expect((await vault.list())[0]).not.toHaveProperty("authentication");
+    login.mockResolvedValueOnce({ session: { ...original, homeAccountId: "different-user" }, subscriptions: [azureAccount()] });
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/different account/u) });
+    login.mockResolvedValueOnce({ session: original, subscriptions: [{ ...azureAccount(), subscriptionId: CREDENTIAL_ID }] });
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/tenant and subscription/u) });
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.homeAccountId)).resolves.toBe(original.homeAccountId);
+    service.dispose();
+  });
+
+  it("rejects stale Azure refresh writes after reauthentication and does not expose cache tokens", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; token: string; expiresOnTimestamp: number }>();
+    const original = azureAuthSession("old");
+    const current = azureAuthSession("current");
+    const getToken = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login: async () => ({ session: current, subscriptions: [azureAccount()] }), getToken });
+    const input = azureCredential();
+    await vault.create({ ...input, secret: { ...input.secret, authentication: "login", loginSession: original } });
+    const testing = service.testCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(getToken).toHaveBeenCalledOnce());
+    await expect(service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    pending.resolve({ session: azureAuthSession("stale"), token: "must-not-expose-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    const result = await testing;
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/Azure Login/u) });
+    expect(JSON.stringify(result)).not.toMatch(/must-not-expose-token|stale-refresh|current-refresh/u);
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(current.cache);
+    service.dispose();
+  });
+
+  it("does not recreate Azure credentials deleted while reauthentication is pending", async () => {
+    const pending = authDeferred<{ session: AzureBrowserLoginSession; subscriptions: readonly AzureCliAccountSummary[] }>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await azureAuthService({ login, getToken: vi.fn() });
+    await vault.create(azureCredential());
+    const signingIn = service.loginAzureCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    await service.deleteCredential({ credentialId: CREDENTIAL_ID });
+    pending.resolve({ session: azureAuthSession("late"), subscriptions: [azureAccount()] });
+    await expect(signingIn).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("creates native AWS Login without CLI profiles and reauthenticates in place", async () => {
+    const originalSession = authSession("original");
+    const nextSession = authSession("reauthenticated");
+    const login = vi.fn().mockResolvedValueOnce(originalSession).mockResolvedValueOnce(nextSession);
+    const { service, vault, store, seen } = await authService({ login, refresh: vi.fn() });
+    const onCreateAuthorization = vi.fn();
+    const onReloginAuthorization = vi.fn();
+    const created = await service.createCredential(nativeAuthInput(), undefined, 0, onCreateAuthorization);
+    expect(created).toMatchObject({ ok: true, value: { id: CREDENTIAL_ID, loginSessionArn: originalSession.loginSessionArn } });
+    expect(login).toHaveBeenCalledWith("us-west-2", expect.any(AbortSignal), onCreateAuthorization, undefined);
+    expect(JSON.stringify(await service.getSnapshot())).not.toMatch(/original-secret|original-refresh|BEGIN EC PRIVATE KEY/u);
+    const sshKey = await vault.withCredential(CREDENTIAL_ID, "aws", (secret) => secret.sshPrivateKey);
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(seen[0]?.secretAccessKey).toBe(originalSession.secretAccessKey);
+    const relogged = await service.loginAwsCredential({ credentialId: CREDENTIAL_ID }, undefined, onReloginAuthorization);
+    expect(login).toHaveBeenLastCalledWith("us-west-2", expect.any(AbortSignal), onReloginAuthorization, undefined);
+    expect(relogged).toEqual(created);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
+      key: secret.sshPrivateKey, refresh: "loginSession" in secret ? secret.loginSession?.refreshToken : undefined,
+    }))).resolves.toEqual({ key: sshKey, refresh: nextSession.refreshToken });
+    expect(store.getState().deployments).toEqual([]);
+    service.dispose();
+  });
+
+  it("prefers valid CLI credentials and refreshes one encrypted native fallback for concurrent expired-profile requests", async () => {
+    let expired = false;
+    const fallback = authSession("old", NOW.getTime() - 1);
+    const fresh = authSession("fresh");
+    const refresh = vi.fn(async () => fresh);
+    const profileSource: CloudAwsProfileSource = {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => ({ accessKeyId: "ASIAEXAMPLE00000001", secretAccessKey: "cli-secret",
+        expiration: new Date(expired ? NOW.getTime() - 1 : NOW.getTime() + 10_000) }),
+      loginSessionArn: async () => fallback.loginSessionArn,
+    };
+    const { service, vault, safeStorage, seen } = await authService({ login: vi.fn(), refresh }, profileSource);
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: fallback,
+      sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(seen.map(({ secretAccessKey }) => secretAccessKey)).toEqual(["cli-secret"]);
+    expect(refresh).not.toHaveBeenCalled();
+    expired = true;
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen.slice(1).map(({ secretAccessKey }) => secretAccessKey)).toEqual([fresh.secretAccessKey, fresh.secretAccessKey]);
+    const reopened = new CloudCredentialVault(rootDirectory, safeStorage);
+    await expect(reopened.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(fresh.refreshToken);
+    reopened.dispose();
+    service.dispose();
+  });
+
+  it("binds profile reauthentication to its configured identity and refuses account changes", async () => {
+    const expected = authSession("expected");
+    const login = vi.fn(async () => ({ ...expected, loginSessionArn: "arn:aws:iam::999999999999:root" }));
+    const { service, vault } = await authService({ login, refresh: vi.fn() }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("expired CLI"); },
+      loginSessionArn: async () => expected.loginSessionArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/different identity/u) });
+    expect((await vault.list())[0]).not.toHaveProperty("loginSessionArn");
+    service.dispose();
+  });
+
+  it("refuses static-key and unbound-profile reauthentication before opening a browser", async () => {
+    const login = vi.fn();
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    await vault.create(awsCredential());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/Access-key/u) });
+    await vault.delete(CREDENTIAL_ID);
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/does not contain/u) });
+    expect(login).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("does not renew an old native fallback after its profile switches to another authentication method", async () => {
+    const login = vi.fn();
+    const refresh = vi.fn();
+    const { service, vault, seen } = await authService({ login, refresh }, {
+      list: async () => [{ name: "default", region: "us-west-2", authentication: { method: "sso", canConsoleLogin: false } }],
+      credentialProvider: async () => async () => { throw new Error("expired SSO"); },
+      loginSessionArn: async () => null,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: authSession("old"), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const snapshot = await service.getSnapshot();
+    expect(snapshot).toMatchObject({ ok: true, value: { credentials: [{ authentication: { method: "sso", canConsoleLogin: false } }] } });
+    expect((await vault.list())[0]).not.toHaveProperty("authentication");
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("configured sign-in method") });
+    expect(login).not.toHaveBeenCalled();
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(seen).toEqual([]);
+    service.dispose();
+  });
+
+  it.each([null, "arn:aws:iam::999999999999:root"])("blocks stale fallback after a profile changes during refresh (%s)", async (changedArn) => {
+    const original = authSession("old", NOW.getTime() - 1);
+    let configuredArn: string | null = original.loginSessionArn;
+    const refresh = vi.fn(async () => { configuredArn = changedArn; return authSession("refreshed"); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("profile expired"); },
+      loginSessionArn: async () => configuredArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", loginSession: original, sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("profile authentication changed") });
+    expect(seen).toEqual([]);
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(original.refreshToken);
+    service.dispose();
+  });
+
+  it("rejects a profile authentication change while browser authorization is pending", async () => {
+    const session = authSession("new");
+    let configuredArn: string | null = session.loginSessionArn;
+    const login = vi.fn(async () => { configuredArn = null; return session; });
+    const { service, vault } = await authService({ login, refresh: vi.fn() }, {
+      list: async () => [{ name: "default", region: "us-west-2" }],
+      credentialProvider: async () => async () => { throw new Error("expired"); },
+      loginSessionArn: async () => configuredArn,
+    });
+    await vault.create({ ...awsCredential(), secret: { profileName: "default", sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("changed during sign-in") });
+    expect((await vault.list())[0]).not.toHaveProperty("loginSessionArn");
+    service.dispose();
+  });
+
+  it("does not save a cancelled native login or recreate a credential deleted during reauthentication", async () => {
+    const pending = authDeferred<AwsConsoleLoginSession>();
+    const login = vi.fn(() => pending.promise);
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    const controller = new AbortController();
+    const creating = service.createCredential(nativeAuthInput(), controller.signal);
+    controller.abort();
+    pending.resolve(authSession("cancelled"));
+    await expect(creating).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old"), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const relogin = authDeferred<AwsConsoleLoginSession>();
+    login.mockImplementation(() => relogin.promise);
+    const signingIn = service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledTimes(2));
+    await service.deleteCredential({ credentialId: CREDENTIAL_ID });
+    relogin.resolve(authSession("deleted"));
+    await expect(signingIn).resolves.toMatchObject({ ok: false });
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it("uses a newer browser login when an older refresh finishes afterwards", async () => {
+    const refreshing = authDeferred<AwsConsoleLoginSession>();
+    const latest = authSession("latest");
+    const refresh = vi.fn(() => refreshing.promise);
+    const { service, vault } = await authService({ login: vi.fn(async () => latest), refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() - 1), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const testing = service.testCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    refreshing.resolve(authSession("stale"));
+    await expect(testing).resolves.toMatchObject({ ok: true });
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe(latest.refreshToken);
+    service.dispose();
+  });
+
+  it("keeps a successful browser login when background refresh rotated the same session", async () => {
+    const signingIn = authDeferred<AwsConsoleLoginSession>();
+    const login = vi.fn(() => signingIn.promise);
+    const refresh = vi.fn(async () => authSession("background"));
+    const { service, vault } = await authService({ login, refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() + 120_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const pending = service.loginAwsCredential({ credentialId: CREDENTIAL_ID });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledOnce());
+    await expect(service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("already in progress") });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledOnce();
+    signingIn.resolve(authSession("interactive"));
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => "loginSession" in secret ? secret.loginSession?.refreshToken : null)).resolves.toBe("interactive-refresh");
+    service.dispose();
+  });
+
+  it("refreshes early, retains unexpired credentials through a transient outage, and bounds retries", async () => {
+    let now = NOW.getTime();
+    const refresh = vi.fn()
+      .mockRejectedValueOnce(new AwsConsoleLoginError("network-unavailable", "AWS could not be reached. Try again."))
+      .mockResolvedValueOnce(authSession("fresh"));
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, undefined, { now: () => now });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", now + 240_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    const results = await Promise.all([service.testCredential({ credentialId: CREDENTIAL_ID }), service.testCredential({ credentialId: CREDENTIAL_ID })]);
+    expect(results.every((result) => result.ok)).toBe(true);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen.map(({ secretAccessKey }) => secretAccessKey)).toEqual(["old-secret", "old-secret"]);
+    now += 29_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledOnce();
+    now += 1_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(seen.at(-1)?.secretAccessKey).toBe("fresh-secret");
+    service.dispose();
+  });
+
+  it("never falls back past the expiration safety margin during refresh backoff", async () => {
+    let now = NOW.getTime();
+    const refresh = vi.fn(async () => { throw new AwsConsoleLoginError("network-unavailable", "AWS could not be reached. Try again."); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh }, undefined, { now: () => now });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", now + 35_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    now += 20_000;
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("could not be reached") });
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(seen).toHaveLength(1);
+    service.dispose();
+  });
+
+  it.each(["login-required", "insufficient-permissions", "token-request-failed"] as const)("never reuses cached credentials after %s", async (code) => {
+    const refresh = vi.fn(async () => { throw new AwsConsoleLoginError(code, "AWS authorization could not be renewed."); });
+    const { service, vault, seen } = await authService({ login: vi.fn(), refresh });
+    await vault.create({ ...awsCredential(), secret: { loginSession: authSession("old", NOW.getTime() + 120_000), sshPrivateKey: awsCredential().secret.sshPrivateKey, sshPassphrase: null } });
+    await expect(service.testCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: false });
+    expect(seen).toHaveLength(0);
+    service.dispose();
+  });
+
+  it("preserves safe token diagnostics and forwards login progress without storing it", async () => {
+    const progress = vi.fn();
+    const login = vi.fn<CloudAwsConsoleLogin["login"]>(async (_region, _signal, _pending, report) => {
+      report?.("exchanging-authorization");
+      throw new AwsConsoleLoginError("insufficient-permissions", "Check AWS sign-in permissions.", {
+        httpStatus: 403, serviceCode: "INSUFFICIENT_PERMISSIONS", requestId: "12345678-1234-1234-1234-123456789012",
+      });
+    });
+    const { service, vault } = await authService({ login, refresh: vi.fn() });
+    await expect(service.createCredential(nativeAuthInput(), undefined, 0, undefined, progress)).resolves.toMatchObject({
+      ok: false, error: expect.stringContaining("HTTP 403; INSUFFICIENT_PERMISSIONS; request 12345678-1234-1234-1234-123456789012"),
+    });
+    expect(progress).toHaveBeenCalledWith("exchanging-authorization");
+    expect(await vault.list()).toEqual([]);
+    service.dispose();
+  });
+
+  it.each(["provisioning", "deleting"] as const)(
+    "marks an interrupted %s transition failed when a new service session starts",
+    async (status) => {
+      const { store, safeStorage } = await dependencies();
+      const created = await store.create(awsDeployment());
+      if (!created.ok) throw new Error(created.error);
+      if (status === "deleting") {
+        const deleting = await store.update({
+          expectedRevision: store.getState().revision,
+          deployment: { ...created.value.deployment, status: "deleting", phase: "deleting" },
+        });
+        if (!deleting.ok) throw new Error(deleting.error);
+      }
+
+      const service = await CloudDeploymentService.create({
+        rootDirectory,
+        operatorConfigDirectory,
+        safeStorage,
+        store,
+        provisioner: fakeProvisioner(),
+      });
+
+      expect(store.getState().deployments[0]).toMatchObject({
+        status: "failed",
+        phase: "failed",
+        lastError: expect.stringMatching(new RegExp(`${status === "deleting" ? "termination" : "provisioning"} operation was interrupted`, "u")),
+      });
+      await expect(service.getSnapshot()).resolves.toMatchObject({
+        ok: true,
+        value: { provisioningTranscripts: [] },
+      });
+      expect(JSON.parse(await readFile(store.filePath, "utf8"))).toEqual(store.getState());
+      service.dispose();
+    },
+  );
+
+  it("returns the detected current egress IPv4 CIDR through the main-owned service", async () => {
+    const detector = vi.fn(async () => ({
+      address: "203.0.113.42",
+      cidr: "203.0.113.42/32",
+    }));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      provisioner: fakeProvisioner(),
+      egressIpv4Detector: detector,
+    });
+
+    const result = await service.detectCurrentEgressIpv4();
+
+    expect(result).toEqual({
+      ok: true,
+      value: { address: "203.0.113.42", cidr: "203.0.113.42/32" },
+    });
+    if (result.ok) expect(Object.isFrozen(result.value)).toBe(true);
+    expect(detector).toHaveBeenCalledOnce();
+  });
+
+  it("returns bounded transcripts without listing credentials or AWS profiles", async () => {
+    const { vault } = await dependencies();
+    const listCredentials = vi.spyOn(vault, "list");
+    const listProfiles = vi.fn(async () => [{ name: "default", region: "us-west-2" }]);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      vault,
+      provisioner: fakeProvisioner(),
+      awsProfileSource: {
+        list: listProfiles,
+        credentialProvider: vi.fn(async () => async () => ({
+          accessKeyId: "not-used",
+          secretAccessKey: "not-used",
+        })),
+      },
+    });
+
+    const result = service.getProvisioningTranscripts();
+
+    expect(result).toEqual({ ok: true, value: { provisioningTranscripts: [] } });
+    if (result.ok) {
+      expect(Object.isFrozen(result.value)).toBe(true);
+      expect(Object.isFrozen(result.value.provisioningTranscripts)).toBe(true);
+    }
+    expect(listCredentials).not.toHaveBeenCalled();
+    expect(listProfiles).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("performs an AWS one-click deployment, lifecycle/firewall management, and confirmed deletion", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const provisioner = fakeProvisioner();
+    const operatorDirectoryClient = fakeOperatorDirectoryClient();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      operatorDirectoryClientFactory: () => operatorDirectoryClient,
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+    const awsProgress: Array<{
+      phase: string;
+      status: string;
+      instanceState: string;
+      instanceHealth: string;
+      systemHealth: string;
+    }> = [];
+    const changeScopes: CloudDeploymentChangeScope[] = [];
+    const changed = vi.fn((scope: CloudDeploymentChangeScope) => {
+      changeScopes.push(scope);
+      const latest = store.getState().deployments[0];
+      if (latest?.provider !== "aws") return;
+      awsProgress.push({
+        phase: latest.phase,
+        status: latest.status,
+        instanceState: latest.runtime.instanceState,
+        instanceHealth: latest.runtime.instanceHealth,
+        systemHealth: latest.runtime.systemHealth,
+      });
+    });
+    service.subscribe(changed);
+
+    const created = await service.createDeployment(awsDeployment());
+    if (!created.ok) throw new Error(created.error);
+
+    expect(created).toMatchObject({
+      ok: true,
+      value: {
+        id: DEPLOYMENT_ID,
+        status: "running",
+        phase: "ready",
+        remoteHost: "203.0.113.20",
+        operatorConfigFileName: `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`,
+        managedAssets: [
+          { resourceType: "ec2-instance", resourceId: "i-0123456789abcdef0", tagged: true },
+          { resourceType: "ec2-volume", resourceId: "vol-0123456789abcdef0", tagged: true },
+          { resourceType: "ec2-network-interface", resourceId: "eni-0123456789abcdef0", tagged: true },
+          { resourceType: "ec2-security-group", resourceId: "sg-0123456789abcdef0", tagged: true },
+          { resourceType: "ec2-key-pair", resourceId: "key-0123456789abcdef0", tagged: true },
+          { resourceType: "ec2-elastic-ip", resourceId: "eipalloc-0123456789abcdef0", tagged: true },
+        ],
+      },
+    });
+    expect(provider.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guid: DEPLOYMENT_ID,
+        network: {
+          mode: "existing",
+          vpcId: "vpc-0123456789abcdef0",
+          subnetId: "subnet-a0000000000000000",
+        },
+        sshPublicKey: expect.stringMatching(/^ssh-rsa /u),
+      }),
+      expect.any(Function),
+    );
+    expect(provider.create.mock.calls[0]?.[0]).not.toHaveProperty("keyName");
+    expect(created.value.provider).toBe("aws");
+    if (created.value.provider !== "aws") throw new Error("Expected an AWS deployment");
+    expect(created.value.spec.keyPairName).toBe("managed-by-sliver-gui");
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      deploymentId: DEPLOYMENT_ID,
+      operatorEndpointHost: "203.0.113.20",
+      ssh: expect.objectContaining({ host: "203.0.113.20", username: "ubuntu" }),
+    }));
+    expect(awsProgress).toEqual(expect.arrayContaining([
+      {
+        phase: "starting-instance",
+        status: "provisioning",
+        instanceState: "pending",
+        instanceHealth: "initializing",
+        systemHealth: "initializing",
+      },
+      {
+        phase: "waiting-instance-status",
+        status: "provisioning",
+        instanceState: "running",
+        instanceHealth: "initializing",
+        systemHealth: "initializing",
+      },
+      {
+        phase: "waiting-system-status",
+        status: "provisioning",
+        instanceState: "running",
+        instanceHealth: "ok",
+        systemHealth: "initializing",
+      },
+      {
+        phase: "finalizing-network",
+        status: "provisioning",
+        instanceState: "running",
+        instanceHealth: "ok",
+        systemHealth: "ok",
+      },
+      {
+        phase: "installing-sliver",
+        status: "provisioning",
+        instanceState: "running",
+        instanceHealth: "ok",
+        systemHealth: "ok",
+      },
+    ]));
+    expect(changeScopes).toContain("snapshot");
+    expect(changeScopes).toContain("transcripts");
+
+    const provisioningSnapshot = await service.getSnapshot();
+    expect(provisioningSnapshot).toMatchObject({
+      ok: true,
+      value: {
+        provisioningTranscripts: [{
+          deploymentId: DEPLOYMENT_ID,
+          status: "complete",
+          truncated: false,
+        }],
+      },
+    });
+    if (!provisioningSnapshot.ok) throw new Error(provisioningSnapshot.error);
+    const transcriptText = provisioningSnapshot.value.provisioningTranscripts[0]?.chunks
+      .map(({ bytes }) => Buffer.from(bytes).toString("utf8"))
+      .join("");
+    expect(transcriptText).toContain("==> Installing the Sliver server");
+    expect(transcriptText).toContain("sliver-server active");
+    expect(await readFile(join(rootDirectory, "state.json"), "utf8")).not.toContain("sliver-server active");
+
+    const filePath = join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`);
+    const config = await readFile(filePath);
+    expect(createHash("sha256").update(config).digest("hex")).toBe(
+      created.ok ? created.value.operatorConfigDigest : undefined,
+    );
+    if (process.platform !== "win32") expect((await lstat(filePath)).mode & 0o777).toBe(0o600);
+    const pinnedHostKeys = JSON.parse(
+      await readFile(join(rootDirectory, "ssh-host-keys.json"), "utf8"),
+    ) as { readonly fingerprints: Readonly<Record<string, string>> };
+    expect(pinnedHostKeys.fingerprints[DEPLOYMENT_ID]).toBe(
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    if (process.platform !== "win32") {
+      expect((await lstat(join(rootDirectory, "ssh-host-keys.json"))).mode & 0o777).toBe(0o600);
+    }
+    expect(changed).toHaveBeenCalled();
+
+    const revisionBeforeOperator = store.getState().revision;
+    const generatedOperator = await service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-2",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "builder",
+    });
+    expect(generatedOperator).toMatchObject({
+      ok: true,
+      value: {
+        operatorName: "red-team-2",
+        publicIp: "198.51.100.70",
+        port: 44_331,
+        permissions: "builder",
+        data: expect.any(Buffer),
+      },
+    });
+    expect(provisioner.createOperator).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      deploymentId: DEPLOYMENT_ID,
+      operatorEndpointHost: "198.51.100.70",
+      multiplayerPort: 44_331,
+      operatorName: "red-team-2",
+      permissions: "builder",
+      ssh: expect.objectContaining({
+        host: "203.0.113.20",
+        username: "ubuntu",
+        hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      }),
+    }));
+    expect(store.getState().revision).toBe(revisionBeforeOperator);
+    if (!generatedOperator.ok) throw new Error(generatedOperator.error);
+    expect(JSON.parse(generatedOperator.value.data.toString("utf8"))).toMatchObject({
+      operator: "red-team-2",
+      lhost: "198.51.100.70",
+      lport: 44_331,
+    });
+    generatedOperator.value.data.fill(0);
+
+    const recoveryPath = `/var/lib/sliver-gui/${DEPLOYMENT_ID}/operator-export/operator-bbbbbbbbbbbbbbbb.cfg`;
+    const handoffPath = `/tmp/.sliver-gui-${DEPLOYMENT_ID}-dddddddddddddddd.operator.cfg`;
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "remote-transfer-failed",
+      "The generated operator configuration could not be retrieved",
+      "created",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      recoveryPath,
+      handoffPath,
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-recovery",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The generated operator configuration could not be retrieved",
+      mutationState: "created",
+      remoteRecoveryPath: recoveryPath,
+      remoteHandoffCandidatePath: handoffPath,
+    });
+
+    const recoveryCandidatePath =
+      `/var/lib/sliver-gui/${DEPLOYMENT_ID}/operator-export/operator-cccccccccccccccc.cfg`;
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "operator-outcome-unknown",
+      "The operator command outcome is unknown; refusing an automatic retry",
+      "unknown",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      recoveryCandidatePath,
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-unknown",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "crackstation",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The operator command outcome is unknown; refusing an automatic retry",
+      mutationState: "unknown",
+      remoteRecoveryCandidatePath: recoveryCandidatePath,
+    });
+
+    provisioner.createOperator.mockRejectedValueOnce(new SliverOperatorCreationError(
+      "operator-outcome-unknown",
+      "A previous operator attempt must be reconciled before retrying",
+      "unknown",
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ));
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeOperator,
+      operatorName: "red-team-marker-only",
+      publicIp: "203.0.113.20",
+      port: 31_337,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "A previous operator attempt must be reconciled before retrying",
+      mutationState: "unknown",
+    });
+
+    const stopped = await service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "stop",
+    });
+    expect(stopped).toMatchObject({ ok: true, value: { status: "stopped", phase: "stopped" } });
+
+    const firewall = await service.updateFirewall({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      sshCidrs: ["192.0.2.44/32"],
+      operatorCidrs: ["198.51.100.44/32"],
+    });
+    expect(firewall).toMatchObject({
+      ok: true,
+      value: { spec: { sshCidrs: ["192.0.2.44/32"], operatorCidrs: ["198.51.100.44/32"] } },
+    });
+    if (!firewall.ok) throw new Error(firewall.error);
+
+    const busyDeployment = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...firewall.value, status: "provisioning", phase: "installing-sliver" },
+    });
+    if (!busyDeployment.ok) throw new Error(busyDeployment.error);
+    await expect(service.updateFirewall({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      sshCidrs: ["192.0.2.45/32"],
+      operatorCidrs: ["198.51.100.45/32"],
+    })).resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    expect(provider.replaceFirewall).toHaveBeenCalledTimes(1);
+    const restoredDeployment = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...busyDeployment.value.deployment, status: "running", phase: "ready" },
+    });
+    if (!restoredDeployment.ok) throw new Error(restoredDeployment.error);
+
+    const prepared = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    expect(prepared).toMatchObject({ ok: true, value: { token: DESTROY_TOKEN, deploymentId: DEPLOYMENT_ID } });
+    const destroyed = await service.executeDestroyDeployment({ token: DESTROY_TOKEN });
+    expect(destroyed).toEqual({ ok: true, value: { v: 1, revision: store.getState().revision, deployments: [] } });
+    expect(provider.destroy).toHaveBeenCalledOnce();
+    expect(provider.destroy).toHaveBeenCalledWith(expect.objectContaining({
+      volumeIds: ["vol-0123456789abcdef0"],
+      networkInterfaceIds: ["eni-0123456789abcdef0"],
+    }));
+    await expect(lstat(filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(service.getSnapshot()).resolves.toMatchObject({
+      ok: true,
+      value: { provisioningTranscripts: [] },
+    });
+    await expect(service.executeDestroyDeployment({ token: DESTROY_TOKEN })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/invalid or expired/u),
+    });
+    service.dispose();
+  });
+
+  it("rejects a server-side duplicate operator name before Sliver creates another profile", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient(["manual-operator"]);
+    const operatorDirectoryClientFactory = vi.fn(() => operatorDirectoryClient);
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      operatorDirectoryClientFactory,
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "manual-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "builder",
+    })).resolves.toEqual({
+      ok: false,
+      error: "That operator already exists on this managed server",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClientFactory).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      operator: "operator",
+      lhost: "203.0.113.20",
+      lport: 31_337,
+    }));
+    expect(operatorDirectoryClient.connect).toHaveBeenCalledOnce();
+    expect(operatorDirectoryClient.getOperators).toHaveBeenCalledOnce();
+    expect(operatorDirectoryClient.disconnect).toHaveBeenCalledOnce();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("fails closed before operator creation when the authoritative operator lookup cannot connect", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient([], {
+      connect: vi.fn(async () => { throw new Error("private lookup detail"); }),
+    });
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      () => operatorDirectoryClient,
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "new-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "all",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The managed server operator list could not be verified",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClient.getOperators).not.toHaveBeenCalled();
+    expect(operatorDirectoryClient.disconnect).toHaveBeenCalledOnce();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("refuses a changed managed operator profile before parsing or connecting it", async () => {
+    const operatorDirectoryClient = fakeOperatorDirectoryClient();
+    const operatorDirectoryClientFactory = vi.fn(() => operatorDirectoryClient);
+    const { service, store, provisioner } = await operatorGenerationFixture(
+      operatorDirectoryClientFactory,
+    );
+    await writeFile(
+      join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`),
+      Buffer.from("changed private operator profile", "utf8"),
+    );
+
+    await expect(service.generateOperatorConfig({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      operatorName: "new-operator",
+      publicIp: "198.51.100.70",
+      port: 44_331,
+      permissions: "crackstation",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The managed server operator list could not be verified",
+      mutationState: "not-started",
+    });
+
+    expect(operatorDirectoryClientFactory).not.toHaveBeenCalled();
+    expect(operatorDirectoryClient.connect).not.toHaveBeenCalled();
+    expect(provisioner.createOperator).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("lists and mutates AWS firewall rules with revision bumps and fresh snapshots", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const rule = awsFirewallRuleSpec();
+
+    const revisionBeforeList = store.getState().revision;
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toEqual({
+      ok: true,
+      value: awsFirewallSnapshot(),
+    });
+    expect(store.getState().revision).toBe(revisionBeforeList);
+
+    const created = await service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      rule,
+    });
+    expect(created).toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeList + 1);
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, securityGroupId: "sg-0123456789abcdef0" }),
+      rule,
+    );
+
+    const updatedRule = { ...rule, toPort: 8444, description: "Operator API range" };
+    const revisionBeforeUpdate = store.getState().revision;
+    await expect(service.updateFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeUpdate,
+      ruleId: FIREWALL_RULE_ID,
+      rule: updatedRule,
+    })).resolves.toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeUpdate + 1);
+    expect(provider.updateFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      FIREWALL_RULE_ID,
+      updatedRule,
+    );
+
+    const revisionBeforeDelete = store.getState().revision;
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: true, value: awsFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeDelete + 1);
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      FIREWALL_RULE_ID,
+    );
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(7);
+
+    provider.createFirewallRule.mockRejectedValueOnce(
+      new Error("AWS rejected secret-cloud-value while creating a rule"),
+    );
+    const beforeFailure = store.getState();
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: beforeFailure.revision,
+      rule,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.not.stringContaining("secret-cloud-value"),
+    });
+    expect(store.getState()).toBe(beforeFailure);
+    expect(store.getState().deployments[0]).toMatchObject({ status: "running", phase: "ready" });
+
+    const createCalls = provider.createFirewallRule.mock.calls.length;
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: beforeFailure.revision - 1,
+      rule,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/changed in another window/u),
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledTimes(createCalls);
+
+    const busy = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...deployed.value, status: "provisioning", phase: "installing-sliver" },
+    });
+    if (!busy.ok) throw new Error(busy.error);
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID }))
+      .resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("returns a synthesized AWS firewall snapshot when the post-mutation refresh fails", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const newSpec = {
+      ...awsFirewallRuleSpec(),
+      description: "Additional operator API",
+    };
+    const newRule = awsFirewallRule(newSpec, "sgr-11111111111111111");
+    provider.listFirewallRules
+      .mockResolvedValueOnce(awsFirewallSnapshot())
+      .mockRejectedValueOnce(new Error("transient post-mutation inventory failure"));
+    provider.createFirewallRule.mockResolvedValueOnce(newRule);
+    const previousRevision = store.getState().revision;
+
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: previousRevision,
+      rule: newSpec,
+    })).resolves.toEqual({
+      ok: true,
+      value: {
+        ...awsFirewallSnapshot(),
+        rules: [awsFirewallRule(), newRule],
+      },
+    });
+    expect(store.getState().revision).toBe(previousRevision + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it("does not report a completed AWS mutation as failed when the local revision journal fails", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    provider.listFirewallRules
+      .mockResolvedValueOnce(awsFirewallSnapshot())
+      .mockRejectedValueOnce(new Error("transient post-mutation inventory failure"));
+    vi.spyOn(store, "update").mockRejectedValueOnce(new Error("local journal unavailable"));
+    const previousRevision = store.getState().revision;
+
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: previousRevision,
+      ruleId: FIREWALL_RULE_ID,
+    })).resolves.toEqual({
+      ok: true,
+      value: { ...awsFirewallSnapshot(), rules: [] },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    expect(store.getState().revision).toBe(previousRevision);
+    service.dispose();
+  });
+
+  it("lists and mutates Azure NSG rules with revision bumps and fresh snapshots", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(azureDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const rule = azureFirewallRuleSpec();
+
+    const revisionBeforeList = store.getState().revision;
+    await expect(service.listFirewallRules({ deploymentId: DEPLOYMENT_ID })).resolves.toEqual({
+      ok: true,
+      value: azureFirewallSnapshot(),
+    });
+    expect(store.getState().revision).toBe(revisionBeforeList);
+
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      rule,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeList + 1);
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, networkSecurityGroupId: AZURE_NSG_ID }),
+      rule,
+    );
+
+    const updatedRule = { ...rule, destinationPortRanges: ["8444", "9443"], description: "Operator API range" };
+    const revisionBeforeUpdate = store.getState().revision;
+    await expect(service.updateFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeUpdate,
+      ruleId: AZURE_FIREWALL_RULE_ID,
+      rule: updatedRule,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeUpdate + 1);
+    expect(provider.updateFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "operator-api",
+      updatedRule,
+    );
+
+    const revisionBeforeDelete = store.getState().revision;
+    await expect(service.deleteFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      ruleId: AZURE_FIREWALL_RULE_ID,
+    })).resolves.toEqual({ ok: true, value: azureFirewallSnapshot() });
+    expect(store.getState().revision).toBe(revisionBeforeDelete + 1);
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "operator-api",
+    );
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(7);
+
+    const createCalls = provider.createFirewallRule.mock.calls.length;
+    await expect(service.createFirewallRule({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: revisionBeforeDelete,
+      rule,
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/changed in another window/u),
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledTimes(createCalls);
+    service.dispose();
+  });
+
+  it("idempotently manages only its exact AWS listener ingress rule and retains manual coverage", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    let current = awsFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementation(async (_resource, rule) => {
+      const created = awsFirewallRule(rule, "sgr-11111111111111111");
+      current = { ...current, rules: [...current.rules, created] };
+      return created;
+    });
+    provider.deleteFirewallRule.mockImplementation(async (_resource, ruleId) => {
+      current = { ...current, rules: current.rules.filter(({ id }) => id !== ruleId) };
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const input = {
+      server: { deploymentId: DEPLOYMENT_ID, provider: "aws" as const, name: "Sliver AWS" },
+      protocol: "tcp" as const,
+      port: 8_888,
+    };
+    const marker = `sliver-gui:${DEPLOYMENT_ID}:listener:tcp:8888`;
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      {
+        direction: "ingress",
+        protocol: "tcp",
+        fromPort: 8_888,
+        toPort: 8_888,
+        peerType: "ipv4",
+        peer: "0.0.0.0/0",
+        description: marker,
+      },
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "sgr-11111111111111111",
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 2);
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "not-found", ruleCount: 0 },
+    });
+
+    const manualRule: AwsFirewallRule = {
+      id: "sgr-22222222222222222",
+      direction: "ingress",
+      protocol: "tcp",
+      fromPort: 8_888,
+      toPort: 8_888,
+      peerType: "ipv4",
+      peer: "0.0.0.0/0",
+      description: "Manual public listener access",
+      managed: false,
+    };
+    current = { ...current, rules: [...current.rules, manualRule] };
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "retained", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("reconciles an ambiguous AWS create response before reporting the listener firewall outcome", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    let current = awsFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule
+      .mockImplementationOnce(async (_resource, rule) => {
+        current = {
+          ...current,
+          rules: [...current.rules, awsFirewallRule(rule, "sgr-33333333333333333")],
+        };
+        throw new Error("AWS accepted secret-cloud-value before the response was lost");
+      })
+      .mockRejectedValueOnce(new Error("AWS rejected secret-cloud-value with an unknown submission state"));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(awsDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const server = { deploymentId: DEPLOYMENT_ID, provider: "aws" as const, name: "Sliver AWS" };
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress({ server, protocol: "tcp", port: 8_888 })).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+
+    const unknown = await service.ensureIngress({ server, protocol: "tcp", port: 9_999 });
+    expect(unknown).toMatchObject({
+      ok: true,
+      value: {
+        status: "outcome-unknown",
+        ruleCount: 0,
+        error: expect.stringContaining("[redacted]"),
+      },
+    });
+    expect(JSON.stringify(unknown)).not.toContain("secret-cloud-value");
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(4);
+    service.dispose();
+  });
+
+  it("idempotently manages a deterministic Azure listener rule and retains manual coverage", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    let current = azureFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementation(async (_resource, rule) => {
+      const created = azureFirewallRule(rule);
+      current = { ...current, rules: [...current.rules, created] };
+      return created;
+    });
+    provider.deleteFirewallRule.mockImplementation(async (_resource, ruleName) => {
+      current = { ...current, rules: current.rules.filter(({ name }) => name !== ruleName) };
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(azureDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const input = {
+      server: { deploymentId: DEPLOYMENT_ID, provider: "azure" as const, name: "Sliver Azure" },
+      protocol: "udp" as const,
+      port: 53,
+    };
+    const marker = `sliver-gui:${DEPLOYMENT_ID}:listener:udp:53`;
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      {
+        name: "sliver-gui-listener-udp-53",
+        priority: 1_201,
+        direction: "ingress",
+        access: "allow",
+        protocol: "udp",
+        sourceAddressPrefixes: ["0.0.0.0/0"],
+        sourcePortRanges: ["*"],
+        destinationAddressPrefixes: ["*"],
+        destinationPortRanges: ["53"],
+        description: marker,
+      },
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "removed", ruleCount: 1 },
+    });
+    expect(provider.deleteFirewallRule).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID }),
+      "sliver-gui-listener-udp-53",
+    );
+    expect(store.getState().revision).toBe(revisionBeforeApply + 2);
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "not-found", ruleCount: 0 },
+    });
+
+    const manualRule = azureFirewallRule({
+      name: "manual-public-dns",
+      priority: 1_300,
+      direction: "ingress",
+      access: "allow",
+      protocol: "udp",
+      sourceAddressPrefixes: ["0.0.0.0/0"],
+      sourcePortRanges: ["*"],
+      destinationAddressPrefixes: ["*"],
+      destinationPortRanges: ["53"],
+      description: "Manual public DNS access",
+    });
+    current = { ...current, rules: [...current.rules, manualRule] };
+    await expect(service.ensureIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "already-covered", ruleCount: 1 },
+    });
+    await expect(service.removeIngress(input)).resolves.toEqual({
+      ok: true,
+      value: { status: "retained", ruleCount: 1 },
+    });
+    expect(provider.createFirewallRule).toHaveBeenCalledOnce();
+    expect(provider.deleteFirewallRule).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("reconciles an Azure rule that exists after create returns an ambiguous error", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    let current = azureFirewallSnapshot();
+    provider.listFirewallRules.mockImplementation(async () => current);
+    provider.createFirewallRule.mockImplementationOnce(async (_resource, rule) => {
+      current = { ...current, rules: [...current.rules, azureFirewallRule(rule)] };
+      throw new Error("Azure accepted azure-cli-token before its response was lost");
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const deployed = await service.createDeployment(azureDeployment());
+    if (!deployed.ok) throw new Error(deployed.error);
+    const revisionBeforeApply = store.getState().revision;
+
+    await expect(service.ensureIngress({
+      server: { deploymentId: DEPLOYMENT_ID, provider: "azure", name: "Sliver Azure" },
+      protocol: "udp",
+      port: 53,
+    })).resolves.toEqual({
+      ok: true,
+      value: { status: "applied", ruleCount: 1 },
+    });
+    expect(store.getState().revision).toBe(revisionBeforeApply + 1);
+    expect(provider.listFirewallRules).toHaveBeenCalledTimes(2);
+    service.dispose();
+  });
+
+  it.each([
+    { state: "pending" as const, instanceHealth: "ok" as const, systemHealth: "ok" as const },
+    { state: "running" as const, instanceHealth: "initializing" as const, systemHealth: "ok" as const },
+    { state: "running" as const, instanceHealth: "ok" as const, systemHealth: "initializing" as const },
+  ])("refuses SSH provisioning until every EC2 status check passes (%o)", async (health) => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    provider.create.mockResolvedValueOnce({ ...awsResource(), ...health });
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      awsProviderFactory: () => provider,
+    });
+
+    await expect(service.createDeployment(awsDeployment())).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/status checks did not pass; refusing SSH provisioning/u),
+    });
+    expect(provisioner.provision).not.toHaveBeenCalled();
+    expect(store.getState().deployments[0]).toMatchObject({ status: "failed", phase: "failed" });
+    service.dispose();
+  });
+
+  it("uses the stable private address in the operator profile when Elastic IP is disabled", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const { elasticIp: _elasticIp, ...withoutElasticIp } = awsResource();
+    provider.create.mockResolvedValueOnce(withoutElasticIp);
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      awsProviderFactory: () => provider,
+    });
+
+    const created = await service.createDeployment(awsDeployment(false));
+
+    expect(created).toMatchObject({ ok: true, value: { status: "running" } });
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      operatorEndpointHost: "10.0.0.20",
+      ssh: expect.objectContaining({ host: "203.0.113.20" }),
+    }));
+    service.dispose();
+  });
+
+  it("creates, journals, and destroys a managed AWS network as GUI-owned infrastructure", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const managedNetwork = {
+      vpcId: "vpc-0123456789abcdef0",
+      subnetId: "subnet-0123456789abcdef0",
+      internetGatewayId: "igw-0123456789abcdef0",
+      routeTableId: "rtb-0123456789abcdef0",
+      routeTableAssociationId: "rtbassoc-0123456789abcdef0",
+    } as const;
+    provider.create.mockImplementationOnce(async (_input, onMutation) => {
+      const resource = { ...awsResource(), managedNetwork };
+      await onMutation?.({ phase: "key-pair", resources: { keyPair: resource.keyPair } });
+      await onMutation?.({ phase: "vpc", resources: { keyPair: resource.keyPair, vpcId: managedNetwork.vpcId } });
+      await onMutation?.({
+        phase: "internet-gateway",
+        resources: {
+          keyPair: resource.keyPair,
+          vpcId: managedNetwork.vpcId,
+          internetGatewayId: managedNetwork.internetGatewayId,
+        },
+      });
+      await onMutation?.({
+        phase: "subnet",
+        resources: {
+          keyPair: resource.keyPair,
+          vpcId: managedNetwork.vpcId,
+          internetGatewayId: managedNetwork.internetGatewayId,
+          subnetId: managedNetwork.subnetId,
+        },
+      });
+      await onMutation?.({
+        phase: "route-table",
+        resources: { keyPair: resource.keyPair, ...managedNetwork },
+      });
+      return resource;
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+    const request = awsDeployment();
+    const created = await service.createDeployment({
+      ...request,
+      spec: {
+        ...request.spec,
+        vpcId: null,
+        subnetId: null,
+        networkMode: "managed",
+        managedVpcCidr: "10.42.0.0/16",
+        managedSubnetCidr: "10.42.1.0/24",
+      },
+    });
+    if (!created.ok) throw new Error(created.error);
+
+    expect(provider.create).toHaveBeenCalledWith(expect.objectContaining({
+      network: {
+        mode: "managed",
+        vpcCidrBlock: "10.42.0.0/16",
+        subnetCidrBlock: "10.42.1.0/24",
+      },
+    }), expect.any(Function));
+    expect(created.value).toMatchObject({
+      runtime: managedNetwork,
+      managedAssets: expect.arrayContaining([
+        expect.objectContaining({ resourceType: "ec2-vpc", resourceId: managedNetwork.vpcId, tagged: true }),
+        expect.objectContaining({ resourceType: "ec2-subnet", resourceId: managedNetwork.subnetId, tagged: true }),
+        expect.objectContaining({ resourceType: "ec2-internet-gateway", resourceId: managedNetwork.internetGatewayId, tagged: true }),
+        expect.objectContaining({ resourceType: "ec2-route-table", resourceId: managedNetwork.routeTableId, tagged: true }),
+        expect.objectContaining({
+          resourceType: "ec2-route-table-association",
+          resourceId: managedNetwork.routeTableAssociationId,
+          tagged: false,
+        }),
+      ]),
+    });
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+    await expect(service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({ ok: true });
+    expect(provider.destroy).toHaveBeenCalledWith(expect.objectContaining({ managedNetwork }));
+    service.dispose();
+  });
+
+  it("uses but never tracks or destroys an existing key pair that matches the credential key", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const existingKeyPair = {
+      id: "key-0123456789abcdef0",
+      name: "operator-existing",
+      managed: false,
+    } as const;
+    provider.create.mockImplementationOnce(async (_input, onMutation) => {
+      const resource = { ...awsResource(), keyPair: existingKeyPair };
+      await onMutation?.({
+        phase: "security-group",
+        resources: { keyPair: existingKeyPair, securityGroupId: resource.securityGroupId },
+      });
+      await onMutation?.({
+        phase: "instance",
+        resources: {
+          keyPair: existingKeyPair,
+          securityGroupId: resource.securityGroupId,
+          instanceId: resource.instanceId,
+        },
+      });
+      return resource;
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+    const request = awsDeployment();
+    const created = await service.createDeployment({
+      ...request,
+      spec: {
+        ...request.spec,
+        vpcId: "vpc-0123456789abcdef0",
+        subnetId: "subnet-a0000000000000000",
+        sshKeyMode: "existing",
+        existingKeyPairName: existingKeyPair.name,
+        keyPairName: existingKeyPair.name,
+      },
+    });
+    if (!created.ok) throw new Error(created.error);
+
+    expect(provider.create).toHaveBeenCalledWith(expect.objectContaining({
+      sshKeyPair: { mode: "existing", name: existingKeyPair.name },
+    }), expect.any(Function));
+    expect(created.value.managedAssets).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceType: "ec2-key-pair" }),
+    ]));
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+    await expect(service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({ ok: true });
+    expect(provider.destroy.mock.calls[0]?.[0]).not.toHaveProperty("keyPair");
+    service.dispose();
+  });
+
+  it("creates and tests a credential without exposing secrets in the snapshot", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const provider = new FakeAwsProvider();
+    const permissionChecker = fakeAwsPermissionChecker();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      awsPermissionCheckerFactory: () => permissionChecker,
+    });
+
+    const created = await service.createCredential({
+      provider: "aws",
+      label: "Production AWS",
+      defaultRegion: "us-west-2",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: "44444444-4444-4444-8444-444444444444",
+      accessKeyId: "AKIAEXAMPLE00000001",
+      secretAccessKey: "secret-cloud-value",
+      sessionToken: null,
+      sshPassphrase: null,
+    });
+    expect(created).toMatchObject({
+      ok: true,
+      value: { id: CREDENTIAL_ID, provider: "aws", persistence: "secure" },
+    });
+    expect(keys.consume).toHaveBeenCalledOnce();
+    const tested = await service.testCredential({ credentialId: CREDENTIAL_ID });
+    expect(tested).toMatchObject({
+      ok: true,
+      value: {
+        provider: "aws",
+        summary: expect.stringMatching(/^AWS us-west-2: [0-9]+\/[0-9]+ required IAM permissions verified/u),
+        permissions: { missing: [], unverifiable: ["ec2:CreateTags", "ec2:ModifyVpcAttribute", "ec2:ModifySubnetAttribute"] },
+      },
+    });
+    expect(permissionChecker.check).toHaveBeenCalledOnce();
+    const snapshot = await service.getSnapshot();
+    expect(snapshot).toMatchObject({ ok: true, value: { secureCredentialStorage: true } });
+    expect(JSON.stringify(snapshot)).not.toContain("secret-cloud-value");
+    expect(await service.deleteCredential({ credentialId: CREDENTIAL_ID })).toEqual({ ok: true });
+    service.dispose();
+    expect(keys.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("returns renderer-safe AWS deployment options for the selected credential and region", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => new FakeAwsProvider(),
+    });
+
+    const discovered = await service.discoverAwsOptions({
+      credentialId: CREDENTIAL_ID,
+      region: "us-west-2",
+    });
+
+    expect(discovered).toMatchObject({
+      ok: true,
+      value: {
+        region: "us-west-2",
+        instanceTypes: [{ name: "t3.micro", architecture: "x86_64", memoryMiB: 1024 }],
+        images: [{ distribution: "ubuntu", sshUsername: "ubuntu" }],
+        vpcs: [{ id: "vpc-0123456789abcdef0", isDefault: true }],
+        credentialKey: { fingerprint: expect.stringMatching(/^SHA256:/u) },
+      },
+    });
+    expect(JSON.stringify(discovered)).not.toMatch(/PRIVATE KEY|secret-cloud-value/u);
+    service.dispose();
+  });
+
+  it("returns renderer-safe Azure accounts and deployment options for the selected CLI subscription", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const azureProviderFactory = vi.fn(() => provider);
+    const accounts = [azureAccount()];
+    const azureAccountSource = fakeAzureAccountSource(accounts);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory,
+      azureAccountSource,
+    });
+
+    await expect(service.discoverAzureAccounts()).resolves.toEqual({ ok: true, value: accounts });
+    const discovered = await service.discoverAzureOptions({
+      credentialId: CREDENTIAL_ID,
+      location: "eastus",
+    });
+
+    expect(discovered).toEqual({
+      ok: true,
+      value: {
+        location: "eastus",
+        vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
+        images: [{
+          reference: "Canonical:ubuntu-24_04-lts:server:latest",
+          label: "Ubuntu Server 24.04 LTS (x64)",
+          architecture: "x64",
+          sshUsername: "azureuser",
+        }],
+        virtualNetworks: [],
+        subnets: [],
+      },
+    });
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(provider.discover).toHaveBeenCalledOnce();
+    expect(azureProviderFactory).toHaveBeenCalledExactlyOnceWith({
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      location: "eastus",
+      credential: expect.objectContaining({ getToken: expect.any(Function) }),
+    });
+    expect(JSON.stringify(discovered)).not.toMatch(/PRIVATE KEY|secret-cloud-value/u);
+    service.dispose();
+  });
+
+  it("tests Azure against its effective RBAC actions without a mutation", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+
+    const tested = await service.testCredential({ credentialId: CREDENTIAL_ID });
+
+    expect(tested).toMatchObject({
+      ok: true,
+      value: {
+        provider: "azure",
+        summary: expect.stringMatching(/^Azure eastus: [0-9]+\/[0-9]+ required RBAC actions verified/u),
+        permissions: { missing: [], unverifiable: [] },
+      },
+    });
+    expect(provider.checkPermissions).toHaveBeenCalledOnce();
+    expect(provider.create).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("generates and securely stores an Ed25519 key when no private key is selected", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const keyGenerator = vi.fn(generateEd25519SshKeyPair);
+    const provider = new FakeAwsProvider();
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      sshKeyGenerator: keyGenerator,
+      provisioner,
+      awsProviderFactory: () => provider,
+    });
+
+    const created = await service.createCredential({
+      provider: "aws",
+      label: "Generated SSH key",
+      defaultRegion: "us-west-2",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: null,
+      accessKeyId: "AKIAEXAMPLE00000001",
+      secretAccessKey: "secret-cloud-value",
+      sessionToken: null,
+      sshPassphrase: null,
+    });
+
+    expect(created).toMatchObject({ ok: true, value: { id: CREDENTIAL_ID, persistence: "secure" } });
+    expect(keyGenerator).toHaveBeenCalledOnce();
+    expect(keys.consume).not.toHaveBeenCalled();
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
+      isGeneratedEd25519: secret.sshPrivateKey.startsWith("-----BEGIN OPENSSH PRIVATE KEY-----"),
+      passphrase: secret.sshPassphrase,
+    }))).resolves.toEqual({ isGeneratedEd25519: true, passphrase: null });
+    expect(JSON.stringify(await service.getSnapshot())).not.toMatch(/OPENSSH PRIVATE KEY|secret-cloud-value/u);
+
+    const deployed = await service.createDeployment(awsDeployment());
+    expect(deployed).toMatchObject({ ok: true, value: { status: "running" } });
+    expect(provider.create).toHaveBeenCalledWith(
+      expect.objectContaining({ sshPublicKey: expect.stringMatching(/^ssh-ed25519 /u) }),
+      expect.any(Function),
+    );
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      ssh: expect.objectContaining({
+        privateKey: expect.stringMatching(/^-----BEGIN OPENSSH PRIVATE KEY-----/u),
+      }),
+    }));
+    service.dispose();
+  });
+
+  it("generates an Ed25519 key for an AWS CLI profile without contacting AWS", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const keyGenerator = vi.fn(generateEd25519SshKeyPair);
+    const profileSource: CloudAwsProfileSource = {
+      list: vi.fn(async () => [{ name: "generals-network", region: "us-west-2" }]),
+      credentialProvider: vi.fn(async () => async () => ({
+        accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        secretAccessKey: "must-not-be-resolved",
+      })),
+    };
+    const awsProviderFactory = vi.fn(() => new FakeAwsProvider());
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      sshKeyGenerator: keyGenerator,
+      provisioner: fakeProvisioner(),
+      awsProfileSource: profileSource,
+      awsProviderFactory,
+    });
+
+    await expect(service.createCredential({
+      provider: "aws",
+      label: "Generated profile key",
+      defaultRegion: "us-west-2",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: null,
+      profileName: "generals-network",
+      sshPassphrase: null,
+    })).resolves.toMatchObject({ ok: true, value: { profileName: "generals-network" } });
+
+    expect(keyGenerator).toHaveBeenCalledOnce();
+    expect(keys.consume).not.toHaveBeenCalled();
+    expect(profileSource.credentialProvider).not.toHaveBeenCalled();
+    expect(awsProviderFactory).not.toHaveBeenCalled();
+    await expect(vault.withCredential(CREDENTIAL_ID, "aws", (secret) => ({
+      ...inspectStoredSshKey(secret),
+      isExpectedProfile: "profileName" in secret && secret.profileName === "generals-network",
+    }))).resolves.toEqual({ algorithm: "ssh-ed25519", isPrivate: true, passphrase: null, isExpectedProfile: true });
+    service.dispose();
+  });
+
+  it("validates an Azure CLI subscription and generates an Ed25519 key without contacting Azure", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const keyGenerator = vi.fn(generateEd25519SshKeyPair);
+    const azureProviderFactory = vi.fn(() => new FakeAzureProvider());
+    const azureAccountSource = fakeAzureAccountSource();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      sshKeyGenerator: keyGenerator,
+      provisioner: fakeProvisioner(),
+      azureProviderFactory,
+      azureAccountSource,
+    });
+
+    await expect(service.createCredential({
+      provider: "azure",
+      label: "Generated Azure key",
+      defaultLocation: "eastus",
+      sshUsername: "azureuser",
+      sshPrivateKeyToken: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      sshPassphrase: null,
+    })).resolves.toMatchObject({ ok: true, value: { provider: "azure" } });
+
+    expect(keyGenerator).toHaveBeenCalledOnce();
+    expect(keys.consume).not.toHaveBeenCalled();
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(azureProviderFactory).not.toHaveBeenCalled();
+    await expect(vault.withCredential(CREDENTIAL_ID, "azure", inspectStoredSshKey))
+      .resolves.toEqual({ algorithm: "ssh-ed25519", isPrivate: true, passphrase: null });
+    service.dispose();
+  });
+
+  it.each([
+    {
+      condition: "the subscription disappeared",
+      accounts: [] as readonly AzureCliAccountSummary[],
+      error: /subscription is no longer available/u,
+    },
+    {
+      condition: "the tenant changed",
+      accounts: [{
+        ...azureAccount(),
+        tenantId: "99999999-9999-4999-8999-999999999999",
+      }],
+      error: /subscription is no longer available/u,
+    },
+    {
+      condition: "the subscription belongs to a sovereign cloud",
+      accounts: [azureAccount("AzureUSGovernment")],
+      error: /Only AzureCloud subscriptions are currently supported/u,
+    },
+  ])("rejects an Azure CLI credential before consuming its SSH key when $condition", async ({ accounts, error }) => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const keyGenerator = vi.fn(generateEd25519SshKeyPair);
+    const azureProviderFactory = vi.fn(() => new FakeAzureProvider());
+    const azureAccountSource = fakeAzureAccountSource(accounts);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      sshKeyGenerator: keyGenerator,
+      provisioner: fakeProvisioner(),
+      azureProviderFactory,
+      azureAccountSource,
+    });
+
+    await expect(service.createCredential({
+      provider: "azure",
+      label: "Rejected Azure key",
+      defaultLocation: "eastus",
+      sshUsername: "azureuser",
+      sshPrivateKeyToken: null,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      sshPassphrase: null,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(error) });
+
+    expect(azureAccountSource.list).toHaveBeenCalledOnce();
+    expect(keyGenerator).not.toHaveBeenCalled();
+    expect(keys.consume).not.toHaveBeenCalled();
+    expect(azureProviderFactory).not.toHaveBeenCalled();
+    await expect(vault.list()).resolves.toEqual([]);
+    service.dispose();
+  });
+
+  it("stores an AWS CLI profile reference and wires its refreshable provider without creating resources", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    const keys = fakePrivateKeys();
+    const provider = new FakeAwsProvider();
+    const resolvedCredentialProvider = vi.fn(async () => ({
+      accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+      secretAccessKey: "resolved-only-inside-sdk",
+    }));
+    const profileSource: CloudAwsProfileSource = {
+      list: vi.fn(async () => [{ name: "generals-network", region: "us-west-2" }]),
+      credentialProvider: vi.fn(async () => resolvedCredentialProvider),
+    };
+    const awsProviderFactory = vi.fn(() => provider);
+    const awsPermissionCheckerFactory = vi.fn(() => fakeAwsPermissionChecker());
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: keys,
+      provisioner: fakeProvisioner(),
+      awsProfileSource: profileSource,
+      awsProviderFactory,
+      awsPermissionCheckerFactory,
+    });
+
+    const created = await service.createCredential({
+      provider: "aws",
+      label: "Existing CLI profile",
+      defaultRegion: "us-west-2",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: "44444444-4444-4444-8444-444444444444",
+      profileName: "generals-network",
+      sshPassphrase: null,
+    });
+    expect(created).toMatchObject({
+      ok: true,
+      value: { provider: "aws", profileName: "generals-network", defaultRegion: "us-west-2" },
+    });
+    expect(keys.consume).toHaveBeenCalledOnce();
+
+    const tested = await service.testCredential({ credentialId: CREDENTIAL_ID });
+    expect(tested).toMatchObject({ ok: true, value: { provider: "aws" } });
+    expect(profileSource.credentialProvider).toHaveBeenCalledWith("generals-network", "us-west-2");
+    expect(awsPermissionCheckerFactory).toHaveBeenCalledWith({
+      region: "us-west-2",
+      credentials: resolvedCredentialProvider,
+    });
+    expect(awsProviderFactory).not.toHaveBeenCalled();
+    expect(resolvedCredentialProvider).not.toHaveBeenCalled();
+    expect(provider.create).not.toHaveBeenCalled();
+
+    const snapshot = await service.getSnapshot();
+    expect(snapshot).toMatchObject({
+      ok: true,
+      value: {
+        awsProfiles: [{ name: "generals-network", region: "us-west-2" }],
+        awsProfileDiscoveryError: null,
+        credentials: [{ profileName: "generals-network" }],
+      },
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("resolved-only-inside-sdk");
+    service.dispose();
+  });
+
+  it("rejects a disappeared AWS CLI profile before consuming the SSH key capability", async () => {
+    const store = await CloudDeploymentStore.load(rootDirectory, { idFactory: () => DEPLOYMENT_ID });
+    const safeStorage = new XorSafeStorage();
+    const keys = fakePrivateKeys();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      privateKeyCapabilities: keys,
+      provisioner: fakeProvisioner(),
+      awsProfileSource: {
+        list: vi.fn(async () => []),
+        credentialProvider: vi.fn(async () => async () => ({
+          accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+          secretAccessKey: "not-used",
+        })),
+      },
+    });
+
+    await expect(service.createCredential({
+      provider: "aws",
+      label: "Missing profile",
+      defaultRegion: "us-west-2",
+      sshUsername: "ubuntu",
+      sshPrivateKeyToken: "44444444-4444-4444-8444-444444444444",
+      profileName: "missing",
+      sshPassphrase: null,
+    })).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/no longer available/u) });
+    expect(keys.consume).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("destroys provider resources before refusing to remove a changed operator configuration", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+    const created = await service.createDeployment(awsDeployment());
+    if (!created.ok) throw new Error(created.error);
+    const filePath = join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`);
+    await writeFile(filePath, "user-modified", { mode: 0o600 });
+    const prepared = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!prepared.ok) throw new Error(prepared.error);
+
+    const result = await service.executeDestroyDeployment({ token: prepared.value.token });
+
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/changed after Cloud Deployment/u) });
+    expect(provider.destroy).toHaveBeenCalledOnce();
+    expect(await readFile(filePath, "utf8")).toBe("user-modified");
+    expect(store.getState().deployments[0]).toMatchObject({ status: "failed", phase: "failed" });
+    service.dispose();
+  });
+
+  it("retains the operator configuration until provider destruction succeeds", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    provider.destroy.mockRejectedValueOnce(new Error("provider teardown failed"));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+    const created = await service.createDeployment(awsDeployment());
+    if (!created.ok) throw new Error(created.error);
+    const filePath = join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`);
+    const firstPlan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!firstPlan.ok) throw new Error(firstPlan.error);
+
+    await expect(service.executeDestroyDeployment({ token: firstPlan.value.token })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/provider teardown failed/u),
+    });
+    await expect(lstat(filePath)).resolves.toMatchObject({ isFile: expect.any(Function) });
+    expect(store.getState().deployments[0]).toMatchObject({
+      operatorConfigFileName: `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`,
+      operatorConfigDigest: created.value.operatorConfigDigest,
+      status: "failed",
+    });
+
+    const retryPlan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!retryPlan.ok) throw new Error(retryPlan.error);
+    await expect(service.executeDestroyDeployment({ token: retryPlan.value.token })).resolves.toMatchObject({
+      ok: true,
+      value: { deployments: [] },
+    });
+    expect(provider.destroy).toHaveBeenCalledTimes(2);
+    await expect(lstat(filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    service.dispose();
+  });
+
+  it("can delete a failed preflight record that never acquired provider resources", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    provider.preflight = vi.fn(async () => { throw new Error("preflight denied"); });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+
+    await expect(service.createDeployment(awsDeployment())).resolves.toMatchObject({ ok: false });
+    expect(store.getState().deployments[0]).toMatchObject({
+      status: "failed",
+      managedAssets: [],
+      runtime: { instanceId: null, securityGroupIds: [] },
+    });
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+
+    await expect(service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+      ok: true,
+      value: { deployments: [] },
+    });
+    expect(provider.destroy).not.toHaveBeenCalled();
+    service.dispose();
+  });
+
+  it("durably journals and can delete an imported AWS key pair after a later create failure", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    provider.create.mockImplementationOnce(async (_input, onMutation) => {
+      await onMutation?.({
+        phase: "key-pair",
+        resources: {
+          keyPair: {
+            id: "key-0123456789abcdef0",
+            name: `sliver-gui-${DEPLOYMENT_ID}`,
+          },
+        },
+      });
+      throw new Error("instance launch interrupted");
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+
+    await expect(service.createDeployment(awsDeployment())).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/instance launch interrupted/u),
+    });
+    expect(store.getState().deployments[0]).toMatchObject({
+      status: "failed",
+      managedAssets: [{
+        resourceType: "ec2-key-pair",
+        resourceId: "key-0123456789abcdef0",
+        displayName: `sliver-gui-${DEPLOYMENT_ID}`,
+        tagged: true,
+      }],
+    });
+    expect(JSON.parse(await readFile(store.filePath, "utf8"))).toEqual(store.getState());
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+
+    await expect(service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+      ok: true,
+      value: { deployments: [] },
+    });
+    expect(provider.destroy).toHaveBeenCalledWith({
+      guid: DEPLOYMENT_ID,
+      name: "Sliver AWS",
+      region: "us-west-2",
+      keyPair: {
+        id: "key-0123456789abcdef0",
+        name: `sliver-gui-${DEPLOYMENT_ID}`,
+      },
+    });
+    service.dispose();
+  });
+
+  it("durably journals and can delete a partially created managed AWS network", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    provider.create.mockImplementationOnce(async (_input, onMutation) => {
+      await onMutation?.({
+        phase: "vpc",
+        resources: { vpcId: "vpc-0123456789abcdef0" },
+      });
+      await onMutation?.({
+        phase: "internet-gateway",
+        resources: {
+          vpcId: "vpc-0123456789abcdef0",
+          internetGatewayId: "igw-0123456789abcdef0",
+        },
+      });
+      throw new Error("managed subnet creation interrupted");
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    const request = awsDeployment();
+
+    await expect(service.createDeployment({
+      ...request,
+      spec: {
+        ...request.spec,
+        vpcId: null,
+        subnetId: null,
+        networkMode: "managed",
+        managedVpcCidr: "10.42.0.0/16",
+        managedSubnetCidr: "10.42.1.0/24",
+      },
+    })).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/managed subnet creation interrupted/u),
+    });
+    expect(store.getState().deployments[0]).toMatchObject({
+      status: "failed",
+      runtime: {
+        vpcId: "vpc-0123456789abcdef0",
+        internetGatewayId: "igw-0123456789abcdef0",
+      },
+      managedAssets: expect.arrayContaining([
+        expect.objectContaining({ resourceType: "ec2-vpc", resourceId: "vpc-0123456789abcdef0" }),
+        expect.objectContaining({
+          resourceType: "ec2-internet-gateway",
+          resourceId: "igw-0123456789abcdef0",
+        }),
+      ]),
+    });
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+
+    await expect(service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({ ok: true });
+    expect(provider.destroy).toHaveBeenCalledWith({
+      guid: DEPLOYMENT_ID,
+      name: "Sliver AWS",
+      region: "us-west-2",
+      managedNetwork: {
+        vpcId: "vpc-0123456789abcdef0",
+        internetGatewayId: "igw-0123456789abcdef0",
+      },
+    });
+    service.dispose();
+  });
+
+  it("never replaces or removes an existing operator configuration on a name collision", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => new FakeAwsProvider(),
+    });
+    const filePath = join(operatorConfigDirectory, `sliver-gui-cloud-${DEPLOYMENT_ID}.cfg`);
+    await mkdir(operatorConfigDirectory, { recursive: true, mode: 0o700 });
+    await writeFile(filePath, "user-owned", { mode: 0o600 });
+
+    const created = await service.createDeployment(awsDeployment());
+
+    expect(created).toMatchObject({ ok: false });
+    expect(await readFile(filePath, "utf8")).toBe("user-owned");
+    expect(store.getState().deployments[0]).toMatchObject({ status: "failed", phase: "failed" });
+    service.dispose();
+  });
+
+  it("provisions, operates, and destroys a GUID-tagged Azure VM with baseline firewall policy", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+      idFactory: () => DESTROY_TOKEN,
+      now: () => NOW.getTime(),
+    });
+
+    const result = await service.createDeployment(azureDeployment());
+    if (!result.ok) throw new Error(result.error);
+
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        provider: "azure",
+        status: "running",
+        phase: "ready",
+        remoteHost: "203.0.113.42",
+        runtime: {
+          resourceGroupName: AZURE_RESOURCE_GROUP,
+          vmId: expect.stringContaining("/virtualMachines/"),
+          networkSecurityGroupId: AZURE_NSG_ID,
+          instanceState: "running",
+        },
+      },
+    });
+    expect(result.value.managedAssets).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceType: "azure-resource-group", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-virtual-network", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-subnet", tagged: false }),
+      expect.objectContaining({ resourceType: "azure-network-security-group", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-public-ip", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-network-interface", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-os-disk", tagged: true }),
+      expect.objectContaining({ resourceType: "azure-virtual-machine", tagged: true }),
+    ]));
+    expect(provider.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        guid: DEPLOYMENT_ID,
+        name: "Sliver Azure",
+        imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+        vmSize: "Standard_B2s",
+        network: {
+          mode: "managed",
+          virtualNetworkCidr: "10.42.0.0/16",
+          subnetCidr: "10.42.1.0/24",
+        },
+        sshPublicKey: expect.stringMatching(/^ssh-rsa /u),
+        firewall: {
+          sshPort: 22,
+          sshSourceCidrs: ["192.0.2.10/32"],
+          operatorPort: 31_337,
+          operatorSourceCidrs: ["198.51.100.0/24"],
+        },
+        allocatePublicIp: true,
+      }),
+      expect.any(Function),
+    );
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      deploymentId: DEPLOYMENT_ID,
+      operatorEndpointHost: "203.0.113.42",
+      ssh: expect.objectContaining({ host: "203.0.113.42", username: "azureuser" }),
+    }));
+
+    const firewallRevision = store.getState().revision;
+    await expect(service.updateFirewall({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: firewallRevision,
+      sshCidrs: ["192.0.2.45/32"],
+      operatorCidrs: ["198.51.100.45/32"],
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        provider: "azure",
+        spec: {
+          sshCidrs: ["192.0.2.45/32"],
+          operatorCidrs: ["198.51.100.45/32"],
+        },
+      },
+    });
+    expect(provider.replaceFirewall).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ guid: DEPLOYMENT_ID, networkSecurityGroupId: AZURE_NSG_ID }),
+      {
+        sshPort: 22,
+        sshSourceCidrs: ["192.0.2.45/32"],
+        operatorPort: 31_337,
+        operatorSourceCidrs: ["198.51.100.45/32"],
+      },
+    );
+
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "stop",
+    })).resolves.toMatchObject({ ok: true, value: { status: "stopped", phase: "stopped" } });
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "start",
+    })).resolves.toMatchObject({ ok: true, value: { status: "running", phase: "ready" } });
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "reboot",
+    })).resolves.toMatchObject({ ok: true, value: { status: "running", phase: "ready" } });
+    expect(provider.stop).toHaveBeenCalledOnce();
+    expect(provider.start).toHaveBeenCalledOnce();
+    expect(provider.reboot).toHaveBeenCalledOnce();
+
+    const plan = service.prepareDestroyDeployment({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+    });
+    if (!plan.ok) throw new Error(plan.error);
+    await expect(service.executeDestroyDeployment({ token: plan.value.token }))
+      .resolves.toMatchObject({ ok: true, value: { deployments: [] } });
+    expect(provider.destroy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      guid: DEPLOYMENT_ID,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      networkSecurityGroupId: AZURE_NSG_ID,
+    }));
+    service.dispose();
+  });
+
+  it("refreshes a requested Azure public IP before using it for SSH and the operator endpoint", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const initial = azureResourceWithoutPublicAddress();
+    provider.create.mockResolvedValue(initial);
+    provider.refresh.mockResolvedValue(azureResource());
+    const provisioner = fakeProvisioner();
+    const refreshDelay = vi.fn(async () => undefined);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+      azurePublicIpRefreshDelay: refreshDelay,
+    });
+
+    await expect(service.createDeployment(azureDeployment())).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: "203.0.113.42",
+        runtime: { publicIpAddress: "203.0.113.42", privateIpAddress: "10.42.1.4" },
+      },
+    });
+    expect(provider.refresh).toHaveBeenCalledExactlyOnceWith(initial);
+    expect(refreshDelay).not.toHaveBeenCalled();
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      operatorEndpointHost: "203.0.113.42",
+      ssh: expect.objectContaining({ host: "203.0.113.42" }),
+    }));
+    service.dispose();
+  });
+
+  it("bounds Azure public IP refreshes and refuses to provision through the private fallback", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const missingPublicAddress = azureResourceWithoutPublicAddress();
+    provider.create.mockResolvedValue(missingPublicAddress);
+    provider.refresh.mockResolvedValue(missingPublicAddress);
+    const provisioner = fakeProvisioner();
+    const refreshDelay = vi.fn(async () => undefined);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+      azurePublicIpRefreshDelay: refreshDelay,
+    });
+
+    await expect(service.createDeployment(azureDeployment())).resolves.toEqual({
+      ok: false,
+      error: expect.stringMatching(/after 7 refresh attempts; refusing private-address fallback/u),
+    });
+    expect(provider.refresh).toHaveBeenCalledTimes(7);
+    expect(refreshDelay).toHaveBeenCalledTimes(6);
+    expect(refreshDelay).toHaveBeenCalledWith(5_000);
+    expect(provisioner.provision).not.toHaveBeenCalled();
+    expect(store.getState().deployments[0]).toMatchObject({
+      status: "failed",
+      phase: "failed",
+      remoteHost: null,
+    });
+    service.dispose();
+  });
+
+  it("preserves private-only Azure provisioning without waiting for a public IP", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    provider.create.mockResolvedValue(azurePrivateResource());
+    const provisioner = fakeProvisioner();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner,
+      azureProviderFactory: () => provider,
+    });
+    const deployment = azureDeployment();
+
+    await expect(service.createDeployment({
+      ...deployment,
+      spec: { ...deployment.spec, usePublicIp: false },
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: "10.42.1.4",
+        runtime: { publicIpAddressId: null, publicIpAddress: null, privateIpAddress: "10.42.1.4" },
+      },
+    });
+    expect(provider.refresh).not.toHaveBeenCalled();
+    expect(provisioner.provision).toHaveBeenCalledWith(expect.objectContaining({
+      operatorEndpointHost: "10.42.1.4",
+      ssh: expect.objectContaining({ host: "10.42.1.4" }),
+    }));
+    service.dispose();
+  });
+
+  it("does not expose a private SSH fallback when a public Azure address disappears on refresh", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    const provider = new FakeAzureProvider();
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      azureProviderFactory: () => provider,
+    });
+    const created = await service.createDeployment(azureDeployment());
+    if (!created.ok) throw new Error(created.error);
+    provider.reboot.mockResolvedValue(azureResourceWithoutPublicAddress());
+
+    await expect(service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: store.getState().revision,
+      action: "reboot",
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        remoteHost: null,
+        runtime: { publicIpAddress: null, privateIpAddress: "10.42.1.4" },
+      },
+    });
+    await expect(service.listSshTargets()).resolves.toMatchObject({
+      ok: true,
+      value: [{
+        provider: "azure",
+        host: "",
+        connectable: false,
+        unavailableReason: "This server does not have an SSH address yet",
+      }],
+    });
+    service.dispose();
+  });
+
+  it("does not mutate a deployment when an optimistic revision is stale", async () => {
+    const { store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage: new XorSafeStorage(),
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => new FakeAwsProvider(),
+    });
+    await service.createDeployment(awsDeployment());
+    const before = store.getState();
+
+    const result = await service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision: 0,
+      action: "stop",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/changed in another window/u) });
+    expect(store.getState()).toBe(before);
+    expect(store.getState().deployments[0]).toMatchObject({ status: "running", phase: "ready" });
+    service.dispose();
+  });
+
+  it("lists only managed servers backed by matching SSH credentials", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unmatched = await store.create({
+      ...azureDeployment(),
+      expectedRevision: store.getState().revision,
+      credentialId: MISSING_CREDENTIAL_ID,
+      name: "Missing SSH key",
+    });
+    if (!unmatched.ok) throw new Error(unmatched.error);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+    });
+
+    const result = await service.listSshTargets();
+
+    expect(result).toEqual({
+      ok: true,
+      value: [{
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver AWS",
+        provider: "aws",
+        host: "203.0.113.20",
+        port: 22,
+        username: "ubuntu",
+        status: "running",
+        connectable: true,
+      }],
+    });
+    if (result.ok) expect(Object.isFrozen(result.value)).toBe(true);
+    service.dispose();
+  });
+
+  it("materializes the current AWS SSH identity through the credential vault without returning key material", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(async () => Object.freeze({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    }));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+
+    const result = await service.materializeSshIdentity(listed.value[0]);
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+        commandPath: "~/.ssh/sliver-gui/sliver-aws",
+      },
+    });
+    expect(materialize).toHaveBeenCalledWith({
+      managedName: "Sliver AWS",
+      deploymentId: DEPLOYMENT_ID,
+      privateKey: TEST_SSH_PRIVATE_KEY,
+      collision: false,
+    });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE KEY");
+    expect(JSON.stringify(result)).not.toContain("secret-cloud-value");
+    service.dispose();
+  });
+
+  it("detects canonical SSH identity name collisions for Azure deployments", async () => {
+    const { safeStorage, store, vault } = await dependencies([
+      DEPLOYMENT_ID,
+      SECOND_DEPLOYMENT_ID,
+    ]);
+    await vault.create(azureCredential());
+    await createRunningAzureDeployment(store);
+    const collision = await store.create({
+      ...azureDeployment(),
+      expectedRevision: store.getState().revision,
+      name: "sliver azure",
+    });
+    if (!collision.ok) throw new Error(collision.error);
+    const identityRoot = join(temporaryDirectory, "home", ".ssh", "sliver-gui");
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: new SshIdentityStore(identityRoot),
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok) throw new Error(listed.error);
+    const target = listed.value.find(({ deploymentId }) => deploymentId === DEPLOYMENT_ID);
+    if (!target) throw new Error("Expected the original managed SSH target");
+
+    const result = await service.materializeSshIdentity(target);
+
+    expect(result).toEqual({
+      ok: true,
+      value: {
+        filePath: join(identityRoot, `sliver-azure--${DEPLOYMENT_ID}`),
+        commandPath: `~/.ssh/sliver-gui/sliver-azure--${DEPLOYMENT_ID}`,
+      },
+    });
+    if (!result.ok) throw new Error(result.error);
+    expect(await readFile(result.value.filePath, "utf8")).toBe(TEST_SSH_PRIVATE_KEY);
+    service.dispose();
+  });
+
+  it("revalidates the managed SSH target after identity materialization", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const pendingIdentity = deferred<MaterializedSshIdentity>();
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(
+      () => pendingIdentity.promise,
+    );
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+    const materializing = service.materializeSshIdentity(listed.value[0]);
+    await vi.waitFor(() => expect(materialize).toHaveBeenCalledOnce());
+    const deployment = store.getState().deployments[0];
+    if (!deployment) throw new Error("Expected a managed SSH deployment");
+    const renamed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...deployment, name: "Renamed while exporting" },
+    });
+    if (!renamed.ok) throw new Error(renamed.error);
+    pendingIdentity.resolve({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    });
+
+    await expect(materializing).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
+    expect(JSON.stringify(await materializing)).not.toContain("PRIVATE KEY");
+    service.dispose();
+  });
+
+  it("does not return an unsuffixed identity when a canonical name collision appears during materialization", async () => {
+    const { safeStorage, store, vault } = await dependencies([
+      DEPLOYMENT_ID,
+      SECOND_DEPLOYMENT_ID,
+    ]);
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const pendingIdentity = deferred<MaterializedSshIdentity>();
+    const materialize = vi.fn<SshIdentityMaterializer["materialize"]>(
+      () => pendingIdentity.promise,
+    );
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      sshIdentityMaterializer: { materialize },
+    });
+    const listed = await service.listSshTargets();
+    if (!listed.ok || !listed.value[0]) throw new Error("Expected a managed SSH target");
+    const materializing = service.materializeSshIdentity(listed.value[0]);
+    await vi.waitFor(() => expect(materialize).toHaveBeenCalledOnce());
+    expect(materialize).toHaveBeenCalledWith(expect.objectContaining({ collision: false }));
+    const collision = await store.create({
+      ...awsDeployment(),
+      expectedRevision: store.getState().revision,
+      name: "SLIVER AWS",
+    });
+    if (!collision.ok) throw new Error(collision.error);
+    pendingIdentity.resolve({
+      filePath: "/Users/operator/.ssh/sliver-gui/sliver-aws",
+      commandPath: "~/.ssh/sliver-gui/sliver-aws",
+    });
+
+    await expect(materializing).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
+    service.dispose();
+  });
+
+  it("requires one-use TOFU approval, pins the fingerprint, and fails closed on a mismatch", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const approvedFingerprint = `SHA256:${"A".repeat(43)}`;
+    const changedFingerprint = `SHA256:${"B".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        approvedFingerprint,
+      ))
+      .mockResolvedValueOnce(runtime)
+      .mockRejectedValueOnce(new SshTerminalStartError("host-key-mismatch", changedFingerprint));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "r".repeat(43),
+      now: () => NOW.getTime(),
+    });
+
+    const first = await service.startSshSession(DEPLOYMENT_ID);
+    expect(first).toEqual({
+      ok: true,
+      value: {
+        token: "r".repeat(43),
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver AWS",
+        host: "203.0.113.20",
+        port: 22,
+        fingerprint: approvedFingerprint,
+        expiresAt: new Date(NOW.getTime() + 5 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).toMatchObject({
+      host: "203.0.113.20",
+      port: 22,
+      username: "ubuntu",
+      privateKey: expect.stringContaining("PRIVATE KEY"),
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).not.toHaveProperty("hostKeySha256");
+    expect(JSON.stringify(first)).not.toContain("PRIVATE KEY");
+
+    const approved = await service.approveSshHostKey("r".repeat(43));
+    expect(approved).toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, host: "203.0.113.20" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      hostKeySha256: approvedFingerprint,
+    });
+    const persisted = JSON.parse(
+      await readFile(join(rootDirectory, "ssh-host-keys.json"), "utf8"),
+    ) as { readonly fingerprints: Readonly<Record<string, string>> };
+    expect(persisted.fingerprints).toEqual({ [DEPLOYMENT_ID]: approvedFingerprint });
+    await expect(service.approveSshHostKey("r".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The SSH host-key review is invalid or expired",
+    });
+
+    const mismatch = await service.startSshSession(DEPLOYMENT_ID);
+    expect(mismatch).toEqual({
+      ok: false,
+      error: "The SSH server host key did not match the trusted fingerprint.",
+    });
+    expect(JSON.stringify(mismatch)).not.toContain("PRIVATE KEY");
+    expect(startSshTerminalRuntime.mock.calls[2]?.[0].ssh).toMatchObject({
+      hostKeySha256: approvedFingerprint,
+    });
+    service.dispose();
+  });
+
+  it("uses the Azure deployment SSH identity through one-use TOFU host-key approval", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(azureCredential());
+    await createRunningAzureDeployment(store);
+    const fingerprint = `SHA256:${"Z".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        fingerprint,
+      ))
+      .mockResolvedValueOnce(runtime);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "z".repeat(43),
+      now: () => NOW.getTime(),
+    });
+
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toEqual({
+      ok: true,
+      value: {
+        token: "z".repeat(43),
+        deploymentId: DEPLOYMENT_ID,
+        name: "Sliver Azure",
+        host: "203.0.113.42",
+        port: 22,
+        fingerprint,
+        expiresAt: new Date(NOW.getTime() + 5 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).toMatchObject({
+      host: "203.0.113.42",
+      port: 22,
+      username: "azureuser",
+      privateKey: expect.stringContaining("PRIVATE KEY"),
+    });
+    expect(startSshTerminalRuntime.mock.calls[0]?.[0].ssh).not.toHaveProperty("hostKeySha256");
+
+    await expect(service.approveSshHostKey("z".repeat(43))).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: {
+          deploymentId: DEPLOYMENT_ID,
+          provider: "azure",
+          name: "Sliver Azure",
+          host: "203.0.113.42",
+          username: "azureuser",
+        },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      host: "203.0.113.42",
+      username: "azureuser",
+      hostKeySha256: fingerprint,
+    });
+    service.dispose();
+  });
+
+  it("keeps a pinned SSH startup valid when an unrelated deployment changes", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unrelated = await createUnrelatedAwsDeployment(store);
+    const fingerprint = `SHA256:${"D".repeat(43)}`;
+    const sshHostKeyStore = await SshHostKeyStore.load(join(rootDirectory, "ssh-host-keys.json"));
+    await sshHostKeyStore.remember(DEPLOYMENT_ID, fingerprint);
+    const pendingRuntime = deferred<ConsolePortRuntime>();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>(() => pendingRuntime.promise);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      sshHostKeyStore,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+    });
+
+    const starting = service.startSshSession(DEPLOYMENT_ID);
+    await vi.waitFor(() => expect(startSshTerminalRuntime).toHaveBeenCalledOnce());
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...unrelated, name: "Renamed unrelated server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+    const runtime = fakeSshTerminalRuntime();
+    pendingRuntime.resolve(runtime);
+
+    await expect(starting).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, name: "Sliver AWS" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledWith(expect.objectContaining({
+      ssh: expect.objectContaining({ hostKeySha256: fingerprint }),
+    }));
+    service.dispose();
+  });
+
+  it("keeps host-key approval valid when an unrelated deployment changes", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const unrelated = await createUnrelatedAwsDeployment(store);
+    const fingerprint = `SHA256:${"E".repeat(43)}`;
+    const runtime = fakeSshTerminalRuntime();
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError("host-key-approval-required", fingerprint))
+      .mockResolvedValueOnce(runtime);
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "u".repeat(43),
+      now: () => NOW.getTime(),
+    });
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toMatchObject({
+      ok: true,
+      value: { token: "u".repeat(43), fingerprint },
+    });
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...unrelated, name: "Renamed unrelated server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+
+    await expect(service.approveSshHostKey("u".repeat(43))).resolves.toMatchObject({
+      ok: true,
+      value: {
+        target: { deploymentId: DEPLOYMENT_ID, name: "Sliver AWS" },
+        runtime,
+      },
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledTimes(2);
+    expect(startSshTerminalRuntime.mock.calls[1]?.[0].ssh).toMatchObject({
+      hostKeySha256: fingerprint,
+    });
+    service.dispose();
+  });
+
+  it("invalidates a host-key review when managed deployment state changes", async () => {
+    const { safeStorage, store, vault } = await dependencies();
+    await vault.create(awsCredential());
+    await createRunningAwsDeployment(store);
+    const startSshTerminalRuntime = vi.fn<CloudSshTerminalStarter>()
+      .mockRejectedValueOnce(new SshTerminalStartError(
+        "host-key-approval-required",
+        `SHA256:${"C".repeat(43)}`,
+      ));
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      provisioner: fakeProvisioner(),
+      startSshTerminalRuntime,
+      opaqueIdFactory: () => "s".repeat(43),
+      now: () => NOW.getTime(),
+    });
+    await expect(service.startSshSession(DEPLOYMENT_ID)).resolves.toMatchObject({
+      ok: true,
+      value: { token: "s".repeat(43) },
+    });
+    const current = store.getState().deployments[0];
+    if (!current) throw new Error("Expected an SSH deployment fixture");
+    const changed = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: { ...current, name: "Renamed managed server" },
+    });
+    if (!changed.ok) throw new Error(changed.error);
+
+    await expect(service.approveSshHostKey("s".repeat(43))).resolves.toEqual({
+      ok: false,
+      error: "The managed SSH server changed. Review the latest server details and try again.",
+    });
+    expect(startSshTerminalRuntime).toHaveBeenCalledOnce();
+    await expect(lstat(join(rootDirectory, "ssh-host-keys.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    service.dispose();
+  });
+
+  it("serializes remote transitions globally before rechecking the shared revision", async () => {
+    const safeStorage = new XorSafeStorage();
+    const ids = [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID];
+    const store = await CloudDeploymentStore.load(rootDirectory, {
+      idFactory: () => ids.shift() ?? DEPLOYMENT_ID,
+      clock: () => NOW,
+    });
+    const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+      idFactory: () => CREDENTIAL_ID,
+      clock: () => NOW,
+    });
+    await vault.create(awsCredential());
+    const provider = new FakeAwsProvider();
+    let releaseFirstStop: (() => void) | undefined;
+    const firstStop = new Promise<void>((resolve) => { releaseFirstStop = resolve; });
+    provider.stop.mockImplementation(async (resource) => {
+      await firstStop;
+      return { ...resource, state: "stopped" as const };
+    });
+    const service = await CloudDeploymentService.create({
+      rootDirectory,
+      operatorConfigDirectory,
+      safeStorage,
+      store,
+      vault,
+      privateKeyCapabilities: fakePrivateKeys(),
+      provisioner: fakeProvisioner(),
+      awsProviderFactory: () => provider,
+    });
+    await service.createDeployment(awsDeployment());
+    await service.createDeployment({
+      ...awsDeployment(),
+      expectedRevision: store.getState().revision,
+      name: "Second Sliver AWS",
+    });
+    const expectedRevision = store.getState().revision;
+
+    const first = service.runLifecycleAction({
+      deploymentId: DEPLOYMENT_ID,
+      expectedRevision,
+      action: "stop",
+    });
+    await vi.waitFor(() => expect(provider.stop).toHaveBeenCalledTimes(1));
+    const second = service.runLifecycleAction({
+      deploymentId: SECOND_DEPLOYMENT_ID,
+      expectedRevision,
+      action: "stop",
+    });
+    await Promise.resolve();
+    expect(provider.stop).toHaveBeenCalledTimes(1);
+    releaseFirstStop?.();
+
+    await expect(first).resolves.toMatchObject({ ok: true });
+    await expect(second).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/changed in another window/u),
+    });
+    expect(provider.stop).toHaveBeenCalledTimes(1);
+    service.dispose();
+  });
+});
+
+describe("CloudDeploymentService instance metadata and provider status refresh", () => {
+  let activeService: CloudDeploymentService | undefined;
+
+  afterEach(() => {
+    activeService?.dispose();
+    activeService = undefined;
+  });
+
+  async function fixture(
+    provider: "aws" | "azure" = "aws",
+    options: Pick<CloudDeploymentServiceOptions, "deploymentRefreshTimeoutMs" | "awsConsoleLogin" | "azureBrowserLogin" | "now"> = {},
+    deploymentIds?: readonly string[],
+  ) {
+    const deps = await dependencies(deploymentIds);
+    const aws = new FakeAwsProvider();
+    const azure = new FakeAzureProvider();
+    const azureConnections: AzureVmProviderConnection[] = [];
+    const provisioner = fakeProvisioner();
+    const credential = awsCredential();
+    const azureInput = provider === "azure" ? azureCredential() : undefined;
+    await deps.vault.create(azureInput ? (options.azureBrowserLogin ? {
+      ...azureInput,
+      secret: { ...azureInput.secret, authentication: "login", loginSession: azureAuthSession("before-login") },
+    } : azureInput) : options.awsConsoleLogin ? {
+      ...credential,
+      secret: {
+        loginSession: authSession("before-login"),
+        sshPrivateKey: credential.secret.sshPrivateKey,
+        sshPassphrase: null,
+      },
+    } : credential);
+    const service = await CloudDeploymentService.create({
+      ...deps,
+      rootDirectory,
+      operatorConfigDirectory,
+      now: () => NOW.getTime(),
+      ...options,
+      provisioner,
+      privateKeyCapabilities: fakePrivateKeys(),
+      awsProviderFactory: () => aws,
+      azureProviderFactory: (connection) => {
+        azureConnections.push(connection);
+        return azure;
+      },
+      awsProfileSource: { list: async () => [], credentialProvider: vi.fn() },
+      azureAccountSource: fakeAzureAccountSource(),
+    });
+    activeService = service;
+    const result = await service.createDeployment(provider === "aws" ? awsDeployment() : azureDeployment());
+    if (!result.ok) throw new Error(result.error);
+    for (const candidate of [aws, azure]) {
+      candidate.create.mockClear();
+      candidate.refresh.mockClear();
+    }
+    provisioner.provision.mockClear();
+    const assertNoMutations = (): void => {
+      for (const candidate of [aws, azure]) {
+        for (const mutation of [candidate.create, candidate.rename, candidate.start, candidate.stop, candidate.reboot,
+          candidate.replaceFirewall, candidate.createFirewallRule, candidate.updateFirewallRule,
+          candidate.deleteFirewallRule, candidate.destroy]) expect(mutation).not.toHaveBeenCalled();
+      }
+      expect(provisioner.provision).not.toHaveBeenCalled();
+    };
+    const update = async (patch: Partial<CloudDeploymentRecord>): Promise<CloudDeploymentRecord> => {
+      const current = deps.store.getState().deployments[0]!;
+      const updated = await deps.store.update({ expectedRevision: deps.store.getState().revision,
+        deployment: { ...current, ...patch } as CloudDeploymentRecord });
+      if (!updated.ok) throw new Error(updated.error);
+      return updated.value.deployment;
+    };
+    return { ...deps, service, aws, azure, azureConnections, assertNoMutations, update };
+  }
+
+  it.each(["aws", "azure"] as const)("persists a %s rename only after the provider succeeds and rejects duplicate work", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    const deployment = before.deployments[0]!;
+    const pending = deferred<void>();
+    const rename = provider === "aws" ? f.aws.rename : f.azure.rename;
+    rename.mockReturnValueOnce(pending.promise);
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+    const input = { deploymentId: deployment.id, expectedRevision: before.revision, name: "Operations server" };
+
+    const result = f.service.renameDeployment(input);
+    await vi.waitFor(() => expect(rename).toHaveBeenCalledTimes(1));
+    expect(rename).toHaveBeenCalledWith(expect.objectContaining({ name: deployment.name }), input.name);
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.renameDeployment(input)).resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    pending.resolve();
+
+    await expect(result).resolves.toMatchObject({ ok: true, value: { ...deployment, name: input.name } });
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      ...deployment, name: input.name, runtime: deployment.runtime, managedAssets: deployment.managedAssets,
+    });
+    expect(f.store.getState().revision).toBe(before.revision + 1);
+    expect(changed.mock.calls.filter(([scope]) => scope === "snapshot")).toHaveLength(1);
+  });
+
+  it.each(["aws", "azure"] as const)("leaves %s state intact and redacts secrets when the provider rejects a rename", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState();
+    const rename = provider === "aws" ? f.aws.rename : f.azure.rename;
+    rename.mockRejectedValueOnce(new Error(`Rename failed: ${TEST_SSH_PRIVATE_KEY}`));
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+
+    const result = await f.service.renameDeployment({
+      deploymentId: before.deployments[0]!.id, expectedRevision: before.revision, name: "Operations server",
+    });
+
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("Rename failed") });
+    expect(JSON.stringify(result)).not.toContain(TEST_SSH_PRIVATE_KEY);
+    expect(JSON.stringify(result)).not.toContain("PRIVATE KEY");
+    expect(f.store.getState()).toEqual(before);
+    expect(changed).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed, stale, busy-state, and missing-credential renames before provider writes", async () => {
+    const f = await fixture();
+    const input = { deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision, name: "Operations server" };
+    await expect(f.service.renameDeployment({ ...input, name: "invalid\nname" })).resolves.toMatchObject({ ok: false });
+    await expect(f.service.renameDeployment({ ...input, expectedRevision: input.expectedRevision - 1 }))
+      .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/changed in another window/u) });
+    for (const status of ["provisioning", "deleting"] as const) {
+      await f.update({ status });
+      await expect(f.service.renameDeployment({ ...input, expectedRevision: f.store.getState().revision }))
+        .resolves.toEqual({ ok: false, error: "The deployment is busy" });
+    }
+    await f.update({ status: "running" });
+    await f.vault.delete(CREDENTIAL_ID);
+    await expect(f.service.renameDeployment({ ...input, expectedRevision: f.store.getState().revision }))
+      .resolves.toMatchObject({ ok: false });
+    expect(f.aws.rename).not.toHaveBeenCalled();
+  });
+
+  it("reports a successful cloud rename separately from a failed local save", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    vi.spyOn(f.store, "update").mockRejectedValueOnce(new Error("local journal unavailable"));
+
+    await expect(f.service.renameDeployment({
+      deploymentId: DEPLOYMENT_ID, expectedRevision: before.revision, name: "Operations server",
+    })).resolves.toEqual({
+      ok: false,
+      error: "The cloud name was updated, but local state could not be saved. Refresh the deployment before retrying.",
+    });
+
+    expect(f.aws.rename).toHaveBeenCalledTimes(1);
+    expect(f.store.getState()).toEqual(before);
+  });
+
+  it.each(["aws", "azure"] as const)("refreshes the observed %s friendly name while keeping resource identity", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState().deployments[0]!;
+    if (provider === "aws") f.aws.refresh.mockResolvedValueOnce({ ...awsResource(), name: "Cloud console name" });
+    else f.azure.refresh.mockResolvedValueOnce({ ...azureResource(), name: "Cloud console name" });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      name: "Cloud console name", runtime: before.runtime, managedAssets: before.managedAssets,
+    });
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("recovers completed %s deployments from legacy authentication read failures", async (provider) => {
+    const f = await fixture(provider);
+    const lastError = provider === "aws"
+      ? "AWS EC2 could not read the managed instance. Refresh the selected AWS CLI profile with `aws login` and try again."
+      : "Azure could not read the managed virtual machine. Use Azure Login to renew this credential, or refresh its Azure CLI sign-in, and try again.";
+    const failed = await f.update({ status: "failed", phase: "failed", lastError });
+
+    const result = await f.service.refreshDeployments();
+
+    expect(result).toMatchObject({ ok: true, value: { refreshErrors: [], state: { deployments: [{
+      status: "running", phase: "ready", lastError: null,
+      operatorConfigFileName: failed.operatorConfigFileName,
+      operatorConfigDigest: failed.operatorConfigDigest,
+      managedAssets: failed.managedAssets,
+    }] } } });
+    f.assertNoMutations();
+  });
+
+  it.each(["provisioning", "termination"])("keeps a genuine %s failure while observing the current VM", async (operation) => {
+    const f = await fixture();
+    const lastError = `The ${operation} operation was interrupted when the application closed. Review the managed assets before retrying termination.`;
+    const failed = await f.update({ status: "failed", phase: "failed", lastError });
+    f.aws.refresh.mockResolvedValue({ ...awsResource(), instanceHealth: "impaired" });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      status: "failed", phase: "failed", lastError,
+      managedAssets: failed.managedAssets,
+      runtime: { instanceHealth: "impaired" },
+    });
+    f.assertNoMutations();
+  });
+
+  it("does not mark an incompletely provisioned running VM ready after a read succeeds", async () => {
+    const f = await fixture();
+    const lastError = "AWS EC2 could not read the managed instance. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again.";
+    await f.update({ status: "failed", phase: "failed", lastError, operatorConfigFileName: null, operatorConfigDigest: null });
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "failed", phase: "failed", lastError });
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("does not change revision or emit changes for unchanged %s observations", async (provider) => {
+    let now = NOW.getTime();
+    const f = await fixture(provider, { now: () => now });
+    await f.service.refreshDeployments();
+    const before = f.store.getState();
+    const changed = vi.fn();
+    f.service.subscribe(changed);
+    now += 60_000;
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({
+      ok: true, value: { state: before, refreshErrors: [] },
+    });
+
+    expect(f.store.getState().revision).toBe(before.revision);
+    expect(changed.mock.calls.filter(([scope]) => scope === "snapshot")).toEqual([]);
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("clears disappeared %s connection addresses while preserving cleanup identity", async (provider) => {
+    const f = await fixture(provider);
+    const before = f.store.getState().deployments[0]!;
+    if (provider === "aws") {
+      const value = { ...awsResource(), state: "terminated" as const, volumeIds: [], networkInterfaceIds: [] };
+      delete value.publicIpAddress;
+      delete value.privateIpAddress;
+      delete value.elasticIp;
+      f.aws.refresh.mockResolvedValue(value);
+    } else {
+      const value = { ...azureResource("deallocated") };
+      delete value.publicIpAddress;
+      delete value.privateIpAddress;
+      f.azure.refresh.mockResolvedValue(value);
+    }
+
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true });
+
+    expect(f.store.getState().deployments[0]).toMatchObject({
+      remoteHost: null,
+      runtime: { publicIpAddress: null, privateIpAddress: null },
+      managedAssets: before.managedAssets,
+    });
+    f.assertNoMutations();
+  });
+
+  it("reports transient read failures separately and clears them after a successful read", async () => {
+    const f = await fixture();
+    const before = f.store.getState();
+    f.aws.refresh.mockRejectedValueOnce(new Error("Unable to read with secret-cloud-value"));
+
+    const failed = await f.service.refreshDeployments();
+
+    expect(failed).toMatchObject({ ok: true, value: { state: before, refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    expect(JSON.stringify(failed)).not.toContain("secret-cloud-value");
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    await expect(f.service.refreshDeployments()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+
+  it("coalesces concurrent refresh calls into one provider read", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const first = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    const second = f.service.refreshDeployments();
+    const third = f.service.refreshDeployments();
+    reading.resolve(awsResource());
+
+    const results = await Promise.all([first, second, third]);
+
+    expect(results.every(({ ok }) => ok)).toBe(true);
+    expect(f.aws.refresh).toHaveBeenCalledOnce();
+    f.assertNoMutations();
+  });
+
+  it("bounds slow reads, aborts their signal, and ignores late results", async () => {
+    const f = await fixture("aws", { deploymentRefreshTimeoutMs: 10 });
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const before = f.store.getState();
+
+    const result = await f.service.refreshDeployments();
+
+    expect(result).toMatchObject({ ok: true, value: { state: before, refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    expect(f.aws.refresh.mock.calls[0]?.[1]?.aborted).toBe(true);
+    reading.resolve({ ...awsResource(), state: "stopped" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(f.store.getState()).toEqual(before);
+    f.assertNoMutations();
+  });
+
+  it("aborts refresh on disposal and does not apply its late response", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const before = f.store.getState();
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+
+    f.service.dispose();
+    expect(f.aws.refresh.mock.calls[0]?.[1]?.aborted).toBe(true);
+    reading.resolve({ ...awsResource(), state: "stopped" });
+    await pending;
+
+    expect(f.store.getState()).toEqual(before);
+    f.assertNoMutations();
+  });
+
+  it("does not let an old running observation overwrite a completed stop action", async () => {
+    const f = await fixture();
+    const reading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation(() => reading.promise);
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    await expect(f.service.runLifecycleAction({ deploymentId: DEPLOYMENT_ID,
+      expectedRevision: f.store.getState().revision, action: "stop" })).resolves.toMatchObject({ ok: true });
+
+    reading.resolve(awsResource());
+    await pending;
+
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "stopped", runtime: { instanceState: "stopped" } });
+  });
+
+  it("reads provider status automatically after successful native reauthentication", async () => {
+    const login = vi.fn(async () => authSession("after-login"));
+    const f = await fixture("aws", { awsConsoleLogin: { login, refresh: vi.fn() } });
+    await f.update({ status: "failed", phase: "failed",
+      lastError: "AWS EC2 could not read the managed instance. Use AWS Login to renew this credential, or refresh its AWS CLI sign-in, and try again." });
+
+    await expect(f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(f.store.getState().deployments[0]).toMatchObject({ status: "running", phase: "ready", lastError: null }));
+    f.assertNoMutations();
+  });
+
+  it.each(["aws", "azure"] as const)("supersedes an old %s read with a fresh read after reauthentication", async (provider) => {
+    const f = await fixture(provider, provider === "aws" ? {
+      awsConsoleLogin: { login: async () => authSession("after-login"), refresh: vi.fn() },
+    } : {
+      azureBrowserLogin: { login: async () => ({ session: azureAuthSession("after-login"), subscriptions: [azureAccount()] }), getToken: vi.fn() },
+    });
+    let oldSignal: AbortSignal | undefined;
+    const waitForAbort = <T,>(_resource: T, signal?: AbortSignal): Promise<never> => {
+      oldSignal = signal;
+      if (!signal) throw new Error("Missing provider abort signal");
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("obsolete provider read")), { once: true });
+      });
+    };
+    if (provider === "aws") {
+      f.aws.refresh.mockImplementationOnce(waitForAbort).mockResolvedValue({ ...awsResource(), state: "stopped" });
+    } else {
+      f.azure.refresh.mockImplementationOnce(waitForAbort).mockResolvedValue(azureResource("deallocated"));
+    }
+    const refresh = provider === "aws" ? f.aws.refresh : f.azure.refresh;
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+
+    const result = provider === "aws"
+      ? await f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })
+      : await f.service.loginAzureCredential({ credentialId: CREDENTIAL_ID });
+    await pending;
+
+    expect(result.ok).toBe(true);
+    expect(oldSignal?.aborted).toBe(true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(f.store.getState().deployments[0]).toMatchObject({ status: "stopped", phase: "stopped", lastError: null });
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+
+  it("persists concurrent observations of different deployments across unrelated store revisions", async () => {
+    const f = await fixture("aws", {}, [DEPLOYMENT_ID, SECOND_DEPLOYMENT_ID]);
+    const secondResource = { ...awsResource(), guid: SECOND_DEPLOYMENT_ID, name: "Second AWS server",
+      instanceId: "i-11111111111111111", publicIpAddress: "203.0.113.21",
+      keyPair: { id: "key-11111111111111111", name: `sliver-gui-${SECOND_DEPLOYMENT_ID}` } };
+    f.aws.create.mockResolvedValueOnce(secondResource);
+    const second = await f.service.createDeployment({ ...awsDeployment(), name: secondResource.name,
+      expectedRevision: f.store.getState().revision });
+    if (!second.ok) throw new Error(second.error);
+    f.aws.create.mockClear();
+    const firstReading = deferred<AwsEc2DeploymentResource>();
+    const secondReading = deferred<AwsEc2DeploymentResource>();
+    f.aws.refresh.mockImplementation((resource) => resource.guid === DEPLOYMENT_ID ? firstReading.promise : secondReading.promise);
+    const beforeRevision = f.store.getState().revision;
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(f.aws.refresh).toHaveBeenCalledTimes(2));
+
+    secondReading.resolve({ ...secondResource, state: "stopped" });
+    await vi.waitFor(() => expect(f.store.getState().deployments.find(({ id }) => id === SECOND_DEPLOYMENT_ID)?.status).toBe("stopped"));
+    firstReading.resolve({ ...awsResource(), state: "stopped" });
+    await pending;
+
+    expect(f.store.getState().revision).toBe(beforeRevision + 2);
+    expect(f.store.getState().deployments.map(({ status }) => status)).toEqual(["stopped", "stopped"]);
+    expect(f.aws.start).not.toHaveBeenCalled();
+    expect(f.aws.stop).not.toHaveBeenCalled();
+    expect(f.aws.destroy).not.toHaveBeenCalled();
+  });
+
+  it("keeps successful login successful when its immediate provider status read fails", async () => {
+    const f = await fixture("aws", { awsConsoleLogin: { login: async () => authSession("after-login"), refresh: vi.fn() } });
+    const before = f.store.getState();
+    f.aws.refresh.mockRejectedValue(new Error("AWS EC2 could not read the managed instance (HTTP 503)."));
+
+    await expect(f.service.loginAwsCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+
+    expect(f.aws.refresh).toHaveBeenCalledOnce();
+    expect(f.store.getState()).toEqual(before);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [{ deploymentId: DEPLOYMENT_ID }] } });
+    f.assertNoMutations();
+  });
+
+  it("does not join obsolete native Azure token work when reauthentication starts a fresh provider read", async () => {
+    const stale = deferred<{ session: AzureBrowserLoginSession; token: string; expiresOnTimestamp: number }>();
+    const freshSession = azureAuthSession("after-login");
+    const getToken = vi.fn<CloudAzureBrowserLogin["getToken"]>()
+      .mockImplementationOnce(() => stale.promise)
+      .mockResolvedValue({ session: freshSession, token: "current-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    const f = await fixture("azure", { azureBrowserLogin: {
+      login: async () => ({ session: freshSession, subscriptions: [azureAccount()] }), getToken,
+    } });
+    f.azure.refresh.mockImplementation(async (_resource, signal) => {
+      if (!signal) throw new Error("Missing provider abort signal");
+      const connection = f.azureConnections.at(-1)!;
+      let onAbort: (() => void) | undefined;
+      const aborted = new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(new Error("Azure provider read aborted"));
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+      try {
+        await Promise.race([connection.credential.getToken("https://management.azure.com/.default"), aborted]);
+        return azureResource();
+      } finally {
+        if (onAbort) signal.removeEventListener("abort", onAbort);
+      }
+    });
+    const pending = f.service.refreshDeployments();
+    await vi.waitFor(() => expect(getToken).toHaveBeenCalledOnce());
+
+    await expect(f.service.loginAzureCredential({ credentialId: CREDENTIAL_ID })).resolves.toMatchObject({ ok: true });
+    await pending;
+
+    expect(getToken).toHaveBeenCalledTimes(2);
+    expect(f.azure.refresh).toHaveBeenCalledTimes(2);
+    stale.resolve({ session: azureAuthSession("obsolete"), token: "obsolete-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await expect(f.vault.withCredential(CREDENTIAL_ID, "azure", (secret) => secret.loginSession?.cache)).resolves.toBe(freshSession.cache);
+    await expect(f.service.getSnapshot()).resolves.toMatchObject({ ok: true, value: { refreshErrors: [] } });
+    f.assertNoMutations();
+  });
+});
+
+async function dependencies(deploymentIds: readonly string[] = [DEPLOYMENT_ID]) {
+  const safeStorage = new XorSafeStorage();
+  let nextDeploymentId = 0;
+  const store = await CloudDeploymentStore.load(rootDirectory, {
+    idFactory: () => deploymentIds[nextDeploymentId++] ?? DEPLOYMENT_ID,
+    clock: () => NOW,
+  });
+  const vault = new CloudCredentialVault(rootDirectory, safeStorage, {
+    idFactory: () => CREDENTIAL_ID,
+    clock: () => NOW,
+  });
+  return { safeStorage, store, vault };
+}
+
+async function createRunningAwsDeployment(store: CloudDeploymentStore): Promise<void> {
+  const created = await store.create({
+    ...awsDeployment(),
+    expectedRevision: store.getState().revision,
+  });
+  if (!created.ok || created.value.deployment.provider !== "aws") {
+    throw new Error(created.ok ? "Expected an AWS deployment fixture" : created.error);
+  }
+  const updated = await store.update({
+    expectedRevision: store.getState().revision,
+    deployment: {
+      ...created.value.deployment,
+      status: "running",
+      phase: "ready",
+      remoteHost: "203.0.113.20",
+      runtime: {
+        ...created.value.deployment.runtime,
+        instanceId: "i-0123456789abcdef0",
+        instanceState: "running",
+        instanceHealth: "ok",
+        systemHealth: "ok",
+        publicIpAddress: "203.0.113.20",
+        privateIpAddress: "10.0.0.20",
+      },
+    },
+  });
+  if (!updated.ok) throw new Error(updated.error);
+}
+
+async function createRunningAzureDeployment(store: CloudDeploymentStore): Promise<void> {
+  const created = await store.create({
+    ...azureDeployment(),
+    expectedRevision: store.getState().revision,
+  });
+  if (!created.ok || created.value.deployment.provider !== "azure") {
+    throw new Error(created.ok ? "Expected an Azure deployment fixture" : created.error);
+  }
+  const resource = azureResource();
+  const updated = await store.update({
+    expectedRevision: store.getState().revision,
+    deployment: {
+      ...created.value.deployment,
+      status: "running",
+      phase: "ready",
+      remoteHost: "203.0.113.42",
+      runtime: {
+        resourceGroupName: AZURE_RESOURCE_GROUP,
+        vmName: `sliver-vm-${DEPLOYMENT_ID}`,
+        vmId: resource.virtualMachineId,
+        instanceState: "running",
+        provisioningState: "Succeeded",
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        networkInterfaceId: resource.networkInterfaceId,
+        osDiskId: resource.osDiskId,
+        publicIpAddressId: resource.publicIpAddressId ?? null,
+        publicIpAddress: "203.0.113.42",
+        privateIpAddress: "10.42.1.4",
+        vnetId: resource.virtualNetworkId,
+        subnetId: resource.subnetId,
+      },
+    },
+  });
+  if (!updated.ok) throw new Error(updated.error);
+}
+
+async function createUnrelatedAwsDeployment(store: CloudDeploymentStore) {
+  const created = await store.create({
+    ...awsDeployment(),
+    expectedRevision: store.getState().revision,
+    name: "Unrelated AWS server",
+  });
+  if (!created.ok) throw new Error(created.error);
+  return created.value.deployment;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function fakeSshTerminalRuntime(): ConsolePortRuntime & { readonly close: ReturnType<typeof vi.fn> } {
+  return {
+    subscribe: vi.fn(() => () => undefined),
+    write: vi.fn(),
+    resize: vi.fn(),
+    pauseOutput: vi.fn(),
+    resumeOutput: vi.fn(),
+    close: vi.fn(async () => undefined),
+  };
+}
+
+function awsCredential(): ResolvedAwsCloudCredentialInput {
+  return {
+    provider: "aws",
+    label: "AWS",
+    defaultRegion: "us-west-2",
+    sshUsername: "ubuntu",
+    secret: {
+      accessKeyId: "AKIAEXAMPLE00000001",
+      secretAccessKey: "secret-cloud-value",
+      sessionToken: null,
+      sshPrivateKey: TEST_SSH_PRIVATE_KEY,
+      sshPassphrase: null,
+    },
+  };
+}
+
+function azureCredential(): ResolvedAzureCloudCredentialInput {
+  return {
+    provider: "azure",
+    label: "Azure CLI",
+    defaultLocation: "eastus",
+    sshUsername: "azureuser",
+    secret: {
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      tenantId: AZURE_TENANT_ID,
+      sshPrivateKey: TEST_SSH_PRIVATE_KEY,
+      sshPassphrase: null,
+    },
+  };
+}
+
+function awsDeployment(useElasticIp = true): CreateAwsCloudDeploymentInput {
+  return {
+    provider: "aws",
+    expectedRevision: 0,
+    credentialId: CREDENTIAL_ID,
+    name: "Sliver AWS",
+    spec: {
+      region: "us-west-2",
+      imageId: "ami-0123456789abcdef0",
+      instanceType: "t3.small",
+      subnetId: "subnet-a0000000000000000",
+      vpcId: "vpc-0123456789abcdef0",
+      networkMode: "existing",
+      managedVpcCidr: null,
+      managedSubnetCidr: null,
+      sshKeyMode: "managed",
+      existingKeyPairName: null,
+      sshUsername: "ubuntu",
+      keyPairName: "managed-by-sliver-gui",
+      operatorName: "operator",
+      sshPort: 22,
+      multiplayerPort: 31_337,
+      volumeSizeGiB: 16,
+      useElasticIp,
+      sshCidrs: ["192.0.2.10/32"],
+      operatorCidrs: ["198.51.100.0/24"],
+    },
+  };
+}
+
+function azureDeployment(): CreateAzureCloudDeploymentInput {
+  return {
+    provider: "azure",
+    expectedRevision: 0,
+    credentialId: CREDENTIAL_ID,
+    name: "Sliver Azure",
+    spec: {
+      location: "eastus",
+      imageReference: "Canonical:ubuntu-24_04-lts:server:latest",
+      vmSize: "Standard_B2s",
+      networkMode: "managed",
+      vnetId: null,
+      subnetId: null,
+      managedVnetCidr: "10.42.0.0/16",
+      managedSubnetCidr: "10.42.1.0/24",
+      sshUsername: "azureuser",
+      operatorName: "operator",
+      sshPort: 22,
+      multiplayerPort: 31_337,
+      osDiskSizeGiB: 30,
+      usePublicIp: true,
+      sshCidrs: ["192.0.2.10/32"],
+      operatorCidrs: ["198.51.100.0/24"],
+    },
+  };
+}
+
+function fakePrivateKeys(): CloudPrivateKeyCapabilities {
+  return {
+    choose: vi.fn(async () => ({ ok: false as const, error: "not used" })),
+    consume: vi.fn(() => ({
+      privateKey: "-----BEGIN OPENSSH PRIVATE KEY-----\nprivate material\n-----END OPENSSH PRIVATE KEY-----",
+      publicKey: "ssh-ed25519 AAAA sliver-gui",
+    })),
+    dispose: vi.fn(),
+  };
+}
+
+function inspectStoredSshKey(secret: { readonly sshPrivateKey: string; readonly sshPassphrase: string | null }) {
+  const parsed = ssh2.utils.parseKey(secret.sshPrivateKey);
+  return {
+    algorithm: parsed instanceof Error ? null : parsed.type,
+    isPrivate: parsed instanceof Error ? false : parsed.isPrivateKey(),
+    passphrase: secret.sshPassphrase,
+  };
+}
+
+async function operatorGenerationFixture(
+  operatorDirectoryClientFactory: NonNullable<
+    CloudDeploymentServiceOptions["operatorDirectoryClientFactory"]
+  >,
+): Promise<{
+  readonly service: CloudDeploymentService;
+  readonly store: CloudDeploymentStore;
+  readonly provisioner: ReturnType<typeof fakeProvisioner>;
+}> {
+  const { safeStorage, store, vault } = await dependencies();
+  await vault.create(awsCredential());
+  const provisioner = fakeProvisioner();
+  const service = await CloudDeploymentService.create({
+    rootDirectory,
+    operatorConfigDirectory,
+    safeStorage,
+    store,
+    vault,
+    privateKeyCapabilities: fakePrivateKeys(),
+    provisioner,
+    operatorDirectoryClientFactory,
+    awsProviderFactory: () => new FakeAwsProvider(),
+  });
+  const created = await service.createDeployment(awsDeployment());
+  if (!created.ok) throw new Error(created.error);
+
+  const deployment = store.getState().deployments.find(({ id }) => id === DEPLOYMENT_ID);
+  if (!deployment?.operatorConfigFileName) throw new Error("Expected a managed operator profile");
+  const staleConfig = Buffer.from(JSON.stringify({
+    operator: deployment.spec.operatorName,
+    // Prove the duplicate lookup replaces stale saved endpoints with current
+    // provider state and never uses the renderer-editable endpoint.
+    lhost: "192.0.2.200",
+    lport: 31_338,
+    ca_certificate: "MANAGED-SLIVER-CA",
+    certificate: "CLIENT-CERTIFICATE",
+    private_key: "CLIENT-PRIVATE-KEY",
+    token: "token",
+  }));
+  try {
+    await writeFile(join(operatorConfigDirectory, deployment.operatorConfigFileName), staleConfig);
+    const updated = await store.update({
+      expectedRevision: store.getState().revision,
+      deployment: {
+        ...deployment,
+        operatorConfigDigest: createHash("sha256").update(staleConfig).digest("hex"),
+      },
+    });
+    if (!updated.ok) throw new Error(updated.error);
+  } finally {
+    staleConfig.fill(0);
+  }
+  return { service, store, provisioner };
+}
+
+function fakeProvisioner(): CloudSliverProvisioner & {
+  provision: ReturnType<typeof vi.fn>;
+  createOperator: ReturnType<typeof vi.fn>;
+} {
+  return {
+    provision: vi.fn(async (input) => {
+      input.onOutput?.({ type: "stage", label: "Installing the Sliver server" });
+      input.onOutput?.({ type: "stdout", chunk: new TextEncoder().encode("sliver-server active\n") });
+      const operatorConfig = Buffer.from(JSON.stringify({
+        operator: input.operatorName ?? `slivergui${input.deploymentId.replaceAll("-", "")}`,
+        lhost: input.operatorEndpointHost,
+        lport: input.multiplayerPort ?? 31_337,
+        ca_certificate: "MANAGED-SLIVER-CA",
+        certificate: "CLIENT-CERTIFICATE",
+        private_key: "CLIENT-PRIVATE-KEY",
+        token: "token",
+      }));
+      return {
+        deploymentId: input.deploymentId,
+        hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        architecture: "amd64" as const,
+        version: "v1.5.42",
+        serverSha256: "a".repeat(64),
+        serviceName: `sliver-gui-${input.deploymentId}.service`,
+        remoteBinaryPath: `/opt/sliver-gui/${input.deploymentId}/sliver-server`,
+        operatorConfig,
+        operatorConfigSha256: createHash("sha256").update(operatorConfig).digest("hex"),
+      };
+    }),
+    createOperator: vi.fn(async (input) => {
+      await input.assertOperatorNameAvailable();
+      const operatorConfig = Buffer.from(JSON.stringify({
+        operator: input.operatorName,
+        lhost: input.operatorEndpointHost,
+        lport: input.multiplayerPort ?? 31_337,
+        ca_certificate: "MANAGED-SLIVER-CA",
+        certificate: "CLIENT-CERTIFICATE",
+        private_key: "CLIENT-PRIVATE-KEY",
+        token: "token",
+      }));
+      return {
+        deploymentId: input.deploymentId,
+        operatorName: input.operatorName,
+        operatorEndpointHost: input.operatorEndpointHost,
+        multiplayerPort: input.multiplayerPort ?? 31_337,
+        permissions: input.permissions,
+        hostKeySha256: input.ssh.hostKeySha256,
+        operatorConfig,
+        operatorConfigSha256: createHash("sha256").update(operatorConfig).digest("hex"),
+        remoteRecoveryPath: `/var/lib/sliver-gui/${input.deploymentId}/operator-export/operator-aaaaaaaaaaaaaaaa.cfg`,
+      };
+    }),
+  };
+}
+
+function fakeOperatorDirectoryClient(
+  names: readonly string[] = [],
+  overrides: Partial<CloudOperatorDirectoryClient> = {},
+): CloudOperatorDirectoryClient & {
+  connect: ReturnType<typeof vi.fn>;
+  getOperators: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+} {
+  return {
+    connect: vi.fn(async () => undefined),
+    getOperators: vi.fn(async () => ({
+      Operators: names.map((Name) => ({ Name })),
+    })),
+    disconnect: vi.fn(async () => undefined),
+    ...overrides,
+  } as CloudOperatorDirectoryClient & {
+    connect: ReturnType<typeof vi.fn>;
+    getOperators: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
+  };
+}
+
+class FakeAwsProvider implements CloudAwsProvider {
+  readonly rename = vi.fn(async (_resource: AwsEc2DeploymentResource, _name: string): Promise<void> => undefined);
+  readonly refresh = vi.fn(async (_resource: AwsEc2DeploymentResource, _signal?: AbortSignal) => awsResource());
+  readonly create = vi.fn(async (
+    _input: Parameters<CloudAwsProvider["create"]>[0],
+    onMutation?: Parameters<CloudAwsProvider["create"]>[1],
+  ) => {
+    const resource = awsResource();
+    const elasticIp = resource.elasticIp;
+    if (!elasticIp) throw new Error("Expected the AWS fixture to include an Elastic IP");
+    await onMutation?.({ phase: "key-pair", resources: { keyPair: resource.keyPair } });
+    await onMutation?.({
+      phase: "security-group",
+      resources: { keyPair: resource.keyPair, securityGroupId: resource.securityGroupId },
+    });
+    await onMutation?.({
+      phase: "instance",
+      resources: {
+        keyPair: resource.keyPair,
+        securityGroupId: resource.securityGroupId,
+        instanceId: resource.instanceId,
+      },
+    });
+    await onMutation?.({
+      phase: "instance-running",
+      resources: {
+        keyPair: resource.keyPair,
+        securityGroupId: resource.securityGroupId,
+        instanceId: resource.instanceId,
+      },
+    });
+    await onMutation?.({
+      phase: "instance-status-ok",
+      resources: {
+        keyPair: resource.keyPair,
+        securityGroupId: resource.securityGroupId,
+        instanceId: resource.instanceId,
+      },
+    });
+    await onMutation?.({
+      phase: "system-status-ok",
+      resources: {
+        keyPair: resource.keyPair,
+        securityGroupId: resource.securityGroupId,
+        instanceId: resource.instanceId,
+      },
+    });
+    await onMutation?.({
+      phase: "elastic-ip",
+      resources: {
+        keyPair: resource.keyPair,
+        securityGroupId: resource.securityGroupId,
+        instanceId: resource.instanceId,
+        elasticIpAllocationId: elasticIp.allocationId,
+        ...(elasticIp.associationId ? { elasticIpAssociationId: elasticIp.associationId } : {}),
+        elasticIpPublicAddress: elasticIp.publicIp,
+      },
+    });
+    return resource;
+  });
+  readonly start = vi.fn(async (_resource: AwsEc2DeploymentResource) => ({
+    ...awsResource(),
+    state: "running" as const,
+  }));
+  readonly stop = vi.fn(async (_resource: AwsEc2DeploymentResource) => ({
+    ...awsResource(),
+    state: "stopped" as const,
+  }));
+  readonly reboot = vi.fn(async (_resource: AwsEc2DeploymentResource) => ({
+    ...awsResource(),
+    state: "running" as const,
+  }));
+  readonly replaceFirewall = vi.fn(async (_resource: AwsEc2DeploymentResource) => awsResource());
+  readonly listFirewallRules = vi.fn(async (_resource: AwsEc2DeploymentResource) => awsFirewallSnapshot());
+  readonly createFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    rule: AwsFirewallRuleSpec,
+  ) => awsFirewallRule(rule));
+  readonly updateFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    _ruleId: string,
+    rule: AwsFirewallRuleSpec,
+  ) => awsFirewallRule(rule));
+  readonly deleteFirewallRule = vi.fn(async (
+    _resource: AwsEc2DeploymentResource,
+    _ruleId: string,
+  ) => undefined);
+  readonly deleteFirewallRuleIfMatches = vi.fn(async (
+    resource: AwsEc2DeploymentResource,
+    ruleId: string,
+    _expected: AwsFirewallRuleSpec,
+  ) => {
+    await this.deleteFirewallRule(resource, ruleId);
+    return true;
+  });
+  readonly destroy = vi.fn(async (_resource?: unknown) => undefined);
+
+  async preflight() {
+    return { region: "us-west-2", availabilityZones: [{}, {}] };
+  }
+
+  async discover() {
+    return {
+      region: "us-west-2",
+      availabilityZones: [{ name: "us-west-2a", state: "available" }],
+      instanceTypes: [{
+        name: "t3.micro",
+        architecture: "x86_64" as const,
+        vCpuCount: 2,
+        memoryMiB: 1024,
+        processor: "Intel or AMD",
+        description: "2 vCPU · 1 GiB memory",
+      }],
+      images: [{
+        id: "ami-0123456789abcdef0",
+        architecture: "x86_64",
+        distribution: "ubuntu" as const,
+        version: "24.04 LTS",
+        sshUsername: "ubuntu",
+      }],
+      vpcs: [{ id: "vpc-0123456789abcdef0", isDefault: true }],
+      subnets: [
+        { id: "subnet-f0000000000000000", vpcId: "vpc-0123456789abcdef0", mapPublicIpOnLaunch: true },
+        { id: "subnet-a0000000000000000", vpcId: "vpc-0123456789abcdef0", mapPublicIpOnLaunch: true },
+      ],
+      keyPairs: [],
+    };
+  }
+}
+
+function awsResource(): AwsEc2DeploymentResource {
+  return {
+    guid: DEPLOYMENT_ID,
+    name: "Sliver AWS",
+    region: "us-west-2",
+    keyPair: {
+      id: "key-0123456789abcdef0",
+      name: `sliver-gui-${DEPLOYMENT_ID}`,
+    },
+    instanceId: "i-0123456789abcdef0",
+    securityGroupId: "sg-0123456789abcdef0",
+    volumeIds: ["vol-0123456789abcdef0"],
+    networkInterfaceIds: ["eni-0123456789abcdef0"],
+    state: "running",
+    instanceHealth: "ok",
+    systemHealth: "ok",
+    availabilityZone: "us-west-2a",
+    privateIpAddress: "10.0.0.20",
+    publicIpAddress: "203.0.113.20",
+    elasticIp: {
+      allocationId: "eipalloc-0123456789abcdef0",
+      associationId: "eipassoc-0123456789abcdef0",
+      publicIp: "203.0.113.20",
+    },
+  };
+}
+
+function awsFirewallRule(
+  rule: AwsFirewallRuleSpec = awsFirewallRuleSpec(),
+  id = FIREWALL_RULE_ID,
+): AwsFirewallRule {
+  return { id, ...rule, managed: true };
+}
+
+function awsFirewallRuleSpec(): AwsFirewallRuleSpec {
+  return {
+    direction: "ingress",
+    protocol: "tcp",
+    fromPort: 8443,
+    toPort: 8443,
+    peerType: "ipv4",
+    peer: "203.0.113.0/24",
+    description: "Operator API",
+  };
+}
+
+function awsFirewallSnapshot(): AwsFirewallSnapshot {
+  return {
+    provider: "aws",
+    securityGroupId: "sg-0123456789abcdef0",
+    securityGroupName: "sliver-gui-managed",
+    vpcId: "vpc-0123456789abcdef0",
+    rules: [awsFirewallRule()],
+  };
+}
+
+function azureResource(
+  instanceState: AzureVmDeploymentResource["instanceState"] = "running",
+): AzureVmDeploymentResource {
+  const virtualNetworkId =
+    `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/virtualNetworks/sliver-vnet-${DEPLOYMENT_ID}`;
+  const subnetId = `${virtualNetworkId}/subnets/sliver-subnet-${DEPLOYMENT_ID}`;
+  return {
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    tenantId: AZURE_TENANT_ID,
+    location: "eastus",
+    guid: DEPLOYMENT_ID,
+    name: "Sliver Azure",
+    resourceGroupId: AZURE_RESOURCE_GROUP_ID,
+    virtualNetworkId,
+    subnetId,
+    managedNetwork: { virtualNetworkId, subnetId },
+    networkSecurityGroupId: AZURE_NSG_ID,
+    publicIpAddressId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/publicIPAddresses/sliver-ip-${DEPLOYMENT_ID}`,
+    networkInterfaceId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Network/networkInterfaces/sliver-nic-${DEPLOYMENT_ID}`,
+    virtualMachineId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Compute/virtualMachines/sliver-vm-${DEPLOYMENT_ID}`,
+    osDiskId:
+      `${AZURE_RESOURCE_GROUP_ID}/providers/Microsoft.Compute/disks/sliver-os-${DEPLOYMENT_ID}`,
+    instanceState,
+    provisioningState: "Succeeded",
+    privateIpAddress: "10.42.1.4",
+    publicIpAddress: "203.0.113.42",
+  };
+}
+
+function azureResourceWithoutPublicAddress(): AzureVmDeploymentResource {
+  const { publicIpAddress, ...resource } = azureResource();
+  void publicIpAddress;
+  return resource;
+}
+
+function azurePrivateResource(): AzureVmDeploymentResource {
+  const { publicIpAddress, publicIpAddressId, ...resource } = azureResource();
+  void publicIpAddress;
+  void publicIpAddressId;
+  return resource;
+}
+
+function azureFirewallRuleSpec(): AzureFirewallRuleSpec {
+  return {
+    name: "operator-api",
+    priority: 1_200,
+    direction: "ingress",
+    access: "allow",
+    protocol: "tcp",
+    sourceAddressPrefixes: ["203.0.113.0/24"],
+    sourcePortRanges: ["*"],
+    destinationAddressPrefixes: ["*"],
+    destinationPortRanges: ["8443"],
+    description: "Operator API",
+  };
+}
+
+function azureFirewallRule(
+  rule: AzureFirewallRuleSpec = azureFirewallRuleSpec(),
+): AzureFirewallRule {
+  return {
+    id: `${AZURE_NSG_ID}/securityRules/${rule.name}`,
+    ...rule,
+    managed: true,
+    isDefault: false,
+    sourceApplicationSecurityGroupIds: [],
+    destinationApplicationSecurityGroupIds: [],
+    editUnsupportedReason: null,
+  };
+}
+
+function azureFirewallSnapshot(): AzureFirewallSnapshot {
+  return {
+    provider: "azure",
+    networkSecurityGroupId: AZURE_NSG_ID,
+    networkSecurityGroupName: `sliver-nsg-${DEPLOYMENT_ID}`,
+    resourceGroupName: AZURE_RESOURCE_GROUP,
+    rules: [azureFirewallRule()],
+  };
+}
+
+class FakeAzureProvider implements CloudAzureProvider {
+  readonly rename = vi.fn(async (_resource: AzureVmDeploymentResource, _name: string): Promise<void> => undefined);
+  readonly create = vi.fn(async (
+    _input: Parameters<CloudAzureProvider["create"]>[0],
+    onMutation?: Parameters<CloudAzureProvider["create"]>[1],
+  ) => {
+    const resource = azureResource();
+    const base = { resourceGroupId: resource.resourceGroupId };
+    const managedNetwork = resource.managedNetwork;
+    const publicIpAddressId = resource.publicIpAddressId;
+    await onMutation?.({ phase: "resource-group", resources: base });
+    await onMutation?.({
+      phase: "virtual-network",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+      },
+    });
+    await onMutation?.({
+      phase: "subnet",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+      },
+    });
+    await onMutation?.({
+      phase: "network-security-group",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+      },
+    });
+    await onMutation?.({
+      phase: "firewall",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+      },
+    });
+    await onMutation?.({
+      phase: "public-ip-address",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+      },
+    });
+    await onMutation?.({
+      phase: "network-interface",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+      },
+    });
+    await onMutation?.({
+      phase: "virtual-machine",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+        virtualMachineId: resource.virtualMachineId,
+      },
+    });
+    await onMutation?.({
+      phase: "os-disk",
+      resources: {
+        ...base,
+        ...(managedNetwork === undefined ? {} : { managedNetwork }),
+        networkSecurityGroupId: resource.networkSecurityGroupId,
+        ...(publicIpAddressId === undefined ? {} : { publicIpAddressId }),
+        networkInterfaceId: resource.networkInterfaceId,
+        virtualMachineId: resource.virtualMachineId,
+        osDiskId: resource.osDiskId,
+      },
+    });
+    return resource;
+  });
+  readonly refresh = vi.fn(async (_resource: AzureVmDeploymentResource, _signal?: AbortSignal) => azureResource());
+  readonly start = vi.fn(async () => azureResource("running"));
+  readonly stop = vi.fn(async () => azureResource("deallocated"));
+  readonly reboot = vi.fn(async () => azureResource("running"));
+  readonly replaceFirewall = vi.fn(async () => azureResource());
+  readonly listFirewallRules = vi.fn(async () => azureFirewallSnapshot());
+  readonly createFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    rule: AzureFirewallRuleSpec,
+  ) => azureFirewallRule(rule));
+  readonly updateFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    _ruleId: string,
+    rule: AzureFirewallRuleSpec,
+  ) => azureFirewallRule(rule));
+  readonly deleteFirewallRule = vi.fn(async (
+    _resource: AzureVmDeploymentResource,
+    _ruleId: string,
+  ) => undefined);
+  readonly deleteFirewallRuleIfMatches = vi.fn(async (
+    resource: AzureVmDeploymentResource,
+    ruleId: string,
+    _expected: AzureFirewallRuleSpec,
+  ) => {
+    await this.deleteFirewallRule(resource, ruleId);
+    return true;
+  });
+  readonly destroy = vi.fn(async () => undefined);
+
+  readonly checkPermissions = vi.fn(async () => {
+    const statuses = new Map(
+      cloudRequiredPermissions("azure").map(({ id }) => [id, "verified" as const]),
+    );
+    return createCloudPermissionEvaluation("azure", statuses);
+  });
+
+  readonly discover = vi.fn(async () => ({
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    tenantId: AZURE_TENANT_ID,
+    location: "eastus",
+    vmSizes: [{
+      name: "Standard_B2s",
+      architecture: "x64" as const,
+      vCpuCount: 2,
+      memoryMiB: 4_096,
+      maxDataDiskCount: 4,
+      osDiskSizeMiB: 1_048_576,
+      premiumIo: true,
+    }],
+    virtualNetworks: [],
+    subnets: [],
+    images: [{
+      id: "Canonical:ubuntu-24_04-lts:server:latest",
+      label: "Ubuntu Server 24.04 LTS (x64)",
+      architecture: "x64" as const,
+      publisher: "Canonical",
+      offer: "ubuntu-24_04-lts",
+      sku: "server",
+      version: "latest" as const,
+      sshUsername: "azureuser" as const,
+    }],
+  }));
+}
+
+function fakeAwsPermissionChecker() {
+  const statuses = new Map<string, "verified" | "missing" | "unverifiable">(
+    cloudRequiredPermissions("aws").map(({ id }) => [id, "verified"]),
+  );
+  statuses.set("ec2:ModifyVpcAttribute", "unverifiable");
+  statuses.set("ec2:ModifySubnetAttribute", "unverifiable");
+  statuses.set("ec2:CreateTags", "unverifiable");
+  return {
+    check: vi.fn(async () => createCloudPermissionEvaluation("aws", statuses)),
+  };
+}
+
+function azureAccount(cloudName = "AzureCloud"): AzureCliAccountSummary {
+  return {
+    subscriptionId: AZURE_SUBSCRIPTION_ID,
+    name: "Test Subscription",
+    tenantId: AZURE_TENANT_ID,
+    homeTenantId: AZURE_TENANT_ID,
+    isDefault: true,
+    cloudName,
+  };
+}
+
+function fakeAzureAccountSource(
+  accounts: readonly AzureCliAccountSummary[] = [azureAccount()],
+): CloudAzureAccountSource {
+  return {
+    list: vi.fn(async () => accounts),
+  };
+}
+
+class XorSafeStorage implements CloudSafeStorageAdapter {
+  isEncryptionAvailable(): boolean {
+    return true;
+  }
+
+  getSelectedStorageBackend(): string {
+    return "keychain";
+  }
+
+  encryptString(plainText: string): Buffer {
+    return xor(Buffer.from(plainText, "utf8"));
+  }
+
+  decryptString(encrypted: Buffer): string {
+    return xor(Buffer.from(encrypted)).toString("utf8");
+  }
+}
+
+function xor(input: Buffer): Buffer {
+  const output = Buffer.alloc(input.length);
+  for (let index = 0; index < input.length; index += 1) output[index] = input[index]! ^ 0xa5;
+  return output;
+}
+
+function nativeAuthInput() {
+  return { provider: "aws" as const, authentication: "login" as const, label: "Browser login", defaultRegion: "us-west-2",
+    sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null };
+}
+
+function authSession(name: string, expires = NOW.getTime() + 900_000): AwsConsoleLoginSession {
+  return { loginSessionArn: "arn:aws:iam::123456789012:root", region: "us-west-2", accessKeyId: "ASIAEXAMPLE00000001",
+    secretAccessKey: `${name}-secret`, sessionToken: `${name}-session`, refreshToken: `${name}-refresh`,
+    privateKey: "-----BEGIN EC PRIVATE KEY-----\nproof-key\n-----END EC PRIVATE KEY-----", expiresAt: new Date(expires).toISOString() };
+}
+
+async function authService(awsConsoleLogin: CloudAwsConsoleLogin, awsProfileSource: CloudAwsProfileSource = {
+  list: async () => [], credentialProvider: async () => { throw new Error("CLI unavailable"); },
+}, options: { now?: () => number } = {}) {
+  const deps = await dependencies();
+  const seen: AwsEc2Credentials[] = [];
+  const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
+    awsConsoleLogin, awsProfileSource, now: options.now ?? (() => NOW.getTime()),
+    awsPermissionCheckerFactory: (connection) => ({ check: async () => {
+      seen.push(typeof connection.credentials === "function" ? await connection.credentials() : connection.credentials);
+      return fakeAwsPermissionChecker().check();
+    } }),
+  });
+  return { ...deps, service, seen };
+}
+
+function authDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+  return { promise, resolve, reject };
+}
+
+function azureAuthSession(name: string): AzureBrowserLoginSession {
+  return { clientId: "04b07795-8ddb-461a-bbee-02f9e1bf7b46", tenantId: AZURE_TENANT_ID,
+    homeAccountId: "home-account", localAccountId: "local-account", username: "operator@example.com",
+    cache: JSON.stringify({ RefreshToken: { account: { secret: `${name}-refresh` } } }) };
+}
+
+function azureNativeInput(loginToken: string) {
+  return { provider: "azure" as const, authentication: "login" as const, loginToken, label: "Azure Login", defaultLocation: "eastus",
+    subscriptionId: AZURE_SUBSCRIPTION_ID, tenantId: AZURE_TENANT_ID, sshUsername: "azureuser", sshPrivateKeyToken: null, sshPassphrase: null };
+}
+
+async function azureAuthService(azureBrowserLogin: CloudAzureBrowserLogin, options: { now?: () => number } = {}) {
+  const deps = await dependencies();
+  const cliGetToken = vi.fn(async () => ({ token: "cli-token", expiresOnTimestamp: NOW.getTime() + 3_600_000 }));
+  const connections: AzureVmProviderConnection[] = [];
+  const azureAccounts = fakeAzureAccountSource();
+  const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
+    azureBrowserLogin, azureAccountSource: azureAccounts, now: options.now ?? (() => NOW.getTime()),
+    azureCliCredentialFactory: () => ({ getToken: cliGetToken }),
+    azureProviderFactory: (connection) => {
+      connections.push(connection);
+      const provider = new FakeAzureProvider();
+      provider.checkPermissions.mockImplementation(async () => {
+        await connection.credential.getToken("https://management.azure.com/.default");
+        return createCloudPermissionEvaluation("azure", new Map(cloudRequiredPermissions("azure").map(({ id }) => [id, "verified" as const])));
+      });
+      return provider;
+    },
+  });
+  return { ...deps, service, azureAccounts, cliGetToken, connections };
+}
+
+function softwareRecord(id: string, deploymentId: string): LocalRedirectorRecord {
+  const when = NOW.toISOString();
+  return {
+    id, deploymentId, recipeId: "caddy", category: "HTTP Redirectors", subcategory: "local",
+    status: "active", publicIp: "203.0.113.20", domains: ["c2.example.test"],
+    publicUrl: "https://c2.example.test", frontendPorts: [80, 443], ingressPortsOwned: [80, 443],
+    listener: { ownership: "managed", kind: "http", host: "127.0.0.1", port: 8000, jobId: 8, domain: "" },
+    serviceName: `sliver-gui-caddy-${id}.service`, createdAt: when, updatedAt: when,
+    lastCheckedAt: when, lastError: null,
+  };
+}
+
+async function softwareLifecycleFixture(providerKind: "aws" | "azure" = "aws") {
+  const deps = await dependencies();
+  await deps.vault.create(providerKind === "aws" ? awsCredential() : azureCredential());
+  const provider = new FakeAwsProvider();
+  const azureProvider = new FakeAzureProvider();
+  const publicIp = providerKind === "aws" ? "203.0.113.20" : "203.0.113.42";
+  const dnsZone: CloudDnsZone = {
+    id: providerKind === "aws" ? "ZEXAMPLE" : `/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Network/dnsZones/example.test`,
+    name: "example.test", provider: providerKind, private: false, recordCount: 0, resourceGroupName: providerKind === "aws" ? null : AZURE_RESOURCE_GROUP,
+  };
+  const dnsRecords: CloudDnsRecord[] = [];
+  const dns = {
+    listZones: vi.fn<CloudDnsProvider["listZones"]>(async () => [dnsZone]),
+    listRecords: vi.fn<CloudDnsProvider["listRecords"]>(async () => [...dnsRecords]),
+    createRecord: vi.fn<CloudDnsProvider["createRecord"]>(async (zoneId, spec) => {
+      const name = spec.name.toLowerCase();
+      dnsRecords.push({ id: `A:${name}`, zoneId, zoneName: dnsZone.name, name, type: "A", ttl: spec.ttl,
+        values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+    }),
+    updateRecord: vi.fn<CloudDnsProvider["updateRecord"]>(async () => undefined),
+    deleteRecord: vi.fn<CloudDnsProvider["deleteRecord"]>(async () => undefined),
+    dispose: vi.fn(),
+  } satisfies CloudDnsProvider;
+  const awsDnsProviderFactory = vi.fn(() => dns);
+  const azureDnsProviderFactory = vi.fn(() => dns);
+  const firewallRules: AwsFirewallRule[] = [awsFirewallRule()];
+  provider.listFirewallRules.mockImplementation(async () => ({ ...awsFirewallSnapshot(), rules: [...firewallRules] }));
+  provider.createFirewallRule.mockImplementation(async (_resource, spec) => {
+    const created = awsFirewallRule(spec, `sgr-managed-${spec.fromPort}`);
+    firewallRules.push(created);
+    return created;
+  });
+  provider.deleteFirewallRuleIfMatches.mockImplementation(async (_resource, ruleId) => {
+    const index = firewallRules.findIndex(({ id }) => id === ruleId);
+    if (index < 0) return false;
+    firewallRules.splice(index, 1);
+    return true;
+  });
+
+  const jobs: Array<{ ID: number; Name: string; Description: string; Protocol: string; Port: number; Domains: string[]; ProfileName: string }> = [];
+  const client = {
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(async () => undefined),
+    getJobs: vi.fn(async () => ({ Active: jobs.map((job) => ({ ...job, Domains: [...job.Domains] })) })),
+    startHTTPListenerWithOptions: vi.fn(async (options: { host: string; port: number }) => {
+      jobs.push({ ID: 8, Name: "http", Description: options.host, Protocol: "tcp", Port: options.port, Domains: [], ProfileName: "" });
+      return { JobID: 8 };
+    }),
+    killJob: vi.fn(async (id: number) => {
+      const index = jobs.findIndex((job) => job.ID === id);
+      if (index < 0) return { ID: id, Success: false };
+      jobs.splice(index, 1);
+      return { ID: id, Success: true };
+    }),
+  };
+  const deployer = {
+    install: vi.fn(async (input: LocalRedirectorInstallInput, _onOutput?: LocalRedirectorOutputHandler) => ({
+      publicUrl: input.domains.length ? `https://${input.domains[0]}` : `http://${input.publicIp}`,
+      frontendPorts: input.domains.length ? [80, 443] : [80],
+    })),
+    verify: vi.fn(async (_input: LocalRedirectorVerifyInput, _onOutput?: LocalRedirectorOutputHandler) => true),
+    remove: vi.fn(async () => undefined),
+    probeLoopbackListener: vi.fn(async () => true),
+    checkFrontendPortsAvailable: vi.fn(async () => true),
+  } satisfies CloudLocalRedirectorDeployer;
+  const resolveDomainAddresses = vi.fn(async (_domain: string) => [publicIp]);
+  const publicDnsPointsToServer = vi.fn(async (_domain: string, _publicIp: string) => true);
+  const softwareStore = await SoftwareDeploymentStore.load(rootDirectory);
+  const service = await CloudDeploymentService.create({
+    ...deps, rootDirectory, operatorConfigDirectory, softwareStore,
+    privateKeyCapabilities: fakePrivateKeys(), provisioner: fakeProvisioner(),
+    awsProviderFactory: () => provider, azureProviderFactory: () => azureProvider,
+    awsDnsProviderFactory, azureDnsProviderFactory,
+    azureCliCredentialFactory: () => ({ getToken: async () => ({ token: "test-token", expiresOnTimestamp: NOW.getTime() + 60_000 }) }),
+    softwareDnsPropagationPollIntervalMs: 1, softwareDnsPropagationTimeoutMs: 30,
+    softwareDeployer: deployer,
+    sliverListenerClientFactory: () => client as unknown as CloudSliverListenerClient,
+    resolveDomainAddresses, publicDnsPointsToServer, now: () => NOW.getTime(),
+  });
+  const created = await service.createDeployment(providerKind === "aws" ? awsDeployment() : azureDeployment());
+  if (!created.ok) throw new Error(created.error);
+  return { ...deps, service, provider, azureProvider, firewallRules, softwareStore, jobs, client, deployer,
+    resolveDomainAddresses, publicDnsPointsToServer, dns, dnsRecords, dnsZone, publicIp,
+    awsDnsProviderFactory, azureDnsProviderFactory };
+}
+
+describe("CloudDeploymentService local redirectors", () => {
+  const ipInput = {
+    deploymentId: DEPLOYMENT_ID, expectedRevision: 0, recipeId: "caddy" as const,
+    publicIp: "203.0.113.20", domains: [], listener: { mode: "create" as const, port: 8000 },
+  };
+
+  it("creates a loopback Sliver listener by default and removes its owned frontend and listener", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector(ipInput);
+      expect(installed).toMatchObject({ ok: true, value: {
+        status: "active", publicUrl: "http://203.0.113.20", frontendPorts: [80], ingressPortsOwned: [80],
+        listener: { ownership: "managed", kind: "http", host: "127.0.0.1", port: 8000, jobId: 8 },
+      } });
+      expect(f.client.startHTTPListenerWithOptions).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        host: "127.0.0.1", port: 8000, domain: "", enforceOTP: true,
+      }));
+      expect(f.deployer.install).toHaveBeenCalledWith(expect.objectContaining({
+        recipeId: "caddy", backendKind: "http", backendPort: 8000, domains: [],
+        ssh: expect.objectContaining({ host: "203.0.113.20", hostKeySha256: expect.stringMatching(/^SHA256:/u) }),
+      }), expect.any(Function));
+      expect(f.provider.createFirewallRule.mock.calls.map(([, rule]) => rule.fromPort)).toEqual([80]);
+      expect(f.service.getSoftwareState()).toMatchObject({ ok: true, value: { records: [{ status: "active" }] } });
+      const state = f.softwareStore.getState();
+      const record = state.records[0];
+      if (!record) throw new Error("Expected installed redirector");
+      const removed = await f.service.removeLocalRedirector({
+        deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision,
+      });
+      expect(removed).toMatchObject({ ok: true, value: { records: [] } });
+      expect(f.deployer.remove).toHaveBeenCalledOnce();
+      expect(f.client.killJob).toHaveBeenCalledExactlyOnceWith(8);
+      expect(f.provider.deleteFirewallRuleIfMatches).toHaveBeenCalledOnce();
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+      expect(f.softwareStore.getState().records).toHaveLength(0);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["caddy", "nginx"] as const)("preflights a %s domain and opens 80/443 for automatic HTTPS", async (recipeId) => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector({
+        ...ipInput, recipeId, publicIp: null, domains: ["c2.example.test"],
+      });
+      expect(installed).toMatchObject({ ok: true, value: {
+        recipeId, publicUrl: "https://c2.example.test", frontendPorts: [80, 443], ingressPortsOwned: [80, 443],
+      } });
+      expect(f.resolveDomainAddresses).toHaveBeenCalledExactlyOnceWith("c2.example.test");
+      expect(f.provider.createFirewallRule.mock.calls.map(([, rule]) => rule.fromPort)).toEqual([80, 443]);
+      expect(f.deployer.install).toHaveBeenCalledWith(expect.objectContaining({ domains: ["c2.example.test"], backendPort: 8000 }), expect.any(Function));
+      expect(f.deployer.verify).toHaveBeenCalledOnce();
+    } finally { f.service.dispose(); }
+  });
+
+  it("creates a missing public A record before SSH and keeps it when the redirector is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    f.publicDnsPointsToServer.mockResolvedValueOnce(false);
+    try {
+      const installed = await f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      });
+      expect(installed).toMatchObject({ ok: true, value: { publicUrl: "https://c2.example.test" } });
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(f.dnsZone.id, {
+        name: "c2.example.test", type: "A", ttl: 300, values: ["203.0.113.20"],
+      });
+      expect(f.publicDnsPointsToServer).toHaveBeenCalledTimes(2);
+      expect(f.resolveDomainAddresses).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toMatchObject([{ name: "c2.example.test", values: ["203.0.113.20"] }]);
+      expect(f.awsDnsProviderFactory).toHaveBeenCalledOnce();
+      expect(f.azureDnsProviderFactory).not.toHaveBeenCalled();
+      if (!installed.ok) throw new Error(installed.error);
+      await expect(f.service.removeLocalRedirector({
+        deploymentId: DEPLOYMENT_ID, installationId: installed.value.id,
+        expectedRevision: f.softwareStore.getState().revision,
+      })).resolves.toMatchObject({ ok: true });
+      expect(f.dns.deleteRecord).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reports DNS, listener, firewall, SSH output, and verification with a resumable session snapshot", async () => {
+    const f = await softwareLifecycleFixture();
+    f.publicDnsPointsToServer.mockResolvedValueOnce(false);
+    f.deployer.install.mockImplementationOnce(async (input, onOutput) => {
+      onOutput?.({ stream: "stdout", chunk: Buffer.from("Installing Caddy\n") });
+      onOutput?.({ stream: "stderr", chunk: Buffer.from("Certificate issuer retrying\n") });
+      return { publicUrl: `https://${input.domains[0]}`, frontendPorts: [80, 443] };
+    });
+    f.deployer.verify.mockImplementationOnce(async (_input, onOutput) => {
+      onOutput?.({ stream: "stdout", chunk: Buffer.from("Endpoint verified\n") });
+      return true;
+    });
+    const events: SoftwareInstallProgress[] = [];
+    let statusAtFinalCallback: string | undefined;
+    try {
+      const result = await f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      }, (event) => {
+        events.push(event);
+        if (event.step === "verify" && event.status === "complete") {
+          const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+          statusAtFinalCallback = snapshot.ok ? snapshot.value?.status : undefined;
+        }
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(statusAtFinalCallback).toBe("complete");
+      expect(events.filter(({ status, output }) => status === "complete" && !output).map(({ step }) => step))
+        .toEqual(["dns", "listener", "firewall", "ssh", "verify"]);
+      expect(events.map(({ message }) => message).filter(Boolean)).toEqual(expect.arrayContaining([
+        "Creating A record for c2.example.test",
+        "Created A record for c2.example.test",
+        "Waiting for public DNS propagation (check 1)",
+      ]));
+      expect(events.filter(({ output }) => output).map(({ step, output }) => ({
+        step, stream: output?.stream, text: Buffer.from(output?.chunk ?? []).toString("utf8"),
+      }))).toEqual([
+        { step: "ssh", stream: "stdout", text: "Installing Caddy\n" },
+        { step: "ssh", stream: "stderr", text: "Certificate issuer retrying\n" },
+        { step: "verify", stream: "stdout", text: "Endpoint verified\n" },
+      ]);
+      const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      expect(snapshot).toMatchObject({ ok: true, value: { recipeId: "caddy", status: "complete", truncated: false, outputSequenceStart: 0 } });
+      if (!snapshot.ok || !snapshot.value) throw new Error("Expected software progress snapshot");
+      expect(snapshot.value.events).toHaveLength(events.length);
+      const firstOutput = snapshot.value.events.find(({ output }) => output)?.output?.chunk;
+      firstOutput?.fill(0);
+      const reread = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      expect(reread.ok && reread.value?.events.find(({ output }) => output)?.output?.chunk[0]).toBe("I".charCodeAt(0));
+    } finally { f.service.dispose(); }
+  });
+
+  it("retains a failed installation's output and marks the snapshot failed before notifying the renderer", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockImplementationOnce(async (_input, onOutput) => {
+      onOutput?.({ stream: "stderr", chunk: Buffer.from("package manager failed\n") });
+      throw new Error("remote installation failed");
+    });
+    const events: SoftwareInstallProgress[] = [];
+    let statusAtFailureCallback: string | undefined;
+    try {
+      const result = await f.service.installLocalRedirector(ipInput, (event) => {
+        events.push(event);
+        if (event.status === "failed") {
+          const snapshot = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+          statusAtFailureCallback = snapshot.ok ? snapshot.value?.status : undefined;
+        }
+      });
+      expect(result).toMatchObject({ ok: false, error: expect.stringContaining("remote installation failed") });
+      expect(statusAtFailureCallback).toBe("failed");
+      expect(events.filter(({ output }) => output).map(({ output }) => Buffer.from(output?.chunk ?? []).toString("utf8")))
+        .toEqual(["package manager failed\n"]);
+      expect(events.at(-1)).toMatchObject({ step: "ssh", status: "failed", message: expect.stringContaining("remote installation failed") });
+      expect(f.service.getSoftwareInstallProgress(DEPLOYMENT_ID)).toMatchObject({
+        ok: true, value: { status: "failed", truncated: false },
+      });
+    } finally { f.service.dispose(); }
+  });
+
+  it("bounds session output while retaining the installation's stage transitions", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockImplementationOnce(async (input, onOutput) => {
+      for (let index = 0; index < 600; index += 1) {
+        onOutput?.({ stream: "stdout", chunk: Buffer.alloc(256, 0x78) });
+      }
+      return { publicUrl: `http://${input.publicIp}`, frontendPorts: [80] };
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({ ok: true });
+      const result = f.service.getSoftwareInstallProgress(DEPLOYMENT_ID);
+      if (!result.ok || !result.value) throw new Error("Expected software progress snapshot");
+      expect(result.value).toMatchObject({ status: "complete", truncated: true });
+      expect(result.value.events.length).toBeLessThanOrEqual(512);
+      const retainedOutput = result.value.events.filter(({ output }) => output);
+      expect(result.value.outputSequenceStart).toBe(600 - retainedOutput.length);
+      expect(retainedOutput.reduce((bytes, { output }) =>
+        bytes + (output?.chunk.byteLength ?? 0), 0)).toBeLessThanOrEqual(128 * 1024);
+      expect(result.value.events.filter(({ status, output }) => status === "complete" && !output).map(({ step }) => step))
+        .toEqual(["dns", "listener", "firewall", "ssh", "verify"]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reuses an exact matching A record on retry after an uncertain DNS create", async () => {
+    const f = await softwareLifecycleFixture();
+    f.dns.createRecord.mockImplementationOnce(async (zoneId, spec) => {
+      f.dnsRecords.push({ id: "A:c2", zoneId, zoneName: f.dnsZone.name, name: "c2.example.test.", type: "A",
+        ttl: spec.ttl, values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+      throw new Error("DNS change outcome is unknown");
+    });
+    const input = { ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] } };
+    try {
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("may remain in Cloud DNS"),
+      });
+      expect(f.softwareStore.getState().records).toEqual([]);
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledTimes(1);
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reuses the first record and creates the second after a partial multi-record failure", async () => {
+    const f = await softwareLifecycleFixture();
+    f.dns.createRecord.mockImplementationOnce(async (zoneId, spec) => {
+      f.dnsRecords.push({ id: "A:c2", zoneId, zoneName: f.dnsZone.name, name: "c2.example.test.", type: "A",
+        ttl: spec.ttl, values: [...spec.values], editable: true, readOnlyReason: null, version: "v1" });
+    }).mockRejectedValueOnce(new Error("cloud DNS response lost"));
+    const input = { ...ipInput, domains: ["c2.example.test", "edge.example.test"],
+      dnsRecords: { zoneId: f.dnsZone.id, names: ["c2", "edge"] } };
+    try {
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("may remain in Cloud DNS"),
+      });
+      expect(f.dnsRecords).toMatchObject([{ name: "c2.example.test." }]);
+      expect(f.softwareStore.getState().records).toEqual([]);
+      await expect(f.service.installLocalRedirector(input)).resolves.toMatchObject({ ok: true });
+      expect(f.dns.createRecord).toHaveBeenCalledTimes(3);
+      expect(f.dns.createRecord.mock.calls[2]).toEqual([f.dnsZone.id, {
+        name: "edge.example.test", type: "A", ttl: 300, values: ["203.0.113.20"],
+      }]);
+      expect(f.dnsRecords).toHaveLength(2);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps requested DNS records and explains this after a downstream SSH install failure", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockRejectedValueOnce(new Error("remote installation failed"));
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("Requested A records remain in Cloud DNS"),
+      });
+      expect(f.dnsRecords).toHaveLength(1);
+      expect(f.softwareStore.getState().records).toMatchObject([{ status: "outcome-unknown" }]);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["A", "CNAME", "AAAA"] as const)("rejects conflicting %s records without remote changes", async (type) => {
+    const f = await softwareLifecycleFixture();
+    f.dnsRecords.push({ id: `existing-${type}`, zoneId: f.dnsZone.id, zoneName: f.dnsZone.name,
+      name: "c2.example.test.", type, ttl: 300, values: [type === "A" ? "198.51.100.8" : "other.example.test."],
+      editable: true, readOnlyReason: null, version: "v1" });
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("conflicting DNS record") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("checks manual domains before creating planned records", async () => {
+    const f = await softwareLifecycleFixture();
+    f.resolveDomainAddresses.mockResolvedValueOnce(["198.51.100.8"]);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["manual.example.test", "c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("manual.example.test must resolve only") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("requires every planned DNS name to be advertised by the redirector", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["other.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("must appear in the redirector's public domains") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+      expect(f.resolveDomainAddresses).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("routes Azure DNS creation through Azure credentials and stops before SSH when propagation fails", async () => {
+    const f = await softwareLifecycleFixture("azure");
+    f.publicDnsPointsToServer.mockResolvedValue(false);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, publicIp: f.publicIp, domains: ["c2.example.test"],
+        dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("remain in Cloud DNS") });
+      expect(f.azureDnsProviderFactory).toHaveBeenCalledOnce();
+      expect(f.awsDnsProviderFactory).not.toHaveBeenCalled();
+      expect(f.dns.createRecord).toHaveBeenCalledExactlyOnceWith(f.dnsZone.id, {
+        name: "c2.example.test", type: "A", ttl: 300, values: ["203.0.113.42"],
+      });
+      expect(f.publicDnsPointsToServer.mock.calls.length).toBeGreaterThan(1);
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.dnsRecords).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it.each(["private", "other-provider"] as const)("rejects a %s DNS zone before any record mutation", async (problem) => {
+    const f = await softwareLifecycleFixture();
+    f.dns.listZones.mockResolvedValue([{ ...f.dnsZone,
+      ...(problem === "private" ? { private: true } : { provider: "azure" as const }),
+    }]);
+    try {
+      await expect(f.service.installLocalRedirector({
+        ...ipInput, domains: ["c2.example.test"], dnsRecords: { zoneId: f.dnsZone.id, names: ["c2"] },
+      })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("public DNS zone") });
+      expect(f.dns.createRecord).not.toHaveBeenCalled();
+    } finally { f.service.dispose(); }
+  });
+
+  it("rejects DNS that does not exclusively resolve to the managed public IP before any listener or firewall mutation", async () => {
+    const f = await softwareLifecycleFixture();
+    f.resolveDomainAddresses.mockResolvedValue(["198.51.100.7"]);
+    try {
+      await expect(f.service.installLocalRedirector({ ...ipInput, domains: ["c2.example.test"] })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("must resolve only"),
+      });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.provider.createFirewallRule).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("lists an existing listener only when SSH confirms loopback and rejects HTTPS backends", async () => {
+    const f = await softwareLifecycleFixture();
+    f.jobs.push({ ID: 12, Name: "http", Description: "", Protocol: "tcp", Port: 8012, Domains: [], ProfileName: "" });
+    f.jobs.push({ ID: 13, Name: "https", Description: "", Protocol: "tcp", Port: 8013, Domains: [], ProfileName: "" });
+    f.deployer.probeLoopbackListener.mockResolvedValue(false);
+    try {
+      const listed = await f.service.listSoftwareListeners({ deploymentId: DEPLOYMENT_ID });
+      expect(listed).toMatchObject({ ok: true, value: [
+        { jobId: 12, kind: "http", eligible: false, reason: expect.stringContaining("127.0.0.1") },
+        { jobId: 13, kind: "https", eligible: false, reason: expect.stringContaining("certificate trust") },
+      ] });
+      await expect(f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 12 } })).resolves.toMatchObject({ ok: false });
+      await expect(f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 13 } })).resolves.toMatchObject({ ok: false });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.deployer.install).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps an adopted loopback listener running when its redirector is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    f.jobs.push({ ID: 12, Name: "http", Description: "", Protocol: "tcp", Port: 8012, Domains: [], ProfileName: "" });
+    try {
+      const installed = await f.service.installLocalRedirector({ ...ipInput, listener: { mode: "existing", jobId: 12 } });
+      expect(installed).toMatchObject({ ok: true, value: { listener: { ownership: "existing", port: 8012, jobId: 12 } } });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      const state = f.softwareStore.getState();
+      const record = state.records[0];
+      if (!record) throw new Error("Expected installed redirector");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision })).resolves.toMatchObject({ ok: true });
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.jobs).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("keeps uncertain failed installs in state so removal can clean their listener and ingress", async () => {
+    const f = await softwareLifecycleFixture();
+    f.deployer.install.mockRejectedValue(new Error("remote installation failed"));
+    try {
+      const failed = await f.service.installLocalRedirector(ipInput);
+      expect(failed).toMatchObject({ ok: false, error: expect.stringContaining("remote installation failed") });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", ingressPortsOwned: [80], listener: { ownership: "managed", jobId: 8 } }]);
+      expect(state.records[0]?.lastError).toContain("remote installation failed");
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      const removed = await f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id, expectedRevision: state.revision });
+      expect(removed).toMatchObject({ ok: true, value: { records: [] } });
+      expect(f.deployer.remove).toHaveBeenCalledOnce();
+      expect(f.client.killJob).toHaveBeenCalledExactlyOnceWith(8);
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+    } finally { f.service.dispose(); }
+  });
+
+  it("does not start a Sliver listener if the first durable software write fails", async () => {
+    const f = await softwareLifecycleFixture();
+    const put = vi.spyOn(f.softwareStore, "put").mockRejectedValueOnce(new Error("disk full"));
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("disk full"),
+      });
+      expect(f.client.startHTTPListenerWithOptions).not.toHaveBeenCalled();
+      expect(f.provider.createFirewallRule).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { put.mockRestore(); f.service.dispose(); }
+  });
+
+  it("retains an unconfirmed listener intent when the Sliver start response is lost", async () => {
+    const f = await softwareLifecycleFixture();
+    f.client.startHTTPListenerWithOptions.mockImplementation(async (options) => {
+      f.jobs.push({ ID: 88, Name: "http", Description: options.host, Protocol: "tcp", Port: options.port,
+        Domains: [], ProfileName: "" });
+      throw new Error("start response lost");
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("start response lost"),
+      });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", listener: { ownership: "managed", port: 8000, jobId: 0 } }]);
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: state.revision })).resolves.toMatchObject({
+        ok: false, error: expect.stringContaining("unconfirmed job ID"),
+      });
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      f.jobs.splice(0);
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: f.softwareStore.getState().revision })).resolves.toMatchObject({ ok: true });
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("records a firewall port before an uncertain create so removal can reconcile it", async () => {
+    const f = await softwareLifecycleFixture();
+    f.provider.listFirewallRules
+      .mockImplementationOnce(async () => ({ ...awsFirewallSnapshot(), rules: [...f.firewallRules] }))
+      .mockRejectedValueOnce(new Error("reconciliation read failed"));
+    f.provider.createFirewallRule.mockImplementationOnce(async (_resource, spec) => {
+      f.firewallRules.push(awsFirewallRule(spec, `sgr-managed-${spec.fromPort}`));
+      throw new Error("firewall response lost");
+    });
+    try {
+      await expect(f.service.installLocalRedirector(ipInput)).resolves.toMatchObject({
+        ok: false,
+      });
+      const state = f.softwareStore.getState();
+      expect(state.records).toMatchObject([{ status: "outcome-unknown", ingressPortsOwned: [80] }]);
+      const record = state.records[0];
+      if (!record) throw new Error("Expected recovery record");
+      await expect(f.service.removeLocalRedirector({ deploymentId: DEPLOYMENT_ID, installationId: record.id,
+        expectedRevision: state.revision })).resolves.toMatchObject({ ok: true });
+      expect(f.firewallRules.map(({ fromPort }) => fromPort)).not.toContain(80);
+    } finally { f.service.dispose(); }
+  });
+
+  it("exposes the saved redirector in Overview and blocks server termination until it is removed", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      const installed = await f.service.installLocalRedirector(ipInput);
+      if (!installed.ok) throw new Error(installed.error);
+      const deployment = f.store.getState().deployments.find(({ id }) => id === DEPLOYMENT_ID);
+      if (!deployment?.operatorConfigDigest) throw new Error("Expected managed operator profile");
+      expect(f.service.resolveManagedServer(deployment.operatorConfigDigest)).toMatchObject({
+        deploymentId: DEPLOYMENT_ID,
+        overview: { redirectors: [{
+          id: installed.value.id, recipeId: "caddy", publicUrl: "http://203.0.113.20",
+          listener: { host: "127.0.0.1", jobId: 8 },
+        }] },
+      });
+      expect(f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      })).toMatchObject({ ok: false, error: expect.stringContaining("Remove managed software") });
+    } finally { f.service.dispose(); }
+  });
+});

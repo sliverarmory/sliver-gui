@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "ghostty-web",
+    "version": "0.4.0",
+    "license": "MIT",
+    "repository": "https://github.com/coder/ghostty-web",
+    "sourceCommit": "9e4e126d89ac3537d2b2ebec075849851566de9f",
+    "npmIntegrity": "sha512-0puDBik2qapbD/QQBW9o5ZHfXnZBqZWx/ctBiVtKZ6ZLds4NYb+wZuw1cRLXZk9zYovIQ908z3rvFhexAvc5Hg=="
+  },
+  "upstreamGhostty": {
+    "repository": "https://github.com/ghostty-org/ghostty",
+    "submoduleCommit": "5714ed07a1012573261b7b7e3ed2add9c1504496"
+  },
+  "runtime": {
+    "path": "node_modules/ghostty-web/ghostty-vt.wasm",
+    "bytes": 423045,
+    "sha256": "d6f0326f1874ad2ce9f289e3a4a0c5f3507d4cb38d8747e4b287def470a0c60a"
+  },
+  "integrationReview": {
+    "rendererFetch": false,
+    "perTerminalWasmInstance": true,
+    "connectSrc": "none",
+    "workerSrc": "none",
+    "wasmCompilationCsp": "wasm-unsafe-eval",
+    "hostEffects": "OSC and string controls are filtered; URL activation is denied; title, bell, notification, download, and clipboard callbacks are not connected to terminal output"
+  }
+}

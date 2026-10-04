@@ -1,0 +1,117 @@
+appId: io.sliver.client.gui
+productName: Sliver GUI
+asar: true
+npmRebuild: false
+beforePack: scripts/stageNodePtyForElectron.mjs
+afterPack: scripts/afterPack.mjs
+directories:
+  output: release
+publish:
+  provider: github
+  owner: sliverarmory
+  repo: sliver-gui
+files:
+  - dist/**
+  - "!dist/**/*.map"
+  - "!node_modules/**/*.map"
+  - "!node_modules/abort-controller-x/src/**/*.test.*"
+  - package.json
+  - LICENSE
+  - LICENSES/LICENSING.md
+  - LICENSES/**
+  - THIRD_PARTY_NOTICES.md
+  - node_modules/ghostty-web/LICENSE
+  - node_modules/ghostty-web/package.json
+  - node_modules/ghostty-web/ghostty-vt.wasm
+  - node_modules/node-pty/LICENSE
+  - node_modules/node-pty/package.json
+  - node_modules/node-pty/lib/**/*.js
+  - "!node_modules/node-pty/lib/**/*.test.js"
+  - node_modules/node-pty/build/Release/**
+  - "!node_modules/node-pty/src/**"
+  - "!node_modules/node-pty/scripts/**"
+  - "!node_modules/node-pty/deps/**"
+  - "!node_modules/node-pty/prebuilds/**"
+  - "!node_modules/node-pty/typings/**"
+  - "!node_modules/node-pty/node-addon-api/**"
+  - "!node_modules/node-pty/binding.gyp"
+  - node_modules/sliver-script/LICENSE
+  - node_modules/sliver-script/package.json
+  - node_modules/sliver-script/integration.lock.json
+  - node_modules/sliver-script/protobuf.lock.json
+  - node_modules/sliver-script/protobuf.sh
+  - node_modules/sliver-script/tsconfig.json
+  - node_modules/sliver-script/scripts/**
+  - node_modules/sliver-script/src/**
+  - protocol/sliver-baseline.json
+  - protocol/sliver-script-provenance.json
+  - protocol/ghostty-web-provenance.json
+  - protocol/terminal-fonts-provenance.json
+  - docs/operator-parity.generated.json
+  - docs/operator-parity.annotations.json
+  - docs/operator-parity.schema.json
+  - docs/operator-parity.md
+  - docs/adr/0001-platform-support.md
+  - docs/rpc-message-budgets.md
+asarUnpack:
+  - node_modules/node-pty/build/Release/**
+extraResources:
+  - from: build
+    to: app-icons
+    filter:
+      - icon1a-dark.png
+      - icon1a-light.png
+      - passion.png
+  - from: build/about-icon.png
+    to: sliver-desktop.png
+  - from: LICENSES
+    to: licenses
+  - from: THIRD_PARTY_NOTICES.md
+    to: licenses/THIRD_PARTY_NOTICES.md
+  - from: dist/THIRD_PARTY_LICENSES.txt
+    to: licenses/THIRD_PARTY_LICENSES.txt
+  - from: native/sliver-console
+    to: sliver-console
+    filter:
+      - sliver-client
+      - sliver-client.exe
+      - provenance.json
+      - LICENSE
+  - from: protocol/sliver-console-provenance.json
+    to: sliver-console/source-provenance.json
+  - from: protocol/sliver-console-overlay
+    to: sliver-console/source-overlay
+    filter:
+      - "**/*.go"
+extraMetadata:
+  main: dist/main/index.js
+mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  notarize: true
+  icon: build/icon1a-dark.png
+  artifactName: sliver-gui-${version}-macos-${arch}.${ext}
+  target:
+    - dmg
+    - zip
+win:
+  icon: build/icon1a-dark.png
+  artifactName: sliver-gui-${version}-windows-${arch}.${ext}
+  target:
+    - nsis
+    - portable
+linux:
+  category: Development
+  maintainer: Sliver Armory <sliverarmory@users.noreply.github.com>
+  icon: build/icon1a-dark.png
+  artifactName: sliver-gui-${version}-linux-${arch}.${ext}
+  target:
+    - AppImage
+    - deb
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: sliver-gui-${version}-windows-${arch}-setup.${ext}
+portable:
+  artifactName: sliver-gui-${version}-windows-${arch}-portable.${ext}
