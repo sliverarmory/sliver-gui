@@ -82,6 +82,31 @@ describe("Monaco strict CSP styles", () => {
     expect(line.querySelector("script")).toBeNull();
   });
 
+  it("restores fullwidth, injected-text, and SVG layout declarations through CSSOM", () => {
+    const fragment = createMonacoMarkupFragment(
+      '<div data-monaco-style="width:120px">'
+      + '<span class="mtkfullwidth" data-monaco-style="width:16px">字</span>'
+      + '<span data-monaco-style="display:inline-block;box-sizing:border-box;white-space:nowrap;width:2em;"></span>'
+      + '<svg data-monaco-style="bottom:0;position:absolute;width:120px;height:20px" viewBox="0 0 120 20" xmlns="http://www.w3.org/2000/svg"><path d="M 0 0 L 4 4 Z" /></svg>'
+      + '</div>',
+    );
+    const line = fragment.firstElementChild as HTMLElement;
+    const fullwidth = line.children[0] as HTMLElement;
+    const injected = line.children[1] as HTMLElement;
+    const svg = line.children[2] as SVGElement;
+    expect(line.style.width).toBe("120px");
+    expect(fullwidth.textContent).toBe("字");
+    expect(fullwidth.style.width).toBe("16px");
+    expect(injected.style.width).toBe("2em");
+    expect(injected.style.display).toBe("inline-block");
+    expect(injected.style.boxSizing).toBe("border-box");
+    expect(injected.style.whiteSpace).toBe("nowrap");
+    expect(svg.style.position).toBe("absolute");
+    expect(svg.style.height).toBe("20px");
+    expect(svg.querySelector("path")?.getAttribute("d")).toBe("M 0 0 L 4 4 Z");
+    expect(fragment.querySelector("[data-monaco-style]")).toBeNull();
+  });
+
   it.each(Object.keys(MONACO_CSP_SOURCE_HASHES))("adapts the exact pinned Monaco source at %s", (suffix) => {
     const path = resolve(`node_modules/monaco-editor/esm/vs/${suffix}`);
     const source = readFileSync(path, "utf8");
@@ -92,6 +117,8 @@ describe("Monaco strict CSP styles", () => {
     expect(result).toEqual(expect.objectContaining({ code: expect.stringContaining("createMonacoStyleElement") }));
     if (suffix.includes("domStylesheets") || suffix.includes("contextview")) {
       expect((result as { code: string }).code).not.toContain("document.createElement('style')");
+    } else {
+      expect((result as { code: string }).code).not.toMatch(/(?<!data-monaco-)style="/);
     }
     expect(() => transform.call(context as never, "changed upstream source", path)).toThrow("Monaco's stylesheet source changed");
     expect(transform.call(context as never, source, "/some-other-package/domStylesheets.js")).toBeNull();

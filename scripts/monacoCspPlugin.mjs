@@ -3,24 +3,24 @@ import { createHash } from "node:crypto";
 
 // Monaco's generated layout markup is trusted package code, but its original
 // inline style attributes are incompatible with strict CSP. Guard every source
-// seam by its pinned 0.56.0 contents before adapting those attribute emitters.
+// seam by its pinned 0.57.0 contents before adapting those attribute emitters.
 export const MONACO_CSP_SOURCE_HASHES = {
   "base/browser/domStylesheets.js": "d75d479eba46e53fe9c230958a9fdafc871218d6879c79f95ba4a2a5aed760c5",
-  "base/browser/ui/contextview/contextview.js": "02fa681986193a16bf184f511bfb8528f135b9d2c73877ce18b8deb45ac2ae38",
-  "editor/browser/view/viewLayer.js": "47df5b51f88619a7ed310087703a986ad39fee79108322369a2cb9427af68370",
-  "editor/browser/view/viewOverlays.js": "02d1e4769506d0778716f75cbafc9641242fd52cba08213aea77b297971960bb",
-  "editor/browser/view/domLineBreaksComputer.js": "52cb9e5b400a7a317d695a1bc59017fc5e1e5e4faab7b0a7046a432662d03bfb",
-  "editor/browser/widget/diffEditor/components/diffEditorViewZones/renderLines.js": "27ad6e124e1dc70c868062f92a8fcb1f32b8d5d9a6904d3f7546597b74e12a15",
+  "base/browser/ui/contextview/contextview.js": "db02377f0d7ae080d6bea102bcb52a8b81eb8630b31885e7cfbe51c3784916a0",
+  "editor/browser/view/viewLayer.js": "c0ce32a0030014328b6f9045e96a0163ae85bda0317c3db2e4e32c881e54e485",
+  "editor/browser/view/viewOverlays.js": "15a3fdf4481cdd3ceef42894c642ff2a067ac3c5fce3cf2f94488248feb078c5",
+  "editor/browser/view/domLineBreaksComputer.js": "2e3dd59bce1534d2201eec7686f789dd4d6713dfdb4b5bb9e725c788f47c9010",
+  "editor/browser/widget/diffEditor/components/diffEditorViewZones/renderLines.js": "1a9d5eb1e7a0937208f811c36dc502d8b69cafa16bcd97c7bacc808854abd518",
   "editor/standalone/browser/colorizer.js": "42bc7a97dabddd0c27ebc90dbdd35ebcda04733d2547c190c7992aa1510b27e7",
-  "editor/common/viewLayout/viewLineRenderer.js": "91f068e663d6ade4d62a4cd7a5aff9e03fbcdeb3e858cbdbd8246985e9e5eb52",
+  "editor/common/viewLayout/viewLineRenderer.js": "cef419ca552fab3310ebb8556cf8b7ca32c4beaacab2fe7d82836256eb7b7908",
   "editor/browser/viewParts/marginDecorations/marginDecorations.js": "2a5d690a6f0c53a51c68cf21ca7d0879c5c8c7417bfd9c28de05dd31d8470c53",
-  "editor/browser/viewParts/currentLineHighlight/currentLineHighlight.js": "bf81f14a1ac9343b1f3c0f81ff1a6ae692fdc9757291268d1ee2d07f410748f4",
+  "editor/browser/viewParts/currentLineHighlight/currentLineHighlight.js": "64dae706f05f8306ad503b8f39fad58369f54d3739bd18216b9974fbc1c21e95",
   "editor/browser/viewParts/selections/selections.js": "9de809cad373c5b339ba174c42124e9402ce668ce9faebe83a7825fbaca69a00",
-  "editor/browser/viewParts/lineNumbers/lineNumbers.js": "1ec7e3be24743bcc7a4930d6bcd36eb7434bfb79ce1441bf76fb4748081aea13",
-  "editor/browser/viewParts/viewLines/viewLine.js": "1483a04e95f9963797abd5425d63fea662295a1f8642e617703c4d35d270fcfd",
-  "editor/browser/viewParts/indentGuides/indentGuides.js": "603452d331348a12ee97999abeddcba1ed25c4a6b7815e2c81483f07c0f2815f",
-  "editor/browser/viewParts/whitespace/whitespace.js": "37975d394550244aa90647beb8e9f098beadf67e83f019ec34550724b51c70dd",
-  "editor/browser/viewParts/linesDecorations/linesDecorations.js": "8760dd3f7519acaa8f1e5ed263be4231c53703e0be324477a27c23b681f5c3c5",
+  "editor/browser/viewParts/lineNumbers/lineNumbers.js": "8cca6be5800e6b290b9a437eddd5be800b6db6f5fadcbf60b6e177edaf4ea1f4",
+  "editor/browser/viewParts/viewLines/viewLine.js": "1877fdcbd8d4b6838767763ee7d9b0e30bb7d24cc8877008f5b5bc378b02b72d",
+  "editor/browser/viewParts/indentGuides/indentGuides.js": "df4076613b97998a0f07e582641d1874cce4bda5eaa185c54db1ca1b2259d462",
+  "editor/browser/viewParts/whitespace/whitespace.js": "b6c1f88a038bfa6b4c2fe5f315aa94ecf1b4439fe79c7fe78b28fb9ba403c134",
+  "editor/browser/viewParts/linesDecorations/linesDecorations.js": "a4766e1c30db6764f535ee3913998a8126f9e6c2e1f9f7949e5f2154f3ca7979",
   "editor/browser/viewParts/decorations/decorations.js": "b843de573e3bb03654e552a85c8b8420c5984fa3944a568cd8612d0e3653f4dd",
 };
 
@@ -35,7 +35,7 @@ const SHADOW_STYLESHEET_CREATION = `                const style = document.creat
                 this.shadowRoot.appendChild(style);`;
 
 /**
- * Keep Monaco 0.56's trusted dynamic styles compatible with the existing CSP.
+ * Keep Monaco 0.57's trusted dynamic styles compatible with the existing CSP.
  * @returns {import("vite").Plugin}
  */
 export function monacoCspPlugin() {

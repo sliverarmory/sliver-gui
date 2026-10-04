@@ -194,7 +194,7 @@ export function registerSshIpcHandlers(
       if (!result.ok) return result;
       requireCurrentSshSender(sshSender, exactRendererUrl, authorizeWindow);
       try {
-        clipboard.writeText(result.value);
+        await clipboard.writeText(result.value);
         return { ok: true as const };
       } catch {
         return { ok: false as const, error: "The SSH command could not be copied" };

@@ -93,7 +93,7 @@ test("Armory shares local console packages through an isolated native window", {
       const state = globalThis as unknown as { __armoryClipboardWrites?: string[]; __armoryExternalUrls?: string[] };
       state.__armoryClipboardWrites = [];
       state.__armoryExternalUrls = [];
-      clipboard.writeText = (text) => { state.__armoryClipboardWrites?.push(text); };
+      clipboard.writeText = async (text) => { state.__armoryClipboardWrites?.push(text); };
       shell.openExternal = async (url) => { state.__armoryExternalUrls?.push(url); };
     });
     const armoryUrl = armory.url();

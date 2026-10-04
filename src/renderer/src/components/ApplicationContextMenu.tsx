@@ -353,7 +353,8 @@ export function ApplicationContextMenu({
         className="pointer-events-none fixed left-0 top-0 -z-10 size-px overflow-hidden opacity-0"
       >
         <ContextMenu open={isOpen} onOpenChange={setOpen}>
-          <ContextMenu.Trigger className="size-px">
+          {/* HeroUI labels the menu and its popover from this synthetic trigger. */}
+          <ContextMenu.Trigger aria-label="Application context menu" className="size-px">
             <span ref={triggerTargetRef} className="block size-px" />
           </ContextMenu.Trigger>
           <ContextMenu.Popover

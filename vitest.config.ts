@@ -14,6 +14,9 @@ export default defineConfig({
     },
   },
   test: {
+    // Preload fixtures record bridge registration once when their module loads.
+    // Preserve those calls across tests; individual suites reset mutable mocks.
+    clearMocks: false,
     include: ["src/**/*.test.{ts,tsx}", "src/**/*.spec.{ts,tsx}"],
     environment: "jsdom",
     setupFiles: ["src/tests/setup.ts"],

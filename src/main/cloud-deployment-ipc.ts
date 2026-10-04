@@ -229,7 +229,7 @@ export function registerCloudDeploymentIpcHandlers(
         return { ok: false, error: "No instance ID is available for this deployment." };
       }
       requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
-      clipboard.writeText(deployment.runtime.instanceId);
+      await clipboard.writeText(deployment.runtime.instanceId);
       return { ok: true };
     },
   );
@@ -247,7 +247,7 @@ export function registerCloudDeploymentIpcHandlers(
         : deployment?.runtime.privateIpAddress;
       if (!address) return { ok: false, error: `No ${input.kind} IP address is available for this deployment.` };
       requireCurrentCloudSender(cloudSender, exactRendererUrl, authorizeWindow);
-      clipboard.writeText(address);
+      await clipboard.writeText(address);
       return { ok: true };
     },
   );
@@ -256,8 +256,8 @@ export function registerCloudDeploymentIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     parseNoArguments,
-    (): OperationResult => {
-      clipboard.writeText(awsRequiredPermissionsTerraform());
+    async (): Promise<OperationResult> => {
+      await clipboard.writeText(awsRequiredPermissionsTerraform());
       return { ok: true };
     },
   );
@@ -339,12 +339,12 @@ export function registerCloudDeploymentIpcHandlers(
     exactRendererUrl,
     authorizeWindow,
     parseNoArguments,
-    ({ sender }): OperationResult => {
+    async ({ sender }): Promise<OperationResult> => {
       const pending = pendingCloudLogins.get(sender);
       if (pending?.provider !== "aws" || pending.controller.signal.aborted || !pending.authorizationUrl) {
         return { ok: false, error: "No AWS sign-in link is available. Start AWS Login and try again." };
       }
-      clipboard.writeText(pending.authorizationUrl);
+      await clipboard.writeText(pending.authorizationUrl);
       return { ok: true };
     },
   );

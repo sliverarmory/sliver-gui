@@ -846,6 +846,7 @@ describe("TargetExecutionWorkbench", () => {
 
     render(<TargetExecutionWorkbench expectedTarget={targetRef} targetIdentity="target-remount" />);
     const history = await screen.findByRole("navigation", { name: "Process execution history" });
+    await within(history).findByRole("row", { name: /\/usr\/bin\/retained/u });
     expect(within(history).getAllByRole("row")).toHaveLength(2);
     expect(within(history).getAllByRole("row")[0]).toHaveTextContent("New Execution");
     expect(within(history).getByRole("row", { name: /\/usr\/bin\/retained/u })).toHaveAttribute("aria-selected", "true");

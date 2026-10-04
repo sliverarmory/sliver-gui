@@ -408,7 +408,7 @@ export function registerIpcHandlers(
           };
         }
         if (!result.ok) return result;
-        clipboard.writeText(result.value);
+        await clipboard.writeText(result.value);
         return { ok: true as const };
       } catch {
         return { ok: false as const, error: "The managed server's SSH command could not be copied" };
@@ -419,7 +419,7 @@ export function registerIpcHandlers(
     IPC.copyManagedServerPublicIp,
     rendererUrl,
     parseCopyManagedServerPublicIpArguments,
-    ({ contentsId }, input) => {
+    async ({ contentsId }, input) => {
       try {
         const managed = registry.snapshot(contentsId).connection.managedServer;
         if (!managed || managed.deploymentId !== input.deploymentId) {
@@ -429,7 +429,7 @@ export function registerIpcHandlers(
         if (typeof address !== "string" || isIP(address) === 0) {
           return { ok: false, error: "The managed server does not have an available public IP address" };
         }
-        clipboard.writeText(address);
+        await clipboard.writeText(address);
         return { ok: true };
       } catch {
         return { ok: false, error: "The managed server's public IP address could not be copied" };

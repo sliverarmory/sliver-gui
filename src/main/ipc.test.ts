@@ -76,6 +76,7 @@ beforeEach(() => {
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue({});
   electronMocks.writeText.mockReset();
+  electronMocks.writeText.mockResolvedValue(undefined);
 });
 
 afterEach(() => unregisterIpcHandlers());
@@ -380,7 +381,7 @@ describe("trusted Electron IPC boundary", () => {
     });
     expect(electronMocks.writeText).not.toHaveBeenCalled();
 
-    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
+    electronMocks.writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
     registerManagedServerSshCommandIpc(
       registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(deploymentId)) }),
       { commandForDeployment: vi.fn(async () => ({
@@ -398,27 +399,27 @@ describe("trusted Electron IPC boundary", () => {
     expect(electronMocks.writeText).toHaveBeenCalledOnce();
   });
 
-  it.each(["203.0.113.24", "2001:db8::24"])("copies the current managed server public address %s from main-owned state", (address) => {
+  it.each(["203.0.113.24", "2001:db8::24"])("copies the current managed server public address %s from main-owned state", async (address) => {
     const deploymentId = "22222222-2222-4222-8222-222222222222";
     const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId, address));
     registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent(RENDERER_URL, 77);
 
-    expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).toEqual({ ok: true });
+    await expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).resolves.toEqual({ ok: true });
     expect(snapshot).toHaveBeenCalledExactlyOnceWith(77);
     expect(electronMocks.writeText).toHaveBeenCalledExactlyOnceWith(address);
   });
 
   it.each([null, "33333333-3333-4333-8333-333333333333"])(
     "does not copy when the current managed association is %s",
-    (associatedDeploymentId) => {
+    async (associatedDeploymentId) => {
       const snapshot = vi.fn(() => managedCloudSnapshot(associatedDeploymentId, "203.0.113.24"));
       registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
       const { event } = invokeEvent(RENDERER_URL, 77);
 
-      expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, {
+      await expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, {
         deploymentId: "22222222-2222-4222-8222-222222222222",
-      })).toEqual({
+      })).resolves.toEqual({
         ok: false,
         error: "The requested deployment is not associated with this window's current connection",
       });
@@ -428,12 +429,12 @@ describe("trusted Electron IPC boundary", () => {
 
   it.each([undefined, null, "", "example.test", "999.0.0.1", "203.0.113.24\n", "https://203.0.113.24"])(
     "rejects unavailable or invalid public address %s without falling back to a private address",
-    (address) => {
+    async (address) => {
       const deploymentId = "22222222-2222-4222-8222-222222222222";
       registerIpcHandlers(registryMock({ snapshot: vi.fn(() => managedCloudSnapshot(deploymentId, address)) }), vi.fn(), RENDERER_URL);
       const { event } = invokeEvent(RENDERER_URL, 77);
 
-      expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).toEqual({
+      await expect(electronMocks.handlers.get(IPC.copyManagedServerPublicIp)?.(event, { deploymentId })).resolves.toEqual({
         ok: false,
         error: "The managed server does not have an available public IP address",
       });
@@ -460,19 +461,19 @@ describe("trusted Electron IPC boundary", () => {
     expect(electronMocks.writeText).not.toHaveBeenCalled();
   });
 
-  it("rechecks the associated server for each copy and reports clipboard failure", () => {
+  it("rechecks the associated server for each copy and reports clipboard failure", async () => {
     const deploymentId = "22222222-2222-4222-8222-222222222222";
     const snapshot = vi.fn(() => managedCloudSnapshot(deploymentId, "203.0.113.24"));
     registerIpcHandlers(registryMock({ snapshot }), vi.fn(), RENDERER_URL);
     const { event } = invokeEvent(RENDERER_URL, 77);
     const copy = electronMocks.handlers.get(IPC.copyManagedServerPublicIp)!;
 
-    expect(copy(event, { deploymentId })).toEqual({ ok: true });
+    await expect(copy(event, { deploymentId })).resolves.toEqual({ ok: true });
     snapshot.mockReturnValueOnce(managedCloudSnapshot(null));
-    expect(copy(event, { deploymentId })).toMatchObject({ ok: false });
+    await expect(copy(event, { deploymentId })).resolves.toMatchObject({ ok: false });
     expect(electronMocks.writeText).toHaveBeenCalledOnce();
-    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
-    expect(copy(event, { deploymentId })).toEqual({
+    electronMocks.writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
+    await expect(copy(event, { deploymentId })).resolves.toEqual({
       ok: false,
       error: "The managed server's public IP address could not be copied",
     });
@@ -2136,7 +2137,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     addCredential: vi.fn(unavailable),
     deleteCredential: vi.fn(unavailable),
     copyCredentialSecret: vi.fn(unavailable),
-    clearCredentialClipboard: vi.fn(() => ({ ok: true as const })),
+    clearCredentialClipboard: vi.fn(async () => ({ ok: true as const })),
     listTargets: vi.fn(unavailable),
     selectTarget: vi.fn(unavailable),
     backgroundTarget: vi.fn(unavailable),

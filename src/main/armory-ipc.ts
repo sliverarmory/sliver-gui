@@ -25,7 +25,7 @@ export interface ArmoryIpcServices {
   readonly getTab: () => ArmoryTabId;
   readonly getApplicationSettings: () => ApplicationSettingsState;
   readonly changed: () => void;
-  readonly writeClipboardText: (text: string) => void;
+  readonly writeClipboardText: (text: string) => void | Promise<void>;
   readonly openExternal: (url: string) => Promise<unknown>;
 }
 
@@ -89,11 +89,11 @@ export function registerArmoryIpcHandlers(
   handle(ARMORY_IPC_INVOKE.uninstall, one(parseArmoryUninstallInput), (input) => services.manager.uninstall(input), true);
   handle(ARMORY_IPC_INVOKE.saveSource, one(parseArmorySaveSourceInput), (input) => services.manager.saveSource(input), true);
   handle(ARMORY_IPC_INVOKE.removeSource, one(parseArmoryRemoveSourceInput), (input) => services.manager.removeSource(input), true);
-  handle(ARMORY_IPC_INVOKE.copyPublicKey, one(parseArmoryCopyPublicKeyInput), (input) => {
+  handle(ARMORY_IPC_INVOKE.copyPublicKey, one(parseArmoryCopyPublicKeyInput), async (input) => {
     let publicKey: string;
     try { publicKey = normalizeArmoryPublicKey(input.publicKey); }
     catch { throw new Error("The package public key is invalid"); }
-    try { services.writeClipboardText(publicKey); }
+    try { await services.writeClipboardText(publicKey); }
     catch { throw new Error("The public key could not be copied to the clipboard"); }
   }, false, true);
   handle(ARMORY_IPC_INVOKE.openRepository, one(parseArmoryOpenRepositoryInput), async (input) => {

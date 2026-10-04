@@ -90,6 +90,7 @@ beforeEach(() => {
   electronMocks.fromWebContents.mockReset();
   electronMocks.fromWebContents.mockReturnValue(CURRENT_WINDOW);
   electronMocks.writeText.mockReset();
+  electronMocks.writeText.mockResolvedValue(undefined);
 });
 
 afterEach(() => unregisterSshIpcHandlers());
@@ -241,9 +242,7 @@ describe("SSH IPC boundary", () => {
       ok: true,
       value: SSH_COMMAND,
     }));
-    electronMocks.writeText.mockImplementationOnce(() => {
-      throw new Error("clipboard unavailable");
-    });
+    electronMocks.writeText.mockRejectedValueOnce(new Error("clipboard unavailable"));
     registerSshIpcHandlers(
       servicesMock({ commandForTab }),
       SSH_RENDERER_URL,

@@ -92,6 +92,7 @@ beforeEach(() => {
   electronMocks.showSaveDialog.mockReset();
   electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
   electronMocks.writeText.mockReset();
+  electronMocks.writeText.mockResolvedValue(undefined);
   electronMocks.openExternal.mockReset();
   electronMocks.openExternal.mockResolvedValue(undefined);
 });
@@ -318,7 +319,7 @@ describe("Cloud Deployment IPC boundary", () => {
 
   it("reports Terraform clipboard failures without returning private error contents", async () => {
     registerCloudDeploymentIpcHandlers(controllerMock(), CLOUD_RENDERER_URL, authorizeCurrentWindow);
-    electronMocks.writeText.mockImplementationOnce(() => { throw new Error("private clipboard failure"); });
+    electronMocks.writeText.mockRejectedValueOnce(new Error("private clipboard failure"));
     await expect(invoke(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform,
       invokeEvent(CLOUD_RENDERER_URL, 77).event)).resolves.toEqual(REJECTED);
   });

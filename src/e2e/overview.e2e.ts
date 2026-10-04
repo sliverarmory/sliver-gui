@@ -540,7 +540,7 @@ async function verifyServerContextMenuNavigation(
     if (state.__overviewClipboardCapture) throw new Error("Overview clipboard capture is already installed");
     const writes: string[] = [];
     state.__overviewClipboardCapture = { originalWriteText: clipboard.writeText, writes };
-    clipboard.writeText = (text) => { writes.push(text); };
+    clipboard.writeText = async (text) => { writes.push(text); };
   });
   try {
     await server.click({ button: "right" });

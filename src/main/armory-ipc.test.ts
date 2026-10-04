@@ -167,12 +167,28 @@ describe("Armory IPC boundary", () => {
 
   it("sanitizes clipboard failures", async () => {
     const services = servicesMock();
-    services.writeClipboardText.mockImplementationOnce(() => { throw new Error("PRIVATE_CLIPBOARD_FAILURE"); });
+    services.writeClipboardText.mockRejectedValueOnce(new Error("PRIVATE_CLIPBOARD_FAILURE"));
     registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
     await expect(invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, { publicKey: CANONICAL_PUBLIC_KEY }))
       .resolves.toEqual({ ok: false, error: "The public key could not be copied to the clipboard" });
     expect(services.writeClipboardText).toHaveBeenCalledExactlyOnceWith(CANONICAL_PUBLIC_KEY);
     expect(services.changed).not.toHaveBeenCalled();
+  });
+
+  it("waits for the native clipboard write before reporting success", async () => {
+    const services = servicesMock();
+    const pending = deferred<void>();
+    services.writeClipboardText.mockReturnValueOnce(pending.promise);
+    registerArmoryIpcHandlers(services, RENDERER_URL, authorizeCurrentWindow);
+    const settled = vi.fn();
+    const copying = invoke(ARMORY_IPC_INVOKE.copyPublicKey, invokeEvent().event, { publicKey: CANONICAL_PUBLIC_KEY });
+    void copying.then(settled);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    pending.resolve();
+    await expect(copying).resolves.toEqual({ ok: true });
   });
 
   it.each([
@@ -436,7 +452,7 @@ function servicesMock() {
     getTab: vi.fn(() => "manage" as const),
     getApplicationSettings: vi.fn(() => DEFAULT_APPLICATION_SETTINGS_STATE),
     changed: vi.fn(),
-    writeClipboardText: vi.fn((_text: string) => undefined),
+    writeClipboardText: vi.fn(async (_text: string): Promise<void> => undefined),
     openExternal: vi.fn(async (_url: string) => undefined),
   } satisfies ArmoryIpcServices;
 }

@@ -8,7 +8,8 @@ if (process.env["CI"] === "true" && process.env["RUNNER_OS"] === "Windows") {
 Object.defineProperty(globalThis, "matchMedia", {
   configurable: true,
   value: (query: string) => ({
-    matches: false,
+    // DOM tests have no animation clock; dismiss overlays without exit delays.
+    matches: query === "(prefers-reduced-motion: reduce)",
     media: query,
     onchange: null,
     addEventListener: () => undefined,

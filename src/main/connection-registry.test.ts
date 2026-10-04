@@ -87,9 +87,9 @@ beforeEach(async () => {
   electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
   electronMocks.clipboardText = "";
   electronMocks.clipboardReadText.mockReset();
-  electronMocks.clipboardReadText.mockImplementation(() => electronMocks.clipboardText);
+  electronMocks.clipboardReadText.mockImplementation(async () => electronMocks.clipboardText);
   electronMocks.clipboardWriteText.mockReset();
-  electronMocks.clipboardWriteText.mockImplementation((value: string) => { electronMocks.clipboardText = value; });
+  electronMocks.clipboardWriteText.mockImplementation(async (value: string) => { electronMocks.clipboardText = value; });
   electronMocks.clipboardClear.mockReset();
   electronMocks.clipboardClear.mockImplementation(() => { electronMocks.clipboardText = ""; });
   terminalRuntimeMocks.loadTerminalRuntime.mockReset();
@@ -1925,7 +1925,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(electronMocks.clipboardClear).not.toHaveBeenCalled();
 
     await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
-    electronMocks.clipboardWriteText.mockImplementationOnce(() => { throw new Error("clipboard unavailable"); });
+    electronMocks.clipboardWriteText.mockRejectedValueOnce(new Error("clipboard unavailable"));
     await expect(registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" })).resolves.toEqual({
       ok: false,
       error: "clipboard unavailable",
@@ -1933,6 +1933,32 @@ describe("connection registry with an injected Sliver client", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(electronMocks.clipboardText).toBe("");
     expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a delayed clipboard cleanup clear a more recent copied secret", async () => {
+    const client = new FakeSliverClient();
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.credentialState = [clientpb.Credential.create({
+      ID: credentialId,
+      Plaintext: "clipboard-secret",
+    })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+
+    let resolveRead!: (value: string) => void;
+    electronMocks.clipboardReadText.mockImplementationOnce(() => new Promise<string>((resolve) => { resolveRead = resolve; }));
+    const clearing = registry.clearCredentialClipboard();
+    await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    resolveRead("clipboard-secret");
+    await expect(clearing).resolves.toEqual({ ok: true });
+    expect(electronMocks.clipboardClear).not.toHaveBeenCalled();
+    expect(electronMocks.clipboardText).toBe("clipboard-secret");
+
+    await registry.clearCredentialClipboard();
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+    expect(electronMocks.clipboardText).toBe("");
   });
 
   it("dispatches listener mutations and refreshes only the jobs domain", async () => {
