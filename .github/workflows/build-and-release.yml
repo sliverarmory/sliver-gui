@@ -76,7 +76,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
@@ -536,180 +536,16 @@ jobs:
           fi
 
   public-update:
-    name: Public auto-update (${{ matrix.platform }})
+    name: Public auto-update
     needs:
       - release
       - release-request
-    runs-on: ${{ matrix.runner }}
-    environment: ci
-    timeout-minutes: 40
     permissions:
       contents: read
-    env:
-      RELEASE_TAG: ${{ needs.release-request.outputs.release_tag }}
-      SLIVER_GUI_UPDATE_E2E: "1"
-      SLIVER_GUI_UPDATE_E2E_FEED: public
-      SLIVER_GUI_UPDATE_E2E_FROM_VERSION: "0.0.0"
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: macOS universal
-            id: macos
-            runner: macos-15
-            baseline_pattern: "*.dmg"
-          - platform: Windows x64
-            id: windows
-            runner: windows-2022
-            baseline_pattern: "*-setup.exe"
-          - platform: Linux x64
-            id: linux
-            runner: ubuntu-22.04
-            baseline_pattern: "*.AppImage"
-    steps:
-      - name: Check out exact release source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 24.15.0
-          cache: npm
-
-      - name: Set up exact npm
-        run: npm install --global npm@11.19.0 --ignore-scripts
-
-      - name: Install dependencies
-        env:
-          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
-          npm_config_engine_strict: "true"
-        run: npm ci --strict-allow-scripts
-
-      - name: Download signed baseline installer
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: updater-baseline-${{ matrix.id }}
-          path: ${{ runner.temp }}/sliver-gui-updater-baseline
-
-      - name: Verify pinned public certificate and release context
-        shell: bash
-        run: |
-          node --input-type=module <<'NODE'
-          import { appendFile } from "node:fs/promises";
-          import { readUpdateSigningAssets } from "./scripts/releaseSigning.mjs";
-          if (process.env.RUNNER_ENVIRONMENT !== "github-hosted") throw new Error("Updater trust tests require a disposable GitHub-hosted runner");
-          if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(process.env.RELEASE_TAG)) throw new Error("Invalid release tag");
-          const { manifest } = await readUpdateSigningAssets(process.cwd());
-          await appendFile(process.env.GITHUB_ENV, `SLIVER_GUI_UPDATE_E2E_TO_VERSION=${process.env.RELEASE_TAG.slice(1)}\nSLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER=${manifest.windows.subject}\n`);
-          NODE
-
-      - name: Resolve absolute baseline installer path
-        if: runner.os != 'Windows'
-        shell: bash
-        env:
-          BASELINE_PATTERN: ${{ matrix.baseline_pattern }}
-        run: |
-          installers=()
-          while IFS= read -r installer; do installers+=("$installer"); done < <(find "$RUNNER_TEMP/sliver-gui-updater-baseline" -maxdepth 1 -type f -name "$BASELINE_PATTERN" -print)
-          if [ "${#installers[@]}" -ne 1 ]; then echo "::error::Expected exactly one baseline installer"; exit 1; fi
-          if [ "$RUNNER_OS" = "Linux" ]; then chmod 0755 "${installers[0]}"; fi
-          echo "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=${installers[0]}" >> "$GITHUB_ENV"
-
-      - name: Resolve absolute Windows baseline installer path
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          BASELINE_PATTERN: ${{ matrix.baseline_pattern }}
-        run: |
-          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP "sliver-gui-updater-baseline") -Filter $env:BASELINE_PATTERN -File)
-          if ($installers.Count -ne 1) { throw "Expected exactly one baseline installer" }
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=$($installers[0].FullName)"
-
-      - name: Establish macOS code-signing trust on the disposable runner
-        if: runner.os == 'macOS'
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          test "$RUNNER_ENVIRONMENT" = "github-hosted"
-          keychain="$RUNNER_TEMP/sliver-gui-public-updater-trust.keychain-db"
-          password="$(openssl rand -hex 32)"
-          echo "::add-mask::$password"
-          security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//' > "$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
-          security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$password" "$keychain"
-          sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$GITHUB_WORKSPACE/build/update-signing/macos.cer"
-          original_keychains=()
-          while IFS= read -r item; do original_keychains+=("$item"); done < "$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
-          security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
-          echo "SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY=Developer ID Application: Sliver Armory Self-Signed" >> "$GITHUB_ENV"
-
-      - name: Establish Windows publisher trust on the disposable runner
-        if: runner.os == 'Windows'
-        shell: pwsh
-        timeout-minutes: 5
-        run: |
-          if ($env:RUNNER_ENVIRONMENT -ne "github-hosted") { throw "Updater trust tests require a disposable GitHub-hosted runner" }
-          $certificatePath = Join-Path $env:GITHUB_WORKSPACE "build/update-signing/windows.cer"
-          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
-          if ($certificate.Subject -cne $env:SLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER) { throw "Unexpected pinned certificate subject" }
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "UPDATER_E2E_TRUST_THUMBPRINT=$($certificate.Thumbprint)"
-          foreach ($store in @("Root", "TrustedPublisher")) {
-            & certutil.exe -addstore -f $store $certificatePath
-            if ($LASTEXITCODE -ne 0) { throw "Failed to trust certificate in $store" }
-          }
-
-      # No GitHub token is passed to this process or to the installed app.
-      - name: Exercise published automatic update and relaunch
-        if: runner.os != 'Linux'
-        timeout-minutes: 25
-        run: npm run test:e2e:packaged-update
-
-      - name: Exercise published automatic update and relaunch under Xvfb
-        if: runner.os == 'Linux'
-        timeout-minutes: 25
-        run: xvfb-run --auto-servernum npm run test:e2e:packaged-update
-
-      - name: Restore macOS keychain configuration
-        if: always() && runner.os == 'macOS'
-        shell: bash
-        timeout-minutes: 2
-        run: |
-          test "$RUNNER_ENVIRONMENT" = "github-hosted"
-          # Admin trust is discarded with the disposable VM. Removing admin
-          # trust explicitly can hang on hosted macOS (runner-images #12116).
-          saved="$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
-          keychain="$RUNNER_TEMP/sliver-gui-public-updater-trust.keychain-db"
-          if [ -f "$saved" ]; then
-            original_keychains=()
-            while IFS= read -r item; do original_keychains+=("$item"); done < "$saved"
-            security list-keychains -d user -s "${original_keychains[@]}"
-            rm -f -- "$saved"
-          fi
-          if [ -e "$keychain" ]; then security delete-keychain "$keychain"; fi
-
-      - name: Remove temporary Windows publisher trust
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        timeout-minutes: 2
-        run: |
-          if ($env:RUNNER_ENVIRONMENT -ne "github-hosted") { throw "Updater trust cleanup requires a disposable GitHub-hosted runner" }
-          if ($env:UPDATER_E2E_TRUST_THUMBPRINT) {
-            foreach ($store in @("Root", "TrustedPublisher")) {
-              if (Test-Path -LiteralPath "Cert:\LocalMachine\$store\$($env:UPDATER_E2E_TRUST_THUMBPRINT)") {
-                & certutil.exe -delstore $store $env:UPDATER_E2E_TRUST_THUMBPRINT
-                if ($LASTEXITCODE -ne 0) { throw "Failed to remove temporary trust from $store" }
-              }
-            }
-          }
-
-      - name: Upload public updater diagnostics
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: public-updater-diagnostics-${{ matrix.id }}
-          path: artifacts/e2e/packaged-update/
-          if-no-files-found: warn
-          retention-days: 30
+      actions: read
+    uses: ./.github/workflows/public-updater-e2e.yml
+    with:
+      release_tag: ${{ needs.release-request.outputs.release_tag }}
+      baseline_run_id: ${{ github.run_id }}
+    secrets:
+      HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
