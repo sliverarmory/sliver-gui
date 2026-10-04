@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import afterPack, { verifySliverConsoleBeforeSigning } from "./afterPack.mjs";
@@ -11,6 +11,7 @@ import {
   prepareNodePtyRuntime,
 } from "./prepareNodePtyRuntime.mjs";
 import stageNodePtyBeforePack, { stageNodePtyRuntimeForElectron } from "./stageNodePtyForElectron.mjs";
+import { verifyWindowsSigningChanges } from "./verifyWindowsSigningChanges.mjs";
 
 // Keep the fixture inventory independent of the implementation: accidentally
 // dropping a required DLL or helper must not silently drop it from the tests.
@@ -308,3 +309,153 @@ test("afterPack rejects a changed Sliver console before signing", async () => {
     await rm(projectDirectory, { recursive: true, force: true });
   }
 });
+
+for (const architecture of ["PE32", "PE32+"]) {
+  test(`accepts only Authenticode changes to the complete ${architecture} source payload`, () => {
+    const { source, signed, checksum, securityDirectory } = signedWindowsFixture(architecture);
+    assert.doesNotThrow(() => verifyWindowsSigningChanges(source, signed));
+
+    for (const [name, mutate] of [
+      ["DOS stub", (bytes) => { bytes[2] ^= 1; }],
+      ["COFF header", (bytes) => { bytes[128 + 8] ^= 1; }],
+      ["section payload", (bytes) => { bytes[512] ^= 1; }],
+      ["existing overlay", (bytes) => { bytes[source.length - 1] ^= 1; }],
+      ["certificate offset", (bytes) => { bytes.writeUInt32LE(source.length - 16, securityDirectory); }],
+      ["certificate size", (bytes) => { bytes.writeUInt32LE(16, securityDirectory + 4); }],
+      ["alignment padding", (bytes) => { bytes[source.length] = 1; }],
+      ["certificate revision", (bytes) => { bytes.writeUInt16LE(0x0100, 776 + 4); }],
+      ["certificate type", (bytes) => { bytes.writeUInt16LE(1, 776 + 6); }],
+      ["certificate record size", (bytes) => { bytes.writeUInt32LE(8, 776); }],
+      ["certificate record padding", (bytes) => { bytes[bytes.length - 1] = 1; }],
+    ]) {
+      const modified = Buffer.from(signed);
+      mutate(modified);
+      assert.throws(() => verifyWindowsSigningChanges(source, modified), /Windows signing/u, name);
+    }
+    assert.throws(() => verifyWindowsSigningChanges(source, signed.subarray(0, signed.length - 1)), /Windows signing/u);
+    assert.throws(() => verifyWindowsSigningChanges(source, Buffer.concat([signed, Buffer.from([1])])), /Windows signing/u);
+    const previouslySignedSource = Buffer.from(source);
+    previouslySignedSource.writeUInt32LE(512, securityDirectory);
+    previouslySignedSource.writeUInt32LE(32, securityDirectory + 4);
+    assert.throws(() => verifyWindowsSigningChanges(previouslySignedSource, signed), /unsigned source executable/u);
+    // The original buffers must remain unchanged by normalization.
+    assert.equal(source.readUInt32LE(checksum), 0x12345678);
+    assert.equal(signed.readUInt32LE(checksum), 0x87654321);
+  });
+}
+
+test("rejects truncated and malformed PE headers before reading signing fields", () => {
+  const { source, signed } = signedWindowsFixture("PE32+");
+  for (const length of [0, 2, 63, 64, 128, 151, 152, 153, 200, 391]) {
+    assert.throws(() => verifyWindowsSigningChanges(source.subarray(0, length), signed), /Windows signing/u);
+    assert.throws(() => verifyWindowsSigningChanges(source, signed.subarray(0, length)), /Windows signing/u);
+  }
+  for (const mutate of [
+    (bytes) => { bytes.writeUInt32LE(0xffffffff, 0x3c); },
+    (bytes) => { bytes.writeUInt32LE(0, 128); },
+    (bytes) => { bytes.writeUInt16LE(0, 128 + 20); },
+    (bytes) => { bytes.writeUInt16LE(0xdead, 152); },
+    (bytes) => { bytes.writeUInt32LE(4, 152 + 108); },
+  ]) {
+    const modified = Buffer.from(source);
+    mutate(modified);
+    assert.throws(() => verifyWindowsSigningChanges(modified, signed), /Windows signing/u);
+  }
+});
+
+test("afterPack accepts an already signed Windows child only with intact source bytes and pinned Authenticode", async (context) => {
+  const projectDirectory = await mkdtemp(join(tmpdir(), "windows-signing-after-pack-test-"));
+  context.after(() => rm(projectDirectory, { recursive: true, force: true }));
+  const resourcesDirectory = join(projectDirectory, "packaged");
+  const sourceDirectory = join(projectDirectory, "native/sliver-console");
+  const packagedDirectory = join(resourcesDirectory, "sliver-console");
+  const { source, signed } = signedWindowsFixture("PE32+");
+  const overlayBytes = Buffer.from("package cli\n");
+  const overlay = { files: [{
+    sourcePath: "fixture.go",
+    replacementPath: "protocol/sliver-console-overlay/fixture.go",
+    sha256: createHash("sha256").update(overlayBytes).digest("hex"),
+  }] };
+  const sourceManifest = JSON.stringify({ build: { overlay } });
+  const record = JSON.stringify({ build: { overlay }, artifact: {
+    fileName: "sliver-client.exe",
+    size: source.length,
+    sha256: createHash("sha256").update(source).digest("hex"),
+  } });
+  await mkdir(join(projectDirectory, "protocol/sliver-console-overlay"), { recursive: true });
+  await mkdir(sourceDirectory, { recursive: true });
+  await mkdir(join(packagedDirectory, "source-overlay"), { recursive: true });
+  const files = new Map([
+    ["protocol/sliver-console-provenance.json", sourceManifest],
+    ["protocol/sliver-console-overlay/fixture.go", overlayBytes],
+    ["native/sliver-console/sliver-client.exe", source],
+    ["native/sliver-console/provenance.json", record],
+    ["native/sliver-console/LICENSE", "license"],
+    ["packaged/sliver-console/sliver-client.exe", signed],
+    ["packaged/sliver-console/source-provenance.json", sourceManifest],
+    ["packaged/sliver-console/provenance.json", record],
+    ["packaged/sliver-console/source-overlay/fixture.go", overlayBytes],
+    ["packaged/sliver-console/LICENSE", "license"],
+  ]);
+  await Promise.all([...files].map(([path, content]) => writeFile(join(projectDirectory, path), content)));
+  await cp(resolve(import.meta.dirname, "../build/update-signing"), join(projectDirectory, "build/update-signing"), { recursive: true });
+  const manifest = JSON.parse(await readFile(join(projectDirectory, "build/update-signing/manifest.json"), "utf8"));
+  const invocations = [];
+  const options = {
+    platform: "win32",
+    projectDirectory,
+    resourcesDirectory,
+    environment: { SLIVER_GUI_SIGNING_PROFILE: "self-signed" },
+    run: async (...invocation) => { invocations.push(invocation); },
+  };
+  await verifySliverConsoleBeforeSigning(options);
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0][0], "powershell.exe");
+  assert.match(invocations[0][1].at(-1), /\$signature.Status -ne 'Valid'/u);
+  assert.match(invocations[0][1].at(-1), /\$fingerprint -cne \$env:SLIVER_GUI_EXPECTED_CERTIFICATE_SHA256/u);
+  assert.equal(invocations[0][2].env.SLIVER_GUI_EXPECTED_CERTIFICATE_SHA256, manifest.windows.sha256);
+  assert.equal(invocations[0][2].env.SLIVER_GUI_EXPECTED_PUBLISHER, manifest.windows.subject);
+  assert.equal(invocations[0][2].env.SLIVER_GUI_CHILD_EXECUTABLE, join(packagedDirectory, "sliver-client.exe"));
+  await assert.rejects(verifySliverConsoleBeforeSigning({ ...options, run: async () => {
+    throw new Error("Unexpected Authenticode signing certificate");
+  } }), /Unexpected Authenticode/u);
+
+  invocations.length = 0;
+  const changed = Buffer.from(signed);
+  changed[512] ^= 1;
+  await writeFile(join(packagedDirectory, "sliver-client.exe"), changed);
+  await assert.rejects(verifySliverConsoleBeforeSigning(options), /outside Authenticode fields/u);
+  assert.equal(invocations.length, 0, "reject payload changes before invoking signature verification");
+  await writeFile(join(packagedDirectory, "sliver-client.exe"), signed);
+  await writeFile(join(sourceDirectory, "sliver-client.exe"), "changed source");
+  await assert.rejects(verifySliverConsoleBeforeSigning(options), /Source Sliver console executable changed/u);
+  assert.equal(invocations.length, 0);
+});
+
+function signedWindowsFixture(architecture) {
+  // Fixed PE header layout and an existing three-byte overlay ensure signature
+  // comparison covers payload bytes that Authenticode may otherwise overlook.
+  const source = Buffer.alloc(771);
+  source.write("MZ", 0, "ascii");
+  source.writeUInt32LE(128, 0x3c);
+  source.write("PE\0\0", 128, "ascii");
+  const optional = 152;
+  const directories = architecture === "PE32+" ? 112 : 96;
+  source.writeUInt16LE(architecture === "PE32+" ? 0x020b : 0x010b, optional);
+  source.writeUInt16LE(architecture === "PE32+" ? 240 : 224, 128 + 20);
+  source.writeUInt32LE(16, optional + directories - 4);
+  const checksum = optional + 64;
+  const securityDirectory = optional + directories + 4 * 8;
+  source.writeUInt32LE(0x12345678, checksum);
+  source.fill(0x5a, 512);
+  const signed = Buffer.alloc(776 + 32);
+  source.copy(signed);
+  signed.writeUInt32LE(0x87654321, checksum);
+  signed.writeUInt32LE(776, securityDirectory);
+  signed.writeUInt32LE(32, securityDirectory + 4);
+  signed.writeUInt32LE(29, 776);
+  signed.writeUInt16LE(0x0200, 776 + 4);
+  signed.writeUInt16LE(0x0002, 776 + 6);
+  signed.fill(0x42, 776 + 8, 776 + 29);
+  return { source, signed, checksum, securityDirectory };
+}

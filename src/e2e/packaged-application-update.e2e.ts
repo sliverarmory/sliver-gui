@@ -539,7 +539,7 @@ async function verifyPlatformTrust(executablePath: string, input: TestInput): Pr
       try {
         for (const architecture of ["x86_64", "arm64"]) {
           const prefix = join(temporaryDirectory, `${architecture}-`);
-          await runCommand("/usr/bin/codesign", ["--display", "--architecture", architecture, "--extract-certificates", prefix, applicationBundle]);
+          await runCommand("/usr/bin/codesign", ["--display", "--architecture", architecture, `--extract-certificates=${prefix}`, applicationBundle]);
           const fingerprint = createHash("sha256").update(await readFile(`${prefix}0`)).digest("hex");
           assert.equal(fingerprint, input.macSigningSha256, `macOS ${architecture} app must use the pinned public certificate`);
         }

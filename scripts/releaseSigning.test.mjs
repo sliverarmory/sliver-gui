@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import { prepareUpdaterTrustBeforeSigning } from "./afterPack.mjs";
-import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
+import { extractMacosSigningCertificate, readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -73,7 +74,9 @@ test("macOS verification checks outer bundle and every physical Mach-O against t
       verified.push(args.at(-1));
     } else {
       extractedArchitectures.push(args[2]);
-      await writeFile(`${args[4]}0`, leaf);
+      assert.match(args[3], /^--extract-certificates=.+/u);
+      assert.equal(args.length, 5);
+      await writeFile(`${args[3].slice("--extract-certificates=".length)}0`, leaf);
     }
   };
   await verifyPinnedMacosSignatures({ appPath, expectedSha256: sha256(leaf), run });
@@ -91,6 +94,23 @@ test("macOS verification checks outer bundle and every physical Mach-O against t
     verifyPinnedMacosSignatures({ appPath, expectedSha256: sha256(leaf), run: async (command, args) => args.includes("--verbose=4") ? { stdout: "", stderr: "CodeDirectory v=20500 size=400 flags=0x0(none)" } : run(command, args) }),
     /must enable hardened runtime/u,
   );
+});
+
+test("macOS certificate extraction uses codesign's real optional-prefix syntax without changing trust", { skip: process.platform !== "darwin" }, async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "macOS certificate extraction "));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const run = (command, args) => promisify(execFile)(command, args, { timeout: 15_000, maxBuffer: 1024 * 1024 });
+  const codePath = "/usr/bin/security";
+  const architectures = (await run("/usr/bin/lipo", ["-archs", codePath])).stdout.trim().split(/\s+/u);
+  assert.ok(architectures.length > 0);
+  const architecture = architectures[0];
+  const expectedPrefix = join(directory, "expected certificate ");
+  await run("/usr/bin/codesign", ["--display", `--extract-certificates=${expectedPrefix}`, "--architecture", architecture, codePath]);
+  const expected = new X509Certificate(await readFile(`${expectedPrefix}0`));
+  const actual = await extractMacosSigningCertificate({
+    codePath, architecture, prefix: join(directory, "actual certificate "), run,
+  });
+  assert.equal(sha256(actual), sha256(expected.raw));
 });
 
 test("Windows verification requires Authenticode validity, full Subject, and SHA-256 of raw certificate", async () => {
