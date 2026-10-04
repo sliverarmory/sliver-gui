@@ -417,6 +417,13 @@ interface ManualRefreshState {
   followupStarted: boolean;
 }
 
+interface CredentialClipboardState {
+  readonly digest: string;
+  readonly expiresAt: number;
+  readonly ownerContentsId: number;
+  readonly timer: NodeJS.Timeout;
+}
+
 const GENERATE_TIMEOUT_SECONDS = 15 * 60;
 const MAX_WINDOW_SESSION_SHELL_PREPARES = 2;
 const MAX_GLOBAL_SESSION_SHELL_PREPARES = 16;
@@ -704,12 +711,8 @@ export class ConnectionRegistry {
   private nextDotNetExecutionHistoryOrder = 0;
   private dotNetExecutionHistoryEntryCount = 0;
   private dotNetExecutionHistoryOutputBytes = 0;
-  private credentialClipboard?: {
-    digest: string;
-    expiresAt: number;
-    ownerContentsId: number;
-    timer: NodeJS.Timeout;
-  };
+  private credentialClipboard?: CredentialClipboardState;
+  private credentialClipboardTail: Promise<void> = Promise.resolve();
 
   private readonly configStore: OperatorConfigStore;
   private readonly savedConfigWatcher: SavedConfigDirectoryWatcher;
@@ -861,9 +864,7 @@ export class ConnectionRegistry {
     context?.savedConfigs.clear();
     await this.streams.closeWindow(contentsId, "window-closed").catch(() => undefined);
     if (context?.poolKey) await this.releasePool(context.poolKey, contentsId).catch(() => undefined);
-    if (this.credentialClipboard?.ownerContentsId === contentsId || this.windows.size === 0) {
-      await this.clearCredentialClipboardIfCurrent();
-    }
+    await this.queueCredentialClipboardOperation(() => this.clearCredentialClipboardState(undefined, contentsId));
   }
 
   async closeWindowStreams(
@@ -7458,16 +7459,31 @@ export class ConnectionRegistry {
         if (credential.ID !== input.id) throw new Error("The credential changed while its secret was loading");
         const secret = credentialSecret(credential, input.field);
         if (!secret) throw new Error(`This credential has no ${input.field} value`);
-        await clipboard.writeText(secret);
-        // Keep an earlier app-owned cleanup timer alive if the replacement write
-        // fails. Only a completed write can safely supersede it here.
-        this.cancelCredentialClipboardTimer();
-        const expiresAt = this.now() + CREDENTIAL_CLIPBOARD_TTL_MS;
-        const digest = clipboardDigest(secret);
-        const timer = setTimeout(() => void this.clearCredentialClipboardIfCurrent(digest), CREDENTIAL_CLIPBOARD_TTL_MS);
-        timer.unref?.();
-        this.credentialClipboard = { digest, expiresAt, ownerContentsId: contentsId, timer };
-        return { expiresAt: new Date(expiresAt).toISOString() };
+        return await this.queueCredentialClipboardOperation(async () => {
+          assertBinding();
+          await clipboard.writeText(secret);
+          // Keep an earlier app-owned cleanup timer alive if the replacement
+          // write fails. Only a completed write can safely supersede it here.
+          this.cancelCredentialClipboardTimer();
+          const expiresAt = this.now() + CREDENTIAL_CLIPBOARD_TTL_MS;
+          const state: CredentialClipboardState = {
+            digest: clipboardDigest(secret),
+            expiresAt,
+            ownerContentsId: contentsId,
+            timer: setTimeout(() => void this.queueCredentialClipboardOperation(
+              () => this.clearCredentialClipboardState(state),
+            ), CREDENTIAL_CLIPBOARD_TTL_MS),
+          };
+          state.timer.unref?.();
+          this.credentialClipboard = state;
+          try {
+            assertBinding();
+          } catch (error) {
+            await this.clearCredentialClipboardState(state);
+            throw error;
+          }
+          return { expiresAt: new Date(expiresAt).toISOString() };
+        });
       } finally {
         clearCredentialSecrets(credential);
       }
@@ -7475,8 +7491,16 @@ export class ConnectionRegistry {
   }
 
   async clearCredentialClipboard(): Promise<OperationResult> {
-    await this.clearCredentialClipboardIfCurrent();
+    await this.queueCredentialClipboardOperation(() => this.clearCredentialClipboardState());
     return { ok: true };
+  }
+
+  private queueCredentialClipboardOperation<T>(operation: () => Promise<T>): Promise<T> {
+    // Native clipboard writes are asynchronous. Preserve request order so a
+    // clear or owner teardown also covers writes that have not completed yet.
+    const pending = this.credentialClipboardTail.then(operation);
+    this.credentialClipboardTail = pending.then(() => undefined, () => undefined);
+    return pending;
   }
 
   private cancelCredentialClipboardTimer(): void {
@@ -7484,9 +7508,13 @@ export class ConnectionRegistry {
     delete this.credentialClipboard;
   }
 
-  private async clearCredentialClipboardIfCurrent(expectedDigest?: string): Promise<void> {
+  private async clearCredentialClipboardState(
+    expectedState?: CredentialClipboardState,
+    ownerContentsId?: number,
+  ): Promise<void> {
     const state = this.credentialClipboard;
-    if (!state || (expectedDigest !== undefined && state.digest !== expectedDigest)) return;
+    if (!state || (expectedState !== undefined && state !== expectedState) ||
+        (ownerContentsId !== undefined && state.ownerContentsId !== ownerContentsId)) return;
     try {
       const currentDigest = clipboardDigest(await clipboard.readText());
       if (this.credentialClipboard !== state) return;

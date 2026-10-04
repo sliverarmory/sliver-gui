@@ -1935,7 +1935,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
   });
 
-  it("does not let a delayed clipboard cleanup clear a more recent copied secret", async () => {
+  it("orders a subsequent copy after a pending clipboard cleanup", async () => {
     const client = new FakeSliverClient();
     const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
     client.credentialState = [clientpb.Credential.create({
@@ -1950,15 +1950,107 @@ describe("connection registry with an injected Sliver client", () => {
     let resolveRead!: (value: string) => void;
     electronMocks.clipboardReadText.mockImplementationOnce(() => new Promise<string>((resolve) => { resolveRead = resolve; }));
     const clearing = registry.clearCredentialClipboard();
-    await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    await vi.waitFor(() => expect(electronMocks.clipboardReadText).toHaveBeenCalledOnce());
+    const copying = registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    expect(electronMocks.clipboardWriteText).toHaveBeenCalledOnce();
     resolveRead("clipboard-secret");
     await expect(clearing).resolves.toEqual({ ok: true });
-    expect(electronMocks.clipboardClear).not.toHaveBeenCalled();
+    await expect(copying).resolves.toMatchObject({ ok: true });
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
     expect(electronMocks.clipboardText).toBe("clipboard-secret");
 
     await registry.clearCredentialClipboard();
-    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+    expect(electronMocks.clipboardClear).toHaveBeenCalledTimes(2);
     expect(electronMocks.clipboardText).toBe("");
+  });
+
+  it.each(["clear", "close"] as const)("%s waits for and removes an owner's first pending clipboard write", async (action) => {
+    const client = new FakeSliverClient();
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.credentialState = [clientpb.Credential.create({ ID: credentialId, Plaintext: "clipboard-secret" })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    const write = deferred<void>();
+    electronMocks.clipboardWriteText.mockImplementationOnce(async (text: string) => {
+      await write.promise;
+      electronMocks.clipboardText = text;
+    });
+    const copying = registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    await vi.waitFor(() => expect(electronMocks.clipboardWriteText).toHaveBeenCalledOnce());
+
+    const cleanup = action === "clear" ? registry.clearCredentialClipboard() : registry.unregisterWindow(1);
+    const settled = vi.fn();
+    void cleanup.then(settled);
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+    write.resolve();
+    await expect(copying).resolves.toMatchObject({ ok: action === "clear" });
+    await cleanup;
+    expect(electronMocks.clipboardText).toBe("");
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+  });
+
+  it("does not let an expired timer clear a queued replacement with the same secret", async () => {
+    const client = new FakeSliverClient();
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.credentialState = [clientpb.Credential.create({ ID: credentialId, Plaintext: "clipboard-secret" })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    vi.useFakeTimers();
+    await registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    const write = deferred<void>();
+    electronMocks.clipboardWriteText.mockImplementationOnce(async (text: string) => {
+      await write.promise;
+      electronMocks.clipboardText = text;
+    });
+    const copying = registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    await vi.waitFor(() => expect(electronMocks.clipboardWriteText).toHaveBeenCalledTimes(2));
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    write.resolve();
+    await expect(copying).resolves.toMatchObject({ ok: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(electronMocks.clipboardText).toBe("clipboard-secret");
+    expect(electronMocks.clipboardClear).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(electronMocks.clipboardText).toBe("");
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+  });
+
+  it("preserves another owner's queued copy when the first owner closes during its write", async () => {
+    const client = new FakeSliverClient();
+    const credentialId = "80ae1382-e6e2-44d6-a663-537cafb60e74";
+    client.credentialState = [clientpb.Credential.create({ ID: credentialId, Plaintext: "clipboard-secret" })];
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    const write = deferred<void>();
+    electronMocks.clipboardWriteText.mockImplementationOnce(async (text: string) => {
+      await write.promise;
+      electronMocks.clipboardText = text;
+    });
+    const firstCopy = registry.copyCredentialSecret(1, { id: credentialId, field: "plaintext" });
+    await vi.waitFor(() => expect(electronMocks.clipboardWriteText).toHaveBeenCalledOnce());
+    const secondCopy = registry.copyCredentialSecret(2, { id: credentialId, field: "plaintext" });
+    await vi.waitFor(() => expect(client.credentialById).toHaveBeenCalledTimes(2));
+    const closing = registry.unregisterWindow(1);
+
+    write.resolve();
+    await expect(firstCopy).resolves.toMatchObject({ ok: false });
+    await expect(secondCopy).resolves.toMatchObject({ ok: true });
+    await closing;
+    expect(electronMocks.clipboardText).toBe("clipboard-secret");
+    expect(electronMocks.clipboardClear).toHaveBeenCalledOnce();
+
+    await registry.clearCredentialClipboard();
+    expect(electronMocks.clipboardText).toBe("");
+    expect(electronMocks.clipboardClear).toHaveBeenCalledTimes(2);
   });
 
   it("dispatches listener mutations and refreshes only the jobs domain", async () => {
