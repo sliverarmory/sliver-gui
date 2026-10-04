@@ -4,6 +4,8 @@ import { chmod, copyFile, mkdir, readdir, readFile, stat } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
+
 import { prepareNodePtyRuntime } from "./prepareNodePtyRuntime.mjs";
 import { buildUpdaterTrust } from "./buildUpdaterTrust.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
@@ -127,7 +129,7 @@ export async function verifySliverConsoleBeforeSigning({
         "$signature = Get-AuthenticodeSignature -LiteralPath $env:SLIVER_GUI_CHILD_EXECUTABLE",
         "if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw 'Invalid copied Authenticode signature' }",
         "if ($env:WIN_CSC_PUBLISHER_NAME -and $signature.SignerCertificate.Subject -cne $env:WIN_CSC_PUBLISHER_NAME) { throw 'Unexpected copied Authenticode publisher' }",
-      ].join("\n")], { env: { ...environment, SLIVER_GUI_CHILD_EXECUTABLE: executablePath } });
+      ].join("\n")], { env: { ...windowsPowerShellEnvironment(environment), SLIVER_GUI_CHILD_EXECUTABLE: executablePath } });
     }
   }
   if (platform !== "win32" && (metadata.mode & 0o111) === 0) {

@@ -5,6 +5,8 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
+
 import { readUpdateSigningAssets } from "./releaseSigning.mjs";
 
 const execute = promisify(execFile);
@@ -100,7 +102,7 @@ if (cleanup) {
     const certificatePath = join(root, "build/update-signing/windows.cer");
     const script = "$ErrorActionPreference = 'Stop'; $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($env:SLIVER_GUI_SIGNING_CERTIFICATE); if ($certificate.Subject -cne $env:WIN_CSC_PUBLISHER_NAME) { throw 'Pinned certificate publisher mismatch' }";
     await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-      ...environment, SLIVER_GUI_SIGNING_CERTIFICATE: certificatePath, WIN_CSC_PUBLISHER_NAME: manifest.windows.subject,
+      ...windowsPowerShellEnvironment(environment), SLIVER_GUI_SIGNING_CERTIFICATE: certificatePath, WIN_CSC_PUBLISHER_NAME: manifest.windows.subject,
     });
     for (const store of ["Root", "TrustedPublisher"]) await run("certutil.exe", ["-addstore", "-f", store, certificatePath]);
   }

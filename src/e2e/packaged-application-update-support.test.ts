@@ -220,7 +220,7 @@ describe("packaged application update E2E support", () => {
     const script = Buffer.from(encodedCommand, "base64").toString("utf16le");
     const encodedPath = Buffer.from(executablePath, "utf16le").toString("base64");
 
-    expect(invocation.executable).toBe("pwsh.exe");
+    expect(invocation.executable).toBe("powershell.exe");
     expect(invocation.arguments.slice(0, -1)).toEqual([
       "-NoLogo",
       "-NoProfile",
@@ -323,6 +323,11 @@ describe("packaged application update E2E support", () => {
     }
     expect(packagedUpdateApplicationEnvironment("/profile", "win32", "private-runtime-token", inherited))
       .toMatchObject({ GH_TOKEN: "private-runtime-token" });
+    const powerShellEnvironment = { ...inherited, PSModulePath: "PowerShell 7 modules", psmodulepath: "other modules" };
+    const windowsEnvironment = packagedUpdateApplicationEnvironment("C:\\profile", "win32", undefined, powerShellEnvironment);
+    expect(windowsEnvironment).not.toHaveProperty("PSModulePath");
+    expect(windowsEnvironment).not.toHaveProperty("psmodulepath");
+    expect(windowsEnvironment).toHaveProperty("PATH", inherited.PATH);
   });
 
   it("accepts only the anonymous production GitHub provider for public updates", () => {

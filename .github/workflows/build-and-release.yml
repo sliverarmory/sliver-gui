@@ -255,6 +255,11 @@ jobs:
           uname -m
           ldd --version | head -n 1
 
+      - name: Verify Windows PowerShell signing compatibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: node --test scripts/releaseSigning.test.mjs
+
       - name: Set and verify exact version from tag
         if: env.RELEASE_TAG != ''
         shell: bash

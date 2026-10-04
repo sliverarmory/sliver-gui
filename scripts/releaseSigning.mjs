@@ -3,6 +3,8 @@ import { mkdtemp, open, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
+
 export function releaseSigningProfile(environment = process.env) {
   const profile = environment.SLIVER_GUI_SIGNING_PROFILE || "developer-id";
   if (profile !== "developer-id" && profile !== "self-signed") {
@@ -120,7 +122,7 @@ export async function verifyPinnedWindowsSignatures({ appPath, executablePath, e
   ].join("\n");
   await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
     env: {
-      ...environment,
+      ...windowsPowerShellEnvironment(environment),
       SLIVER_GUI_APPLICATION_EXECUTABLE: appPath,
       SLIVER_GUI_CHILD_EXECUTABLE: executablePath,
       SLIVER_GUI_EXPECTED_CERTIFICATE_SHA256: expectedSha256,
