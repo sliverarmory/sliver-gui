@@ -496,6 +496,7 @@ function buildApplicationUpdateMenuItems(
       }];
     case "idle":
     case "up-to-date":
+    case "trust-required":
     case "error":
       return [{
         label: "Check for Updates…",

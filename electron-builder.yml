@@ -56,6 +56,12 @@ files:
 asarUnpack:
   - node_modules/node-pty/build/Release/**
 extraResources:
+  - from: build/update-signing
+    to: update-signing
+    filter:
+      - manifest.json
+      - macos.cer
+      - windows.cer
   - from: build
     to: app-icons
     filter:

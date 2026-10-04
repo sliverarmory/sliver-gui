@@ -133,6 +133,13 @@ in the background, and install on **Restart to update** or normal application
 exit. Stable builds do not accept prerelease updates. No GitHub token is
 embedded in the application.
 
+The initial `v0.0.1` release uses persistent self-signed code-signing certificates.
+macOS **Check for Updates** offers the native certificate trust dialog before
+the first update check; the app must first be allowed to launch through
+Gatekeeper. Windows installations need the public signing certificate trusted
+on the destination machine. See [self-signed installation and updates](docs/self-signed-updates.md)
+for the trust bootstrap, public fingerprints, and release key policy.
+
 Build targets and minimum-runtime certification are separate. See the
 [platform support ADR](docs/adr/0001-platform-support.md) for runtime requirements,
 certification status, and signing/update policy.
@@ -145,12 +152,16 @@ parity checks, Electron E2E, and native package jobs. Application jobs need the
 non-secret protocol/parity job. Native jobs test unpacked applications against
 a loopback mTLS fixture.
 
-Stable publication is configured for exact `vX.Y.Z` tags at the current
-`origin/main` commit. The workflow requires a public repository with immutable
-releases enabled, macOS signing/notarization, Windows signing, and verified
-assets before publishing through a draft release. Pull-request, `main`, and
-manually dispatched non-tag builds produce CI artifacts. See the workflow for
-signing inputs and publication gates, and the
+Stable publication starts with a signed annotated `vX.Y.Z` tag at the current
+`origin/main` commit. A credential-free tag workflow dispatches the release
+workflow on `main`; release signing secrets are available only from its
+main-only GitHub environment. Publication requires a public repository with
+immutable releases enabled, valid macOS and Windows signatures matching the
+pinned public certificates, and verified assets before publishing through a
+draft release. This self-signed profile explicitly skips Apple notarization;
+the separate Developer ID profile retains its Apple signing requirements.
+Pull-request, `main`, and manually dispatched non-release builds produce CI
+artifacts. See the workflow for signing inputs and publication gates, and the
 [private updater workflow](.github/workflows/private-updater-e2e.yml) for the
 separate update integration test.
 

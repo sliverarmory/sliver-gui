@@ -163,6 +163,34 @@ describe("application update status", () => {
     });
   });
 
+  it("requests trust only from the setup action and keeps cancellation actionable", async () => {
+    const state: ApplicationUpdateState = {
+      status: "trust-required",
+      revision: 2,
+      currentVersion: "0.1.0",
+      message: "Approve the developer certificate in macOS to enable signed updates.",
+    };
+    const checkForApplicationUpdates = vi.fn().mockResolvedValue({
+      ok: true,
+      value: { ...state, revision: 4 },
+    });
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue(state),
+      checkForApplicationUpdates,
+    });
+    const user = userEvent.setup();
+
+    renderUpdateStatus();
+    expect(await screen.findByText("Trust setup required")).toBeInTheDocument();
+    expect(screen.getByText(state.message)).toBeInTheDocument();
+    expect(checkForApplicationUpdates).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Set up trust" }));
+    expect(checkForApplicationUpdates).toHaveBeenCalledExactlyOnceWith();
+    expect(screen.getByRole("button", { name: "Set up trust" })).toBeInTheDocument();
+    expect(screen.queryByText("Update check failed")).not.toBeInTheDocument();
+  });
+
   it("requires confirmation, offers Later and Escape, and restarts with zero arguments", async () => {
     const restartToApplyApplicationUpdate = vi.fn().mockResolvedValue({ ok: true });
     installUpdateAPI({

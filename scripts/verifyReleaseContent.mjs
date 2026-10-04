@@ -16,10 +16,12 @@ import {
   verifySourceOverlayReplacements,
 } from "./buildSliverConsole.mjs";
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
+import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
 const releaseDir = join(rootDir, "release");
+const signingProfile = releaseSigningProfile();
 const verifyPackaged = process.argv.includes("--packaged");
 const exactArchiveArgument = argumentValue("--archive");
 if (exactArchiveArgument && !verifyPackaged) {
@@ -379,6 +381,11 @@ for (const requiredPath of requiredBuilderPaths) {
   }
 }
 for (const requiredSetting of [
+  "from: build/update-signing",
+  "to: update-signing",
+  "- manifest.json",
+  "- macos.cer",
+  "- windows.cer",
   "from: build/about-icon.png",
   "to: sliver-desktop.png",
   "to: app-icons",
@@ -408,6 +415,7 @@ for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/
 
 const sliverClientEvidence = await verifyInstalledSliverClient();
 const sliverConsoleEvidence = await verifyPreparedSliverConsole();
+const updateSigningEvidence = await readUpdateSigningAssets(rootDir);
 await verifyNodePtyDirectory(join(rootDir, "node_modules/node-pty"), process.platform);
 
 if (verifyPackaged) {
@@ -419,6 +427,7 @@ if (verifyPackaged) {
     verifyArchive(archive, terminalFontEvidence, sliverClientEvidence);
     await verifyExternalBrandAsset(archive);
     await verifyExternalLegalAssets(archive);
+    await verifyExternalUpdateSigning(archive, updateSigningEvidence);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
     await verifyExternalNodePtyRuntime(archive);
   }
@@ -579,8 +588,7 @@ async function verifyExternalSliverConsole(archivePath, evidence) {
   });
   const executablePath = join(resourceDirectory, evidence.buildRecord.artifact.fileName);
   const exactUnsignedDigest = sha256(executable) === evidence.buildRecord.artifact.sha256;
-  const signatureRequired = process.env.SLIVER_GUI_REQUIRE_SIGNED_CHILD === "true" ||
-    process.env.SLIVER_GUI_REQUIRE_SIGNED_CHILD === "1";
+  const signatureRequired = signedNativeCodeRequired();
   if (process.platform === "linux" && !exactUnsignedDigest) {
     throw new Error(`Packaged Linux Sliver console changed after its pre-sign integrity check: ${executablePath}`);
   }
@@ -626,6 +634,14 @@ async function verifySliverExecutableBuildInfo(executablePath, evidence) {
 async function verifyNestedSliverSignature(archivePath, executablePath, signatureRequired) {
   if (process.platform === "darwin") {
     const appPath = resolve(dirname(archivePath), "..", "..");
+    if (signingProfile === "self-signed") {
+      await verifyPinnedMacosSignatures({
+        appPath,
+        expectedSha256: updateSigningEvidence.manifest.macos.sha256,
+        run: runCommand,
+      });
+      return;
+    }
     await runCommand("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", executablePath]);
     await runCommand("/usr/bin/codesign", ["--verify", "--strict", "--verbose=2", appPath]);
     const childDetails = await runCommand("/usr/bin/codesign", ["-dv", "--verbose=4", executablePath]);
@@ -644,6 +660,16 @@ async function verifyNestedSliverSignature(archivePath, executablePath, signatur
 
   if (process.platform === "win32") {
     const appPath = join(dirname(dirname(archivePath)), "Sliver GUI.exe");
+    if (signingProfile === "self-signed") {
+      await verifyPinnedWindowsSignatures({
+        appPath,
+        executablePath,
+        expectedSha256: updateSigningEvidence.manifest.windows.sha256,
+        expectedPublisher: updateSigningEvidence.manifest.windows.subject,
+        run: runCommand,
+      });
+      return;
+    }
     const expectedPublisher = process.env.WIN_CSC_PUBLISHER_NAME?.trim();
     if (signatureRequired && !expectedPublisher) {
       throw new Error("Signed Sliver console verification requires WIN_CSC_PUBLISHER_NAME");
@@ -685,6 +711,36 @@ async function verifyNestedSliverSignature(archivePath, executablePath, signatur
 
 function signingDetail(output, name) {
   return output.match(new RegExp(`^${name}=(.+)$`, "mu"))?.[1]?.trim();
+}
+
+function signedNativeCodeRequired() {
+  return process.platform !== "linux" && (
+    signingProfile === "self-signed" ||
+    process.env.SLIVER_GUI_REQUIRE_SIGNED_CHILD === "true" ||
+    process.env.SLIVER_GUI_REQUIRE_SIGNED_CHILD === "1"
+  );
+}
+
+async function verifyExternalUpdateSigning(archivePath, evidence) {
+  const resourcesDirectory = dirname(archivePath);
+  for (const [name, expected] of evidence.files) {
+    const actual = await readFile(join(resourcesDirectory, "update-signing", name));
+    if (!actual.equals(expected)) throw new Error(`Packaged update signing asset changed: ${name}`);
+  }
+  if (process.platform !== "darwin") return;
+  const helperPath = join(resourcesDirectory, "updater-trust", "updater-trust");
+  const metadata = await stat(helperPath);
+  if (!metadata.isFile() || metadata.size === 0 || (metadata.mode & 0o111) === 0) {
+    throw new Error("Packaged macOS updater trust helper must be a non-empty executable");
+  }
+  for (const architecture of ["x86_64", "arm64"]) {
+    await runCommand("/usr/bin/lipo", [helperPath, "-verify_arch", architecture]);
+  }
+  // The self-signed profile validates every Mach-O below Contents, including
+  // this helper, together with the app in verifyNestedSliverSignature.
+  if (signedNativeCodeRequired() && signingProfile !== "self-signed") {
+    await verifyNestedSliverSignature(archivePath, helperPath, true);
+  }
 }
 
 async function verifyExternalBrandAsset(archivePath) {

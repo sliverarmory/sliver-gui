@@ -5,6 +5,7 @@ export type ApplicationUpdateStatus =
   | "disabled"
   | "idle"
   | "checking"
+  | "trust-required"
   | "available"
   | "downloading"
   | "ready"
@@ -26,6 +27,10 @@ export type ApplicationUpdateState =
     })
   | (ApplicationUpdateStateBase & {
       readonly status: "checking";
+    })
+  | (ApplicationUpdateStateBase & {
+      readonly status: "trust-required";
+      readonly message: string;
     })
   | (ApplicationUpdateStateBase & {
       readonly status: "available";
@@ -72,6 +77,10 @@ export function parseApplicationUpdateState(value: unknown): ApplicationUpdateSt
     case "up-to-date": {
       requireExactKeys(state, ["status", "revision", "currentVersion"]);
       return Object.freeze({ status, revision, currentVersion });
+    }
+    case "trust-required": {
+      requireExactKeys(state, ["status", "revision", "currentVersion", "message"]);
+      return Object.freeze({ status, revision, currentVersion, message: requireMessage(state["message"]) });
     }
     case "available":
     case "ready": {
@@ -146,6 +155,7 @@ function requireStatus(value: unknown): ApplicationUpdateStatus {
     "disabled",
     "idle",
     "checking",
+    "trust-required",
     "available",
     "downloading",
     "ready",

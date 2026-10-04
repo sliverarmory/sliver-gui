@@ -200,6 +200,7 @@ test("afterPack prepares the exact unpacked runtime before signing", async () =>
         verifySliverConsoleBeforeSigning: async ({ resourcesDirectory }) => {
           verifiedResourcesDirectory = resourcesDirectory;
         },
+        prepareUpdaterTrustBeforeSigning: async () => {},
       },
     );
     assert.equal(verifiedResourcesDirectory, join(appOutDir, "Sliver GUI.app", "Contents", "Resources"));

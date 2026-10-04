@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
 const SEMVER_PATTERN =
-  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)$/u;
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
 
 const FORBIDDEN_UPDATE_CONFIG_KEY_PATTERN =
   /^(?:access[-_]?token|api[-_]?key|auth(?:orization)?|credentials?|password|request-?headers?|secret|token)$/iu;
@@ -10,6 +10,26 @@ const FORBIDDEN_UPDATE_CONFIG_KEY_PATTERN =
 export interface PackagedUpdateVersions {
   readonly from: string;
   readonly to: string;
+}
+
+export type PackagedUpdateFeed = "private" | "public";
+
+export function parsePackagedUpdateFeed(value: string | undefined): PackagedUpdateFeed {
+  if (value === undefined || value === "" || value === "private") return "private";
+  if (value === "public") return "public";
+  throw new Error("SLIVER_GUI_UPDATE_E2E_FEED must be private or public");
+}
+
+export function packagedUpdateGithubToken(
+  feed: PackagedUpdateFeed,
+  environment: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (feed === "public") return undefined;
+  const token = environment["GH_TOKEN"];
+  if (!token || token.length < 20 || /[\s\0]/u.test(token)) {
+    throw new Error("GH_TOKEN must be a non-empty runtime credential without whitespace or NUL bytes");
+  }
+  return token;
 }
 
 export interface PackagedUpdateLaunchProfile {
@@ -157,6 +177,26 @@ export function packagedUpdateProfileEnvironment(
   };
 }
 
+export function packagedUpdateApplicationEnvironment(
+  profileRoot: string,
+  platform: NodeJS.Platform,
+  githubToken: string | undefined,
+  inherited: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const environment = Object.fromEntries(
+    Object.entries(inherited).filter((entry): entry is [string, string] =>
+      typeof entry[1] === "string" &&
+      !/(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIALS?|PASS(?:WORD)?|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)/iu.test(entry[0]) &&
+      !/^(?:APPLE_ID|CSC_LINK|MAC_CSC_LINK|WIN_CSC_LINK|NODE_OPTIONS)$/iu.test(entry[0])),
+  );
+  return {
+    ...environment,
+    ...packagedUpdateProfileEnvironment(profileRoot, platform),
+    ...(githubToken ? { GH_TOKEN: githubToken } : {}),
+    ...(platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
+  };
+}
+
 export interface WindowsAuthenticodeInspection {
   readonly status: string;
   readonly statusMessage: string;
@@ -229,9 +269,13 @@ interface ParsedPrereleaseVersion {
   readonly prerelease: readonly string[];
 }
 
-export function parsePackagedUpdateVersions(fromValue: string, toValue: string): PackagedUpdateVersions {
-  const from = parsePrereleaseVersion(fromValue, "SLIVER_GUI_UPDATE_E2E_FROM_VERSION");
-  const to = parsePrereleaseVersion(toValue, "SLIVER_GUI_UPDATE_E2E_TO_VERSION");
+export function parsePackagedUpdateVersions(
+  fromValue: string,
+  toValue: string,
+  feed: PackagedUpdateFeed = "private",
+): PackagedUpdateVersions {
+  const from = parseVersion(fromValue, "SLIVER_GUI_UPDATE_E2E_FROM_VERSION", feed);
+  const to = parseVersion(toValue, "SLIVER_GUI_UPDATE_E2E_TO_VERSION", feed);
   if (compareVersions(from, to) >= 0) {
     throw new Error("SLIVER_GUI_UPDATE_E2E_TO_VERSION must have higher SemVer precedence than the from version");
   }
@@ -240,6 +284,14 @@ export function parsePackagedUpdateVersions(fromValue: string, toValue: string):
 
 export function assertPrivatePackagedUpdateConfiguration(content: string, token: string): void {
   if (content.includes(token)) throw new Error("Packaged app-update.yml contains the runtime GitHub token");
+  assertPackagedUpdateConfiguration(content, "private");
+}
+
+export function assertPublicPackagedUpdateConfiguration(content: string): void {
+  assertPackagedUpdateConfiguration(content, "public");
+}
+
+function assertPackagedUpdateConfiguration(content: string, feed: PackagedUpdateFeed): void {
   assertSimpleUpdateConfigurationSyntax(content);
 
   const keyEntries = [...content.matchAll(/^([ \t]*)([A-Za-z][A-Za-z0-9_-]*):/gmu)]
@@ -256,7 +308,7 @@ export function assertPrivatePackagedUpdateConfiguration(content: string, token:
     "provider",
     "owner",
     "repo",
-    "private",
+    ...(feed === "private" ? ["private"] : []),
     "channel",
     "updaterCacheDirName",
     "publisherName",
@@ -272,10 +324,12 @@ export function assertPrivatePackagedUpdateConfiguration(content: string, token:
     ["provider", "github"],
     ["owner", "sliverarmory"],
     ["repo", "sliver-gui"],
-    ["private", "true"],
-    ["channel", "latest"],
     ["updaterCacheDirName", "sliver-gui-updater"],
   ]);
+  if (feed === "private") expectedScalars.set("private", "true");
+  if (feed === "private" || rootEntries.some(({ key }) => key === "channel")) {
+    expectedScalars.set("channel", "latest");
+  }
   for (const [key, expected] of expectedScalars) {
     const count = rootEntries.filter((entry) => entry.key === key).length;
     if (count !== 1) {
@@ -314,12 +368,14 @@ function assertSimpleUpdateConfigurationSyntax(content: string): void {
   }
 }
 
-function parsePrereleaseVersion(value: string, variableName: string): ParsedPrereleaseVersion {
+function parseVersion(value: string, variableName: string, feed: PackagedUpdateFeed): ParsedPrereleaseVersion {
   const match = SEMVER_PATTERN.exec(value);
-  if (!match) throw new Error(`${variableName} must be an exact prerelease SemVer without build metadata`);
+  const kind = feed === "private" ? "prerelease" : "stable";
+  if (!match) throw new Error(`${variableName} must be an exact ${kind} SemVer without build metadata`);
   const prereleaseText = match[4];
-  if (prereleaseText === undefined) throw new Error(`${variableName} is missing prerelease identifiers`);
-  const prerelease = prereleaseText.split(".");
+  if (feed === "private" && prereleaseText === undefined) throw new Error(`${variableName} is missing prerelease identifiers`);
+  if (feed === "public" && prereleaseText !== undefined) throw new Error(`${variableName} must be stable for the public feed`);
+  const prerelease = prereleaseText?.split(".") ?? [];
   for (const identifier of prerelease) {
     if (/^\d+$/u.test(identifier) && identifier.length > 1 && identifier.startsWith("0")) {
       throw new Error(`${variableName} contains a numeric prerelease identifier with a leading zero`);

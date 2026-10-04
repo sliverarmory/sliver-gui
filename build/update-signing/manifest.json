@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "macos": {
+    "sha256": "244c4d9ae362dde4e74cf36365ea926774707928f779619580ec64370469dc7c"
+  },
+  "windows": {
+    "sha256": "be395c8931d20c20c43b9e88e6b6104da325122558fa0b6a5086c438deb2939d",
+    "subject": "CN=Sliver Armory, O=Sliver Armory"
+  }
+}

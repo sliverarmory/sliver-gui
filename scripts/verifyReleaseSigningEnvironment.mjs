@@ -1,6 +1,12 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { readUpdateSigningAssets, releaseSigningProfile } from "./releaseSigning.mjs";
+
+const profile = releaseSigningProfile();
 const platform = argumentValue("--platform");
 const requiredVariables = {
-  macos: [
+  macos: profile === "self-signed" ? ["MAC_CSC_LINK", "MAC_CSC_KEY_PASSWORD"] : [
     "MAC_CSC_LINK",
     "MAC_CSC_KEY_PASSWORD",
     "APPLE_ID",
@@ -27,7 +33,15 @@ if (platform === "windows" && (!process.env.WIN_CSC_PUBLISHER_NAME.includes("=")
   throw new Error("WIN_CSC_PUBLISHER_NAME must be the certificate Subject distinguished name");
 }
 
-if (platform === "macos") {
+if (profile === "self-signed") {
+  const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const { manifest } = await readUpdateSigningAssets(rootDirectory);
+  if (platform === "windows" && process.env.WIN_CSC_PUBLISHER_NAME !== manifest.windows.subject) {
+    throw new Error("WIN_CSC_PUBLISHER_NAME does not match the pinned Windows certificate Subject");
+  }
+}
+
+if (platform === "macos" && profile === "developer-id") {
   if (!/^[A-Z0-9]{10}$/u.test(process.env.APPLE_TEAM_ID)) {
     throw new Error("APPLE_TEAM_ID must be a 10-character Apple team identifier");
   }
@@ -36,7 +50,7 @@ if (platform === "macos") {
   }
 }
 
-console.log(`Validated required ${platform} release signing environment`);
+console.log(`Validated required ${platform} ${profile} release signing environment`);
 
 function argumentValue(name) {
   const indexes = process.argv.flatMap((argument, index) => argument === name ? [index] : []);

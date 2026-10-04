@@ -310,6 +310,22 @@ function UpdateStateContent({
       />
     );
   }
+  if (state.status === "trust-required") {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-start gap-3">
+          <FontAwesomeIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-accent" icon={faCircleInfo} />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-foreground">Trust setup required</p>
+            <p className="text-xs leading-5 text-muted">{state.message}</p>
+          </div>
+        </div>
+        <Button isPending={isChecking} size="sm" variant="tertiary" onPress={onCheck}>
+          Set up trust
+        </Button>
+      </div>
+    );
+  }
   if (state.status === "disabled") {
     return (
       <StatusLine
@@ -426,6 +442,7 @@ function updateAnnouncement(state: ApplicationUpdateState): string {
   if (state.status === "disabled") return `Application updates unavailable. ${state.disabledReason}`;
   if (state.status === "idle") return "Application updater ready.";
   if (state.status === "checking") return "Checking for application updates.";
+  if (state.status === "trust-required") return `Update trust setup required. ${state.message}`;
   if (state.status === "available") return `Application update ${state.availableVersion} found.`;
   if (state.status === "downloading") {
     return `Downloading application update ${state.availableVersion}: ${Math.round(state.progressPercent)} percent.`;
