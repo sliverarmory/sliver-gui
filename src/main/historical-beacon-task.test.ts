@@ -48,6 +48,7 @@ describe("historical beacon task decoder", () => {
     const response = Buffer.from(sliverpb.Pwd.encode(sliverpb.Pwd.create({ Path: "/tmp/history" })).finish());
     const result = decodeHistoricalBeaconTask("CdReq", savedRequest(11), response);
     expect(text(result)).toContain("Path: /tmp/history");
+    expect(text(result)).not.toContain("CdReq");
     expect(result.error).toBeUndefined();
   });
 

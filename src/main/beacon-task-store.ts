@@ -1031,7 +1031,7 @@ function decodeDisposition(
       assertResponse(decoded.Response?.Err);
       return {
         kind: "inline-text" as const,
-        text: "The beacon acknowledged and scheduled the interactive-session request. This does not prove a session connected; a session is shown only after authoritative inventory refresh.",
+        text: "The beacon acknowledged and scheduled the interactive-session request.",
         truncated: false,
       };
     }

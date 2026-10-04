@@ -7,24 +7,27 @@ const TABLE_PAGE_SIZE = 100;
 const BINARY_PAGE_BYTES = 4_096;
 
 /** Presents complete task content in the same language as the task itself. */
-export function BeaconFullResponse({ model }: { model: BeaconFullResponseModel }): React.JSX.Element {
+export function BeaconFullResponse({ model, hideTaskTitle = false }: {
+  model: BeaconFullResponseModel;
+  hideTaskTitle?: boolean;
+}): React.JSX.Element {
   return (
     <div aria-label="Full task output" className="min-w-0 space-y-6" role="region">
       {model.sections.length === 0 ? <p className="py-8 text-center text-sm text-muted">No output was returned.</p> : null}
       {model.sections.map((section, index) => (
-        <ResponseSection key={`${section.kind}:${section.title}:${index}`} section={section} />
+        <ResponseSection hideTitle={hideTaskTitle && section.title === model.title} key={`${section.kind}:${section.title}:${index}`} section={section} />
       ))}
     </div>
   );
 }
 
-function ResponseSection({ section }: { section: BeaconFullResponseSection }): React.JSX.Element {
-  if (section.kind === "table") return <ResponseTable section={section} />;
-  if (section.kind === "text") return <ResponseText section={section} />;
-  if (section.kind === "bytes") return <ResponseBytes section={section} />;
+function ResponseSection({ section, hideTitle }: { section: BeaconFullResponseSection; hideTitle: boolean }): React.JSX.Element {
+  if (section.kind === "table") return <ResponseTable hideTitle={hideTitle} section={section} />;
+  if (section.kind === "text") return <ResponseText hideTitle={hideTitle} section={section} />;
+  if (section.kind === "bytes") return <ResponseBytes hideTitle={hideTitle} section={section} />;
   return (
     <section aria-label={section.title} className="min-w-0 space-y-3">
-      <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+      {!hideTitle ? <h3 className="text-sm font-semibold text-foreground">{section.title}</h3> : null}
       <dl className="grid gap-x-8 gap-y-4 rounded-xl bg-surface-secondary px-4 py-4 sm:grid-cols-2 lg:grid-cols-3">
         {section.fields.map((field, index) => (
           <div className="min-w-0" key={`${field.label}:${index}`}>
@@ -37,7 +40,7 @@ function ResponseSection({ section }: { section: BeaconFullResponseSection }): R
   );
 }
 
-function ResponseTable({ section }: { section: Extract<BeaconFullResponseSection, { kind: "table" }> }): React.JSX.Element {
+function ResponseTable({ section, hideTitle }: { section: Extract<BeaconFullResponseSection, { kind: "table" }>; hideTitle: boolean }): React.JSX.Element {
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(0);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -59,7 +62,7 @@ function ResponseTable({ section }: { section: Extract<BeaconFullResponseSection
   return (
     <section aria-label={section.title} className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+        {!hideTitle ? <h3 className="text-sm font-semibold text-foreground">{section.title}</h3> : null}
         {section.rows.length > 0 ? (
           <SearchField
             aria-label={`Filter ${section.title}`}
@@ -121,7 +124,7 @@ function ResponseTable({ section }: { section: Extract<BeaconFullResponseSection
   );
 }
 
-function ResponseText({ section }: { section: Extract<BeaconFullResponseSection, { kind: "text" }> }): React.JSX.Element {
+function ResponseText({ section, hideTitle }: { section: Extract<BeaconFullResponseSection, { kind: "text" }>; hideTitle: boolean }): React.JSX.Element {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -142,7 +145,7 @@ function ResponseText({ section }: { section: Extract<BeaconFullResponseSection,
   return (
     <section aria-label={section.title} className="min-w-0 space-y-3">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+        {!hideTitle ? <h3 className="text-sm font-semibold text-foreground">{section.title}</h3> : null}
         {section.text ? <Button aria-label={`Copy ${section.title}`} size="sm" variant="ghost" onPress={() => void copy()}>{copyState === "copied" ? "Copied" : "Copy"}</Button> : null}
       </div>
       {section.text ? (
@@ -158,7 +161,7 @@ function ResponseText({ section }: { section: Extract<BeaconFullResponseSection,
   );
 }
 
-function ResponseBytes({ section }: { section: Extract<BeaconFullResponseSection, { kind: "bytes" }> }): React.JSX.Element {
+function ResponseBytes({ section, hideTitle }: { section: Extract<BeaconFullResponseSection, { kind: "bytes" }>; hideTitle: boolean }): React.JSX.Element {
   const [page, setPage] = useState(0);
   const viewportRef = useRef<HTMLPreElement>(null);
   const byteCount = Math.floor(section.hex.length / 2);
@@ -182,7 +185,7 @@ function ResponseBytes({ section }: { section: Extract<BeaconFullResponseSection
   return (
     <section aria-label={section.title} className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h3 className="text-sm font-semibold text-foreground">{section.title}</h3>
+        {!hideTitle ? <h3 className="text-sm font-semibold text-foreground">{section.title}</h3> : null}
         <p className="text-xs tabular-nums text-muted">{byteCount.toLocaleString()} bytes</p>
       </div>
       <pre aria-label={`${section.title} hex view`} className="max-h-[52vh] overflow-auto rounded-xl bg-surface-secondary p-4 font-mono text-xs leading-6 text-foreground" ref={viewportRef} tabIndex={0}>

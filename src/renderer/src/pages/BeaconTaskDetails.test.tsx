@@ -59,10 +59,13 @@ describe("BeaconTaskDetails", () => {
     expect(getBeaconTaskResponse).not.toHaveBeenCalled();
     expect(screen.queryByText(task.taskId)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Details" }));
-    const dialog = screen.getByRole("dialog", { name: "Task details" });
+    const dialog = screen.getByRole("dialog", { name: "Beacon task" });
+    expect(within(dialog).getByRole("heading", { name: "Beacon task" }).querySelector("svg")).not.toBeNull();
+    expect(within(dialog).queryByText("FutureTaskReq")).not.toBeInTheDocument();
     expect(within(dialog).getByText("Task GUID")).toBeVisible();
     expect(within(dialog).getByText(task.taskId)).toBeVisible();
     await waitFor(() => expect(renderedText()).toBe(text));
+    expect(within(dialog).getAllByRole("heading", { name: "Beacon task" })).toHaveLength(1);
     expect(dialog.querySelector("script")).toBeNull();
     expect(getBeaconTaskResponse).toHaveBeenCalledExactlyOnceWith({ taskId: task.taskId, offset: 0 });
     await user.click(within(dialog).getByRole("button", { name: /^Close$/u }));
@@ -85,6 +88,8 @@ describe("BeaconTaskDetails", () => {
     ), "DownloadReq");
     await user.click(screen.getByRole("button", { name: "Details" }));
     await waitFor(() => expect(renderedText()).toBe(file));
+    const dialog = screen.getByRole("dialog", { name: "File contents" });
+    expect(within(dialog).getAllByRole("heading", { name: "File contents" })).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "Next" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Characters .* of/)).not.toBeInTheDocument();
     expect(screen.queryByText(/"encoding"/)).not.toBeInTheDocument();

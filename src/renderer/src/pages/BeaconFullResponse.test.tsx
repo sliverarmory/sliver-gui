@@ -24,6 +24,18 @@ function show(sections: BeaconFullResponseModel["sections"]) {
 }
 
 describe("BeaconFullResponse", () => {
+  it("omits repeated task headings while retaining distinct sections and accessible output labels", () => {
+    render(<BeaconFullResponse hideTaskTitle model={{ title: "File contents", sections: [
+      { kind: "text", title: "File contents", text: "complete file" },
+      { kind: "fields", title: "Response details", fields: [{ label: "Path", value: "/tmp/file.txt" }] },
+    ] }} />);
+    expect(screen.queryByRole("heading", { name: "File contents" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Response details" })).toBeVisible();
+    const output = screen.getByRole("region", { name: "File contents" });
+    expect(within(output).getByLabelText("File contents")).toHaveTextContent("complete file");
+    expect(within(output).getByRole("button", { name: "Copy File contents" })).toBeVisible();
+  });
+
   it("renders and copies complete file text with real lines and preserved whitespace", async () => {
     const user = userEvent.setup();
     const writeText = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();

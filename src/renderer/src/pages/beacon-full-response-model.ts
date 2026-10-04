@@ -1,5 +1,6 @@
 import type { BeaconTaskSummary } from "../../../shared/operation-contracts.js";
 import { escapeTerminalOutput } from "../../../shared/terminal-output.js";
+import { getBeaconTaskPresentation } from "./beacon-task-presentation.js";
 
 export type BeaconFullResponseSection =
   | { kind: "text"; title: string; text: string }
@@ -14,22 +15,6 @@ export interface BeaconFullResponseModel {
 
 type RecordValue = Record<string, unknown>;
 type Column = readonly [key: string, title: string, format?: (value: unknown) => string];
-
-const TITLES: Readonly<Record<string, string>> = {
-  Ping: "Ping response", PwdReq: "Working directory", CdReq: "Working directory",
-  LsReq: "Directory listing", MemfilesListReq: "Memory files", DownloadReq: "File contents",
-  PsReq: "Processes", IfconfigReq: "Network interfaces", EnvReq: "Environment variables",
-  CurrentTokenOwnerReq: "Current identity", NetstatReq: "Network connections", MountReq: "Mounted filesystems",
-  GrepReq: "Search results", RegistryReadReq: "Registry value", RegistrySubKeyListReq: "Registry subkeys",
-  RegistryListValuesReq: "Registry values", RegistryWriteReq: "Registry write", RegistryCreateKeyReq: "Registry key creation",
-  RegistryDeleteKeyReq: "Registry key deletion", ServicesReq: "Services", ServiceDetailReq: "Service details",
-  ExecuteReq: "Process execution", ExecuteWindowsReq: "Process execution", ExecuteChildrenReq: "Background processes",
-  InvokeExecuteAssemblyReq: "Assembly output", InvokeInProcExecuteAssemblyReq: "Assembly output", ExecuteAssemblyReq: "Assembly output",
-  CallExtensionReq: "Extension output", GetPrivsReq: "Windows privileges", SSHCommandReq: "SSH command output",
-  SideloadReq: "Sideload output", SpawnDllReq: "DLL output", RunAsReq: "Run as output",
-  SetEnvReq: "Environment updated", UnsetEnvReq: "Environment updated", ReconfigureReq: "Beacon configuration",
-  OpenSession: "Session request", StartServiceByNameReq: "Service start", StopServiceReq: "Service stop",
-};
 
 const FILE_COLUMNS: readonly Column[] = [
   ["Name", "Name"], ["IsDir", "Type", (value) => value ? "Directory" : "File"],
@@ -46,8 +31,7 @@ export function buildBeaconFullResponse(
   task: BeaconTaskSummary,
   response: { format: "text" | "json" | "hex"; text: string },
 ): BeaconFullResponseModel {
-  const title = Object.hasOwn(TITLES, task.description) ? TITLES[task.description]!
-    : `${label(task.description.replace(/^Invoke/u, "").replace(/Req$/u, ""))} response`;
+  const title = getBeaconTaskPresentation(task).label;
   const builder = new ResponseBuilder(title);
   if (response.format === "text") {
     builder.text(title, response.text);

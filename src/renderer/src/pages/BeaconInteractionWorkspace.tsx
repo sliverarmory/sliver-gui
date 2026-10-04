@@ -54,6 +54,7 @@ import { AreaField, Field } from "../components/FormControls";
 import { BeaconExecutionCommand, type BeaconExecutionCommandState, type BeaconExecutionSelection } from "./BeaconExecutionCommand";
 import { BeaconExecutionTaskOutput } from "./BeaconExecutionTaskOutput";
 import { BeaconTaskDetails } from "./BeaconTaskDetails";
+import { getBeaconTaskPresentation } from "./beacon-task-presentation";
 import { capabilityFor, formatTimestamp, operationStateLabel, taskStateColor } from "./target-page-model";
 import { useBeaconTaskOutputs, type BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 
@@ -1023,12 +1024,18 @@ function BeaconTaskQueue({
       header: "Task",
       isRowHeader: true,
       minWidth: 220,
-      cell: (task) => (
-        <div className="min-w-0 py-1">
-          <p className="truncate text-sm font-medium text-foreground">{task.description || "Beacon task"}</p>
-          <p className="mt-0.5 truncate font-mono text-[11px] text-muted">{task.taskId}</p>
-        </div>
-      ),
+      cell: (task) => {
+        const presentation = getBeaconTaskPresentation(task);
+        return (
+          <div className="min-w-0 py-1">
+            <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <FontAwesomeIcon aria-hidden className="shrink-0 text-accent" icon={presentation.icon} />
+              <span className="truncate">{presentation.label}</span>
+            </p>
+            <p className="mt-0.5 truncate font-mono text-[11px] text-muted">{task.taskId}</p>
+          </div>
+        );
+      },
     },
     {
       id: "state",
@@ -1317,11 +1324,15 @@ export function BeaconTaskOutput({ output, isCanceling, onCancel, onLoad, onRetr
   onRetry: () => void;
 }): React.JSX.Element {
   const task = output.detail;
+  const presentation = getBeaconTaskPresentation(task ?? output.task);
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-foreground">{output.task.description || (task ? operationResultTitle(task) : "Beacon task")}</h3>
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <FontAwesomeIcon aria-hidden className="shrink-0 text-accent" icon={presentation.icon} />
+            <span>{presentation.label}</span>
+          </h3>
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <BeaconTaskDetails key={`${output.task.beaconId}:${output.task.taskId}`} task={task ?? output.task} />
@@ -1375,38 +1386,37 @@ function BeaconTaskResult({ task }: { task: BeaconTaskDetail }): React.JSX.Eleme
   const operationId = task.operationId as string | undefined;
   if (operationId === "beacon.filesystem.pwd") return <WorkingDirectoryResult disposition={task.disposition} />;
   if (operationId === "beacon.filesystem.ls") {
-    return <TableResult description="Filesystem metadata returned by this check-in." disposition={task.disposition} emptyLabel="The directory is empty." icon={faFolderOpen} presentation="directory" title="Directory listing" />;
+    return <TableResult disposition={task.disposition} emptyLabel="The directory is empty." presentation="directory" />;
   }
   if (operationId === "beacon.process.list") {
-    return <TableResult description="Process inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No processes were returned." icon={faMicrochip} presentation="processes" title="Processes" />;
+    return <TableResult disposition={task.disposition} emptyLabel="No processes were returned." presentation="processes" />;
   }
   if (operationId === "beacon.network.interfaces") return <NetworkInterfacesResult disposition={task.disposition} />;
   if (operationId === "beacon.environment.list") {
-    return <TableResult description="Environment captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No environment variables were returned." icon={faTerminal} title="Environment variables" />;
+    return <TableResult description="Environment captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No environment variables were returned." />;
   }
   if (operationId === "beacon.network.netstat") {
-    return <TableResult description="Connection inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No network connections were returned." icon={faNetworkWired} title="Network connections" />;
+    return <TableResult description="Connection inventory captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No network connections were returned." />;
   }
   if (operationId === "beacon.filesystem.mount") {
-    return <TableResult description="Mounted filesystems captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No mounts were returned." icon={faFolderOpen} title="Mounts" />;
+    return <TableResult description="Mounted filesystems captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No mounts were returned." />;
   }
   if (operationId === "beacon.filesystem.memfiles") {
-    return <TableResult description="Memory files captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No memory files were returned." icon={faFolderOpen} title="Memory files" />;
+    return <TableResult description="Memory files captured when the beacon executed the task." disposition={task.disposition} emptyLabel="No memory files were returned." />;
   }
   if (operationId === "beacon.filesystem.grep") {
-    return <TableResult description="Matches returned by this beacon task." disposition={task.disposition} emptyLabel="No matches were returned." icon={faFolderOpen} title="File search" />;
+    return <TableResult description="Matches returned by this beacon task." disposition={task.disposition} emptyLabel="No matches were returned." />;
   }
   if (operationId === "beacon.filesystem.cat" || operationId === "beacon.filesystem.head" || operationId === "beacon.filesystem.tail") {
     return <TextResult disposition={task.disposition} title={operationResultTitle(task)} />;
   }
   if (operationId === "beacon.registry.list-subkeys" || operationId === "beacon.registry.list-values") {
     return <TableResult description="Registry entries returned by this beacon task." disposition={task.disposition}
-      emptyLabel={operationId === "beacon.registry.list-subkeys" ? "No subkeys were returned." : "No values were returned."}
-      icon={faFolderOpen} title={operationResultTitle(task)} />;
+      emptyLabel={operationId === "beacon.registry.list-subkeys" ? "No subkeys were returned." : "No values were returned."} />;
   }
   if (operationId === "beacon.service.list") {
     return <TableResult description="Windows services captured when the beacon executed the task." disposition={task.disposition}
-      emptyLabel="No services were returned." icon={faListCheck} title="Services" />;
+      emptyLabel="No services were returned." />;
   }
   if (operationId === "beacon.registry.create" || operationId === "beacon.registry.delete" || operationId === "beacon.registry.write" ||
     operationId === "beacon.service.start" || operationId === "beacon.service.stop") {
@@ -1474,8 +1484,7 @@ function BeaconExecutionReadTaskOutput({ task }: { task: BeaconTaskDetail }): Re
     <section aria-label={label} className="space-y-3" role="region">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h4 className="text-sm font-semibold text-foreground">{label}</h4>
-          {!children ? <p className="mt-1 text-xs text-muted">{result.processName} · {result.processIntegrity}{result.currentIdentity ? ` · ${result.currentIdentity}` : ""}</p> : null}
+          {!children ? <p className="text-xs text-muted">{result.processName} · {result.processIntegrity}{result.currentIdentity ? ` · ${result.currentIdentity}` : ""}</p> : null}
         </div>
         <span className="text-xs text-muted">{rows.length} of {result.total}</span>
       </div>
@@ -1508,10 +1517,7 @@ function WorkingDirectoryResult({ disposition }: { disposition: OperationDisposi
   if (path === undefined || path === null) return <GenericDisposition disposition={disposition} />;
   return (
     <div className="rounded-2xl bg-default p-4">
-      <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-        <FontAwesomeIcon aria-hidden className="text-accent" icon={faTerminal} /> Working directory
-      </div>
-      <p className="mt-3 break-all font-mono text-sm text-foreground">{String(path)}</p>
+      <p className="break-all font-mono text-sm text-foreground">{String(path)}</p>
       {disposition?.kind === "structured-detail" && disposition.truncated ? <TruncatedNotice /> : null}
     </div>
   );
@@ -1521,7 +1527,6 @@ function TextResult({ disposition, title }: { disposition: OperationDisposition 
   if (disposition?.kind !== "inline-text") return <GenericDisposition disposition={disposition} />;
   return (
     <section aria-label={title} className="space-y-2" role="region">
-      <h4 className="text-sm font-semibold text-foreground">{title}</h4>
       <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-2xl bg-default p-4 font-mono text-xs leading-relaxed text-foreground">{disposition.text}</pre>
       {disposition.truncated ? <TruncatedNotice /> : null}
     </section>
@@ -1529,35 +1534,27 @@ function TextResult({ disposition, title }: { disposition: OperationDisposition 
 }
 
 function TableResult({
-  title,
   description,
-  icon,
   disposition,
   emptyLabel,
   presentation,
 }: {
-  title: string;
-  description: string;
-  icon: IconDefinition;
+  description?: string | undefined;
   disposition: OperationDisposition | undefined;
   emptyLabel: string;
   presentation?: "directory" | "processes" | undefined;
 }): React.JSX.Element {
   if (disposition?.kind !== "table") return <GenericDisposition disposition={disposition} />;
-  return <PagedTableResult description={description} disposition={disposition} emptyLabel={emptyLabel} icon={icon} presentation={presentation} title={title} />;
+  return <PagedTableResult description={description} disposition={disposition} emptyLabel={emptyLabel} presentation={presentation} />;
 }
 
 function PagedTableResult({
-  title,
   description,
-  icon,
   disposition,
   emptyLabel,
   presentation,
 }: {
-  title: string;
-  description: string;
-  icon: IconDefinition;
+  description?: string | undefined;
   disposition: Extract<OperationDisposition, { kind: "table" }>;
   emptyLabel: string;
   presentation?: "directory" | "processes" | undefined;
@@ -1589,13 +1586,7 @@ function PagedTableResult({
     Boolean(processPid.trim() || processExecutable.trim() || processOwner.trim());
   return (
     <div>
-      <div className="mb-3 flex items-start gap-2">
-        <FontAwesomeIcon aria-hidden className="mt-0.5 text-accent" icon={icon} />
-        <div>
-          <p className="text-sm font-semibold text-foreground">{title}</p>
-          <p className="mt-0.5 text-xs text-muted">{description}</p>
-        </div>
-      </div>
+      {description ? <p className="mb-3 text-xs text-muted">{description}</p> : null}
       {presentation === "directory" ? (
         <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="Directory sort">
           <span className="text-xs text-muted">Sort decoded rows by</span>
@@ -1661,13 +1652,6 @@ function PagedNetworkInterfacesResult({ disposition }: { disposition: Extract<Op
   };
   return (
     <div>
-      <div className="mb-3 flex items-start gap-2">
-        <FontAwesomeIcon aria-hidden className="mt-0.5 text-accent" icon={faNetworkWired} />
-        <div>
-          <p className="text-sm font-semibold text-foreground">Network interfaces</p>
-          <p className="mt-0.5 text-xs text-muted">Addresses and link-layer identity returned by the beacon.</p>
-        </div>
-      </div>
       <div className="mb-3 flex flex-wrap items-center gap-3">
         <Switch aria-label="Show all interface addresses" isSelected={showAll} onChange={setShowAll}>
           <Switch.Content className="min-w-0 flex-1"><span className="block text-xs text-foreground">Show all interface addresses</span></Switch.Content>
@@ -1892,8 +1876,7 @@ function GenericDisposition({ disposition }: { disposition: OperationDisposition
   if (disposition.kind === "structured-detail") {
     return (
       <div className="rounded-2xl bg-default p-4">
-        <p className="text-sm font-semibold text-foreground">{disposition.title}</p>
-        <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+        <dl className="grid gap-3 sm:grid-cols-2">
           {disposition.fields.map((field) => <ResultMeta key={field.label} label={field.label} value={String(field.value ?? "")} />)}
         </dl>
         {disposition.truncated ? <TruncatedNotice /> : null}
@@ -2164,8 +2147,7 @@ function registryWriteValueFromDraft(type: SessionRegistryWriteValue["type"], dr
 }
 
 function operationResultTitle(task: BeaconTaskDetail): string {
-  const operationId = task.operationId as string | undefined;
-  return BEACON_COMMANDS.find((command) => command.id === operationId)?.label ?? "Beacon task";
+  return getBeaconTaskPresentation(task).label;
 }
 
 function stateLabel(state: BeaconTaskSummary["state"]): string {

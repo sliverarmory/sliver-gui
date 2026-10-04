@@ -98,6 +98,7 @@ import {
 import type { TargetModeFilter } from "./target-page-model";
 import { BeaconInteractionWorkspace } from "./BeaconInteractionWorkspace";
 import { BeaconWorkspaceHeader } from "./BeaconWorkspaceHeader";
+import { getBeaconTaskPresentation } from "./beacon-task-presentation";
 
 export interface TargetsPageProps {
   mode: TargetMode;
@@ -2097,12 +2098,18 @@ function BeaconTasks({
       header: "Task",
       isRowHeader: true,
       minWidth: 220,
-      cell: (task) => (
-        <div className="min-w-0 py-1">
-          <p className="truncate text-sm font-medium text-foreground">{task.description || "Beacon task"}</p>
-          <p className="mt-0.5 truncate font-mono text-[11px] text-muted">{task.taskId}</p>
-        </div>
-      ),
+      cell: (task) => {
+        const presentation = getBeaconTaskPresentation(task);
+        return (
+          <div className="min-w-0 py-1">
+            <p className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <FontAwesomeIcon aria-hidden className="shrink-0 text-accent" icon={presentation.icon} />
+              <span className="truncate">{presentation.label}</span>
+            </p>
+            <p className="mt-0.5 truncate font-mono text-[11px] text-muted">{task.taskId}</p>
+          </div>
+        );
+      },
     },
     {
       id: "state",
@@ -2326,6 +2333,7 @@ function TaskDetailModal({
 }): React.JSX.Element | null {
   const [isCanceling, setIsCanceling] = useState(false);
   if (!task) return null;
+  const presentation = getBeaconTaskPresentation(task);
 
   const cancel = async () => {
     setIsCanceling(true);
@@ -2350,9 +2358,9 @@ function TaskDetailModal({
         <Modal.Dialog className="sm:max-w-[680px]">
           <Modal.CloseTrigger isDisabled={isCanceling} />
           <Modal.Header className="flex-row items-start pr-8">
-            <Modal.Icon className="bg-accent-soft text-accent-soft-foreground"><FontAwesomeIcon aria-hidden icon={faListCheck} /></Modal.Icon>
+            <Modal.Icon className="bg-accent-soft text-accent-soft-foreground"><FontAwesomeIcon aria-hidden icon={presentation.icon} /></Modal.Icon>
             <div className="min-w-0 flex-1">
-              <Modal.Heading>{task.description || "Beacon task"}</Modal.Heading>
+              <Modal.Heading>{presentation.label}</Modal.Heading>
               <p className="mt-1 truncate font-mono text-xs text-muted">{task.taskId}</p>
             </div>
           </Modal.Header>
@@ -2370,7 +2378,7 @@ function TaskDetailModal({
               <OwnershipChip ownership={task.ownership} />
             </div>
             {task.error ? <InlineNotice tone="danger" message={task.error} /> : null}
-            <DispositionView disposition={task.disposition} />
+            <DispositionView disposition={task.disposition} hideTitle />
           </Modal.Body>
           <Modal.Footer>
             <Button slot="close" variant="tertiary">Close</Button>
@@ -2474,7 +2482,10 @@ export function DestructiveReviewModal({
   );
 }
 
-function DispositionView({ disposition }: { disposition: OperationDisposition | undefined }): React.JSX.Element {
+function DispositionView({ disposition, hideTitle = false }: {
+  disposition: OperationDisposition | undefined;
+  hideTitle?: boolean;
+}): React.JSX.Element {
   if (!disposition) {
     return (
       <div className="rounded-xl bg-default px-4 py-4 text-sm text-muted">
@@ -2508,8 +2519,8 @@ function DispositionView({ disposition }: { disposition: OperationDisposition | 
   if (disposition.kind === "structured-detail") {
     return (
       <div className="rounded-xl bg-default p-4">
-        <p className="text-xs font-semibold text-foreground">{disposition.title}</p>
-        <dl className="mt-3 grid gap-3 sm:grid-cols-2">
+        {!hideTitle ? <p className="text-xs font-semibold text-foreground">{disposition.title}</p> : null}
+        <dl className={`${hideTitle ? "" : "mt-3 "}grid gap-3 sm:grid-cols-2`}>
           {disposition.fields.map((field) => <DetailItem key={field.label} label={field.label} value={String(field.value ?? "")} />)}
         </dl>
       </div>

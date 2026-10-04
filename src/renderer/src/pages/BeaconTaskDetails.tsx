@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { Button, Modal } from "@heroui/react";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 
 import type { BeaconTaskResponse, BeaconTaskSummary } from "../../../shared/operation-contracts";
 import { BeaconFullResponse } from "./BeaconFullResponse";
 import { buildBeaconFullResponse, type BeaconFullResponseModel } from "./beacon-full-response-model";
+import { getBeaconTaskPresentation } from "./beacon-task-presentation";
 
 const MAX_COMPLETE_RESPONSE_CHARACTERS = 64 * 1024 * 1024;
 const MAX_RESPONSE_PAGES = 1_025;
@@ -27,6 +29,7 @@ function BeaconTaskResponseDialog({ task, onClose }: {
   const [output, setOutput] = useState<BeaconFullResponseModel>();
   const [error, setError] = useState<string>();
   const [progress, setProgress] = useState(0);
+  const presentation = getBeaconTaskPresentation(task);
 
   useEffect(() => {
     let active = true;
@@ -85,7 +88,10 @@ function BeaconTaskResponseDialog({ task, onClose }: {
         <Modal.Dialog className="w-[calc(100vw-3rem)] max-w-[1280px] sm:max-w-[1280px]">
           <Modal.CloseTrigger aria-label="Dismiss details" />
           <Modal.Header className="pr-10">
-            <Modal.Heading>Task details</Modal.Heading>
+            <Modal.Heading className="flex items-center gap-2">
+              <FontAwesomeIcon aria-hidden className="shrink-0 text-accent" icon={presentation.icon} />
+              {presentation.label}
+            </Modal.Heading>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
               <span className="text-muted">Task GUID</span>
               <span className="break-all font-mono text-muted">{task.taskId}</span>
@@ -99,7 +105,7 @@ function BeaconTaskResponseDialog({ task, onClose }: {
                 <Button size="sm" variant="tertiary" onPress={() => setRetry((current) => current + 1)}>Retry</Button>
               </div>
             ) : null}
-            {output ? <BeaconFullResponse model={output} /> : null}
+            {output ? <BeaconFullResponse hideTaskTitle model={output} /> : null}
           </Modal.Body>
           <Modal.Footer>
             <Button slot="close" variant="secondary">Close</Button>

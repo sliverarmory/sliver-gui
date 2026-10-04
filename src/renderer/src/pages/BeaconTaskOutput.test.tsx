@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import type { BeaconTaskDetail, OperationDisposition } from "../../../shared/operation-contracts";
 import type { BeaconTaskOutputEntry } from "./useBeaconTaskOutputs";
 import { BeaconTaskOutput } from "./BeaconInteractionWorkspace";
+import { getBeaconTaskPresentation } from "./beacon-task-presentation";
 
 vi.mock("./BeaconExecutionTaskOutput", () => ({ BeaconExecutionTaskOutput: () => <div>Execution output</div> }));
 vi.mock("./BeaconExecutionCommand", () => ({ BeaconExecutionCommand: () => <div /> }));
@@ -78,7 +79,9 @@ describe("Beacon task preview details", () => {
   it.each(taskKinds)("offers Details for %s and keeps the GUID out of its preview title", (_name, overrides) => {
     preview({ ...task, ...overrides });
     expect(screen.getByRole("button", { name: "Details" })).toBeVisible();
-    expect(screen.getByRole("heading", { name: "Task preview" })).toBeVisible();
+    const heading = screen.getByRole("heading", { name: getBeaconTaskPresentation({ ...task, ...overrides }).label, level: 3 });
+    expect(heading).toBeVisible();
+    expect(heading.querySelector("svg")).toBeInTheDocument();
     expect(screen.queryByText(task.taskId)).not.toBeInTheDocument();
   });
 
@@ -99,5 +102,36 @@ describe("Beacon task preview details", () => {
   it("directs a shortened preview to Details", () => {
     preview({ ...task, disposition: text });
     expect(screen.getByText("Preview shortened. Open Details to view the full output.")).toBeVisible();
+  });
+
+  it("promotes the directory name and icon to the only task title", () => {
+    const directoryTask: BeaconTaskDetail = {
+      ...task,
+      description: "LsReq",
+      operationId: "beacon.filesystem.ls",
+      disposition: table,
+    };
+    preview(directoryTask, { task: directoryTask });
+
+    const heading = screen.getByRole("heading", { name: "Directory listing", level: 3 });
+    expect(heading.querySelector('[data-icon="folder-open"]')).toBeInTheDocument();
+    expect(screen.getAllByText("Directory listing")).toHaveLength(1);
+    expect(screen.queryByText("LsReq")).not.toBeInTheDocument();
+    expect(screen.queryByText("Filesystem metadata returned by this check-in.")).not.toBeInTheDocument();
+    expect(screen.getByText("preview row")).toBeVisible();
+  });
+
+  it.each(["pending", "sent", "completed", "failed", "canceled"] as const)("uses the friendly title before a %s task preview loads", (state) => {
+    preview(undefined, { task: { ...task, state, description: "LsReq" }, isLoading: true });
+
+    expect(screen.getByRole("heading", { name: "Directory listing", level: 3 })).toBeVisible();
+    expect(screen.queryByText("LsReq")).not.toBeInTheDocument();
+  });
+
+  it("uses a plain fallback title when a task type is unknown", () => {
+    preview(undefined, { task: { ...task, description: "FutureTaskReq" } });
+
+    expect(screen.getByRole("heading", { name: "Beacon task", level: 3 })).toBeVisible();
+    expect(screen.queryByText("FutureTaskReq")).not.toBeInTheDocument();
   });
 });

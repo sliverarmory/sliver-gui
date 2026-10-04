@@ -86,6 +86,7 @@ describe("complete beacon response presentation", () => {
         { Name: "last", ExtraField: "preserved" },
       ],
     });
+    expect(model.title).toBe("Beacon task");
     const rows = model.sections.find((section) => section.kind === "table" && section.title === "Records");
     expect(rows?.kind).toBe("table");
     if (rows?.kind !== "table") throw new Error("Expected records table");

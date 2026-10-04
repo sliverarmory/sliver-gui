@@ -4184,6 +4184,41 @@ describe("TargetsPage", () => {
     expect(screen.queryByRole("button", { name: "Load more operations" })).not.toBeInTheDocument();
   });
 
+  it("uses friendly task names and matching icons in beacon task rows and details", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({ description: "LsReq" });
+    delete task.operationId;
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: task }),
+    });
+    render(<TargetsPage mode="beacon" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    const row = await screen.findByRole("row", { name: /Directory listing/ });
+    expect(row.querySelector('[data-icon="folder-open"]')).not.toBeNull();
+    expect(within(row).queryByText("LsReq")).not.toBeInTheDocument();
+    await user.click(row);
+    const dialog = await screen.findByRole("dialog", { name: "Directory listing" });
+    expect(dialog.querySelector('[data-icon="folder-open"]')).not.toBeNull();
+    expect(within(dialog).queryByText("LsReq")).not.toBeInTheDocument();
+  });
+
+  it("shows one main title for completed beacon task details", async () => {
+    const user = userEvent.setup();
+    const task = beaconTaskDetail({ description: "PwdReq" });
+    delete task.operationId;
+    installAPI({
+      listBeaconTasks: vi.fn().mockResolvedValue({ ok: true, value: { items: [task], page: { limit: 100, total: 1, truncated: false } } }),
+      getBeaconTask: vi.fn().mockResolvedValue({ ok: true, value: task }),
+    });
+    render(<TargetsPage mode="beacon" snapshot={targetSnapshot("beacon")} onSnapshot={vi.fn()} />);
+    await user.click(await screen.findByRole("row", { name: /Working directory/ }));
+    const dialog = await screen.findByRole("dialog", { name: "Working directory" });
+    expect(within(dialog).getAllByText("Working directory")).toHaveLength(1);
+    expect(within(dialog).getByRole("heading", { name: "Working directory" })).toBeVisible();
+    expect(within(dialog).getByText("/srv/first-output")).toBeVisible();
+    expect(within(dialog).queryByText("PwdReq")).not.toBeInTheDocument();
+  });
+
   it("watches beacon tasks, cancels pending work, and executes an exact lifecycle plan", async () => {
     const user = userEvent.setup();
     const snapshot = targetSnapshot("beacon");
@@ -4249,11 +4284,11 @@ describe("TargetsPage", () => {
 
     const taskRow = await screen.findByRole("row", { name: /task-1/i });
     await user.click(taskRow);
-    const taskDialog = await screen.findByRole("dialog", { name: "Ping" });
+    const taskDialog = await screen.findByRole("dialog", { name: "Ping response" });
     await user.click(within(taskDialog).getByRole("button", { name: "Cancel task" }));
     await waitFor(() => expect(cancelBeaconTask).toHaveBeenCalledWith({ taskId: "task-1" }));
     await user.click(within(taskDialog).getByText("Close"));
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Ping" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Ping response" })).not.toBeInTheDocument());
 
     rerender(<TargetsPage expectedTarget={beaconRef} mode="beacon" presentation="dedicated" snapshot={snapshot} onSnapshot={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "Beacon details" }));

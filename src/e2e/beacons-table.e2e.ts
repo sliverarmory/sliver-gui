@@ -664,7 +664,7 @@ test("beacon Details render complete tables, file text, and execution streams in
     await page.getByRole("button", { name: "Interact with m1-beacon", exact: true }).click();
     const composer = page.locator('[aria-labelledby="beacon-command-heading"]');
     const queue = page.getByRole("grid", { name: "Beacon task queue", exact: true });
-    const dialog = page.getByRole("dialog", { name: "Task details", exact: true });
+    const dialog = page.getByRole("dialog", { name: /^(Directory listing|File contents|Process execution)$/u });
 
     const selectCommand = async (label: string): Promise<void> => {
       await composer.locator('[data-slot="autocomplete-trigger"]').first().click();
@@ -673,7 +673,22 @@ test("beacon Details render complete tables, file text, and execution streams in
       await page.getByRole("option", { name: label === "Execution" ? /^Execution\b/u : new RegExp(`^${label} Filesystem\\b`, "u") }).click();
       await page.keyboard.press("Escape");
     };
-    const submitAndOpen = async (reviewed = false): Promise<{ taskId: string; preview: Locator }> => {
+    const assertTaskTitle = async (container: Locator, label: string, icon: string, rawType: string): Promise<void> => {
+      const title = container.getByRole("heading", { name: label, exact: true });
+      await title.waitFor();
+      assert.equal(await container.getByText(label, { exact: true }).count(), 1,
+        "each task must have one friendly primary title without a duplicate result title");
+      assert.equal(await title.locator(`svg[data-icon="${icon}"]`).count(), 1,
+        "the task icon must appear inside the primary title");
+      assert.equal((await container.innerText()).includes(rawType), false,
+        "protocol task types must stay out of visible task output");
+    };
+    const submitAndOpen = async (
+      label: string,
+      icon: string,
+      rawType: string,
+      reviewed = false,
+    ): Promise<{ taskId: string; preview: Locator }> => {
       const knownIds = await application!.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.tasks.map((task) => task.id));
       await application!.evaluate(() => { globalThis.__SLIVER_GUI_E2E_STATE__.holdNextBeaconTask = true; });
       await composer.getByRole("button", { name: "Queue task", exact: true }).click();
@@ -691,14 +706,23 @@ test("beacon Details render complete tables, file text, and execution streams in
       }
       assert.ok(task && task.beaconId === "m1_beacon", "the selected beacon must own the queued response");
       assert.match(task.id, /^[0-9a-f-]{36}$/u, "the Details fixture must exercise a full task GUID");
+      const preview = page.getByRole("article", { name: `Task output ${task.id}`, exact: true });
+      await preview.getByText("Waiting for the beacon", { exact: true }).waitFor();
+      await assertTaskTitle(preview, label, icon, rawType);
       await page.getByRole("tab", { name: "Task queue", exact: true }).click();
       const row = queue.getByRole("row").filter({ hasText: task.id });
       await row.getByText("Pending", { exact: true }).waitFor();
+      await row.getByText(label, { exact: true }).waitFor();
+      assert.equal(await row.locator(`svg[data-icon="${icon}"]`).count(), 1,
+        "pending queue rows must show the task icon beside the friendly label");
+      assert.equal((await row.innerText()).includes(rawType), false,
+        "protocol task types must stay out of the task queue");
       await application!.evaluate((_electron, taskId) => globalThis.__SLIVER_GUI_E2E_CONTROL__.completeTask(taskId), task.id);
       await row.getByText("Completed", { exact: true }).waitFor();
+      await row.getByText(label, { exact: true }).waitFor();
       await row.click();
-      const preview = page.getByRole("article", { name: `Task output ${task.id}`, exact: true });
       await preview.getByRole("button", { name: "Details", exact: true }).waitFor();
+      await assertTaskTitle(preview, label, icon, rawType);
       assert.equal((await preview.innerText()).includes(task.id), false, "compact output must omit the task GUID");
       await page.waitForFunction(() => {
         const document = (globalThis as unknown as { document: { querySelector(selector: string): unknown } }).document;
@@ -723,16 +747,20 @@ test("beacon Details render complete tables, file text, and execution streams in
     };
 
     await selectCommand("List directory");
-    const directory = await submitAndOpen();
+    const directory = await submitAndOpen("Directory listing", "folder-open", "LsReq");
     await directory.preview.getByRole("cell", { name: "details-row-000.txt", exact: true }).waitFor();
+    await assertTaskTitle(directory.preview, "Directory listing", "folder-open", "LsReq");
     assert.equal(await directory.preview.getByRole("cell", { name: "details-row-299.txt", exact: true }).count(), 0,
       "the compact directory preview must remain limited to its first 256 rows");
+    await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-directory-task-title.png") });
     await directory.preview.getByRole("button", { name: "Details", exact: true }).click();
     await dialog.getByText("Task GUID", { exact: true }).waitFor();
     await dialog.getByText(directory.taskId, { exact: true }).waitFor();
+    await assertTaskTitle(dialog, "Directory listing", "folder-open", "LsReq");
     const directorySection = dialog.getByRole("region", { name: "Files", exact: true });
     const directoryTable = directorySection.getByRole("table", { name: "Files", exact: true });
     await directoryTable.getByRole("cell", { name: "details-row-000.txt", exact: true }).waitFor();
+    await assertTaskTitle(dialog, "Directory listing", "folder-open", "LsReq");
     for (const column of ["Name", "Type", "Size", "Modified", "Mode"]) {
       await directoryTable.getByRole("columnheader", { name: column, exact: true }).waitFor();
     }
@@ -762,11 +790,13 @@ test("beacon Details render complete tables, file text, and execution streams in
 
     await selectCommand("Read file");
     await composer.getByRole("textbox", { name: /^File path/u }).fill("/Users/e2e/workspace/full-response.txt");
-    const file = await submitAndOpen();
+    const file = await submitAndOpen("File contents", "file-arrow-down", "DownloadReq");
     await file.preview.getByRole("button", { name: "Details", exact: true }).click();
     await dialog.getByText(file.taskId, { exact: true }).waitFor();
+    await assertTaskTitle(dialog, "File contents", "file-arrow-down", "DownloadReq");
     const fileContents = dialog.locator('pre[aria-label="File contents"]');
     await fileContents.filter({ hasText: "DETAILS_TEXT_TAIL" }).waitFor();
+    await assertTaskTitle(dialog, "File contents", "file-arrow-down", "DownloadReq");
     assert.equal(await fileContents.textContent(), `DETAILS_TEXT_START\n${"Complete task response line.\n".repeat(3500)}DETAILS_TEXT_TAIL\n`,
       "Details must automatically load and render the exact multiline file, including its tail beyond 64K");
     assert.equal(await dialog.getByRole("button", { name: "Next", exact: true }).count(), 0,
@@ -781,8 +811,9 @@ test("beacon Details render complete tables, file text, and execution streams in
     await composer.getByRole("tab", { name: "Process", exact: true }).waitFor();
     await composer.getByRole("textbox", { name: /^Executable path/u }).fill("/usr/bin/printf");
     await composer.getByRole("textbox", { name: "Arguments", exact: true }).fill("details");
-    const execution = await submitAndOpen(true);
+    const execution = await submitAndOpen("Process execution", "terminal", "ExecuteReq", true);
     await execution.preview.getByRole("button", { name: "Details", exact: true }).click();
+    await assertTaskTitle(dialog, "Process execution", "terminal", "ExecuteReq");
     try {
       await dialog.locator('pre[aria-label="Standard output"]').waitFor();
     } catch (error) {
@@ -790,6 +821,7 @@ test("beacon Details render complete tables, file text, and execution streams in
     }
     assert.equal(await dialog.locator('pre[aria-label="Standard output"]').textContent(), "deterministic M4 process stdout\n");
     assert.equal(await dialog.locator('pre[aria-label="Standard error"]').textContent(), "deterministic beacon process stderr\n");
+    await assertTaskTitle(dialog, "Process execution", "terminal", "ExecuteReq");
     assert.equal((await dialog.innerText()).includes('"Stdout":'), false, "execution output must render decoded streams instead of JSON");
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-full-execution-response.png") });
     assert.deepEqual(rendererErrors, []);

@@ -143,7 +143,7 @@ export function decodeHistoricalBeaconTask(
       }
       const result = description === "CallExtensionReq"
         ? extensionResponse(message)
-        : structuredResponse(description, message);
+        : structuredResponse(message);
       if (envelope !== undefined && nonempty(asRecord(envelope)["Err"])) {
         return {
           ...result,
@@ -220,13 +220,13 @@ function extensionResponse(message: Record<string, unknown>): HistoricalTaskResu
   return inline(lines.join("\n"), collector.truncated);
 }
 
-function structuredResponse(description: string, message: Record<string, unknown>): HistoricalTaskResult {
+function structuredResponse(message: Record<string, unknown>): HistoricalTaskResult {
   const collector = new TextCollector();
   collectFields(message, "", 0, collector);
   if (collector.lines.length === 0) {
     collector.add("No result fields were present in the saved response.");
   }
-  return inline(`${description} response:\n${collector.lines.join("\n")}`, collector.truncated);
+  return inline(collector.lines.join("\n"), collector.truncated);
 }
 
 class TextCollector {
