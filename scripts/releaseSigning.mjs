@@ -64,8 +64,7 @@ export async function verifyPinnedMacosSignatures({ appPath, expectedSha256, run
           }
         }
         const prefix = join(temporaryDirectory, `certificate-${index}-${architecture}-`);
-        await run("/usr/bin/codesign", ["--display", "--architecture", architecture, "--extract-certificates", prefix, path]);
-        const leaf = await readFile(`${prefix}0`);
+        const leaf = await extractMacosSigningCertificate({ codePath: path, architecture, prefix, run });
         if (sha256(leaf) !== expectedSha256) {
           throw new Error(`Packaged macOS code does not match the pinned signing certificate (${architecture}): ${path}`);
         }
@@ -74,6 +73,13 @@ export async function verifyPinnedMacosSignatures({ appPath, expectedSha256, run
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+export async function extractMacosSigningCertificate({ codePath, architecture, prefix, run }) {
+  // codesign's optional prefix must be attached with '='; a separate argument
+  // is parsed as another code path instead of the certificate output prefix.
+  await run("/usr/bin/codesign", ["--display", "--architecture", architecture, `--extract-certificates=${prefix}`, codePath]);
+  return readFile(`${prefix}0`);
 }
 
 async function machOFiles(directory) {

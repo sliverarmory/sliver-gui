@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { prepareNodePtyRuntime } from "./prepareNodePtyRuntime.mjs";
 import { buildUpdaterTrust } from "./buildUpdaterTrust.mjs";
-import { readUpdateSigningAssets } from "./releaseSigning.mjs";
+import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
+import { verifyWindowsSigningChanges } from "./verifyWindowsSigningChanges.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -68,6 +69,7 @@ export async function verifySliverConsoleBeforeSigning({
   projectDirectory = rootDirectory,
   resourcesDirectory,
   run = runCommand,
+  environment = process.env,
 }) {
   const sourceDirectory = join(projectDirectory, "native", "sliver-console");
   const packagedDirectory = join(resourcesDirectory, "sliver-console");
@@ -96,7 +98,37 @@ export async function verifySliverConsoleBeforeSigning({
   const executablePath = join(packagedDirectory, record.artifact.fileName);
   const [executable, metadata] = await Promise.all([readFile(executablePath), stat(executablePath)]);
   if (executable.byteLength !== record.artifact.size || sha256(executable) !== record.artifact.sha256) {
-    throw new Error(`Packaged Sliver console executable changed before signing: ${executablePath}`);
+    if (platform !== "win32") {
+      throw new Error(`Packaged Sliver console executable changed before signing: ${executablePath}`);
+    }
+    // Electron Builder signs Windows extraResources while copying them, before
+    // afterPack. Preserve exact source integrity and allow only Authenticode's
+    // documented PE changes, then independently require a valid trusted signer.
+    const sourceExecutable = await readFile(join(sourceDirectory, record.artifact.fileName));
+    if (sourceExecutable.byteLength !== record.artifact.size || sha256(sourceExecutable) !== record.artifact.sha256) {
+      throw new Error("Source Sliver console executable changed before Windows signing");
+    }
+    verifyWindowsSigningChanges(sourceExecutable, executable);
+    if (releaseSigningProfile(environment) === "self-signed") {
+      const { manifest } = await readUpdateSigningAssets(projectDirectory);
+      await verifyPinnedWindowsSignatures({
+        // The outer application is signed later; postdist verifies it and the
+        // child together. At this hook only the copied child is already signed.
+        appPath: executablePath,
+        executablePath,
+        expectedSha256: manifest.windows.sha256,
+        expectedPublisher: manifest.windows.subject,
+        environment,
+        run,
+      });
+    } else {
+      await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", [
+        "$ErrorActionPreference = 'Stop'",
+        "$signature = Get-AuthenticodeSignature -LiteralPath $env:SLIVER_GUI_CHILD_EXECUTABLE",
+        "if ($signature.Status -ne 'Valid' -or $null -eq $signature.SignerCertificate) { throw 'Invalid copied Authenticode signature' }",
+        "if ($env:WIN_CSC_PUBLISHER_NAME -and $signature.SignerCertificate.Subject -cne $env:WIN_CSC_PUBLISHER_NAME) { throw 'Unexpected copied Authenticode publisher' }",
+      ].join("\n")], { env: { ...environment, SLIVER_GUI_CHILD_EXECUTABLE: executablePath } });
+    }
   }
   if (platform !== "win32" && (metadata.mode & 0o111) === 0) {
     throw new Error(`Packaged Sliver console executable is not executable: ${executablePath}`);

@@ -326,7 +326,7 @@ jobs:
 
       - name: Verify native macOS trust checks without prompting
         if: runner.os == 'macOS'
-        run: node --test native/updater-trust/check.test.mjs
+        run: node --test native/updater-trust/check.test.mjs scripts/releaseSigning.test.mjs
 
       - name: Verify strict macOS code signature
         if: env.RELEASE_TAG != '' && runner.os == 'macOS'
