@@ -5,18 +5,45 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Signed stable tag at the current main commit; leave empty for unsigned CI"
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: ${{ inputs.release_tag == '' && github.ref == 'refs/heads/main' }}
 
 jobs:
+  release-request:
+    name: Validate release request
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      release_tag: ${{ steps.verify.outputs.release_tag }}
+    steps:
+      - name: Check out source without signing credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+
+      - name: Verify release tag, signature, and current main commit
+        id: verify
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verifyReleaseRequest.mjs
+
   protocol-parity:
     name: Protocol and parity drift
     runs-on: ubuntu-22.04
@@ -49,7 +76,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
@@ -110,8 +137,12 @@ jobs:
     name: Build (${{ matrix.platform }})
     needs:
       - protocol-parity
+      - release-request
     runs-on: ${{ matrix.runner }}
-    environment: ${{ github.ref_type == 'tag' && 'release' || 'ci' }}
+    environment: ${{ needs.release-request.outputs.release_tag != '' && 'release' || 'ci' }}
+    env:
+      RELEASE_TAG: ${{ needs.release-request.outputs.release_tag }}
+      SLIVER_GUI_SIGNING_PROFILE: ${{ needs.release-request.outputs.release_tag != '' && vars.SLIVER_GUI_SIGNING_PROFILE || '' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -124,6 +155,7 @@ jobs:
             update_platform: macos
             app_update_path: release/mac-universal/Sliver GUI.app/Contents/Resources/app-update.yml
             artifact_name: sliver-gui-macos-universal
+            baseline_pattern: "*.dmg"
             artifact_paths: |
               release/*.dmg
               release/*.dmg.blockmap
@@ -137,6 +169,7 @@ jobs:
             update_platform: windows
             app_update_path: release/win-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-windows-x64
+            baseline_pattern: "*-setup.exe"
             artifact_paths: |
               release/*.exe
               release/*.exe.blockmap
@@ -148,6 +181,7 @@ jobs:
             update_platform: linux
             app_update_path: release/linux-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-linux-x64
+            baseline_pattern: "*.AppImage"
             artifact_paths: |
               release/*.AppImage
               release/*.deb
@@ -222,35 +256,23 @@ jobs:
           ldd --version | head -n 1
 
       - name: Set and verify exact version from tag
-        if: github.ref_type == 'tag'
-        run: |
-          node ./scripts/verifyReleaseVersion.mjs --tag "${{ github.ref_name }}" --allow-package-mismatch
-          npm version --no-git-tag-version --allow-same-version "${{ github.ref_name }}"
-          node ./scripts/verifyReleaseVersion.mjs --tag "${{ github.ref_name }}"
-
-      - name: Require release tag at the reviewed main commit
-        if: github.ref_type == 'tag'
+        if: env.RELEASE_TAG != ''
         shell: bash
         run: |
-          tag_commit="$(git rev-parse "$GITHUB_SHA^{commit}")"
-          main_commit="$(git rev-parse 'refs/remotes/origin/main^{commit}')"
-          if [ "$tag_commit" != "$main_commit" ]; then
-            echo "::error::Release tag $GITHUB_REF_NAME must point at the current reviewed origin/main commit."
-            exit 1
-          fi
+          node ./scripts/verifyReleaseVersion.mjs --tag "$RELEASE_TAG" --allow-package-mismatch
+          npm version --no-git-tag-version --allow-same-version "$RELEASE_TAG"
+          node ./scripts/syncReleaseVersion.mjs
+          node ./scripts/verifyReleaseVersion.mjs --tag "$RELEASE_TAG"
 
-      - name: Require macOS signing and notarization secrets
-        if: github.ref_type == 'tag' && runner.os == 'macOS'
+      - name: Require macOS self-signing secrets
+        if: env.RELEASE_TAG != '' && runner.os == 'macOS'
         env:
           MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: node ./scripts/verifyReleaseSigningEnvironment.mjs --platform macos
 
       - name: Require Windows signing secrets
-        if: github.ref_type == 'tag' && runner.os == 'Windows'
+        if: env.RELEASE_TAG != '' && runner.os == 'Windows'
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
@@ -265,24 +287,25 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=4096"
         run: npm run predist
 
+      - name: Import pinned release signing identity on the isolated runner
+        if: env.RELEASE_TAG != '' && runner.os != 'Linux'
+        env:
+          MAC_CSC_LINK: ${{ runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          MAC_CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+        run: node scripts/importReleaseSigningIdentity.mjs
+
       - name: Build unsigned CI packages
-        if: github.ref_type != 'tag'
+        if: env.RELEASE_TAG == ''
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never
 
-      - name: Build signed and notarized macOS release packages
-        if: github.ref_type == 'tag' && runner.os == 'macOS'
-        env:
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never --config.forceCodeSigning=true
+      - name: Build self-signed macOS release packages
+        if: env.RELEASE_TAG != '' && runner.os == 'macOS'
+        run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never --config.mac.notarize=false --config.forceCodeSigning=true
 
       - name: Build signed Windows release packages
-        if: github.ref_type == 'tag' && runner.os == 'Windows'
+        if: env.RELEASE_TAG != '' && runner.os == 'Windows'
         env:
           CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
@@ -290,29 +313,30 @@ jobs:
         run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never --config.forceCodeSigning=true --config.win.signtoolOptions.publisherName="$env:WIN_CSC_PUBLISHER_NAME"
 
       - name: Build Linux release packages
-        if: github.ref_type == 'tag' && runner.os == 'Linux'
+        if: env.RELEASE_TAG != '' && runner.os == 'Linux'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: node ./node_modules/electron-builder/cli.js ${{ matrix.build_args }} --publish never
 
       - name: Verify native packages
         env:
-          SLIVER_GUI_REQUIRE_SIGNED_CHILD: ${{ github.ref_type == 'tag' && runner.os != 'Linux' }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          SLIVER_GUI_REQUIRE_SIGNED_CHILD: ${{ env.RELEASE_TAG != '' && runner.os != 'Linux' }}
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
         run: npm run postdist
 
-      - name: Verify macOS signature, notarization, and stapling
-        if: github.ref_type == 'tag' && runner.os == 'macOS'
+      - name: Verify native macOS trust checks without prompting
+        if: runner.os == 'macOS'
+        run: node --test native/updater-trust/check.test.mjs
+
+      - name: Verify strict macOS code signature
+        if: env.RELEASE_TAG != '' && runner.os == 'macOS'
         run: |
           app_path="release/mac-universal/Sliver GUI.app"
           test -d "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          xcrun stapler validate "$app_path"
-          spctl --assess --type execute --verbose=4 "$app_path"
 
       - name: Verify Windows Authenticode signatures
-        if: github.ref_type == 'tag' && runner.os == 'Windows'
+        if: env.RELEASE_TAG != '' && runner.os == 'Windows'
         shell: pwsh
         env:
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
@@ -328,7 +352,7 @@ jobs:
             }
             $signature = Get-AuthenticodeSignature -LiteralPath $asset
             if ($signature.Status -ne "Valid" -or $null -eq $signature.SignerCertificate) {
-              throw "Invalid Authenticode signature for $asset: $($signature.Status)"
+              throw "Invalid Authenticode signature for ${asset}: $($signature.Status)"
             }
             if ($signature.SignerCertificate.Subject -cne $env:WIN_CSC_PUBLISHER_NAME) {
               throw "Unexpected Authenticode publisher subject for $asset"
@@ -336,11 +360,11 @@ jobs:
           }
 
       - name: Verify updater metadata and native asset inventory
-        if: github.ref_type != 'tag' || runner.os != 'Windows'
+        if: env.RELEASE_TAG == '' || runner.os != 'Windows'
         run: node ./scripts/verifyUpdateArtifacts.mjs --platform "${{ matrix.update_platform }}" --app-update "${{ matrix.app_update_path }}"
 
       - name: Verify Windows updater publisher continuity
-        if: github.ref_type == 'tag' && runner.os == 'Windows'
+        if: env.RELEASE_TAG != '' && runner.os == 'Windows'
         env:
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
         run: node ./scripts/verifyUpdateArtifacts.mjs --platform windows --app-update "${{ matrix.app_update_path }}" --publisher-name "$env:WIN_CSC_PUBLISHER_NAME"
@@ -369,12 +393,50 @@ jobs:
           compression-level: 0
           retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
 
+      # The baseline is a private workflow artifact, never a public release.
+      # It exercises the real published feed with the same pinned signer.
+      - name: Build signed macOS updater baseline
+        if: env.RELEASE_TAG != '' && runner.os == 'macOS'
+        run: node ./node_modules/electron-builder/cli.js --mac dmg --universal --publish never --config.extraMetadata.version=0.0.0 --config.mac.notarize=false --config.forceCodeSigning=true --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
+
+      - name: Build signed Windows updater baseline
+        if: env.RELEASE_TAG != '' && runner.os == 'Windows'
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
+        run: node ./node_modules/electron-builder/cli.js --win nsis --x64 --publish never --config.extraMetadata.version=0.0.0 --config.forceCodeSigning=true --config.win.signtoolOptions.publisherName="$env:WIN_CSC_PUBLISHER_NAME" --config.directories.output="$env:RUNNER_TEMP/sliver-gui-update-baseline"
+
+      - name: Build Linux updater baseline
+        if: env.RELEASE_TAG != '' && runner.os == 'Linux'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: node ./node_modules/electron-builder/cli.js --linux AppImage --x64 --publish never --config.extraMetadata.version=0.0.0 --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
+
+      - name: Upload updater baseline installer
+        if: env.RELEASE_TAG != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: updater-baseline-${{ matrix.update_platform }}
+          path: ${{ runner.temp }}/sliver-gui-update-baseline/${{ matrix.baseline_pattern }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Remove isolated release signing identity
+        if: always() && env.RELEASE_TAG != '' && runner.os != 'Linux'
+        run: node scripts/importReleaseSigningIdentity.mjs --cleanup
+
   release:
     name: Verify and publish GitHub release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: build
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.release-request.outputs.release_tag != ''
+    needs:
+      - build
+      - release-request
     runs-on: ubuntu-22.04
     environment: release
+    env:
+      RELEASE_TAG: ${{ needs.release-request.outputs.release_tag }}
     timeout-minutes: 30
     permissions:
       contents: write
@@ -400,14 +462,9 @@ jobs:
             echo "::error::Stable automatic updates require the GitHub repository and release assets to be public; found $visibility."
             exit 1
           fi
-          immutable="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/immutable-releases" \
-            --jq .enabled)"
-          if [ "$immutable" != "true" ]; then
-            echo "::error::Enable GitHub immutable releases before publishing a stable automatic update."
-            exit 1
-          fi
+          # Repository administration enables immutable releases. The settings
+          # endpoint requires admin-read permission unavailable to GITHUB_TOKEN;
+          # verify the actual published release below with contents permission.
 
       - name: Download native packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -418,8 +475,8 @@ jobs:
 
       - name: Verify complete release and updater inventory
         run: |
-          node ./scripts/verifyReleaseVersion.mjs --tag "$GITHUB_REF_NAME" --allow-package-mismatch
-          version="${GITHUB_REF_NAME#v}"
+          node ./scripts/verifyReleaseVersion.mjs --tag "$RELEASE_TAG" --allow-package-mismatch
+          version="${RELEASE_TAG#v}"
           node ./scripts/verifyUpdateArtifacts.mjs --directory release-assets --platform all --version "$version"
 
       - name: Generate checksums
@@ -428,7 +485,7 @@ jobs:
 
       - name: Verify checksums cover the exact release inventory
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${RELEASE_TAG#v}"
           node ./scripts/verifyUpdateArtifacts.mjs --directory release-assets --platform all --version "$version" --checksums SHA256SUMS
 
       - name: Create or update draft GitHub release
@@ -436,17 +493,17 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
               --draft \
               --verify-tag \
               --generate-notes \
-              --title "Sliver GUI $GITHUB_REF_NAME"
-          elif [ "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" != "true" ]; then
+              --title "Sliver GUI $RELEASE_TAG"
+          elif [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != "true" ]; then
             echo "::error::Refusing to replace assets on a published or immutable release."
             exit 1
           fi
-          gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber
 
       - name: Verify uploaded draft release inventory
         env:
@@ -454,7 +511,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           find release-assets -maxdepth 1 -type f -printf '%f\n' | sort > /tmp/expected-release-assets.txt
-          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort > /tmp/uploaded-release-assets.txt
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | sort > /tmp/uploaded-release-assets.txt
           diff -u /tmp/expected-release-assets.txt /tmp/uploaded-release-assets.txt
 
       - name: Publish verified release for automatic updates
@@ -462,5 +519,192 @@ jobs:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release edit "$GITHUB_REF_NAME" --draft=false --latest
-          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')" = $'false\tfalse'
+          node scripts/verifyReleaseRequest.mjs
+          gh release edit "$RELEASE_TAG" --draft=false --latest
+          published="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            --jq '[.draft, .prerelease, .immutable, .tag_name] | @tsv')"
+          if [ "$published" != $'false\tfalse\ttrue\t'"$RELEASE_TAG" ]; then
+            echo "::error::Published release must be stable, immutable, and match the requested tag."
+            exit 1
+          fi
+
+  public-update:
+    name: Public auto-update (${{ matrix.platform }})
+    needs:
+      - release
+      - release-request
+    runs-on: ${{ matrix.runner }}
+    environment: ci
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ needs.release-request.outputs.release_tag }}
+      SLIVER_GUI_UPDATE_E2E: "1"
+      SLIVER_GUI_UPDATE_E2E_FEED: public
+      SLIVER_GUI_UPDATE_E2E_FROM_VERSION: "0.0.0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS universal
+            id: macos
+            runner: macos-15
+            baseline_pattern: "*.dmg"
+          - platform: Windows x64
+            id: windows
+            runner: windows-2022
+            baseline_pattern: "*-setup.exe"
+          - platform: Linux x64
+            id: linux
+            runner: ubuntu-22.04
+            baseline_pattern: "*.AppImage"
+    steps:
+      - name: Check out exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.15.0
+          cache: npm
+
+      - name: Set up exact npm
+        run: npm install --global npm@11.19.0 --ignore-scripts
+
+      - name: Install dependencies
+        env:
+          HEROUI_AUTH_TOKEN: ${{ secrets.HEROUI_AUTH_TOKEN }}
+          npm_config_engine_strict: "true"
+        run: npm ci --strict-allow-scripts
+
+      - name: Download signed baseline installer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: updater-baseline-${{ matrix.id }}
+          path: ${{ runner.temp }}/sliver-gui-updater-baseline
+
+      - name: Verify pinned public certificate and release context
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import { appendFile } from "node:fs/promises";
+          import { readUpdateSigningAssets } from "./scripts/releaseSigning.mjs";
+          if (process.env.RUNNER_ENVIRONMENT !== "github-hosted") throw new Error("Updater trust tests require a disposable GitHub-hosted runner");
+          if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(process.env.RELEASE_TAG)) throw new Error("Invalid release tag");
+          const { manifest } = await readUpdateSigningAssets(process.cwd());
+          await appendFile(process.env.GITHUB_ENV, `SLIVER_GUI_UPDATE_E2E_TO_VERSION=${process.env.RELEASE_TAG.slice(1)}\nSLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER=${manifest.windows.subject}\n`);
+          NODE
+
+      - name: Resolve absolute baseline installer path
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          BASELINE_PATTERN: ${{ matrix.baseline_pattern }}
+        run: |
+          installers=()
+          while IFS= read -r installer; do installers+=("$installer"); done < <(find "$RUNNER_TEMP/sliver-gui-updater-baseline" -maxdepth 1 -type f -name "$BASELINE_PATTERN" -print)
+          if [ "${#installers[@]}" -ne 1 ]; then echo "::error::Expected exactly one baseline installer"; exit 1; fi
+          if [ "$RUNNER_OS" = "Linux" ]; then chmod 0755 "${installers[0]}"; fi
+          echo "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=${installers[0]}" >> "$GITHUB_ENV"
+
+      - name: Resolve absolute Windows baseline installer path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          BASELINE_PATTERN: ${{ matrix.baseline_pattern }}
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP "sliver-gui-updater-baseline") -Filter $env:BASELINE_PATTERN -File)
+          if ($installers.Count -ne 1) { throw "Expected exactly one baseline installer" }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "SLIVER_GUI_UPDATE_E2E_BASE_ARTIFACT=$($installers[0].FullName)"
+
+      - name: Establish macOS code-signing trust on the disposable runner
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          keychain="$RUNNER_TEMP/sliver-gui-public-updater-trust.keychain-db"
+          password="$(openssl rand -hex 32)"
+          echo "::add-mask::$password"
+          security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//' > "$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          sudo -n security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$GITHUB_WORKSPACE/build/update-signing/macos.cer"
+          original_keychains=()
+          while IFS= read -r item; do original_keychains+=("$item"); done < "$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
+          security list-keychains -d user -s "$keychain" "${original_keychains[@]}"
+          echo "SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY=Developer ID Application: Sliver Armory Self-Signed" >> "$GITHUB_ENV"
+
+      - name: Establish Windows publisher trust on the disposable runner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne "github-hosted") { throw "Updater trust tests require a disposable GitHub-hosted runner" }
+          $certificatePath = Join-Path $env:GITHUB_WORKSPACE "build/update-signing/windows.cer"
+          $certificate = [Security.Cryptography.X509Certificates.X509Certificate2]::new($certificatePath)
+          if ($certificate.Subject -cne $env:SLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER) { throw "Unexpected pinned certificate subject" }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "UPDATER_E2E_TRUST_THUMBPRINT=$($certificate.Thumbprint)"
+          foreach ($store in @("Root", "TrustedPublisher")) {
+            & certutil.exe -addstore -f $store $certificatePath
+            if ($LASTEXITCODE -ne 0) { throw "Failed to trust certificate in $store" }
+          }
+
+      # No GitHub token is passed to this process or to the installed app.
+      - name: Exercise published automatic update and relaunch
+        if: runner.os != 'Linux'
+        timeout-minutes: 25
+        run: npm run test:e2e:packaged-update
+
+      - name: Exercise published automatic update and relaunch under Xvfb
+        if: runner.os == 'Linux'
+        timeout-minutes: 25
+        run: xvfb-run --auto-servernum npm run test:e2e:packaged-update
+
+      - name: Restore macOS keychain configuration
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 2
+        run: |
+          test "$RUNNER_ENVIRONMENT" = "github-hosted"
+          # Admin trust is discarded with the disposable VM. Removing admin
+          # trust explicitly can hang on hosted macOS (runner-images #12116).
+          saved="$RUNNER_TEMP/sliver-gui-public-updater-keychains.txt"
+          keychain="$RUNNER_TEMP/sliver-gui-public-updater-trust.keychain-db"
+          if [ -f "$saved" ]; then
+            original_keychains=()
+            while IFS= read -r item; do original_keychains+=("$item"); done < "$saved"
+            security list-keychains -d user -s "${original_keychains[@]}"
+            rm -f -- "$saved"
+          fi
+          if [ -e "$keychain" ]; then security delete-keychain "$keychain"; fi
+
+      - name: Remove temporary Windows publisher trust
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 2
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne "github-hosted") { throw "Updater trust cleanup requires a disposable GitHub-hosted runner" }
+          if ($env:UPDATER_E2E_TRUST_THUMBPRINT) {
+            foreach ($store in @("Root", "TrustedPublisher")) {
+              if (Test-Path -LiteralPath "Cert:\LocalMachine\$store\$($env:UPDATER_E2E_TRUST_THUMBPRINT)") {
+                & certutil.exe -delstore $store $env:UPDATER_E2E_TRUST_THUMBPRINT
+                if ($LASTEXITCODE -ne 0) { throw "Failed to remove temporary trust from $store" }
+              }
+            }
+          }
+
+      - name: Upload public updater diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-updater-diagnostics-${{ matrix.id }}
+          path: artifacts/e2e/packaged-update/
+          if-no-files-found: warn
+          retention-days: 30

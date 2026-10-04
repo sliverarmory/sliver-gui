@@ -88,6 +88,7 @@ import {
   createApplicationUpdater,
   type ApplicationUpdater,
 } from "./application-updater.js";
+import { createUpdateCertificateTrust } from "./update-certificate-trust.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
 import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
@@ -2927,6 +2928,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     currentVersion: app.getVersion(),
     isPackaged: app.isPackaged,
     platform: process.platform,
+    certificateTrust: createUpdateCertificateTrust({
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
     portableExecutableFile: process.env["PORTABLE_EXECUTABLE_FILE"],
     appImageFile: process.env["APPIMAGE"],
     linuxPackageType: readLinuxPackageType(),
@@ -3214,6 +3220,7 @@ function applicationUpdateMenuSignature(state: ApplicationUpdateState): string {
       return `${state.status}:${state.disabledReason}`;
     case "idle":
     case "up-to-date":
+    case "trust-required":
     case "error":
       return "check-available";
     case "checking":

@@ -13,6 +13,10 @@ import {
   type ApplicationUpdateState,
 } from "../shared/application-update-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
+import {
+  UpdateCertificateTrustRequiredError,
+  type UpdateCertificateTrust,
+} from "./update-certificate-trust.js";
 
 const FIRST_CHECK_MINIMUM_DELAY_MS = 30_000;
 const FIRST_CHECK_JITTER_MS = 30_000;
@@ -20,6 +24,7 @@ const PERIODIC_CHECK_MINIMUM_DELAY_MS = 6 * 60 * 60 * 1_000;
 const PERIODIC_CHECK_JITTER_MS = 30 * 60 * 1_000;
 const UPDATE_CHECK_ERROR = "Sliver Desktop could not check for updates. Try again later.";
 const UPDATE_INSTALL_ERROR = "Sliver Desktop could not restart to install the update. Try again later.";
+const UPDATE_TRUST_REQUIRED = "Approve the developer certificate in macOS to enable signed updates. Choose Set up trust to continue.";
 
 export interface ApplicationUpdateBackendEvents {
   readonly checking: () => void;
@@ -51,6 +56,7 @@ export interface CreateApplicationUpdaterOptions {
   readonly appImageFile: string | undefined;
   readonly linuxPackageType: string | undefined;
   readonly backend?: ApplicationUpdateBackend;
+  readonly certificateTrust?: UpdateCertificateTrust;
   readonly random?: () => number;
   readonly firstCheckMinimumDelayMs?: number;
   readonly firstCheckJitterMs?: number;
@@ -60,6 +66,7 @@ export interface CreateApplicationUpdaterOptions {
 
 export class ApplicationUpdater {
   readonly #backend: ApplicationUpdateBackend | undefined;
+  readonly #certificateTrust: UpdateCertificateTrust | undefined;
   readonly #random: () => number;
   readonly #firstCheckMinimumDelayMs: number;
   readonly #firstCheckJitterMs: number;
@@ -71,11 +78,14 @@ export class ApplicationUpdater {
   #unsubscribeBackend: (() => void) | undefined;
   #scheduledCheck: ReturnType<typeof setTimeout> | undefined;
   #checkPromise: Promise<OperationResult<ApplicationUpdateState>> | undefined;
+  #foregroundRetryPromise: Promise<OperationResult<ApplicationUpdateState>> | undefined;
+  #checkIsManual = false;
   #installRequested = false;
   #started = false;
   #disposed = false;
 
   constructor(options: CreateApplicationUpdaterOptions) {
+    this.#certificateTrust = options.certificateTrust;
     this.#random = options.random ?? Math.random;
     this.#firstCheckMinimumDelayMs = options.firstCheckMinimumDelayMs ?? FIRST_CHECK_MINIMUM_DELAY_MS;
     this.#firstCheckJitterMs = options.firstCheckJitterMs ?? FIRST_CHECK_JITTER_MS;
@@ -127,7 +137,7 @@ export class ApplicationUpdater {
     this.#scheduleNextCheck(this.#firstCheckMinimumDelayMs, this.#firstCheckJitterMs);
   }
 
-  checkForUpdates(): Promise<OperationResult<ApplicationUpdateState>> {
+  checkForUpdates(manual = true): Promise<OperationResult<ApplicationUpdateState>> {
     if (this.#state.status === "disabled") {
       // Disabled updaters have no automatic checks, so publishing the current
       // state here represents an explicit user-requested check. Renderers keep
@@ -145,27 +155,23 @@ export class ApplicationUpdater {
     ) {
       return Promise.resolve({ ok: true, value: this.#state });
     }
-    if (this.#checkPromise) return this.#checkPromise;
+    if (this.#checkPromise) {
+      if (!manual || this.#checkIsManual) return this.#checkPromise;
+      // A background probe cannot open an authorization panel. Preserve a
+      // foreground request arriving during that probe, and coalesce callers
+      // into one retry after a trust-required result.
+      this.#foregroundRetryPromise ??= this.#checkPromise.then((result) => {
+        if (result.ok && result.value?.status === "trust-required") return this.checkForUpdates(true);
+        return result;
+      }).finally(() => {
+        this.#foregroundRetryPromise = undefined;
+      });
+      return this.#foregroundRetryPromise;
+    }
 
-    this.#transition({ status: "checking" });
-    const backend = this.#backend;
-    this.#checkPromise = backend.checkForUpdates()
-      .then((result): OperationResult<ApplicationUpdateState> => {
-        if (this.#disposed) return { ok: false, error: "Application updates are unavailable." };
-        if (result === null) {
-          this.#setError(UPDATE_CHECK_ERROR);
-          return { ok: false, error: UPDATE_CHECK_ERROR };
-        }
-        if (this.#state.status === "checking") {
-          if (result.isUpdateAvailable) this.#setAvailable(result.version);
-          else {
-            this.#availableVersion = undefined;
-            this.#transition({ status: "up-to-date" });
-          }
-        }
-        if (this.#state.status === "error") return { ok: false, error: this.#state.error };
-        return { ok: true, value: this.#state };
-      })
+    if (manual || this.#state.status !== "trust-required") this.#transition({ status: "checking" });
+    this.#checkIsManual = manual;
+    this.#checkPromise = this.#performCheck(this.#backend, manual)
       .catch((): OperationResult<ApplicationUpdateState> => {
         if (!this.#disposed && this.#state.status !== "error") this.#setError(UPDATE_CHECK_ERROR);
         return { ok: false, error: UPDATE_CHECK_ERROR };
@@ -174,6 +180,43 @@ export class ApplicationUpdater {
         this.#checkPromise = undefined;
       });
     return this.#checkPromise;
+  }
+
+  async #performCheck(
+    backend: ApplicationUpdateBackend,
+    manual: boolean,
+  ): Promise<OperationResult<ApplicationUpdateState>> {
+    if (this.#certificateTrust) {
+      try {
+        await this.#certificateTrust.ensureTrusted(manual);
+      } catch (error) {
+        if (this.#disposed) return { ok: false, error: "Application updates are unavailable." };
+        if (!(error instanceof UpdateCertificateTrustRequiredError)) throw error;
+        if (this.#state.status !== "trust-required") {
+          this.#transition({ status: "trust-required", message: UPDATE_TRUST_REQUIRED });
+        }
+        return { ok: true, value: this.#state };
+      }
+    }
+    if (this.#disposed) return { ok: false, error: "Application updates are unavailable." };
+    if (this.#state.status !== "checking") this.#transition({ status: "checking" });
+    // electron-updater downloads automatically once it finds an update, so
+    // certificate trust must be established before contacting the backend.
+    const result = await backend.checkForUpdates();
+    if (this.#disposed) return { ok: false, error: "Application updates are unavailable." };
+    if (result === null) {
+      this.#setError(UPDATE_CHECK_ERROR);
+      return { ok: false, error: UPDATE_CHECK_ERROR };
+    }
+    if (this.#state.status === "checking") {
+      if (result.isUpdateAvailable) this.#setAvailable(result.version);
+      else {
+        this.#availableVersion = undefined;
+        this.#transition({ status: "up-to-date" });
+      }
+    }
+    if (this.#state.status === "error") return { ok: false, error: this.#state.error };
+    return { ok: true, value: this.#state };
   }
 
   restartToApply(): OperationResult {
@@ -212,7 +255,7 @@ export class ApplicationUpdater {
     const delay = minimumDelayMs + Math.floor(randomValue * jitterMs);
     this.#scheduledCheck = setTimeout(() => {
       this.#scheduledCheck = undefined;
-      void this.checkForUpdates().finally(() => {
+      void this.checkForUpdates(false).finally(() => {
         this.#scheduleNextCheck(this.#periodicCheckMinimumDelayMs, this.#periodicCheckJitterMs);
       });
     }, delay);

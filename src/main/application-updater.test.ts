@@ -9,6 +9,7 @@ import type {
   ApplicationUpdateCheckResult,
   CreateApplicationUpdaterOptions,
 } from "./application-updater.js";
+import { UpdateCertificateTrustRequiredError } from "./update-certificate-trust.js";
 
 vi.mock("electron-updater", () => ({
   default: { autoUpdater: {} },
@@ -64,7 +65,8 @@ describe("application updater", () => {
     })).toBeUndefined();
 
     const backend = new FakeUpdateBackend();
-    const updater = createUpdater(backend, { isPackaged: false });
+    const ensureTrusted = vi.fn();
+    const updater = createUpdater(backend, { isPackaged: false, certificateTrust: { ensureTrusted } });
     const observed: ApplicationUpdateState[] = [];
     updater.subscribe((state) => observed.push(state));
     expect(updater.getState()).toMatchObject({ status: "disabled", currentVersion: "1.2.3" });
@@ -74,6 +76,7 @@ describe("application updater", () => {
     expect(observed).toEqual([updater.getState()]);
     expect(backend.configureCalls).toBe(0);
     expect(backend.checkCalls).toBe(0);
+    expect(ensureTrusted).not.toHaveBeenCalled();
   });
 
   it("configures the backend and publishes bounded download progress through ready", () => {
@@ -136,6 +139,118 @@ describe("application updater", () => {
       status: "error",
       error: "Sliver Desktop could not check for updates. Try again later.",
     });
+  });
+
+  it("waits for foreground certificate trust before checking or automatically downloading", async () => {
+    const backend = new FakeUpdateBackend();
+    const trust = deferred<void>();
+    const ensureTrusted = vi.fn(() => trust.promise);
+    const updater = createUpdater(backend, { certificateTrust: { ensureTrusted } });
+
+    const first = updater.checkForUpdates();
+    const second = updater.checkForUpdates();
+    expect(first).toBe(second);
+    expect(ensureTrusted).toHaveBeenCalledExactlyOnceWith(true);
+    expect(backend.checkCalls).toBe(0);
+
+    trust.resolve();
+    await expect(first).resolves.toMatchObject({ ok: true, value: { status: "up-to-date" } });
+    expect(backend.checkCalls).toBe(1);
+  });
+
+  it("runs scheduled trust probes without prompting and resumes after foreground approval", async () => {
+    vi.useFakeTimers();
+    const backend = new FakeUpdateBackend();
+    const ensureTrusted = vi.fn(async (manual: boolean) => {
+      if (!manual) throw new UpdateCertificateTrustRequiredError("required");
+    });
+    const updater = createUpdater(backend, {
+      certificateTrust: { ensureTrusted },
+      firstCheckMinimumDelayMs: 100,
+      firstCheckJitterMs: 0,
+      periodicCheckMinimumDelayMs: 1_000,
+      periodicCheckJitterMs: 0,
+    });
+
+    updater.start();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(ensureTrusted).toHaveBeenCalledExactlyOnceWith(false);
+    expect(backend.checkCalls).toBe(0);
+    expect(updater.getState()).toMatchObject({ status: "trust-required", message: expect.stringContaining("macOS") });
+    const requiredRevision = updater.getState().revision;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(ensureTrusted).toHaveBeenLastCalledWith(false);
+    expect(backend.checkCalls).toBe(0);
+    expect(updater.getState().revision).toBe(requiredRevision);
+
+    await expect(updater.checkForUpdates()).resolves.toMatchObject({ ok: true, value: { status: "up-to-date" } });
+    expect(ensureTrusted).toHaveBeenLastCalledWith(true);
+    expect(backend.checkCalls).toBe(1);
+    updater.dispose();
+  });
+
+  it("coalesces a foreground retry arriving while a background trust probe is pending", async () => {
+    const backend = new FakeUpdateBackend();
+    const backgroundTrust = deferred<void>();
+    const ensureTrusted = vi.fn((manual: boolean) => manual ? Promise.resolve() : backgroundTrust.promise);
+    const updater = createUpdater(backend, { certificateTrust: { ensureTrusted } });
+
+    const background = updater.checkForUpdates(false);
+    const foreground = updater.checkForUpdates();
+    expect(updater.checkForUpdates()).toBe(foreground);
+    expect(ensureTrusted).toHaveBeenCalledExactlyOnceWith(false);
+    expect(backend.checkCalls).toBe(0);
+
+    backgroundTrust.reject(new UpdateCertificateTrustRequiredError("required"));
+    await expect(background).resolves.toMatchObject({ ok: true, value: { status: "trust-required" } });
+    await expect(foreground).resolves.toMatchObject({ ok: true, value: { status: "up-to-date" } });
+    expect(ensureTrusted.mock.calls).toEqual([[false], [true]]);
+    expect(backend.checkCalls).toBe(1);
+  });
+
+  it.each(["required", "cancelled"] as const)("keeps %s trust actionable without checking or leaking helper errors", async (kind) => {
+    const backend = new FakeUpdateBackend();
+    const ensureTrusted = vi.fn(async () => {
+      const error = new UpdateCertificateTrustRequiredError(kind);
+      error.message = "private certificate at /private/test and https://example.invalid";
+      throw error;
+    });
+    const updater = createUpdater(backend, { certificateTrust: { ensureTrusted } });
+
+    await expect(updater.checkForUpdates()).resolves.toMatchObject({ ok: true, value: { status: "trust-required" } });
+    expect(backend.checkCalls).toBe(0);
+    expect(JSON.stringify(updater.getState())).not.toContain("private");
+    expect(JSON.stringify(updater.getState())).not.toContain("example.invalid");
+  });
+
+  it("fails closed and sanitizes unexpected certificate validation errors", async () => {
+    const backend = new FakeUpdateBackend();
+    const updater = createUpdater(backend, {
+      certificateTrust: {
+        ensureTrusted: async () => { throw new Error("Mismatched certificate at /private/test"); },
+      },
+    });
+
+    await expect(updater.checkForUpdates()).resolves.toEqual({
+      ok: false,
+      error: "Sliver Desktop could not check for updates. Try again later.",
+    });
+    expect(updater.getState()).toMatchObject({ status: "error" });
+    expect(backend.checkCalls).toBe(0);
+    expect(JSON.stringify(updater.getState())).not.toContain("private");
+  });
+
+  it("does not start a backend check after disposal while awaiting trust", async () => {
+    const backend = new FakeUpdateBackend();
+    const trust = deferred<void>();
+    const updater = createUpdater(backend, { certificateTrust: { ensureTrusted: () => trust.promise } });
+
+    const pending = updater.checkForUpdates();
+    updater.dispose();
+    trust.resolve();
+
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(backend.checkCalls).toBe(0);
   });
 
   it("asks the backend to install without disabling the running app preemptively", () => {
@@ -276,4 +391,14 @@ function createUpdater(
     backend,
     ...overrides,
   });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
 }

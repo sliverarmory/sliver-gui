@@ -5,12 +5,16 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   assertPrivatePackagedUpdateConfiguration,
+  assertPublicPackagedUpdateConfiguration,
   attachCleanupFailure,
   cleanupOwnedApplication,
   observePromiseSettlement,
   packagedUpdateLaunchProfile,
+  packagedUpdateApplicationEnvironment,
+  packagedUpdateGithubToken,
   packagedUpdateProfileEnvironment,
   parsePackagedUpdateVersions,
+  parsePackagedUpdateFeed,
   parseWindowsAuthenticodeInspection,
   windowsAuthenticodeInspectionCommand,
 } from "./packaged-application-update-support.js";
@@ -273,6 +277,70 @@ describe("packaged application update E2E support", () => {
       from: "0.1.0-updater-e2e.1",
       to: "0.1.0-updater-e2e.2",
     });
+  });
+
+  it("opts into the anonymous public stable feed explicitly", () => {
+    expect(parsePackagedUpdateFeed(undefined)).toBe("private");
+    expect(parsePackagedUpdateFeed("private")).toBe("private");
+    expect(parsePackagedUpdateFeed("public")).toBe("public");
+    expect(() => parsePackagedUpdateFeed("stable")).toThrow(/must be private or public/u);
+    expect(packagedUpdateGithubToken("public", {})).toBeUndefined();
+    expect(packagedUpdateGithubToken("public", { GH_TOKEN: "github_pat_must_not_pass_to_public_app" })).toBeUndefined();
+    expect(() => packagedUpdateGithubToken("private", {})).toThrow(/GH_TOKEN/u);
+    expect(packagedUpdateGithubToken("private", { GH_TOKEN: "github_pat_runtime_only" })).toBe("github_pat_runtime_only");
+    expect(parsePackagedUpdateVersions("0.0.0", "0.0.1", "public")).toEqual({ from: "0.0.0", to: "0.0.1" });
+    expect(parsePackagedUpdateVersions("0.0.1", "0.1.0", "public")).toEqual({ from: "0.0.1", to: "0.1.0" });
+  });
+
+  it.each([
+    ["0.0.0-updater-e2e.1", "0.0.1"],
+    ["0.0.0", "0.0.1-updater-e2e.1"],
+    ["0.0.1", "0.0.1"],
+    ["0.0.2", "0.0.1"],
+    ["0.0.0+local", "0.0.1"],
+    ["00.0.0", "0.0.1"],
+  ])("rejects a non-increasing or non-stable public pair %s -> %s", (from, to) => {
+    expect(() => parsePackagedUpdateVersions(from, to, "public")).toThrow();
+  });
+
+  it("strips inherited GitHub and signing credentials from anonymous public application launches", () => {
+    const inherited = {
+      GH_TOKEN: "github-token",
+      GITHUB_TOKEN: "actions-token",
+      MAC_CSC_LINK: "signing-archive",
+      MAC_CSC_KEY_PASSWORD: "password",
+      WIN_CSC_LINK: "windows-archive",
+      WIN_CSC_KEY_PASSWORD: "windows-password",
+      HEROUI_AUTH_TOKEN: "registry-token",
+      APPLE_ID: "account",
+      NODE_OPTIONS: "--require unwanted",
+      PATH: "/bin",
+    };
+    const publicEnvironment = packagedUpdateApplicationEnvironment("/profile", "darwin", undefined, inherited);
+    expect(publicEnvironment).toMatchObject({ PATH: "/bin", CFFIXED_USER_HOME: "/profile" });
+    for (const key of Object.keys(inherited).filter((key) => key !== "PATH")) {
+      expect(publicEnvironment).not.toHaveProperty(key);
+    }
+    expect(packagedUpdateApplicationEnvironment("/profile", "win32", "private-runtime-token", inherited))
+      .toMatchObject({ GH_TOKEN: "private-runtime-token" });
+  });
+
+  it("accepts only the anonymous production GitHub provider for public updates", () => {
+    const content = [
+      "owner: sliverarmory",
+      "repo: sliver-gui",
+      "provider: github",
+      "updaterCacheDirName: sliver-gui-updater",
+      "",
+    ].join("\n");
+    expect(() => assertPublicPackagedUpdateConfiguration(content)).not.toThrow();
+    expect(() => assertPublicPackagedUpdateConfiguration(`${content}channel: latest\n`)).not.toThrow();
+    for (const invalid of ["private: true", "private: false", "token: hidden", "requestHeaders: unsafe", "host: attacker.example", "channel: beta", "provider: github"]) {
+      expect(() => assertPublicPackagedUpdateConfiguration(`${content}${invalid}\n`), invalid).toThrow();
+    }
+    expect(() => assertPublicPackagedUpdateConfiguration(content.replace("sliverarmory", "other-owner"))).toThrow();
+    expect(() => assertPublicPackagedUpdateConfiguration(content.replace("sliver-gui\n", "other-repo\n"))).toThrow();
+    expect(() => assertPrivatePackagedUpdateConfiguration(content, "github_pat_runtime_only")).toThrow();
   });
 
   it.each([

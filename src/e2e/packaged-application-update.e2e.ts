@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import {
@@ -24,15 +24,19 @@ import { parseApplicationUpdateState, type ApplicationUpdateState } from "../sha
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
 import {
   assertPrivatePackagedUpdateConfiguration,
+  assertPublicPackagedUpdateConfiguration,
   attachCleanupFailure,
   cleanupOwnedApplication,
   observePromiseSettlement,
   packagedUpdateLaunchProfile,
-  packagedUpdateProfileEnvironment,
+  packagedUpdateApplicationEnvironment,
+  packagedUpdateGithubToken,
+  parsePackagedUpdateFeed,
   parsePackagedUpdateVersions,
   parseWindowsAuthenticodeInspection,
   type ObservedPromiseSettlement,
   type PackagedUpdateVersions,
+  type PackagedUpdateFeed,
   windowsAuthenticodeInspectionCommand,
 } from "./packaged-application-update-support.js";
 
@@ -57,7 +61,7 @@ if (enableValue !== undefined && enableValue !== "" && enableValue !== "0" && en
 }
 const ENABLED = enableValue === "1";
 
-test("packaged application updates from N-1 to N through a private GitHub prerelease", {
+test("packaged application updates from N-1 to N through its configured GitHub feed", {
   skip: !ENABLED,
   timeout: TEST_TIMEOUT_MS,
 }, async () => {
@@ -68,12 +72,14 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
   const temporaryRoot = await mkdtemp(join(input.runnerTemp, `sliver-gui-update-${process.platform}-`));
   const profileRoot = join(temporaryRoot, "profile");
   const installRoot = join(temporaryRoot, "installed");
-  const redactions = [input.githubToken, input.baseArtifact, temporaryRoot, input.runnerTemp];
+  const redactions = [input.githubToken, input.baseArtifact, temporaryRoot, input.runnerTemp]
+    .filter((value): value is string => typeof value === "string" && value !== "");
   const diagnostics: Record<string, unknown> = {
     platform: process.platform,
     architecture: process.arch,
     fromVersion: input.versions.from,
     toVersion: input.versions.to,
+    feed: input.feed,
     phases: [],
   };
   await Promise.all([
@@ -107,6 +113,7 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     attachPageDiagnostics(firstPage, diagnostics);
     const initialState = await inspectApplication(firstApplication);
     assert.equal(initialState.isPackaged, true, "N-1 must be a packaged application");
+    if (input.feed === "public") assert.equal(initialState.githubCredentialPresent, false, "public N-1 launch must be anonymous");
     assert.equal(initialState.version, input.versions.from, "installed application version must match N-1");
     await assertCanonicalPathEqual(
       initialState.userDataPath,
@@ -120,7 +127,7 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
         "N-1 APPIMAGE must identify the installed AppImage",
       );
     }
-    await assertPackagedUpdateConfig(initialState.resourcesPath, input.githubToken);
+    await assertPackagedUpdateConfig(initialState.resourcesPath, input);
     diagnostics["nMinusOne"] = initialState;
 
     const sentinelPath = join(initialState.userDataPath, "packaged-updater-e2e-sentinel.json");
@@ -223,6 +230,7 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
     attachPageDiagnostics(secondPage, diagnostics);
     const updatedState = await inspectApplication(secondApplication);
     assert.equal(updatedState.isPackaged, true, "N must be a packaged application");
+    if (input.feed === "public") assert.equal(updatedState.githubCredentialPresent, false, "public N launch must be anonymous");
     assert.equal(updatedState.version, input.versions.to, "restarted application version must match N");
     await assertCanonicalPathEqual(
       updatedState.userDataPath,
@@ -242,7 +250,7 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
         "N APPIMAGE must identify the updater-installed AppImage",
       );
     }
-    await assertPackagedUpdateConfig(updatedState.resourcesPath, input.githubToken);
+    await assertPackagedUpdateConfig(updatedState.resourcesPath, input);
     diagnostics["n"] = updatedState;
 
     await closeSavedConfigSelector(secondPage);
@@ -329,11 +337,14 @@ test("packaged application updates from N-1 to N through a private GitHub prerel
 
 interface TestInput {
   readonly baseArtifact: string;
-  readonly githubToken: string;
+  readonly feed: PackagedUpdateFeed;
+  readonly githubToken: string | undefined;
   readonly macSigningAuthority?: string;
+  readonly macSigningSha256?: string;
   readonly runnerTemp: string;
   readonly versions: PackagedUpdateVersions;
   readonly windowsPublisher?: string;
+  readonly windowsSigningThumbprint?: string;
 }
 
 interface Installation {
@@ -345,6 +356,7 @@ interface ApplicationState {
   readonly appImagePath: string | null;
   readonly executablePath: string;
   readonly isPackaged: boolean;
+  readonly githubCredentialPresent: boolean;
   readonly pid: number;
   readonly resourcesPath: string;
   readonly userDataPath: string;
@@ -390,13 +402,12 @@ async function readInput(repositoryRoot: string): Promise<TestInput> {
     throw new Error("The N-1 artifact must be downloaded outside the source checkout");
   }
 
-  const githubToken = requiredEnvironment("GH_TOKEN");
-  if (githubToken.length < 20 || /[\s\0]/u.test(githubToken)) {
-    throw new Error("GH_TOKEN must be a non-empty runtime credential without whitespace or NUL bytes");
-  }
+  const feed = parsePackagedUpdateFeed(process.env["SLIVER_GUI_UPDATE_E2E_FEED"]);
+  const githubToken = packagedUpdateGithubToken(feed);
   const versions = parsePackagedUpdateVersions(
     requiredEnvironment("SLIVER_GUI_UPDATE_E2E_FROM_VERSION"),
     requiredEnvironment("SLIVER_GUI_UPDATE_E2E_TO_VERSION"),
+    feed,
   );
   if (!basename(baseArtifact).includes(versions.from)) {
     throw new Error("The N-1 artifact filename must contain SLIVER_GUI_UPDATE_E2E_FROM_VERSION");
@@ -404,13 +415,18 @@ async function readInput(repositoryRoot: string): Promise<TestInput> {
 
   if (process.platform === "darwin") {
     if (!/\.dmg$/iu.test(baseArtifact)) throw new Error("macOS updater E2E requires an N-1 DMG");
+    if (feed === "public") {
+      const certificate = await pinnedPublicCertificate(repositoryRoot, "macos");
+      const macSigningSha256 = createHash("sha256").update(certificate.raw).digest("hex");
+      return { baseArtifact, feed, githubToken, macSigningSha256, runnerTemp, versions };
+    }
     const macSigningAuthority = requiredEnvironment("SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY");
     if (!/^Developer ID Application: .+ \([A-Z0-9]{10}\)$/u.test(macSigningAuthority)) {
       throw new Error(
         "SLIVER_GUI_UPDATE_E2E_MAC_SIGNING_AUTHORITY must be the exact Developer ID Application authority",
       );
     }
-    return { baseArtifact, githubToken, macSigningAuthority, runnerTemp, versions };
+    return { baseArtifact, feed, githubToken, macSigningAuthority, runnerTemp, versions };
   }
   if (process.platform === "win32") {
     if (!/-setup\.exe$/iu.test(baseArtifact)) {
@@ -420,13 +436,31 @@ async function readInput(repositoryRoot: string): Promise<TestInput> {
     if (!windowsPublisher.includes("=") || /[\r\n\0]/u.test(windowsPublisher)) {
       throw new Error("SLIVER_GUI_UPDATE_E2E_WINDOWS_PUBLISHER must be the exact Authenticode subject");
     }
-    return { baseArtifact, githubToken, runnerTemp, versions, windowsPublisher };
+    const windowsSigningThumbprint = feed === "public"
+      ? createHash("sha1").update((await pinnedPublicCertificate(repositoryRoot, "windows")).raw).digest("hex").toUpperCase()
+      : undefined;
+    return {
+      baseArtifact, feed, githubToken, runnerTemp, versions, windowsPublisher,
+      ...(windowsSigningThumbprint ? { windowsSigningThumbprint } : {}),
+    };
   }
   if (process.platform === "linux") {
     if (!/\.AppImage$/u.test(baseArtifact)) throw new Error("Linux updater E2E requires an N-1 AppImage");
-    return { baseArtifact, githubToken, runnerTemp, versions };
+    return { baseArtifact, feed, githubToken, runnerTemp, versions };
   }
   throw new Error(`Packaged updater E2E does not support ${process.platform}`);
+}
+
+async function pinnedPublicCertificate(repositoryRoot: string, platform: "macos" | "windows"): Promise<X509Certificate> {
+  const directory = join(repositoryRoot, "build", "update-signing");
+  const manifest: unknown = JSON.parse(await readFile(join(directory, "manifest.json"), "utf8"));
+  assert.ok(manifest && typeof manifest === "object" && "schemaVersion" in manifest && manifest.schemaVersion === 1);
+  const entry = (manifest as Record<string, unknown>)[platform];
+  assert.ok(entry && typeof entry === "object" && "sha256" in entry);
+  assert.match(String(entry.sha256), /^[0-9a-f]{64}$/u);
+  const certificate = new X509Certificate(await readFile(join(directory, `${platform}.cer`)));
+  assert.equal(createHash("sha256").update(certificate.raw).digest("hex"), entry.sha256);
+  return certificate;
 }
 
 async function installBaseApplication(
@@ -498,7 +532,22 @@ async function verifyPlatformTrust(executablePath: string, input: TestInput): Pr
       samePath(executablePath, join(applicationBundle, "Contents", "MacOS", "Sliver GUI")),
       "macOS executable must use the expected bundle layout",
     );
-    await runCommand("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", applicationBundle]);
+    await runCommand("/usr/bin/codesign", ["--verify", "--all-architectures", "--deep", "--strict", "--verbose=2", applicationBundle]);
+    if (input.feed === "public") {
+      assert.ok(input.macSigningSha256);
+      const temporaryDirectory = await mkdtemp(join(input.runnerTemp, "sliver-update-certificates-"));
+      try {
+        for (const architecture of ["x86_64", "arm64"]) {
+          const prefix = join(temporaryDirectory, `${architecture}-`);
+          await runCommand("/usr/bin/codesign", ["--display", "--architecture", architecture, "--extract-certificates", prefix, applicationBundle]);
+          const fingerprint = createHash("sha256").update(await readFile(`${prefix}0`)).digest("hex");
+          assert.equal(fingerprint, input.macSigningSha256, `macOS ${architecture} app must use the pinned public certificate`);
+        }
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+      return { signerIdentity: input.macSigningSha256, details: { sha256: input.macSigningSha256 } };
+    }
     const details = await runCommand("/usr/bin/codesign", ["--display", "--verbose=4", applicationBundle]);
     const combined = `${details.stdout}\n${details.stderr}`;
     const authorities = [...combined.matchAll(/^Authority=(.+)$/gmu)].map((match) => match[1]?.trim()).filter(
@@ -525,6 +574,9 @@ async function verifyPlatformTrust(executablePath: string, input: TestInput): Pr
       `Windows application signature must be valid: ${signature.statusMessage}`,
     );
     assert.equal(signature.subject, input.windowsPublisher, "Windows application publisher must remain unchanged");
+    if (input.feed === "public") {
+      assert.equal(signature.thumbprint, input.windowsSigningThumbprint, "Windows application must use the pinned public certificate");
+    }
     return {
       signerIdentity: `${signature.subject} (${signature.thumbprint})`,
       details: { ...signature },
@@ -541,7 +593,7 @@ async function verifyPlatformTrust(executablePath: string, input: TestInput): Pr
 async function launchApplication(
   executablePath: string,
   profileRoot: string,
-  githubToken: string,
+  githubToken: string | undefined,
 ): Promise<{ application: ElectronApplication; page: Page; userDataDirectory: string }> {
   const environment = isolatedApplicationEnvironment(profileRoot, githubToken);
   const launchProfile = packagedUpdateLaunchProfile(profileRoot);
@@ -573,35 +625,8 @@ async function launchApplication(
   }
 }
 
-function isolatedApplicationEnvironment(profileRoot: string, githubToken: string): Record<string, string> {
-  const environment = Object.fromEntries(
-    Object.entries(process.env).filter((entry): entry is [string, string] =>
-      typeof entry[1] === "string" && !isCredentialEnvironmentName(entry[0])),
-  );
-  for (const name of [
-    "HEROUI_AUTH_TOKEN",
-    "MAC_CSC_LINK",
-    "MAC_CSC_KEY_PASSWORD",
-    "WIN_CSC_LINK",
-    "WIN_CSC_KEY_PASSWORD",
-    "CSC_LINK",
-    "CSC_KEY_PASSWORD",
-    "APPLE_ID",
-    "APPLE_APP_SPECIFIC_PASSWORD",
-    "GITHUB_TOKEN",
-    "NODE_OPTIONS",
-  ]) delete environment[name];
-  return {
-    ...environment,
-    ...packagedUpdateProfileEnvironment(profileRoot, process.platform),
-    GH_TOKEN: githubToken,
-    ...(process.platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
-  };
-}
-
-function isCredentialEnvironmentName(name: string): boolean {
-  return /(?:^|_)(?:ACCESS_KEY|API_KEY|AUTH|CREDENTIALS?|PASS(?:WORD)?|PRIVATE_KEY|SECRET|TOKEN)(?:_|$)/iu.test(name) ||
-    /^(?:APPLE_ID|CSC_KEY_PASSWORD|CSC_LINK|MAC_CSC_LINK|WIN_CSC_LINK)$/iu.test(name);
+function isolatedApplicationEnvironment(profileRoot: string, githubToken: string | undefined): Record<string, string> {
+  return packagedUpdateApplicationEnvironment(profileRoot, process.platform, githubToken);
 }
 
 async function inspectApplication(application: ElectronApplication): Promise<ApplicationState> {
@@ -609,6 +634,7 @@ async function inspectApplication(application: ElectronApplication): Promise<App
     appImagePath: process.env["APPIMAGE"] ?? null,
     executablePath: process.execPath,
     isPackaged: app.isPackaged,
+    githubCredentialPresent: Boolean(process.env["GH_TOKEN"] || process.env["GITHUB_TOKEN"]),
     pid: process.pid,
     resourcesPath: process.resourcesPath,
     userDataPath: app.getPath("userData"),
@@ -616,10 +642,11 @@ async function inspectApplication(application: ElectronApplication): Promise<App
   }));
 }
 
-async function assertPackagedUpdateConfig(resourcesPath: string, githubToken: string): Promise<void> {
+async function assertPackagedUpdateConfig(resourcesPath: string, input: TestInput): Promise<void> {
   const configPath = join(resourcesPath, "app-update.yml");
   const content = await readFile(configPath, "utf8");
-  assertPrivatePackagedUpdateConfiguration(content, githubToken);
+  if (input.feed === "public") assertPublicPackagedUpdateConfiguration(content);
+  else assertPrivatePackagedUpdateConfiguration(content, input.githubToken ?? "");
 }
 
 async function closeSavedConfigSelector(page: Page): Promise<void> {

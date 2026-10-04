@@ -798,6 +798,18 @@ describe("application menu templates", () => {
     clickItem(menuItems(macTemplate, "Sliver GUI").find((item) => item.label === "Check for Updates…"));
     expect(checkForApplicationUpdates).toHaveBeenCalledOnce();
 
+    const trustTemplate = buildApplicationMenuTemplate(
+      "darwin",
+      "Sliver GUI",
+      actions,
+      { status: "loading" },
+      { status: "trust-required", revision: 2, currentVersion: "1.2.3", message: "Approve certificate trust." },
+    );
+    const trustCheck = menuItems(trustTemplate, "Sliver GUI").find((item) => item.label === "Check for Updates…");
+    expect(trustCheck?.enabled).not.toBe(false);
+    clickItem(trustCheck);
+    expect(checkForApplicationUpdates).toHaveBeenCalledTimes(2);
+
     const linuxTemplate = buildApplicationMenuTemplate(
       "linux",
       "Sliver GUI",

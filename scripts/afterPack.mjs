@@ -1,16 +1,19 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { prepareNodePtyRuntime } from "./prepareNodePtyRuntime.mjs";
+import { buildUpdaterTrust } from "./buildUpdaterTrust.mjs";
+import { readUpdateSigningAssets } from "./releaseSigning.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export default async function afterPack(context, dependencies = {}) {
   const prepareRuntime = dependencies.prepareNodePtyRuntime ?? prepareNodePtyRuntime;
   const verifySliverConsole = dependencies.verifySliverConsoleBeforeSigning ?? verifySliverConsoleBeforeSigning;
+  const prepareTrust = dependencies.prepareUpdaterTrustBeforeSigning ?? prepareUpdaterTrustBeforeSigning;
   const platform = context.electronPlatformName;
   let resourcesDirectory;
   if (platform === "darwin") {
@@ -33,6 +36,31 @@ export default async function afterPack(context, dependencies = {}) {
     projectDirectory: context.packager?.projectDir ?? rootDirectory,
     resourcesDirectory,
   });
+  await prepareTrust({
+    platform,
+    projectDirectory: context.packager?.projectDir ?? rootDirectory,
+    resourcesDirectory,
+  });
+}
+
+export async function prepareUpdaterTrustBeforeSigning({
+  platform,
+  projectDirectory = rootDirectory,
+  resourcesDirectory,
+  build = buildUpdaterTrust,
+}) {
+  const { files } = await readUpdateSigningAssets(projectDirectory);
+  for (const [name, expected] of files) {
+    const actual = await readFile(join(resourcesDirectory, "update-signing", name));
+    if (!actual.equals(expected)) throw new Error(`Packaged update signing asset changed before signing: ${name}`);
+  }
+  if (platform !== "darwin") return;
+  const helper = await build({ projectDirectory });
+  const helperDirectory = join(resourcesDirectory, "updater-trust");
+  await mkdir(helperDirectory, { recursive: true });
+  const packagedHelper = join(helperDirectory, "updater-trust");
+  await copyFile(helper, packagedHelper);
+  await chmod(packagedHelper, 0o755);
 }
 
 export async function verifySliverConsoleBeforeSigning({
