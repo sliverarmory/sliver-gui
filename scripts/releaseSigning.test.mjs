@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import { prepareUpdaterTrustBeforeSigning } from "./afterPack.mjs";
+import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
 import { extractMacosSigningCertificate, readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -120,7 +121,7 @@ test("Windows verification requires Authenticode validity, full Subject, and SHA
     executablePath: "child.exe",
     expectedSha256: "1".repeat(64),
     expectedPublisher: "CN=Publisher",
-    environment: {},
+    environment: { PSModulePath: "incompatible modules", Path: "preserved" },
     run: async (...args) => { invocation = args; },
   });
   const [command, args, options] = invocation;
@@ -131,6 +132,39 @@ test("Windows verification requires Authenticode validity, full Subject, and SHA
   assert.match(args.at(-1), /Subject -cne \$env:SLIVER_GUI_EXPECTED_PUBLISHER/u);
   assert.equal(options.env.SLIVER_GUI_EXPECTED_CERTIFICATE_SHA256, "1".repeat(64));
   assert.equal(options.env.SLIVER_GUI_EXPECTED_PUBLISHER, "CN=Publisher");
+  assert.equal(options.env.Path, "preserved");
+  assert.equal(options.env.PSModulePath, undefined);
+});
+
+test("Windows PowerShell child environments omit every casing of PSModulePath without mutating the parent", () => {
+  const original = Object.freeze({ PSModulePath: "one", PSMODULEPATH: "two", psmodulepath: "three", Path: "preserved", TEMP: "temporary" });
+  assert.deepEqual(windowsPowerShellEnvironment(original), { Path: "preserved", TEMP: "temporary" });
+  assert.equal(original.PSModulePath, "one");
+});
+
+test("Windows Authenticode verifier works through Node launched from PowerShell 7 and rejects a wrong certificate pin", { skip: process.platform !== "win32", timeout: 60_000 }, async () => {
+  const run = (command, args, options = {}) => promisify(execFile)(command, args, {
+    ...options, timeout: 20_000, maxBuffer: 1024 * 1024, windowsHide: true,
+  });
+  const powerShell7Home = (await run("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSHOME"])).stdout.trim();
+  const environment = { ...process.env, PSModulePath: join(powerShell7Home, "Modules") };
+  const executablePath = join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const inspection = [
+    "$ErrorActionPreference = 'Stop'",
+    "$signature = Get-AuthenticodeSignature -LiteralPath $env:TEST_SIGNED_EXECUTABLE",
+    "if ($signature.Status -ne 'Valid') { throw 'System PowerShell signature must be valid' }",
+    "$sha256 = [System.Security.Cryptography.SHA256]::Create()",
+    "try { @{ Subject = $signature.SignerCertificate.Subject; Fingerprint = ([BitConverter]::ToString($sha256.ComputeHash($signature.SignerCertificate.RawData))).Replace('-', '').ToLowerInvariant() } | ConvertTo-Json -Compress } finally { $sha256.Dispose() }",
+  ].join("\n");
+  const baseline = JSON.parse((await run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", inspection], {
+    env: { ...windowsPowerShellEnvironment(environment), TEST_SIGNED_EXECUTABLE: executablePath },
+  })).stdout);
+  const options = {
+    appPath: executablePath, executablePath, expectedSha256: baseline.Fingerprint,
+    expectedPublisher: baseline.Subject, run, environment,
+  };
+  await verifyPinnedWindowsSignatures(options);
+  await assert.rejects(verifyPinnedWindowsSignatures({ ...options, expectedSha256: "0".repeat(64) }), /Unexpected Authenticode signing certificate/u);
 });
 
 test("afterPack verifies public certs and installs the executable before app signing", async (context) => {

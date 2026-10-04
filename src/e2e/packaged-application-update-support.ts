@@ -1,6 +1,8 @@
 import { Buffer } from "node:buffer";
 import { join } from "node:path";
 
+import { windowsPowerShellEnvironment } from "../shared/windows-powershell-environment.js";
+
 const SEMVER_PATTERN =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u;
 
@@ -190,7 +192,7 @@ export function packagedUpdateApplicationEnvironment(
       !/^(?:APPLE_ID|CSC_LINK|MAC_CSC_LINK|WIN_CSC_LINK|NODE_OPTIONS)$/iu.test(entry[0])),
   );
   return {
-    ...environment,
+    ...(platform === "win32" ? windowsPowerShellEnvironment(environment) : environment),
     ...packagedUpdateProfileEnvironment(profileRoot, platform),
     ...(githubToken ? { GH_TOKEN: githubToken } : {}),
     ...(platform === "linux" ? { APPIMAGE_EXTRACT_AND_RUN: "1" } : {}),
@@ -206,7 +208,7 @@ export interface WindowsAuthenticodeInspection {
 
 export interface WindowsAuthenticodeInspectionCommand {
   readonly arguments: readonly string[];
-  readonly executable: "pwsh.exe";
+  readonly executable: "powershell.exe";
 }
 
 export function windowsAuthenticodeInspectionCommand(
@@ -233,7 +235,7 @@ export function windowsAuthenticodeInspectionCommand(
       "-EncodedCommand",
       Buffer.from(script, "utf16le").toString("base64"),
     ],
-    executable: "pwsh.exe",
+    executable: "powershell.exe",
   };
 }
 

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
+
 import { extractFile, listPackage, statFile } from "@electron/asar";
 
 import { asarEntryPaths } from "./asarEntryPaths.mjs";
@@ -690,7 +692,7 @@ async function verifyNestedSliverSignature(archivePath, executablePath, signatur
       script,
     ], {
       env: {
-        ...process.env,
+        ...windowsPowerShellEnvironment(process.env),
         SLIVER_GUI_APPLICATION_EXECUTABLE: appPath,
         SLIVER_GUI_CHILD_EXECUTABLE: executablePath,
       },

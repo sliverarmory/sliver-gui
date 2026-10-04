@@ -21,6 +21,7 @@ import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 
 import { parseApplicationUpdateState, type ApplicationUpdateState } from "../shared/application-update-contracts.js";
+import { windowsPowerShellEnvironment } from "../shared/windows-powershell-environment.js";
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
 import {
   assertPrivatePackagedUpdateConfiguration,
@@ -1238,7 +1239,7 @@ async function runCommand(
   return new Promise((resolveCommand, rejectCommand) => {
     const environment = options.env ? { ...process.env, ...options.env } : process.env;
     const child = spawn(command, [...args], {
-      env: environment,
+      env: process.platform === "win32" ? windowsPowerShellEnvironment(environment) : environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
