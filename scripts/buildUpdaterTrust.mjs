@@ -11,6 +11,7 @@ const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export async function buildUpdaterTrust({ projectDirectory = rootDirectory } = {}) {
   if (process.platform !== "darwin") throw new Error("The updater trust helper must be built on macOS.");
   const source = join(projectDirectory, "native", "updater-trust", "main.swift");
+  const authorizationSource = join(projectDirectory, "native", "updater-trust", "authorization-result.swift");
   const outputDirectory = join(projectDirectory, "native", "updater-trust", "build");
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-updater-trust-"));
   await mkdir(outputDirectory, { recursive: true });
@@ -24,7 +25,7 @@ export async function buildUpdaterTrust({ projectDirectory = rootDirectory } = {
         "swiftc", "-O", "-target", `${architecture}-apple-macosx13.0`,
         "-module-cache-path", join(temporaryDirectory, "module-cache"),
         "-framework", "AppKit", "-framework", "Security", "-framework", "SecurityInterface",
-        source, "-o", slice,
+        source, authorizationSource, "-o", slice,
       ], { timeout: 180_000, maxBuffer: 1024 * 1024 });
       slices.push(slice);
     }

@@ -13,7 +13,6 @@ struct SigningManifest: Decodable {
 }
 
 enum HelperError: Error { case invalidInput, invalidCertificate, securityFailure }
-enum TrustStatus: String { case trusted, required, cancelled }
 
 func fingerprint(_ data: Data) -> String {
   SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -103,8 +102,7 @@ func installCodeSigningTrust(_ certificate: SecCertificate) throws -> TrustStatu
   let item: [CFString: Any] = [kSecClass: kSecClassCertificate, kSecValueRef: certificate]
   let addStatus = SecItemAdd(item as CFDictionary, nil)
   guard addStatus == errSecSuccess || addStatus == errSecDuplicateItem else {
-    if addStatus == errSecUserCanceled { return .cancelled }
-    if addStatus == errSecAuthFailed { return .required }
+    if let outcome = authorizationFailureStatus(addStatus) { return outcome }
     throw HelperError.securityFailure
   }
   let setting: [String: Any] = [
@@ -114,8 +112,7 @@ func installCodeSigningTrust(_ certificate: SecCertificate) throws -> TrustStatu
   // Never pass nil/empty settings: those grant trust for every policy. The
   // Security framework performs any authorization required for this user.
   let status = SecTrustSettingsSetTrustSettings(certificate, .user, [setting] as CFArray)
-  if status == errSecUserCanceled { return .cancelled }
-  if status == errSecAuthFailed { return .required }
+  if let outcome = authorizationFailureStatus(status) { return outcome }
   guard status == errSecSuccess else { throw HelperError.securityFailure }
   return try isTrusted(certificate) ? .trusted : .required
 }

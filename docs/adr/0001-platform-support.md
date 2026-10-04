@@ -113,8 +113,8 @@ The release job stages all packages, blockmaps, and `latest*.yml` files in a
 draft, verifies the uploaded inventory, and then publishes it as the latest
 stable release. Draft and prerelease records are not update signals. Repository
 immutable releases must be enabled before production release; the workflow
-checks the repository setting before it creates the draft. After promotion,
-the workflow refuses asset replacement and performs no further release writes.
+verifies that the published release is immutable. After promotion, the workflow
+refuses asset replacement and performs no further release writes.
 Installed builds older than the first updater-capable version require one
 manual bootstrap installation.
 

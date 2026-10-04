@@ -76,7 +76,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
@@ -261,6 +261,7 @@ jobs:
         run: |
           node ./scripts/verifyReleaseVersion.mjs --tag "$RELEASE_TAG" --allow-package-mismatch
           npm version --no-git-tag-version --allow-same-version "$RELEASE_TAG"
+          node ./scripts/syncReleaseVersion.mjs
           node ./scripts/verifyReleaseVersion.mjs --tag "$RELEASE_TAG"
 
       - name: Require macOS self-signing secrets
@@ -394,13 +395,9 @@ jobs:
 
       # The baseline is a private workflow artifact, never a public release.
       # It exercises the real published feed with the same pinned signer.
-      - name: Set baseline version for public updater proof
-        if: env.RELEASE_TAG != ''
-        run: npm version 0.0.0 --no-git-tag-version --allow-same-version --ignore-scripts
-
       - name: Build signed macOS updater baseline
         if: env.RELEASE_TAG != '' && runner.os == 'macOS'
-        run: node ./node_modules/electron-builder/cli.js --mac dmg --universal --publish never --config.mac.notarize=false --config.forceCodeSigning=true --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
+        run: node ./node_modules/electron-builder/cli.js --mac dmg --universal --publish never --config.extraMetadata.version=0.0.0 --config.mac.notarize=false --config.forceCodeSigning=true --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
 
       - name: Build signed Windows updater baseline
         if: env.RELEASE_TAG != '' && runner.os == 'Windows'
@@ -408,13 +405,13 @@ jobs:
           CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           WIN_CSC_PUBLISHER_NAME: ${{ vars.WIN_CSC_PUBLISHER_NAME }}
-        run: node ./node_modules/electron-builder/cli.js --win nsis --x64 --publish never --config.forceCodeSigning=true --config.win.signtoolOptions.publisherName="$env:WIN_CSC_PUBLISHER_NAME" --config.directories.output="$env:RUNNER_TEMP/sliver-gui-update-baseline"
+        run: node ./node_modules/electron-builder/cli.js --win nsis --x64 --publish never --config.extraMetadata.version=0.0.0 --config.forceCodeSigning=true --config.win.signtoolOptions.publisherName="$env:WIN_CSC_PUBLISHER_NAME" --config.directories.output="$env:RUNNER_TEMP/sliver-gui-update-baseline"
 
       - name: Build Linux updater baseline
         if: env.RELEASE_TAG != '' && runner.os == 'Linux'
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: node ./node_modules/electron-builder/cli.js --linux AppImage --x64 --publish never --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
+        run: node ./node_modules/electron-builder/cli.js --linux AppImage --x64 --publish never --config.extraMetadata.version=0.0.0 --config.directories.output="$RUNNER_TEMP/sliver-gui-update-baseline"
 
       - name: Upload updater baseline installer
         if: env.RELEASE_TAG != ''
@@ -465,14 +462,9 @@ jobs:
             echo "::error::Stable automatic updates require the GitHub repository and release assets to be public; found $visibility."
             exit 1
           fi
-          immutable="$(gh api \
-            -H 'X-GitHub-Api-Version: 2026-03-10' \
-            "repos/$GITHUB_REPOSITORY/immutable-releases" \
-            --jq .enabled)"
-          if [ "$immutable" != "true" ]; then
-            echo "::error::Enable GitHub immutable releases before publishing a stable automatic update."
-            exit 1
-          fi
+          # Repository administration enables immutable releases. The settings
+          # endpoint requires admin-read permission unavailable to GITHUB_TOKEN;
+          # verify the actual published release below with contents permission.
 
       - name: Download native packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -529,7 +521,14 @@ jobs:
         run: |
           node scripts/verifyReleaseRequest.mjs
           gh release edit "$RELEASE_TAG" --draft=false --latest
-          test "$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')" = $'false\tfalse'
+          published="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+            --jq '[.draft, .prerelease, .immutable, .tag_name] | @tsv')"
+          if [ "$published" != $'false\tfalse\ttrue\t'"$RELEASE_TAG" ]; then
+            echo "::error::Published release must be stable, immutable, and match the requested tag."
+            exit 1
+          fi
 
   public-update:
     name: Public auto-update (${{ matrix.platform }})

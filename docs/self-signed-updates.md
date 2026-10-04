@@ -29,6 +29,10 @@ required and wait for an explicit update action. Trust is requested only for
 the certificate shipped with the installed app; the update server cannot
 introduce a replacement key through this dialog.
 
+The helper preserves any existing user trust settings for this certificate.
+If those settings reject code signing, or device policy disables user trust,
+use Keychain Access or ask the device administrator to review the certificate.
+
 Certificate trust does not replace Gatekeeper's first-launch decision or Apple
 notarization. See [Apple's instructions for opening downloaded apps](https://support.apple.com/en-us/102445).
 Release packaging keeps hardened runtime enabled and verifies the pinned

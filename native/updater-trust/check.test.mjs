@@ -11,6 +11,21 @@ import { promisify } from "node:util";
 const execute = promisify(execFile);
 const directory = dirname(fileURLToPath(import.meta.url));
 
+test("native authorization outcomes distinguish cancellation, denial, and unexpected failures", { skip: process.platform !== "darwin" }, async () => {
+  const temporary = await mkdtemp(join(tmpdir(), "native-updater-authorization-test-"));
+  try {
+    const binary = join(temporary, "authorization-result-test");
+    await execute("/usr/bin/xcrun", [
+      "swiftc", "-module-cache-path", join(temporary, "module-cache"), "-framework", "Security",
+      join(directory, "authorization-result.swift"), join(directory, "authorization-result.test.swift"),
+      "-o", binary,
+    ], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    await execute(binary, [], { timeout: 15_000 });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("native helper checks an untrusted certificate and rejects replacements without requesting trust", { skip: process.platform !== "darwin" }, async () => {
   const temporary = await mkdtemp(join(tmpdir(), "native-updater-trust-test-"));
   try {
