@@ -152,12 +152,33 @@ function cleanupErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function packagedUpdateLaunchProfile(profileRoot: string): PackagedUpdateLaunchProfile {
+export function packagedUpdateLaunchProfile(
+  profileRoot: string,
+  platform: NodeJS.Platform,
+): PackagedUpdateLaunchProfile {
   const userDataDirectory = join(profileRoot, "user-data");
   return {
-    arguments: ["--enable-sandbox", `--user-data-dir=${userDataDirectory}`],
+    arguments: [
+      "--enable-sandbox",
+      // This disposable profile has no login keychain. Match the packaged
+      // smoke harness so Chromium cannot block on profile-encryption prompts.
+      // These flags do not change native code-signature or certificate trust.
+      ...(platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
+      `--user-data-dir=${userDataDirectory}`,
+    ],
     userDataDirectory,
   };
+}
+
+export async function boundedUpdateDiagnostic<T>(
+  label: string,
+  operation: () => Promise<T>,
+  timeoutMs: number,
+): Promise<T | { readonly error: string }> {
+  const outcome = await settlementWithin(observePromiseSettlement(Promise.resolve().then(operation)), timeoutMs);
+  if (!outcome) return { error: `${label} timed out after ${timeoutMs}ms` };
+  if (outcome.status === "rejected") return { error: `${label}: ${cleanupErrorMessage(outcome.reason)}` };
+  return outcome.value;
 }
 
 export function packagedUpdateProfileEnvironment(

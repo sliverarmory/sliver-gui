@@ -7,6 +7,7 @@ import {
   assertPrivatePackagedUpdateConfiguration,
   assertPublicPackagedUpdateConfiguration,
   attachCleanupFailure,
+  boundedUpdateDiagnostic,
   cleanupOwnedApplication,
   observePromiseSettlement,
   packagedUpdateLaunchProfile,
@@ -192,13 +193,46 @@ describe("packaged application update E2E support", () => {
     const profileRoot = resolve("private", "tmp", "e2e-profile");
     const userDataDirectory = join(profileRoot, "user-data");
 
-    expect(packagedUpdateLaunchProfile(profileRoot)).toEqual({
+    expect(packagedUpdateLaunchProfile(profileRoot, "linux")).toEqual({
       arguments: [
         "--enable-sandbox",
         `--user-data-dir=${userDataDirectory}`,
       ],
       userDataDirectory,
     });
+  });
+
+  it.each(["darwin", "linux", "win32"] as const)("isolates %s profile storage while retaining sandboxed launches", (platform) => {
+    const profileRoot = resolve("private", "tmp", "e2e-profile");
+    expect(packagedUpdateLaunchProfile(profileRoot, platform)).toEqual({
+      arguments: [
+        "--enable-sandbox",
+        ...(platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
+        `--user-data-dir=${join(profileRoot, "user-data")}`,
+      ],
+      userDataDirectory: join(profileRoot, "user-data"),
+    });
+  });
+
+  it("retains completed diagnostic evidence and reports probe failures without replacing the test failure", async () => {
+    await expect(boundedUpdateDiagnostic("window", async () => ({ visible: true }), 100)).resolves.toEqual({ visible: true });
+    await expect(boundedUpdateDiagnostic("window", async () => { throw new Error("disconnected"); }, 100))
+      .resolves.toEqual({ error: "window: disconnected" });
+  });
+
+  it("bounds an unresponsive renderer diagnostic and observes a later rejection", async () => {
+    vi.useFakeTimers();
+    try {
+      let rejectProbe: ((error: Error) => void) | undefined;
+      const probe = new Promise<never>((_resolve, reject) => { rejectProbe = reject; });
+      const result = boundedUpdateDiagnostic("renderer", () => probe, 5_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(result).resolves.toEqual({ error: "renderer timed out after 5000ms" });
+      rejectProbe?.(new Error("renderer closed"));
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("uses the Core Foundation home override for isolated macOS launches", () => {

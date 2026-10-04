@@ -27,6 +27,7 @@ import {
   assertPrivatePackagedUpdateConfiguration,
   assertPublicPackagedUpdateConfiguration,
   attachCleanupFailure,
+  boundedUpdateDiagnostic,
   cleanupOwnedApplication,
   observePromiseSettlement,
   packagedUpdateLaunchProfile,
@@ -50,6 +51,8 @@ const APPLICATION_PROCESS_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
 const APPLICATION_PROCESS_FORCE_EXIT_TIMEOUT_MS = 15_000;
 const PROCESS_POLL_INTERVAL_MS = 250;
 const COMMAND_OUTPUT_LIMIT = 64 * 1_024;
+const FAILURE_DIAGNOSTIC_TIMEOUT_MS = 5_000;
+const PROCESS_DIAGNOSTIC_LIMIT = 4_096;
 
 const BROAD_APPLICATION_PROCESS_INVENTORY = {
   includeDescendants: true,
@@ -108,6 +111,8 @@ test("packaged application updates from N-1 to N through its configured GitHub f
       installation.executablePath,
       profileRoot,
       input.githubToken,
+      diagnostics,
+      "nMinusOne",
     );
     firstApplication = firstLaunch.application;
     firstPage = firstLaunch.page;
@@ -225,7 +230,7 @@ test("packaged application updates from N-1 to N through its configured GitHub f
     }
 
     recordPhase(diagnostics, "launching-and-verifying-n");
-    const secondLaunch = await launchApplication(updatedExecutable, profileRoot, input.githubToken);
+    const secondLaunch = await launchApplication(updatedExecutable, profileRoot, input.githubToken, diagnostics, "n");
     secondApplication = secondLaunch.application;
     secondPage = secondLaunch.page;
     attachPageDiagnostics(secondPage, diagnostics);
@@ -274,22 +279,53 @@ test("packaged application updates from N-1 to N through its configured GitHub f
     testFailed = true;
     testFailure = error;
     diagnostics["failure"] = errorMessage(error);
-    diagnostics["processes"] = await applicationProcesses(
-      undefined,
-      installRoot,
-      BROAD_APPLICATION_PROCESS_INVENTORY,
-    ).catch((processError) => [{
-      pid: -1,
-      commandLine: errorMessage(processError),
-    }]);
+    diagnostics["processes"] = await boundedUpdateDiagnostic("process inventory", () => applicationProcesses(
+      undefined, installRoot, BROAD_APPLICATION_PROCESS_INVENTORY,
+    ), FAILURE_DIAGNOSTIC_TIMEOUT_MS);
     const diagnosticPage = secondPage ?? firstPage;
+    const diagnosticApplication = secondApplication ?? firstApplication;
+    const probes: Promise<void>[] = [];
+    if (diagnosticApplication) probes.push((async () => {
+      diagnostics["nativeWindows"] = await boundedUpdateDiagnostic("native window state", () =>
+        diagnosticApplication.evaluate(({ app, BrowserWindow }) => ({
+          hidden: process.platform === "darwin" ? app.isHidden() : null,
+          focusedWindowId: BrowserWindow.getFocusedWindow()?.id ?? null,
+          windows: BrowserWindow.getAllWindows().map((window) => ({
+            id: window.id,
+            visible: window.isVisible(),
+            focused: window.isFocused(),
+            minimized: window.isMinimized(),
+            bounds: window.getBounds(),
+            rendererDestroyed: window.webContents.isDestroyed(),
+            rendererLoading: !window.webContents.isDestroyed() && window.webContents.isLoading(),
+          })),
+        })), FAILURE_DIAGNOSTIC_TIMEOUT_MS);
+    })());
     if (diagnosticPage && !diagnosticPage.isClosed()) {
-      diagnostics["body"] = await diagnosticPage.locator("body").innerText().catch(errorMessage);
-      await diagnosticPage.screenshot({
-        animations: "disabled",
-        path: join(diagnosticsDirectory, `failure-${process.platform}-${process.arch}.png`),
-      }).catch(() => undefined);
+      probes.push((async () => {
+        diagnostics["failureUpdateStates"] = await boundedUpdateDiagnostic("renderer update states", () =>
+          capturedUpdateStates(diagnosticPage), FAILURE_DIAGNOSTIC_TIMEOUT_MS);
+      })(), (async () => {
+        diagnostics["rendererState"] = await boundedUpdateDiagnostic("renderer visibility", () =>
+          diagnosticPage.evaluate(() => {
+            const { document } = globalThis as unknown as {
+              document: { visibilityState: string; readyState: string; hasFocus(): boolean };
+            };
+            return { visibility: document.visibilityState, focused: document.hasFocus(), readyState: document.readyState };
+          }), FAILURE_DIAGNOSTIC_TIMEOUT_MS);
+      })(), (async () => {
+        diagnostics["body"] = await diagnosticPage.locator("body").innerText({
+          timeout: FAILURE_DIAGNOSTIC_TIMEOUT_MS,
+        }).catch(errorMessage);
+      })(), (async () => {
+        diagnostics["failureScreenshot"] = await diagnosticPage.screenshot({
+          animations: "disabled",
+          path: join(diagnosticsDirectory, `failure-${process.platform}-${process.arch}.png`),
+          timeout: FAILURE_DIAGNOSTIC_TIMEOUT_MS,
+        }).then(() => "captured", errorMessage);
+      })());
     }
+    await Promise.all(probes);
     await writeDiagnosticFile(diagnosticsDirectory, "failure", diagnostics, redactions).catch((diagnosticError) => {
       console.error("Failed to write packaged updater diagnostics", errorMessage(diagnosticError));
     });
@@ -595,9 +631,11 @@ async function launchApplication(
   executablePath: string,
   profileRoot: string,
   githubToken: string | undefined,
+  diagnostics: Record<string, unknown>,
+  phase: "nMinusOne" | "n",
 ): Promise<{ application: ElectronApplication; page: Page; userDataDirectory: string }> {
   const environment = isolatedApplicationEnvironment(profileRoot, githubToken);
-  const launchProfile = packagedUpdateLaunchProfile(profileRoot);
+  const launchProfile = packagedUpdateLaunchProfile(profileRoot, process.platform);
   await mkdir(launchProfile.userDataDirectory, { recursive: true });
   const application = await electron.launch({
     executablePath,
@@ -608,9 +646,16 @@ async function launchApplication(
     env: environment,
     timeout: 120_000,
   } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+  const processDiagnostics = { stdout: "", stderr: "" };
+  diagnostics[`${phase}ProcessOutput`] = processDiagnostics;
+  for (const stream of ["stdout", "stderr"] as const) {
+    application.process()[stream]?.on("data", (chunk: Buffer | string) => {
+      processDiagnostics[stream] = `${processDiagnostics[stream]}${chunk.toString()}`.slice(-PROCESS_DIAGNOSTIC_LIMIT);
+    });
+  }
   try {
     const page = await application.firstWindow({ timeout: 120_000 });
-    await beginUpdateStateCapture(page);
+    await beginUpdateStateCapture(page, diagnostics, phase);
     await page.emulateMedia({ reducedMotion: "reduce" });
     return { application, page, userDataDirectory: launchProfile.userDataDirectory };
   } catch (error) {
@@ -657,7 +702,20 @@ async function closeSavedConfigSelector(page: Page): Promise<void> {
   await dialog.waitFor({ state: "hidden" });
 }
 
-async function beginUpdateStateCapture(page: Page): Promise<void> {
+async function beginUpdateStateCapture(
+  page: Page,
+  diagnostics: Record<string, unknown>,
+  phase: "nMinusOne" | "n",
+): Promise<void> {
+  // Mirror bounded state history outside the renderer before any interaction.
+  // It remains available even when renderer evaluation itself stops responding.
+  const observedStates: unknown[] = [];
+  diagnostics[`${phase}ObservedUpdateStates`] = observedStates;
+  await page.exposeFunction("__SLIVER_GUI_UPDATE_E2E_DIAGNOSTIC_STATE__", (value: unknown) => {
+    if (observedStates.length >= 128) observedStates.shift();
+    try { observedStates.push(parseApplicationUpdateState(value)); }
+    catch (error) { observedStates.push({ error: errorMessage(error) }); }
+  });
   await page.waitForFunction(() => {
     const host = globalThis as unknown as {
       sliver?: {
@@ -671,6 +729,7 @@ async function beginUpdateStateCapture(page: Page): Promise<void> {
   await page.evaluate(async () => {
     const host = globalThis as unknown as {
       __SLIVER_GUI_UPDATE_E2E_STATES__?: unknown[];
+      __SLIVER_GUI_UPDATE_E2E_DIAGNOSTIC_STATE__(value: unknown): Promise<void>;
       sliver: {
         getApplicationUpdateState(): Promise<unknown>;
         onApplicationUpdateChanged(listener: (state: unknown) => void): () => void;
@@ -679,17 +738,21 @@ async function beginUpdateStateCapture(page: Page): Promise<void> {
     const states: unknown[] = [];
     host.__SLIVER_GUI_UPDATE_E2E_STATES__ = states;
     let highestRevision = -1;
+    const recordState = (state: unknown): void => {
+      states.push(state);
+      void host.__SLIVER_GUI_UPDATE_E2E_DIAGNOSTIC_STATE__(state).catch(() => undefined);
+    };
     const acceptState = (value: unknown): void => {
       const state = structuredClone(value);
       if (!state || typeof state !== "object" || !("revision" in state) ||
           !Number.isSafeInteger(state.revision) || (state.revision as number) < 0) {
-        states.push(state);
+        recordState(state);
         return;
       }
       const revision = state.revision as number;
       if (revision <= highestRevision) return;
       highestRevision = revision;
-      states.push(state);
+      recordState(state);
     };
     // Subscribe before reading the snapshot so a concurrent main-process event
     // cannot be overwritten by an older invoke result.

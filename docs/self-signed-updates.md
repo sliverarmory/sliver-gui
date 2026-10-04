@@ -98,3 +98,14 @@ installations.
 Release CI validates signatures and package contents. An initial Gatekeeper
 approval, native trust prompt, and installed update on a clean Mac still require
 their own end-to-end evidence; unit tests alone do not establish that experience.
+
+The **Public updater verification** workflow can also replay the latest immutable
+release against the signed `0.0.0` baselines from its original **Build and release**
+run. Dispatch it on `main` with `release_tag` and `baseline_run_id`. It checks the
+signed tag, immutable latest release, and original build commit, then tests the
+anonymous public feed on all three platforms. The baseline artifacts must still
+exist, and the checked-in public certificate pins must match that release.
+This workflow has read-only GitHub permissions and no release signing keys; it
+does not rebuild or replace published assets. Its disposable macOS profile uses
+Chromium's mock profile keychain while retaining real native code-signing trust
+and certificate verification.
