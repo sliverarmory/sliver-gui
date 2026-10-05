@@ -140,7 +140,9 @@ import {
   sessionShellWindowOptions,
   sessionPanelWindowOptions,
   sshWindowOptions,
+  supportsWindowsAcrylic,
   titleBarSymbolColor,
+  windowsCaptionColor,
 } from "./window-options.js";
 import {
   ConsolePortSession,
@@ -2440,8 +2442,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const dark = nativeTheme.shouldUseDarkColors;
     try {
       if (surface === "workspace") {
-        window.setBackgroundColor("#00000000");
-        if (process.platform !== "darwin") {
+        // An opaque background color covers DWM's acrylic client backdrop.
+        // Let the system paint that backdrop on supported Windows hosts.
+        if (!supportsWindowsAcrylic()) {
+          window.setBackgroundColor(process.platform === "win32"
+            ? nativeWindowBackgroundColor(dark)
+            : "#00000000");
+        }
+        if (process.platform !== "darwin" && process.platform !== "win32") {
           window.setTitleBarOverlay({
             color: "#00000000",
             symbolColor: titleBarSymbolColor(dark),
@@ -2456,10 +2464,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         if (process.platform === "darwin") window.setVibrancy(transparent ? "sidebar" : null);
         else {
           window.setBackgroundMaterial(transparent ? "acrylic" : "none");
-          window.setTitleBarOverlay({ color: background, symbolColor: theme?.foreground ?? titleBarSymbolColor(dark), height: 48 });
+          if (process.platform !== "win32") {
+            window.setTitleBarOverlay({ color: background, symbolColor: theme?.foreground ?? titleBarSymbolColor(dark), height: 48 });
+          }
         }
       } else {
         window.setBackgroundColor(nativeWindowBackgroundColor(dark));
+      }
+      if (process.platform === "win32" && supportsWindowsAcrylic() &&
+          (surface === "workspace" || surface === "console" || surface === "ssh")) {
+        // DWM paints the framed caption separately from the acrylic client area.
+        window.setAccentColor(windowsCaptionColor(dark));
       }
     } catch {
       // A native window can enter teardown while the operating-system theme

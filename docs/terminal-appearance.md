@@ -87,7 +87,8 @@ directives itself; its appearance comes from the GUI config and selected theme.
 
 **Transparent terminal windows** is enabled by default. Console and SSH windows
 use native sidebar vibrancy on macOS and acrylic on Windows 11 22H2 or newer
-(build 22621+). Linux and older Windows versions retain an opaque window.
+(build 22621+). Windows keeps its visible native File, Edit, and other menus.
+Linux and older Windows versions retain an opaque window.
 
 Turning the setting off immediately restores an opaque terminal background while
 retaining the selected colors. With transparency enabled on a supported platform,

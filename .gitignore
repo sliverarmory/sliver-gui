@@ -15,6 +15,7 @@
 *.cfg
 *.pem
 *.key
+/HEROUI_AUTH_TOKEN.txt
 .env
 .env.*
 !.env.example
