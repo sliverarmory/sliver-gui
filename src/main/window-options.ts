@@ -9,11 +9,17 @@ export const NETWORK_SESSION_PARTITION = "sliver-network";
 export const TEXT_EDITOR_SESSION_PARTITION = "sliver-text-editor";
 export const DARK_NATIVE_WINDOW_COLOR = "#09090b";
 export const LIGHT_NATIVE_WINDOW_COLOR = "#fafafa";
+export const DARK_WINDOWS_MENU_COLOR = "#1f1f1f";
+export const LIGHT_WINDOWS_MENU_COLOR = "#ffffff";
 export const DARK_TITLE_BAR_SYMBOL_COLOR = "#f4f4f5";
 export const LIGHT_TITLE_BAR_SYMBOL_COLOR = "#18181b";
 
 export function nativeWindowBackgroundColor(dark: boolean): string {
   return dark ? DARK_NATIVE_WINDOW_COLOR : LIGHT_NATIVE_WINDOW_COLOR;
+}
+
+export function windowsCaptionColor(dark: boolean): string {
+  return dark ? DARK_WINDOWS_MENU_COLOR : LIGHT_WINDOWS_MENU_COLOR;
 }
 
 /** A general-purpose local text editor with its own minimal preload and session. */
@@ -44,29 +50,36 @@ export function titleBarSymbolColor(dark: boolean): string {
   return dark ? DARK_TITLE_BAR_SYMBOL_COLOR : LIGHT_TITLE_BAR_SYMBOL_COLOR;
 }
 
-/**
- * Keep the native surface transparent so renderer alpha can reveal the desktop.
- * Native background materials provide the platform blur beneath translucent
- * renderer regions; Linux falls back to the renderer's glass treatment.
- * Windows requires a frameless window for transparency, while the title-bar
- * overlay restores the native window controls on Windows and Linux.
- */
+/** Windows 11 22H2 is the first release with the DWM acrylic backdrop. */
+export function supportsWindowsAcrylic(
+  platform: NodeJS.Platform = process.platform,
+  osRelease = release(),
+): boolean {
+  if (platform !== "win32") return false;
+  const [major = 0, , build = 0] = osRelease.split(".").map(Number);
+  return major > 10 || (major === 10 && build >= 22621);
+}
+
+/** Keep native glass beneath translucent renderer regions where supported. */
 export function mainWindowOptions(
   preload: string,
   platform: NodeJS.Platform = process.platform,
   icon?: string,
   dark = true,
+  osRelease = release(),
 ): BrowserWindowConstructorOptions {
+  const windowsAcrylic = supportsWindowsAcrylic(platform, osRelease);
   return {
     width: 1440,
     height: 920,
     minWidth: 960,
     minHeight: 680,
     show: false,
-    transparent: true,
-    backgroundColor: TRANSPARENT_WINDOW_COLOR,
+    ...(platform === "win32"
+      ? windowsAcrylic ? {} : { backgroundColor: nativeWindowBackgroundColor(dark) }
+      : { transparent: true, backgroundColor: TRANSPARENT_WINDOW_COLOR }),
     title: "Sliver GUI",
-    titleBarStyle: platform === "darwin" ? "hiddenInset" : "hidden",
+    ...(platform !== "win32" ? { titleBarStyle: platform === "darwin" ? "hiddenInset" as const : "hidden" as const } : {}),
     ...(platform === "darwin"
       ? {
           vibrancy: "sidebar" as const,
@@ -75,13 +88,17 @@ export function mainWindowOptions(
       : {}),
     ...(platform === "win32"
       ? {
-          frame: false,
-          backgroundMaterial: "acrylic" as const,
+          frame: true,
+          autoHideMenuBar: false,
+          ...(windowsAcrylic ? {
+            backgroundMaterial: "acrylic" as const,
+            accentColor: windowsCaptionColor(dark),
+          } : {}),
         }
       : {}),
-    ...(platform !== "darwin"
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    ...(platform !== "darwin" && platform !== "win32"
       ? {
-          ...(icon ? { icon } : {}),
           titleBarOverlay: {
             color: TRANSPARENT_WINDOW_COLOR,
             symbolColor: titleBarSymbolColor(dark),
@@ -194,31 +211,38 @@ export function sessionPanelWindowOptions(
   };
 }
 
-/** Native blur is available on macOS and Windows 11 22H2 or newer. */
-export function supportsTerminalTransparency(platform: NodeJS.Platform = process.platform, osRelease = release()): boolean {
-  if (platform === "darwin") return true;
-  if (platform !== "win32") return false;
-  const [major = 0, , build = 0] = osRelease.split(".").map(Number);
-  return major > 10 || (major === 10 && build >= 22621);
+/** Native terminal glass is available on macOS and supported Windows builds. */
+export function supportsTerminalTransparency(
+  platform: NodeJS.Platform = process.platform,
+  osRelease = release(),
+): boolean {
+  return platform === "darwin" || supportsWindowsAcrylic(platform, osRelease);
 }
 
-function terminalWindowChrome(platform: NodeJS.Platform, dark: boolean, transparent: boolean, osRelease: string): BrowserWindowConstructorOptions {
+function terminalWindowChrome(
+  platform: NodeJS.Platform,
+  dark: boolean,
+  transparent: boolean,
+  osRelease: string,
+): BrowserWindowConstructorOptions {
+  if (platform === "win32") return {
+    frame: true,
+    autoHideMenuBar: false,
+    ...(supportsWindowsAcrylic(platform, osRelease)
+      ? {
+          backgroundMaterial: transparent ? "acrylic" as const : "none" as const,
+          accentColor: windowsCaptionColor(dark),
+        }
+      : {}),
+  };
   if (!supportsTerminalTransparency(platform, osRelease)) return {};
   // Keep a transparent native surface available so the setting can change live.
   return {
     transparent: true,
     backgroundColor: transparent ? TRANSPARENT_WINDOW_COLOR : nativeWindowBackgroundColor(dark),
-    ...(platform === "darwin" ? {
-      titleBarStyle: "hiddenInset" as const,
-      ...(transparent ? { vibrancy: "sidebar" as const } : {}),
-      visualEffectState: "followWindow" as const,
-    } : {
-      frame: false,
-      titleBarStyle: "hidden" as const,
-      backgroundMaterial: transparent ? "acrylic" as const : "none" as const,
-      titleBarOverlay: { color: transparent ? TRANSPARENT_WINDOW_COLOR : nativeWindowBackgroundColor(dark),
-        symbolColor: titleBarSymbolColor(dark), height: 48 },
-    }),
+    titleBarStyle: "hiddenInset",
+    ...(transparent ? { vibrancy: "sidebar" as const } : {}),
+    visualEffectState: "followWindow",
   };
 }
 
@@ -242,7 +266,8 @@ export function consoleWindowOptions(
     minHeight: 540,
     show: false,
     title: "Sliver Console",
-    backgroundColor: nativeWindowBackgroundColor(dark),
+    backgroundColor: transparent && supportsTerminalTransparency(platform, osRelease)
+      ? TRANSPARENT_WINDOW_COLOR : nativeWindowBackgroundColor(dark),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     ...terminalWindowChrome(platform, dark, transparent, osRelease),
     webPreferences: secureWebPreferences(preload),
@@ -268,7 +293,8 @@ export function sshWindowOptions(
     minHeight: 540,
     show: false,
     title: "SSH",
-    backgroundColor: nativeWindowBackgroundColor(dark),
+    backgroundColor: transparent && supportsTerminalTransparency(platform, osRelease)
+      ? TRANSPARENT_WINDOW_COLOR : nativeWindowBackgroundColor(dark),
     ...(platform !== "darwin" && icon ? { icon } : {}),
     ...terminalWindowChrome(platform, dark, transparent, osRelease),
     webPreferences: secureWebPreferences(preload),

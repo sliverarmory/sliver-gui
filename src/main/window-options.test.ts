@@ -16,8 +16,10 @@ import {
   sessionShellWindowOptions,
   sshWindowOptions,
   supportsTerminalTransparency,
+  supportsWindowsAcrylic,
   TEXT_EDITOR_SESSION_PARTITION,
   textEditorWindowOptions,
+  windowsCaptionColor,
 } from "./window-options.js";
 
 describe("standalone text editor window", () => {
@@ -40,7 +42,7 @@ describe("standalone text editor window", () => {
 });
 
 describe("main window transparency", () => {
-  it.each(["darwin", "linux", "win32"] as const)(
+  it.each(["darwin", "linux"] as const)(
     "uses a transparent native surface on %s without weakening renderer isolation",
     (platform) => {
       const options = mainWindowOptions("/absolute/preload.js", platform);
@@ -60,9 +62,9 @@ describe("main window transparency", () => {
     },
   );
 
-  it("uses native glass materials on macOS and Windows", () => {
+  it("keeps macOS glass and gives Windows a native menu bar over acrylic", () => {
     const mac = mainWindowOptions("/preload.js", "darwin", "/brand.png");
-    const windows = mainWindowOptions("/preload.js", "win32", "/brand.png");
+    const windows = mainWindowOptions("/preload.js", "win32", "/brand.png", true, "10.0.22621");
     const linux = mainWindowOptions("/preload.js", "linux", "/brand.png");
 
     expect(mac).toMatchObject({
@@ -73,20 +75,27 @@ describe("main window transparency", () => {
     expect(mac).not.toHaveProperty("frame");
     expect(mac).not.toHaveProperty("titleBarOverlay");
     expect(mac).not.toHaveProperty("backgroundMaterial");
+    expect(mac).not.toHaveProperty("accentColor");
     expect(mac).not.toHaveProperty("icon");
 
     expect(windows).toMatchObject({
-      frame: false,
+      frame: true,
+      autoHideMenuBar: false,
       backgroundMaterial: "acrylic",
+      accentColor: "#1f1f1f",
       icon: "/brand.png",
-      titleBarStyle: "hidden",
-      titleBarOverlay: {
-        color: "#00000000",
-        symbolColor: "#f4f4f5",
-        height: 72,
-      },
     });
     expect(windows).not.toHaveProperty("vibrancy");
+    expect(windows).not.toHaveProperty("transparent");
+    expect(windows).not.toHaveProperty("backgroundColor");
+    expect(windows).not.toHaveProperty("titleBarStyle");
+    expect(windows).not.toHaveProperty("titleBarOverlay");
+
+    const olderWindows = mainWindowOptions("/preload.js", "win32", undefined, false, "10.0.22000");
+    expect(olderWindows).toMatchObject({ frame: true, autoHideMenuBar: false, backgroundColor: "#fafafa" });
+    expect(olderWindows).not.toHaveProperty("backgroundMaterial");
+    expect(olderWindows).not.toHaveProperty("accentColor");
+    expect(mainWindowOptions("/preload.js", "win32", undefined, false, "10.0.22621").accentColor).toBe("#ffffff");
 
     expect(linux).toMatchObject({
       titleBarStyle: "hidden",
@@ -98,6 +107,20 @@ describe("main window transparency", () => {
     });
     expect(linux).not.toHaveProperty("vibrancy");
     expect(linux).not.toHaveProperty("backgroundMaterial");
+    expect(linux).not.toHaveProperty("accentColor");
+  });
+
+  it("gates Windows acrylic on the supported Windows build", () => {
+    expect(supportsWindowsAcrylic("win32", "10.0.22000")).toBe(false);
+    expect(supportsWindowsAcrylic("win32", "10.0.22621")).toBe(true);
+    expect(supportsWindowsAcrylic("win32", "10.0.26300")).toBe(true);
+    expect(supportsWindowsAcrylic("darwin", "10.0.26300")).toBe(false);
+    expect(supportsWindowsAcrylic("linux", "10.0.26300")).toBe(false);
+  });
+
+  it("uses the native menu surface color for the Windows caption in each theme", () => {
+    expect(windowsCaptionColor(true)).toBe("#1f1f1f");
+    expect(windowsCaptionColor(false)).toBe("#ffffff");
   });
 
   it("uses a readable title-bar symbol color for each application theme", () => {
@@ -399,20 +422,27 @@ describe("terminal native glass", () => {
     expect(opaque.titleBarStyle).toBe("hiddenInset");
   });
 
-  it("limits acrylic to supported Windows builds and leaves Linux opaque", () => {
+  it("keeps native Windows terminal menus over acrylic and leaves older hosts opaque", () => {
     expect(supportsTerminalTransparency("win32", "10.0.22000")).toBe(false);
     expect(supportsTerminalTransparency("win32", "10.0.22621")).toBe(true);
     expect(supportsTerminalTransparency("linux", "6.12.0")).toBe(false);
-    expect(sshWindowOptions("/preload.cjs", "win32", undefined, true, true, "10.0.22621")).toMatchObject({
-      frame: false, backgroundMaterial: "acrylic", backgroundColor: "#00000000", titleBarOverlay: { height: 48 },
-    });
-    expect(consoleWindowOptions("/preload.cjs", "win32", undefined, false, false, "10.0.22621")).toMatchObject({
-      backgroundMaterial: "none", backgroundColor: "#fafafa",
-    });
-    for (const [platform, release] of [["linux", "6.12.0"], ["win32", "10.0.22000"]] as const) {
-      const options = consoleWindowOptions("/preload.cjs", platform, undefined, true, true, release);
-      expect(options.transparent).toBeUndefined();
-      expect(options.backgroundMaterial).toBeUndefined();
+    for (const optionsFor of [consoleWindowOptions, sshWindowOptions]) {
+      const windows = optionsFor("/preload.cjs", "win32", undefined, true, true, "10.0.22621");
+      expect(windows).toMatchObject({ frame: true, autoHideMenuBar: false,
+        backgroundMaterial: "acrylic", backgroundColor: "#00000000", accentColor: "#1f1f1f" });
+      expect(windows).not.toHaveProperty("transparent");
+      expect(windows).not.toHaveProperty("titleBarStyle");
+      expect(windows).not.toHaveProperty("titleBarOverlay");
+      const opaque = optionsFor("/preload.cjs", "win32", undefined, false, false, "10.0.22621");
+      expect(opaque).toMatchObject({ frame: true, autoHideMenuBar: false,
+        backgroundMaterial: "none", backgroundColor: "#fafafa", accentColor: "#ffffff" });
+      for (const [platform, release] of [["linux", "6.12.0"], ["win32", "10.0.22000"]] as const) {
+        const fallback = optionsFor("/preload.cjs", platform, undefined, true, true, release);
+        expect(fallback.transparent).toBeUndefined();
+        expect(fallback.backgroundMaterial).toBeUndefined();
+        expect(fallback.accentColor).toBeUndefined();
+        expect(fallback.backgroundColor).toBe("#09090b");
+      }
     }
   });
 });

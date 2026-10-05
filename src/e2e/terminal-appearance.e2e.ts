@@ -68,6 +68,16 @@ test("terminal themes, native glass toggle and Monaco config saves work under CS
     await terminal.locator('[data-terminal-state="ready"]').waitFor();
     const modal = terminal.getByRole("dialog", { name: "Terminal Settings", exact: true });
     const nativeTerminal = await application.browserWindow(terminal);
+    if (process.platform === "win32") {
+      const menuBar = await nativeTerminal.evaluate((window) => ({
+        visible: window.isMenuBarVisible(),
+        autoHide: window.isMenuBarAutoHide(),
+        topInset: window.getContentBounds().y - window.getBounds().y,
+      }));
+      assert.equal(menuBar.visible, true, "the Windows console must show its native menu bar");
+      assert.equal(menuBar.autoHide, false);
+      assert.ok(menuBar.topInset > 0, "the console menu bar must sit above the renderer");
+    }
     const originalSize = await nativeTerminal.evaluate((window) => window.getContentSize());
     for (const [width, height] of [[1180, 780], [720, 540]] as const) {
       await nativeTerminal.evaluate((window, size) => window.setContentSize(size.width, size.height), { width, height });
