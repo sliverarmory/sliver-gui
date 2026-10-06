@@ -129,7 +129,8 @@ export function ApplicationUpdateStatus({
     if (dismissedStatus.current === state.status) return;
 
     dismissedStatus.current = undefined;
-    const toastId = toast("Application update", {
+    const toastId = toast(<UpdateToastHeading store={toastStore} />, {
+      indicator: <FontAwesomeIcon aria-hidden className="size-4" icon={faArrowsRotate} />,
       description: (
         <UpdateToastContent
           store={toastStore}
@@ -244,6 +245,20 @@ function createUpdateToastStore(): UpdateToastStore {
   };
 }
 
+function UpdateToastHeading({ store }: { readonly store: UpdateToastStore }): React.JSX.Element {
+  const { state } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  return (
+    <span className="flex min-w-0 flex-col gap-0.5">
+      <span>Application update</span>
+      {state && (state.status === "idle" || state.status === "up-to-date") ? (
+        <span className="truncate text-xs font-normal text-muted tabular-nums">
+          Version {state.currentVersion}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 function UpdateToastContent({
   store,
   onCheck,
@@ -256,7 +271,10 @@ function UpdateToastContent({
   const { state, isChecking } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   if (!state) return null;
   return (
-    <>
+    <div
+      className="application-update-toast min-w-0"
+      data-layout={state.status === "idle" || state.status === "up-to-date" ? "compact" : "expanded"}
+    >
       <span aria-atomic="true" aria-live="polite" className="sr-only" role="status">
         {updateAnnouncement(state)}
       </span>
@@ -266,7 +284,7 @@ function UpdateToastContent({
         onCheck={onCheck}
         onRestart={onRestart}
       />
-    </>
+    </div>
   );
 }
 
@@ -283,22 +301,32 @@ function UpdateStateContent({
 }): React.JSX.Element {
   if (state.status === "idle") {
     return (
-      <CompactAction
-        icon={faArrowsRotate}
+      <Button
+        aria-label="Check for updates"
+        className="rounded-lg"
         isPending={isChecking}
-        label="Check for updates"
+        size="sm"
+        variant="secondary"
         onPress={onCheck}
-      />
+      >
+        <span className="hidden sm:inline">Check for updates</span>
+        <span className="sm:hidden">Check now</span>
+      </Button>
     );
   }
   if (state.status === "up-to-date") {
     return (
-      <CompactAction
-        icon={faCircleCheck}
+      <Button
+        aria-label={`Up to date · ${state.currentVersion}. Check again`}
+        className="rounded-lg text-success"
         isPending={isChecking}
-        label={`Up to date · ${state.currentVersion}`}
+        size="sm"
+        variant="tertiary"
         onPress={onCheck}
-      />
+      >
+        <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0" icon={faCircleCheck} />
+        Up to date
+      </Button>
     );
   }
   if (state.status === "checking") {
@@ -390,25 +418,6 @@ function UpdateStateContent({
       </div>
       <Button isPending={isChecking} size="sm" variant="tertiary" onPress={onCheck}>Retry</Button>
     </div>
-  );
-}
-
-function CompactAction({
-  icon,
-  isPending,
-  label,
-  onPress,
-}: {
-  readonly icon: Parameters<typeof FontAwesomeIcon>[0]["icon"];
-  readonly isPending: boolean;
-  readonly label: string;
-  readonly onPress: () => void;
-}): React.JSX.Element {
-  return (
-    <Button fullWidth isPending={isPending} size="sm" variant="tertiary" onPress={onPress}>
-      <FontAwesomeIcon aria-hidden icon={icon} />
-      {label}
-    </Button>
   );
 }
 

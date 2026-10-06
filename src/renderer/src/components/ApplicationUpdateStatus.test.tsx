@@ -134,7 +134,11 @@ describe("application update status", () => {
     await user.click(await screen.findByRole("button", { name: "Check for updates" }));
 
     expect(checkForApplicationUpdates).toHaveBeenCalledExactlyOnceWith();
-    expect(await screen.findByRole("button", { name: "Up to date · 0.1.0" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Up to date · 0.1.0. Check again" })).toBeInTheDocument();
+    expect(screen.getByText("Version 0.1.0")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Up to date · 0.1.0. Check again" }));
+    expect(checkForApplicationUpdates).toHaveBeenCalledTimes(2);
   });
 
   it("keeps unavailable updates silent until an explicit check and lets the user dismiss the toast", async () => {
