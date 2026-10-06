@@ -11,6 +11,7 @@ import {
   ListBox,
   Modal,
   NumberField,
+  ScrollShadow,
   Select,
   Spinner,
   Switch,
@@ -324,6 +325,7 @@ export function NetworkWindowApp(): React.JSX.Element {
         />
       ) : null}
       <ConfirmDialog
+        scrollShadow
         isOpen={Boolean(stopTarget)}
         title={stopTarget ? stopTargetTitle(stopTarget) : "Stop forward?"}
         description={stopDescription}
@@ -646,7 +648,10 @@ function CreateForwardModal({
                 </p>
               </div>
             </Modal.Header>
-            <Modal.Body className="flex flex-col gap-5">
+            <Modal.Body
+              className="flex flex-col gap-5 [&>*]:shrink-0"
+              render={(props) => <ScrollShadow {...props} hideScrollBar={false} size={28} />}
+            >
               {formError ? <Message tone="danger" title="Could not start forward" detail={formError} /> : null}
               <section className="space-y-3">
                 <SectionLabel icon={faNetworkWired} title="Target session" />

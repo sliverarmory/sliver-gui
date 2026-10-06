@@ -827,7 +827,7 @@ export function App() {
         <header className="app-header">
           <div aria-hidden="true" className="app-header-drag-region" />
           <div className="header-server">
-            <div className="hidden min-w-0 text-center sm:block">
+            <div className="header-server__label hidden min-w-0 text-center sm:block">
               <p className="truncate text-sm font-medium text-foreground">
                 {connected ? snapshot.connection.server : "No server connected"}
               </p>

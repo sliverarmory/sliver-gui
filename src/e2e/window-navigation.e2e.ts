@@ -12,6 +12,64 @@ const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const backShortcut = process.platform === "darwin" ? "Meta+[" : "Alt+ArrowLeft";
 const forwardShortcut = process.platform === "darwin" ? "Meta+]" : "Alt+ArrowRight";
 
+test("the full server header is draggable without covering window navigation", {
+  timeout: 60_000,
+}, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "sliver-gui-header-drag-"));
+  await Promise.all(["saved", "managed", "client", "user-data"].map((name) => mkdir(join(root, name))));
+  let application: ElectronApplication | undefined;
+  let testFailure: unknown;
+  try {
+    application = await electron.launch({
+      args: [
+        "--enable-sandbox",
+        join(repositoryRoot, ".e2e-dist/src/e2e/application-icon-main.js"),
+        `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${join(root, "saved")}`,
+        `--managed-config-directory=${join(root, "managed")}`,
+        `--user-data-directory=${join(root, "user-data")}`,
+        `--console-client-root-directory=${join(root, "client")}`,
+      ],
+      cwd: repositoryRoot,
+      bypassCSP: false,
+      timeout: 20_000,
+    });
+    const ownedProcess = application.process();
+    context.signal.addEventListener("abort", () => { ownedProcess.kill("SIGKILL"); }, { once: true });
+    const page = await application.firstWindow();
+    page.setDefaultTimeout(5_000);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const configurations = page.getByRole("dialog", { name: "Saved configurations" });
+    await configurations.waitFor();
+    await page.keyboard.press("Escape");
+    await configurations.waitFor({ state: "hidden" });
+    await assertHeaderDragCoverage(page);
+    await assertDragRegionsExcludeNavigation(page);
+
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    const navigation = page.getByRole("navigation", { name: "Window navigation" });
+    for (const label of ["Collapse sidebar", "Expand sidebar"] as const) {
+      await assertSidebarAnimationExcludesNavigation(page, navigation.getByRole("button", { name: label }));
+      await assertHeaderDragCoverage(page);
+    }
+  } catch (error) {
+    testFailure = error;
+    throw error;
+  } finally {
+    const cleanupFailures: unknown[] = [];
+    if (application) {
+      await cleanupOwnedApplication(application, "header drag", 5_000)
+        .catch((error) => cleanupFailures.push(error));
+    }
+    await rm(root, { recursive: true, force: true }).catch((error) => cleanupFailures.push(error));
+    if (cleanupFailures.length > 0) {
+      const cleanupError = new AggregateError(cleanupFailures, "Header drag E2E cleanup failed");
+      if (testFailure) attachCleanupFailure(testFailure, cleanupError);
+      else throw cleanupError;
+    }
+  }
+});
+
 test("window navigation supports pointer, keyboard and palette actions without drag-region overlap", {
   timeout: 90_000,
 }, async (context) => {
@@ -268,6 +326,69 @@ interface NavigationDragInspection {
   readonly overlaps: readonly unknown[];
   readonly sidebarBounds: { readonly width: number };
 }
+
+async function assertHeaderDragCoverage(page: Page): Promise<void> {
+  const result = await page.evaluate<HeaderDragInspection>(inspectHeaderDragCoverage);
+  assert.equal(result.serverRegion, "drag", "the full server header must move the window");
+  assert.equal(result.labelRegion, "drag", "the server title must move the window");
+  assert.equal(result.actionsRegion, "no-drag", "header actions must remain clickable");
+  assert.ok(result.sideWidths.every((width) => width > 0), "the server title must have blank space on both sides");
+  assert.deepEqual(result.sideSamples, [true, true], "both blank sides of the server title must be draggable");
+  assert.ok(result.labelWidth > 0, "the draggable server title must have width");
+  assert.equal(result.labelWithinServer, true, "the draggable server title must stay inside its header area");
+  assert.equal(result.dragLayerCoversLabel, true, "the surrounding header drag layer must reach the title");
+  assert.deepEqual(result.samples, [true, true, true], "the server title must not have a horizontal overlay gap");
+}
+
+interface HeaderDragInspection {
+  readonly serverRegion: string;
+  readonly labelRegion: string;
+  readonly actionsRegion: string;
+  readonly sideWidths: readonly number[];
+  readonly sideSamples: readonly boolean[];
+  readonly labelWidth: number;
+  readonly labelWithinServer: boolean;
+  readonly dragLayerCoversLabel: boolean;
+  readonly samples: readonly boolean[];
+}
+
+const inspectHeaderDragCoverage = `(() => {
+    const server = document.querySelector('.header-server');
+    const label = document.querySelector('.header-server__label');
+    const actions = document.querySelector('.header-actions');
+    const dragLayer = document.querySelector('.app-header-drag-region');
+    if (!server || !label || !actions || !dragLayer) throw new Error('Application header is missing');
+    const serverBounds = server.getBoundingClientRect();
+    const labelBounds = label.getBoundingClientRect();
+    const actionBounds = actions.getBoundingClientRect();
+    const dragBounds = dragLayer.getBoundingClientRect();
+    const centerY = labelBounds.top + labelBounds.height / 2;
+    const sideWidths = [labelBounds.left - serverBounds.left, serverBounds.right - labelBounds.right];
+    const sideSamples = [
+      (serverBounds.left + labelBounds.left) / 2,
+      (labelBounds.right + serverBounds.right) / 2,
+    ].map((x) => {
+      const element = document.elementFromPoint(x, centerY);
+      return element === server && getComputedStyle(element).getPropertyValue('-webkit-app-region') === 'drag';
+    });
+    const samples = [0.1, 0.5, 0.9].map((fraction) => {
+      const element = document.elementFromPoint(labelBounds.left + labelBounds.width * fraction, centerY);
+      return element === label || (element !== null && label.contains(element));
+    });
+    return {
+      serverRegion: getComputedStyle(server).getPropertyValue('-webkit-app-region'),
+      labelRegion: getComputedStyle(label).getPropertyValue('-webkit-app-region'),
+      actionsRegion: getComputedStyle(actions).getPropertyValue('-webkit-app-region'),
+      sideWidths,
+      sideSamples,
+      labelWidth: labelBounds.width,
+      labelWithinServer: labelBounds.left >= serverBounds.left && labelBounds.right <= serverBounds.right &&
+        labelBounds.right <= actionBounds.left,
+      dragLayerCoversLabel: dragBounds.left <= labelBounds.left && dragBounds.right >= labelBounds.right &&
+        dragBounds.top <= labelBounds.top && dragBounds.bottom >= labelBounds.bottom,
+      samples,
+    };
+  })()`;
 
 async function assertDragRegionsExcludeNavigation(page: Page): Promise<void> {
   const result = await page.evaluate<NavigationDragInspection>(inspectNavigationDragRegions);

@@ -620,8 +620,13 @@
     color: var(--color-muted);
   }
 
-  .app-shell[data-state="collapsed"] .app-header {
-    padding-inline-start: max(1.25rem, calc(var(--window-navigation-end) + 1.25rem - 56px));
+  .app-shell[data-state] .app-header {
+    /* Keep the draggable server area beyond the fixed navigation throughout sidebar animation. */
+    padding-inline-start: max(
+      1.25rem,
+      env(titlebar-area-x, 0px),
+      calc(100% - 100vw + var(--window-navigation-end) + 1.25rem)
+    );
   }
 
   .app-header-drag-region {
@@ -674,12 +679,17 @@
   }
 
   .header-server {
+    -webkit-app-region: drag;
     display: flex;
     flex: 1;
     min-width: 0;
     align-items: center;
     justify-content: center;
     gap: 0.75rem;
+  }
+
+  .header-server__label {
+    -webkit-app-region: drag;
   }
 
   .header-actions {
@@ -796,6 +806,7 @@
 
   .app-content:has(> .settings-page) {
     padding-top: 0;
+    background: var(--color-background);
   }
 
   .settings-page {

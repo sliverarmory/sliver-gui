@@ -1,4 +1,4 @@
-import { AlertDialog, Button } from "@heroui/react";
+import { AlertDialog, Button, ScrollShadow } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faTriangleExclamation } from "@fortawesome/free-solid-svg-icons";
 
@@ -8,6 +8,7 @@ interface ConfirmDialogProps {
   description: string;
   confirmLabel: string;
   isPending?: boolean;
+  scrollShadow?: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void | boolean | Promise<void | boolean>;
 }
@@ -18,9 +19,12 @@ export function ConfirmDialog({
   description,
   confirmLabel,
   isPending = false,
+  scrollShadow = false,
   onOpenChange,
   onConfirm,
 }: ConfirmDialogProps) {
+  const body = <p className="text-sm leading-6 text-muted">{description}</p>;
+
   return (
     <AlertDialog.Backdrop isOpen={isOpen} onOpenChange={onOpenChange} variant="blur">
       <AlertDialog.Container size="sm">
@@ -33,9 +37,13 @@ export function ConfirmDialog({
                 </AlertDialog.Icon>
                 <AlertDialog.Heading>{title}</AlertDialog.Heading>
               </AlertDialog.Header>
-              <AlertDialog.Body>
-                <p className="text-sm leading-6 text-muted">{description}</p>
-              </AlertDialog.Body>
+              {scrollShadow ? (
+                <ScrollShadow className="alert-dialog__body" hideScrollBar={false} size={28}>
+                  {body}
+                </ScrollShadow>
+              ) : (
+                <AlertDialog.Body>{body}</AlertDialog.Body>
+              )}
               <AlertDialog.Footer>
                 <Button variant="tertiary" onPress={close} isDisabled={isPending}>
                   Cancel
