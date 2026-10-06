@@ -248,11 +248,23 @@ function createUpdateToastStore(): UpdateToastStore {
 function UpdateToastHeading({ store }: { readonly store: UpdateToastStore }): React.JSX.Element {
   const { state } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   return (
-    <span className="flex min-w-0 flex-col gap-0.5">
-      <span>Application update</span>
-      {state && (state.status === "idle" || state.status === "up-to-date") ? (
-        <span className="truncate text-xs font-normal text-muted tabular-nums">
-          Version {state.currentVersion}
+    <span className="flex min-w-0 items-center justify-between gap-4">
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span>Application update</span>
+        {state && (state.status === "idle" || state.status === "up-to-date") ? (
+          <span className="truncate text-xs font-normal text-muted tabular-nums">
+            Version {state.currentVersion}
+          </span>
+        ) : null}
+        {state?.status === "downloading" ? (
+          <span className="truncate text-xs font-normal text-muted tabular-nums">
+            Downloading {state.availableVersion}
+          </span>
+        ) : null}
+      </span>
+      {state?.status === "downloading" ? (
+        <span className="shrink-0 rounded-lg bg-default px-3 py-1.5 text-sm font-medium text-accent tabular-nums">
+          {Math.round(state.progressPercent)}%
         </span>
       ) : null}
     </span>
@@ -273,7 +285,9 @@ function UpdateToastContent({
   return (
     <div
       className="application-update-toast min-w-0"
-      data-layout={state.status === "idle" || state.status === "up-to-date" ? "compact" : "expanded"}
+      data-layout={state.status === "downloading"
+        ? "progress"
+        : state.status === "idle" || state.status === "up-to-date" ? "compact" : "expanded"}
     >
       <span aria-atomic="true" aria-live="polite" className="sr-only" role="status">
         {updateAnnouncement(state)}
@@ -375,26 +389,18 @@ function UpdateStateContent({
     );
   }
   if (state.status === "downloading") {
-    const percent = Math.round(state.progressPercent);
     return (
-      <div className="space-y-2">
-        <StatusLine
-          detail={`${percent}%`}
-          icon={faDownload}
-          iconClassName="text-accent"
-          label={`Downloading ${state.availableVersion}`}
-        />
-        <ProgressBar
-          aria-label={`Downloading application update ${state.availableVersion}`}
-          maxValue={100}
-          size="sm"
-          value={state.progressPercent}
-        >
-          <ProgressBar.Track>
-            <ProgressBar.Fill />
-          </ProgressBar.Track>
-        </ProgressBar>
-      </div>
+      <ProgressBar
+        aria-label={`Downloading application update ${state.availableVersion}`}
+        className="w-full gap-0"
+        maxValue={100}
+        size="sm"
+        value={state.progressPercent}
+      >
+        <ProgressBar.Track className="h-1.5 rounded-full">
+          <ProgressBar.Fill className="rounded-full" />
+        </ProgressBar.Track>
+      </ProgressBar>
     );
   }
   if (state.status === "ready") {

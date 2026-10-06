@@ -105,6 +105,8 @@ describe("application update status", () => {
     });
     expect(await screen.findByText("53%")).toBeInTheDocument();
     expect(screen.getByText("Downloading 0.2.0").closest('[data-slot="toast"]')).toBe(progressToast);
+    expect(screen.getByRole("progressbar", { name: "Downloading application update 0.2.0" }))
+      .toHaveAttribute("aria-valuenow", "53.4");
 
     emit({
       status: "ready",
@@ -113,6 +115,8 @@ describe("application update status", () => {
       availableVersion: "0.2.0",
     });
     expect(await screen.findByText("Update 0.2.0 ready")).toBeInTheDocument();
+    expect(screen.queryByText("Downloading 0.2.0")).not.toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("checks with zero arguments and accepts the returned revision", async () => {
