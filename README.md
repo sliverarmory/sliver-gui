@@ -1,4 +1,12 @@
-# Sliver GUI
+<p align="center">
+  <img src="build/icon1a-dark.png" alt="Sliver GUI icon" width="160" height="160">
+</p>
+
+<h1 align="center">Sliver GUI</h1>
+
+<p align="center">
+  <a href="https://github.com/sliverarmory/sliver-gui/releases/latest">Download the latest release</a>
+</p>
 
 Sliver GUI is a cross-platform Electron desktop application for Sliver. It
 combines backend connections, live status views, dedicated workspaces, and a
