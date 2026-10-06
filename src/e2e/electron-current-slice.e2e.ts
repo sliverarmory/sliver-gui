@@ -2493,9 +2493,12 @@ async function verifyReleaseDownloadToast(
     arch: "amd64",
   } as const;
   await sendReleaseDownloadEvent(electronApplication, { ...base, status: "started" });
-  await page.getByText("Downloading Sliver server · Linux / amd64", { exact: true }).waitFor();
   const progress = page.getByRole("progressbar", { name: /Downloading Sliver server/ });
   await progress.waitFor();
+  const notification = page.locator('[data-slot="toast"]').filter({ has: progress });
+  await notification.getByText("Sliver server", { exact: true }).waitFor();
+  await notification.getByText("Linux / amd64", { exact: true }).waitFor();
+  await notification.getByText("Starting", { exact: true }).waitFor();
   assert.equal(await progress.getAttribute("aria-valuenow"), null);
 
   await sendReleaseDownloadEvent(electronApplication, {
@@ -2506,7 +2509,10 @@ async function verifyReleaseDownloadToast(
     receivedBytes: 25 * 1024 * 1024,
     totalBytes: 100 * 1024 * 1024,
   });
-  await page.getByText("25% · 25.0 MB / 100.0 MB", { exact: true }).waitFor();
+  await notification.getByText("25%", { exact: true }).waitFor();
+  await notification.getByText("Linux / amd64 · v1.7.3", { exact: true }).waitFor();
+  await notification.getByText("sliver-server_linux-amd64", { exact: true }).waitFor();
+  await notification.getByText("25.0 MB / 100.0 MB", { exact: true }).waitFor();
   assert.equal(await progress.getAttribute("aria-valuenow"), "25");
 
   await sendReleaseDownloadEvent(electronApplication, {

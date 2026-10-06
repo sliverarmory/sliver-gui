@@ -261,10 +261,15 @@ test("packaged application updates from N-1 to N through its configured GitHub f
 
     await closeSavedConfigSelector(secondPage);
     await triggerApplicationUpdateCheck(secondPage);
+    const upToDateName = `Up to date · ${input.versions.to}`;
+    // The harness also replays older immutable releases with the original label.
     await secondPage.getByRole("button", {
-      name: `Up to date · ${input.versions.to}`,
+      name: `${upToDateName}. Check again`,
       exact: true,
-    }).waitFor({ timeout: UPDATE_TIMEOUT_MS });
+    }).or(secondPage.getByRole("button", {
+      name: upToDateName,
+      exact: true,
+    })).waitFor({ timeout: UPDATE_TIMEOUT_MS });
     const secondStates = await capturedUpdateStates(secondPage);
     assertUpToDateTransition(secondStates, input.versions);
     diagnostics["nUpdateStates"] = secondStates;
