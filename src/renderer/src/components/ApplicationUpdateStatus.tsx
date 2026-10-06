@@ -129,22 +129,23 @@ export function ApplicationUpdateStatus({
     if (dismissedStatus.current === state.status) return;
 
     dismissedStatus.current = undefined;
-    const toastId = toast(<UpdateToastHeading store={toastStore} />, {
-      indicator: <FontAwesomeIcon aria-hidden className="size-4" icon={faArrowsRotate} />,
-      description: (
-        <UpdateToastContent
-          store={toastStore}
-          onCheck={() => void checkForUpdates()}
-          onRestart={() => setIsRestartDialogOpen(true)}
-        />
-      ),
-      timeout: 0,
-      onClose: () => {
-        if (updateToastId.current !== toastId) return;
-        updateToastId.current = undefined;
-        dismissedStatus.current = displayedStatus.current;
+    const toastId = toast(
+      <UpdateToastHeading
+        store={toastStore}
+        onCheck={() => void checkForUpdates()}
+        onRestart={() => setIsRestartDialogOpen(true)}
+      />,
+      {
+        indicator: <UpdateToastIndicator store={toastStore} />,
+        description: <UpdateToastContent store={toastStore} />,
+        timeout: 0,
+        onClose: () => {
+          if (updateToastId.current !== toastId) return;
+          updateToastId.current = undefined;
+          dismissedStatus.current = displayedStatus.current;
+        },
       },
-    });
+    );
     updateToastId.current = toastId;
     displayedStatus.current = state.status;
   }, [checkForUpdates, showIdleControl, state, toastStore]);
@@ -245,33 +246,7 @@ function createUpdateToastStore(): UpdateToastStore {
   };
 }
 
-function UpdateToastHeading({ store }: { readonly store: UpdateToastStore }): React.JSX.Element {
-  const { state } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
-  return (
-    <span className="flex min-w-0 items-center justify-between gap-4">
-      <span className="flex min-w-0 flex-col gap-0.5">
-        <span>Application update</span>
-        {state && (state.status === "idle" || state.status === "up-to-date") ? (
-          <span className="truncate text-xs font-normal text-muted tabular-nums">
-            Version {state.currentVersion}
-          </span>
-        ) : null}
-        {state?.status === "downloading" ? (
-          <span className="truncate text-xs font-normal text-muted tabular-nums">
-            Downloading {state.availableVersion}
-          </span>
-        ) : null}
-      </span>
-      {state?.status === "downloading" ? (
-        <span className="shrink-0 rounded-lg bg-default px-3 py-1.5 text-sm font-medium text-accent tabular-nums">
-          {Math.round(state.progressPercent)}%
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
-function UpdateToastContent({
+function UpdateToastHeading({
   store,
   onCheck,
   onRestart,
@@ -279,30 +254,84 @@ function UpdateToastContent({
   readonly store: UpdateToastStore;
   readonly onCheck: () => void;
   readonly onRestart: () => void;
-}): React.JSX.Element | null {
+}): React.JSX.Element {
   const { state, isChecking } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  return (
+    <span className="flex min-w-0 items-center justify-between gap-3">
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span>Application update</span>
+        {state ? (
+          <span className="truncate text-xs font-normal text-muted tabular-nums">
+            {updateSubtitle(state)}
+          </span>
+        ) : null}
+      </span>
+      {state ? (
+        <UpdateToastAction state={state} isChecking={isChecking} onCheck={onCheck} onRestart={onRestart} />
+      ) : null}
+    </span>
+  );
+}
+
+function UpdateToastIndicator({ store }: { readonly store: UpdateToastStore }): React.JSX.Element {
+  const { state } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  const status = state?.status;
+  const icon = status === "error" ? faTriangleExclamation
+    : status === "trust-required" ? faCircleInfo
+    : status === "ready" ? faCircleCheck
+    : status === "available" || status === "downloading" ? faDownload
+    : faArrowsRotate;
+  const color = status === "error" ? "text-danger"
+    : status === "trust-required" ? "text-warning"
+    : status === "ready" ? "text-success"
+    : status === "idle" || status === "up-to-date" ? "text-muted" : "text-accent";
+  return (
+    <>
+      <FontAwesomeIcon
+        aria-hidden
+        className={`size-4 ${color}${status === "checking" ? " motion-safe:animate-spin" : ""}`}
+        icon={icon}
+      />
+      <span className="sr-only" aria-atomic="true" aria-live="polite" role="status">
+        {state ? updateAnnouncement(state) : ""}
+      </span>
+    </>
+  );
+}
+
+function UpdateToastContent({ store }: { readonly store: UpdateToastStore }): React.JSX.Element | null {
+  const { state } = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   if (!state) return null;
+  const hasProgress = state.status === "downloading" || state.status === "available";
+  const detail = state.status === "trust-required" ? state.message
+    : state.status === "error" ? state.error
+    : state.status === "ready" ? "Restart when your operator work is safe." : undefined;
   return (
     <div
       className="application-update-toast min-w-0"
-      data-layout={state.status === "downloading"
-        ? "progress"
-        : state.status === "idle" || state.status === "up-to-date" ? "compact" : "expanded"}
+      data-layout={hasProgress ? "progress" : detail ? "expanded" : "compact"}
     >
-      <span aria-atomic="true" aria-live="polite" className="sr-only" role="status">
-        {updateAnnouncement(state)}
-      </span>
-      <UpdateStateContent
-        isChecking={isChecking}
-        state={state}
-        onCheck={onCheck}
-        onRestart={onRestart}
-      />
+      {hasProgress ? (
+        <ProgressBar
+          aria-label={`${state.status === "available" ? "Preparing" : "Downloading"} application update ${state.availableVersion}`}
+          className="w-full gap-0"
+          isIndeterminate={state.status === "available"}
+          maxValue={100}
+          size="sm"
+          value={state.status === "downloading" ? state.progressPercent : 0}
+        >
+          <ProgressBar.Track className="h-1.5 rounded-full">
+            <ProgressBar.Fill className="rounded-full" />
+          </ProgressBar.Track>
+        </ProgressBar>
+      ) : detail ? (
+        <p className="text-xs leading-5 text-muted [overflow-wrap:anywhere]">{detail}</p>
+      ) : null}
     </div>
   );
 }
 
-function UpdateStateContent({
+function UpdateToastAction({
   state,
   isChecking,
   onCheck,
@@ -312,12 +341,12 @@ function UpdateStateContent({
   readonly isChecking: boolean;
   readonly onCheck: () => void;
   readonly onRestart: () => void;
-}): React.JSX.Element {
+}): React.JSX.Element | null {
   if (state.status === "idle") {
     return (
       <Button
         aria-label="Check for updates"
-        className="rounded-lg"
+        className="shrink-0 rounded-lg"
         isPending={isChecking}
         size="sm"
         variant="secondary"
@@ -332,7 +361,7 @@ function UpdateStateContent({
     return (
       <Button
         aria-label={`Up to date · ${state.currentVersion}. Check again`}
-        className="rounded-lg text-success"
+        className="shrink-0 rounded-lg text-success"
         isPending={isChecking}
         size="sm"
         variant="tertiary"
@@ -343,110 +372,51 @@ function UpdateStateContent({
       </Button>
     );
   }
-  if (state.status === "checking") {
+  if (state.status === "checking" || state.status === "available" || state.status === "downloading") {
     return (
-      <StatusLine
-        icon={faArrowsRotate}
-        label="Checking for updates…"
-        iconClassName="text-accent"
-      />
+      <span className="shrink-0 rounded-lg bg-default px-3 py-1.5 text-sm font-medium text-accent tabular-nums">
+        {state.status === "checking" ? "Checking…"
+          : state.status === "available" ? "Preparing…" : `${Math.round(state.progressPercent)}%`}
+      </span>
     );
   }
   if (state.status === "trust-required") {
     return (
-      <div className="space-y-3">
-        <div className="flex items-start gap-3">
-          <FontAwesomeIcon aria-hidden className="mt-0.5 size-4 shrink-0 text-accent" icon={faCircleInfo} />
-          <div className="min-w-0 flex-1">
-            <p className="text-sm font-medium text-foreground">Trust setup required</p>
-            <p className="text-xs leading-5 text-muted">{state.message}</p>
-          </div>
-        </div>
-        <Button isPending={isChecking} size="sm" variant="tertiary" onPress={onCheck}>
-          Set up trust
-        </Button>
-      </div>
-    );
-  }
-  if (state.status === "disabled") {
-    return (
-      <StatusLine
-        detail={state.disabledReason}
-        icon={faCircleInfo}
-        iconClassName="text-muted"
-        label="Updates unavailable"
-      />
-    );
-  }
-  if (state.status === "available") {
-    return (
-      <StatusLine
-        detail="Preparing the automatic download…"
-        icon={faDownload}
-        iconClassName="text-accent"
-        label={`Update ${state.availableVersion} found`}
-      />
-    );
-  }
-  if (state.status === "downloading") {
-    return (
-      <ProgressBar
-        aria-label={`Downloading application update ${state.availableVersion}`}
-        className="w-full gap-0"
-        maxValue={100}
+      <Button
+        className="shrink-0 rounded-lg"
+        isPending={isChecking}
         size="sm"
-        value={state.progressPercent}
+        variant="secondary"
+        onPress={onCheck}
       >
-        <ProgressBar.Track className="h-1.5 rounded-full">
-          <ProgressBar.Fill className="rounded-full" />
-        </ProgressBar.Track>
-      </ProgressBar>
+        Set up trust
+      </Button>
     );
   }
   if (state.status === "ready") {
     return (
-      <div className="flex items-center gap-3">
-        <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-success" icon={faCircleCheck} />
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-foreground">Update {state.availableVersion} ready</p>
-          <p className="truncate text-xs text-muted">Restart when your operator work is safe.</p>
-        </div>
-        <Button size="sm" variant="danger-soft" onPress={onRestart}>Restart</Button>
-      </div>
+      <Button className="shrink-0 rounded-lg" size="sm" variant="danger-soft" onPress={onRestart}>
+        Restart
+      </Button>
     );
   }
-  return (
-    <div className="flex items-center gap-3">
-      <FontAwesomeIcon aria-hidden className="size-4 shrink-0 text-danger" icon={faTriangleExclamation} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-foreground">Update failed</p>
-        <p className="line-clamp-2 text-xs text-muted">{state.error}</p>
-      </div>
-      <Button isPending={isChecking} size="sm" variant="tertiary" onPress={onCheck}>Retry</Button>
-    </div>
-  );
+  if (state.status === "error") {
+    return (
+      <Button className="shrink-0 rounded-lg" isPending={isChecking} size="sm" variant="secondary" onPress={onCheck}>
+        Retry
+      </Button>
+    );
+  }
+  return null;
 }
 
-function StatusLine({
-  detail,
-  icon,
-  iconClassName,
-  label,
-}: {
-  readonly detail?: string;
-  readonly icon: Parameters<typeof FontAwesomeIcon>[0]["icon"];
-  readonly iconClassName: string;
-  readonly label: string;
-}): React.JSX.Element {
-  return (
-    <div className="flex min-w-0 items-center gap-3">
-      <FontAwesomeIcon aria-hidden className={`size-4 shrink-0 ${iconClassName}`} icon={icon} />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium text-foreground">{label}</p>
-        {detail ? <p className="truncate text-xs text-muted tabular-nums">{detail}</p> : null}
-      </div>
-    </div>
-  );
+function updateSubtitle(state: ApplicationUpdateState): string {
+  if (state.status === "trust-required") return "Trust setup required";
+  if (state.status === "available") return `Update ${state.availableVersion} found`;
+  if (state.status === "downloading") return `Downloading ${state.availableVersion}`;
+  if (state.status === "ready") return `Update ${state.availableVersion} ready`;
+  if (state.status === "error") return "Update failed";
+  return `Version ${state.currentVersion}`;
 }
 
 function isPassiveState(state: ApplicationUpdateState): boolean {

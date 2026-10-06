@@ -56,8 +56,11 @@ describe("release download toasts", () => {
       arch: "amd64",
     });
 
-    expect(await screen.findByText("Downloading Sliver server · Linux / amd64")).toBeInTheDocument();
+    expect(await screen.findByText("Sliver server")).toBeInTheDocument();
+    expect(screen.getByText("Linux / amd64")).toBeInTheDocument();
+    expect(screen.getByText("Starting")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: /Downloading Sliver server/ })).not.toHaveAttribute("aria-valuenow");
+    const progressToastId = toast.getQueue().visibleToasts[0]?.key;
 
     emit({
       status: "progress",
@@ -70,8 +73,30 @@ describe("release download toasts", () => {
       receivedBytes: 25 * 1024 * 1024,
       totalBytes: 100 * 1024 * 1024,
     });
-    expect(await screen.findByText("25% · 25.0 MB / 100.0 MB")).toBeInTheDocument();
+    expect(await screen.findByText("25%")).toBeInTheDocument();
+    expect(screen.getByText("25.0 MB / 100.0 MB")).toBeInTheDocument();
+    expect(screen.getByText("Linux / amd64 · v1.7.3")).toBeInTheDocument();
+    expect(screen.getByText("sliver-server_linux-amd64")).toBeInTheDocument();
+    expect(screen.queryByText("Starting")).not.toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: /Downloading Sliver server/ })).toHaveAttribute("aria-valuenow", "25");
+    expect(toast.getQueue().visibleToasts.map(({ key }) => key)).toEqual([progressToastId]);
+
+    emit({
+      status: "progress",
+      downloadId,
+      artifact: "server",
+      os: "linux",
+      arch: "amd64",
+      version: "v1.7.3",
+      fileName: "sliver-server_linux-amd64",
+      receivedBytes: 75 * 1024 * 1024,
+      totalBytes: 100 * 1024 * 1024,
+    });
+    expect(await screen.findByText("75%")).toBeInTheDocument();
+    expect(screen.getByText("75.0 MB / 100.0 MB")).toBeInTheDocument();
+    expect(screen.queryByText("25%")).not.toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: /Downloading Sliver server/ })).toHaveAttribute("aria-valuenow", "75");
+    expect(toast.getQueue().visibleToasts.map(({ key }) => key)).toEqual([progressToastId]);
 
     emit({
       status: "completed",
@@ -86,6 +111,7 @@ describe("release download toasts", () => {
     });
     expect(await screen.findByText("Download complete")).toBeInTheDocument();
     expect(screen.getByText("sliver-server_linux-amd64 was saved to Downloads.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
   });
 
   it("replaces the progress toast with a bounded failure message", async () => {
@@ -102,7 +128,8 @@ describe("release download toasts", () => {
       os: "windows",
       arch: "arm64",
     });
-    expect(await screen.findByText("Downloading Sliver console client · Windows / arm64")).toBeInTheDocument();
+    expect(await screen.findByText("Sliver console client")).toBeInTheDocument();
+    expect(screen.getByText("Windows / arm64")).toBeInTheDocument();
 
     emit({
       status: "failed",
@@ -114,6 +141,7 @@ describe("release download toasts", () => {
     });
     expect(await screen.findByText("Download failed")).toBeInTheDocument();
     expect(screen.getByText("GitHub returned HTTP 503 for the release download")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("progressbar")).not.toBeInTheDocument());
   });
 
   it("labels Crackstation downloads distinctly", async () => {
@@ -131,7 +159,8 @@ describe("release download toasts", () => {
       arch: "arm64",
     });
 
-    expect(await screen.findByText("Downloading Sliver Crackstation · macOS / arm64")).toBeInTheDocument();
+    expect(await screen.findByText("Sliver Crackstation")).toBeInTheDocument();
+    expect(screen.getByText("macOS / arm64")).toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: /Downloading Sliver Crackstation/ })).toBeInTheDocument();
   });
 
@@ -149,11 +178,11 @@ describe("release download toasts", () => {
       os: "macos",
       arch: "arm64",
     });
-    expect(await screen.findByText(/Downloading Sliver console client/)).toBeInTheDocument();
+    expect(await screen.findByText("Sliver console client")).toBeInTheDocument();
 
     view.unmount();
     expect(unsubscribe).toHaveBeenCalledOnce();
-    await waitFor(() => expect(screen.queryByText(/Downloading Sliver console client/)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Sliver console client")).not.toBeInTheDocument());
   });
 });
 

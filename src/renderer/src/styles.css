@@ -124,70 +124,58 @@
 }
 
 @layer components {
-  .toast:has(.application-update-toast) {
+  .toast:has(.application-update-toast, .release-download-toast) {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr);
+    align-items: center;
     gap: 0.75rem;
     padding: 1rem;
     border-radius: var(--radius-xl);
 
-    .toast__content {
-      min-width: 0;
-      gap: 0.75rem;
-    }
-
-    .toast__description {
-      width: 100%;
-      min-width: 0;
-    }
-  }
-
-  .toast:has(.application-update-toast:is([data-layout="compact"], [data-layout="progress"])) {
-    align-items: center;
-
     .toast__indicator {
       display: flex;
+      grid-column: 1;
+      grid-row: 1;
       width: 2rem;
       height: 2rem;
       align-items: center;
       justify-content: center;
       color: var(--color-muted);
     }
-  }
 
-  .toast:has(.application-update-toast[data-layout="compact"]) {
-
+    /* Keep HeroUI's wrapper so stacked toast opacity applies to all content. */
     .toast__content {
-      flex-direction: row;
+      display: grid;
+      grid-column: 1 / -1;
+      grid-row: 1 / span 2;
+      grid-template-columns: subgrid;
+      grid-template-rows: subgrid;
       align-items: center;
-      justify-content: space-between;
-    }
-
-    .toast__title {
+      align-self: stretch;
       min-width: 0;
-    }
-
-    .toast__description {
-      width: auto;
-      flex-shrink: 0;
-    }
-  }
-
-  .toast:has(.application-update-toast[data-layout="progress"]) {
-    display: grid;
-    grid-template-columns: 2rem minmax(0, 1fr);
-
-    .toast__content {
-      display: contents;
     }
 
     .toast__title {
       grid-column: 2;
+      grid-row: 1;
       width: 100%;
       min-width: 0;
     }
 
     .toast__description {
       grid-column: 1 / -1;
+      grid-row: 2;
+      width: 100%;
+      min-width: 0;
     }
+  }
+
+  .toast:has(.application-update-toast[data-layout="compact"]) .toast__content {
+    grid-row: 1;
+  }
+
+  .toast__description:has(.application-update-toast[data-layout="compact"]) {
+    display: none;
   }
 
   .terminal-window {

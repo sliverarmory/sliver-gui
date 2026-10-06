@@ -17,9 +17,9 @@ export function ReleaseDownloadToasts(): null {
       setDownloadState(event);
       if (event.status === "started" || event.status === "progress") {
         if (!activeToastIds.has(event.downloadId)) {
-          const toastId = toast(downloadTitle(event), {
+          const toastId = toast(<ReleaseDownloadHeading downloadId={event.downloadId} />, {
             description: <ReleaseDownloadProgress downloadId={event.downloadId} />,
-            indicator: <FontAwesomeIcon aria-hidden icon={faDownload} />,
+            indicator: <FontAwesomeIcon aria-hidden className="size-4" icon={faDownload} />,
             timeout: 0,
             variant: "accent",
           });
@@ -50,46 +50,65 @@ export function ReleaseDownloadToasts(): null {
   return null;
 }
 
+function ReleaseDownloadHeading({ downloadId }: { readonly downloadId: string }): React.JSX.Element | null {
+  const state = useDownloadState(downloadId);
+  if (!state || state.status === "failed") return null;
+  return (
+    <span className="flex min-w-0 items-center justify-between gap-4">
+      <span className="flex min-w-0 flex-col gap-0.5">
+        <span>{artifactTitle(state.artifact)}</span>
+        <span className="text-xs font-normal text-muted tabular-nums [overflow-wrap:anywhere]">
+          {operatingSystemLabel(state.os)} / {architectureLabel(state.arch)}
+          {state.status !== "started" ? ` · ${state.version}` : ""}
+        </span>
+      </span>
+      <span className="shrink-0 rounded-lg bg-default px-3 py-1.5 text-sm font-medium text-accent tabular-nums">
+        {state.status === "started" ? "Starting" : `${Math.round(downloadPercentage(state))}%`}
+      </span>
+    </span>
+  );
+}
+
 function ReleaseDownloadProgress({ downloadId }: { readonly downloadId: string }): React.JSX.Element | null {
-  const state = useSyncExternalStore(
+  const state = useDownloadState(downloadId);
+  if (!state || state.status === "failed") return null;
+  const isStarting = state.status === "started";
+  return (
+    <div className="release-download-toast min-w-0 w-full space-y-2">
+      <ProgressBar
+        aria-label={`${downloadTitle(state)} progress`}
+        className="w-full gap-0"
+        isIndeterminate={isStarting}
+        maxValue={100}
+        size="sm"
+        value={isStarting ? 0 : downloadPercentage(state)}
+      >
+        <ProgressBar.Track className="h-1.5 rounded-full">
+          <ProgressBar.Fill className="rounded-full" />
+        </ProgressBar.Track>
+      </ProgressBar>
+      {!isStarting ? (
+        <div className="grid min-w-0 grid-cols-1 gap-x-4 gap-y-1 text-xs leading-5 text-muted sm:grid-cols-[minmax(0,1fr)_auto]">
+          <span className="min-w-0 [overflow-wrap:anywhere]">{state.fileName}</span>
+          <span className="justify-self-end whitespace-nowrap tabular-nums">
+            {formatBytes(state.receivedBytes)} / {formatBytes(state.totalBytes)}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function useDownloadState(downloadId: string): SliverReleaseDownloadEvent | undefined {
+  return useSyncExternalStore(
     (listener) => subscribeToDownloadState(downloadId, listener),
     () => downloadStates.get(downloadId),
     () => downloadStates.get(downloadId),
   );
-  if (!state) return null;
-  if (state.status === "started") {
-    return (
-      <div className="mt-2 w-72 max-w-full">
-        <ProgressBar isIndeterminate aria-label={`${downloadTitle(state)} progress`} size="sm">
-          <ProgressBar.Track>
-            <ProgressBar.Fill />
-          </ProgressBar.Track>
-        </ProgressBar>
-      </div>
-    );
-  }
-  if (state.status === "failed") return null;
-  const percentage = state.totalBytes === 0 ? 0 : (state.receivedBytes / state.totalBytes) * 100;
-  return (
-    <div className="mt-2 w-72 max-w-full space-y-2">
-      <div className="flex min-w-0 items-center justify-between gap-3 text-xs text-muted">
-        <span className="truncate">{state.fileName}</span>
-        <span className="shrink-0 tabular-nums">
-          {Math.min(100, Math.round(percentage))}% · {formatBytes(state.receivedBytes)} / {formatBytes(state.totalBytes)}
-        </span>
-      </div>
-      <ProgressBar
-        aria-label={`${downloadTitle(state)} progress`}
-        maxValue={100}
-        size="sm"
-        value={percentage}
-      >
-        <ProgressBar.Track>
-          <ProgressBar.Fill />
-        </ProgressBar.Track>
-      </ProgressBar>
-    </div>
-  );
+}
+
+function downloadPercentage(state: { readonly receivedBytes: number; readonly totalBytes: number }): number {
+  return state.totalBytes === 0 ? 0 : Math.min(100, (state.receivedBytes / state.totalBytes) * 100);
 }
 
 function setDownloadState(event: SliverReleaseDownloadEvent): void {
@@ -115,12 +134,16 @@ function scheduleDownloadStateRemoval(downloadId: string): void {
 }
 
 function downloadTitle(event: Pick<SliverReleaseDownloadEvent, "artifact" | "os" | "arch">): string {
-  const artifact = event.artifact === "server"
+  return `Downloading ${artifactTitle(event.artifact)} · ${operatingSystemLabel(event.os)} / ${architectureLabel(event.arch)}`;
+}
+
+function artifactTitle(value: SliverReleaseDownloadEvent["artifact"]): string {
+  const artifact = value === "server"
     ? "server"
-    : event.artifact === "client"
+    : value === "client"
       ? "console client"
       : "Crackstation";
-  return `Downloading Sliver ${artifact} · ${operatingSystemLabel(event.os)} / ${architectureLabel(event.arch)}`;
+  return `Sliver ${artifact}`;
 }
 
 function operatingSystemLabel(value: string): string {

@@ -119,6 +119,35 @@ describe("application update status", () => {
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
+  it("shows indeterminate preparation until download progress arrives", async () => {
+    installUpdateAPI({
+      getApplicationUpdateState: vi.fn().mockResolvedValue({
+        status: "available",
+        revision: 1,
+        currentVersion: "0.1.0",
+        availableVersion: "0.2.0",
+      }),
+    });
+    renderUpdateStatus();
+
+    expect(await screen.findByText("Update 0.2.0 found")).toBeInTheDocument();
+    expect(screen.getByText("Preparing…")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Preparing application update 0.2.0" }))
+      .not.toHaveAttribute("aria-valuenow");
+
+    emit({
+      status: "downloading",
+      revision: 2,
+      currentVersion: "0.1.0",
+      availableVersion: "0.2.0",
+      progressPercent: 16.7,
+    });
+    expect(await screen.findByText("17%")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Downloading application update 0.2.0" }))
+      .toHaveAttribute("aria-valuenow", "16.7");
+    expect(screen.queryByText("Preparing…")).not.toBeInTheDocument();
+  });
+
   it("checks with zero arguments and accepts the returned revision", async () => {
     const checkForApplicationUpdates = vi.fn().mockResolvedValue({
       ok: true,
@@ -239,7 +268,7 @@ describe("application update status", () => {
     expect(screen.queryByText("Application update")).not.toBeInTheDocument();
 
     emit({ status: "checking", revision: 2, currentVersion: "0.1.0" });
-    expect(await screen.findByText("Checking for updates…")).toBeInTheDocument();
+    expect(await screen.findByText("Checking…")).toBeInTheDocument();
 
     view.unmount();
     expect(unsubscribe).toHaveBeenCalledOnce();
@@ -256,7 +285,7 @@ describe("application update status", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Check for updates" })).not.toBeInTheDocument());
 
     emit({ status: "checking", revision: 2, currentVersion: "0.1.0" });
-    expect(await screen.findByText("Checking for updates…")).toBeInTheDocument();
+    expect(await screen.findByText("Checking…")).toBeInTheDocument();
     emit({
       status: "downloading",
       revision: 3,
