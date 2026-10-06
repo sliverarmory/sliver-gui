@@ -7,6 +7,7 @@ import { disconnectedSnapshot, type OperationResult, type SliverSnapshot } from 
 import type { BeaconSummary, SessionSummary } from "../../../shared/target-contracts";
 import type { TopologyDocument, TopologyNode } from "../../../shared/topology-contracts";
 import {
+  APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   parseApplicationSettingsState,
   type ApplicationSettingsState,
@@ -382,7 +383,7 @@ describe("Overview document rendering", () => {
       getApplicationSettings: vi.fn(async () => persisted),
       updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
         if (expectedRevision !== persisted.revision) return { ok: false as const, error: "Stale settings" };
-        persisted = parseApplicationSettingsState({ v: 7, revision: expectedRevision + 1, ...settings });
+        persisted = parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: expectedRevision + 1, ...settings });
         return { ok: true as const, value: persisted };
       }),
       onApplicationSettingsChanged: vi.fn(() => vi.fn()),
@@ -432,7 +433,7 @@ describe("Overview document rendering", () => {
     const api: ApplicationSettingsAPI = {
       getApplicationSettings: vi.fn(() => initial),
       updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
-        persisted = parseApplicationSettingsState({ v: 7, revision: expectedRevision + 1, ...settings });
+        persisted = parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: expectedRevision + 1, ...settings });
         return { ok: true as const, value: persisted };
       }),
       onApplicationSettingsChanged: vi.fn(() => vi.fn()),
@@ -459,7 +460,7 @@ describe("Overview document rendering", () => {
     const api: ApplicationSettingsAPI = {
       getApplicationSettings: vi.fn(async () => persisted),
       updateApplicationSettings: vi.fn(async ({ expectedRevision, settings }) => {
-        persisted = parseApplicationSettingsState({ v: 7, revision: expectedRevision + 1, ...settings });
+        persisted = parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: expectedRevision + 1, ...settings });
         return { ok: true as const, value: persisted };
       }),
       onApplicationSettingsChanged: vi.fn(() => vi.fn()),

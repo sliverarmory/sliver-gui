@@ -80,6 +80,11 @@ open selector when a valid config is saved there. It saves configs selected
 through Import as private file references in `gui/operator-configs.json`.
 Import and Forget do not copy or delete the source configs.
 
+**Settings → General → Appearance → Disable window transparency** turns off
+native window glass immediately across the app. The switch is off by default,
+so transparency remains enabled where supported. It is saved with the other
+application preferences and takes precedence over terminal transparency.
+
 Ghostty-compatible terminal colors are configured in **Settings → Terminal** and
 saved to `gui/ghostty/config`. Custom themes belong in `gui/ghostty/themes/`;
 installed native Ghostty themes are discovered automatically. See

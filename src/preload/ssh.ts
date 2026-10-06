@@ -588,15 +588,16 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"],
+    ["v", "revision", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"],
     "application settings",
   );
-  if (state["v"] !== 7 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 8 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
   if (!APPLICATION_ICONS.has(stringValue(state["appIcon"]))) throw new TypeError("Invalid application icon");
   if (typeof state["reduceMotion"] !== "boolean") throw new TypeError("Invalid reduced-motion setting");
+  if (typeof state["disableWindowTransparency"] !== "boolean") throw new TypeError("Invalid native window transparency setting");
   if (!isReportScreenshotDirectory(state["reportScreenshotDirectory"])) throw new TypeError("Invalid report screenshot directory");
   const shortcut = stringValue(state["commandPaletteShortcut"]);
   if (!isKeyboardShortcut(shortcut)) throw new TypeError("Invalid command-palette shortcut");
@@ -637,11 +638,12 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     throw new TypeError("Invalid overview settings");
   }
   return Object.freeze({
-    v: 7,
+    v: 8,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
     reduceMotion: state["reduceMotion"],
+    disableWindowTransparency: state["disableWindowTransparency"],
     reportScreenshotDirectory: state["reportScreenshotDirectory"],
     commandPaletteShortcut: shortcut,
     keyboardShortcuts,

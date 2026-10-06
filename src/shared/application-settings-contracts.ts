@@ -4,7 +4,7 @@ import {
   type KeyboardShortcutOverrides,
 } from "./keyboard-shortcuts.js";
 
-export const APPLICATION_SETTINGS_VERSION = 7 as const;
+export const APPLICATION_SETTINGS_VERSION = 8 as const;
 const REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION = 5 as const;
 const KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION = 4 as const;
 const PREVIOUS_APPLICATION_SETTINGS_VERSION = 3 as const;
@@ -54,6 +54,7 @@ export interface ApplicationSettingsValues {
   readonly theme: ApplicationTheme;
   readonly appIcon: ApplicationIcon;
   readonly reduceMotion: boolean;
+  readonly disableWindowTransparency: boolean;
   /** null uses the current user's Desktop directory when a report is captured. */
   readonly reportScreenshotDirectory: string | null;
   readonly commandPaletteShortcut: string;
@@ -93,6 +94,7 @@ export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Ob
   theme: "system",
   appIcon: "auto",
   reduceMotion: false,
+  disableWindowTransparency: false,
   reportScreenshotDirectory: null,
   commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
   keyboardShortcuts: Object.freeze({}),
@@ -120,8 +122,9 @@ const TERMINAL_KEYS = [
 ] as const;
 const OVERVIEW_KEYS = ["kinds", "statuses", "lightning", "sidebarDisabled", "presentation"] as const;
 const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
-const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
+const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const PRE_WINDOW_TRANSPARENCY_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
 const REPORT_SCREENSHOT_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
 const KEYBOARD_SHORTCUTS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
 const PREVIOUS_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "commandPaletteShortcut", "terminal"] as const;
@@ -255,6 +258,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     !isApplicationTheme(value["theme"]) ||
     !isApplicationIcon(value["appIcon"]) ||
     typeof value["reduceMotion"] !== "boolean" ||
+    typeof value["disableWindowTransparency"] !== "boolean" ||
     !isReportScreenshotDirectory(value["reportScreenshotDirectory"]) ||
     !isKeyboardShortcut(value["commandPaletteShortcut"])
   ) {
@@ -274,6 +278,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     theme: value["theme"],
     appIcon: value["appIcon"],
     reduceMotion: value["reduceMotion"],
+    disableWindowTransparency: value["disableWindowTransparency"],
     reportScreenshotDirectory: value["reportScreenshotDirectory"],
     commandPaletteShortcut: value["commandPaletteShortcut"],
     keyboardShortcuts,
@@ -296,6 +301,7 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
       theme: value["theme"],
       appIcon: value["appIcon"],
       reduceMotion: value["reduceMotion"],
+      disableWindowTransparency: value["disableWindowTransparency"],
       reportScreenshotDirectory: value["reportScreenshotDirectory"],
       commandPaletteShortcut: value["commandPaletteShortcut"],
       keyboardShortcuts: value["keyboardShortcuts"],
@@ -317,8 +323,8 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
       hasExactKeys(value["terminal"], TERMINAL_KEYS.filter((key) => key !== "transparentWindows"))) {
     value = { ...value, terminal: { ...value["terminal"], transparentWindows: true } };
   }
-  if (hasExactKeys(value, SETTINGS_STATE_KEYS) && value["v"] === 6) {
-    return parseApplicationSettingsState({ ...value, v: APPLICATION_SETTINGS_VERSION });
+  if (hasExactKeys(value, PRE_WINDOW_TRANSPARENCY_SETTINGS_STATE_KEYS) && (value["v"] === 6 || value["v"] === 7)) {
+    return parseApplicationSettingsState({ ...value, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false });
   }
   try {
     return parseApplicationSettingsState(value);
@@ -328,6 +334,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
+          disableWindowTransparency: false,
           overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
       }
@@ -335,6 +342,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
+          disableWindowTransparency: false,
           reportScreenshotDirectory: null,
           overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
         });
@@ -344,6 +352,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
+          disableWindowTransparency: false,
           keyboardShortcuts: {},
           reportScreenshotDirectory: null,
           overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
@@ -354,6 +363,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
+          disableWindowTransparency: false,
           appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
           keyboardShortcuts: {},
           reportScreenshotDirectory: null,
@@ -364,6 +374,7 @@ export function parsePersistedApplicationSettingsState(value: unknown): Applicat
         return parseApplicationSettingsState({
           ...value,
           v: APPLICATION_SETTINGS_VERSION,
+          disableWindowTransparency: false,
           appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
           commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
           keyboardShortcuts: {},

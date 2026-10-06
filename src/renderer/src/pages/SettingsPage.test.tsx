@@ -48,6 +48,7 @@ describe("SettingsPage", () => {
     expect(screen.getByRole("button", { name: "Use Desktop" })).toBeDisabled();
     expect(screen.getByRole("radiogroup", { name: "Color theme" })).toBeInTheDocument();
     expect(screen.getByRole("radiogroup", { name: "App icon" })).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Disable window transparency" })).not.toBeChecked();
     expect(screen.getByRole("switch", { name: "Reduce motion" })).toBeInTheDocument();
 
     const shortcutsTab = screen.getByRole("tab", { name: "Keyboard Shortcuts" });
@@ -156,6 +157,25 @@ describe("SettingsPage", () => {
     expect(onThemeChange).not.toHaveBeenCalled();
   });
 
+  it("applies the window transparency preference immediately and disables changes while saving", async () => {
+    const user = userEvent.setup();
+    const onDisableWindowTransparencyChange = vi.fn();
+    const props = settingsProps({ onDisableWindowTransparencyChange });
+    const { rerender } = render(<SettingsPage {...props} />);
+
+    await user.click(screen.getByRole("switch", { name: "Disable window transparency" }));
+    expect(onDisableWindowTransparencyChange).toHaveBeenCalledExactlyOnceWith(true);
+
+    const settings = { ...DEFAULT_APPLICATION_SETTINGS_STATE, disableWindowTransparency: true };
+    rerender(<SettingsPage {...props} settings={settings} />);
+    expect(screen.getByRole("switch", { name: "Disable window transparency" })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "Disable window transparency" }));
+    expect(onDisableWindowTransparencyChange).toHaveBeenLastCalledWith(false);
+
+    rerender(<SettingsPage {...props} settings={settings} isSaving />);
+    expect(screen.getByRole("switch", { name: "Disable window transparency" })).toBeDisabled();
+  });
+
   it("returns to Auto from a manually selected icon and disables changes while saving", async () => {
     const user = userEvent.setup();
     const onAppIconChange = vi.fn();
@@ -261,6 +281,7 @@ function settingsProps(overrides: Partial<SettingsPageProps> = {}): SettingsPage
     onAppIconChange: vi.fn(),
     onThemeChange: vi.fn(),
     onReduceMotionChange: vi.fn(),
+    onDisableWindowTransparencyChange: vi.fn(),
     onReportScreenshotDirectoryChange: vi.fn(),
     onKeyboardShortcutChange: vi.fn(),
     onResetKeyboardShortcuts: vi.fn(),

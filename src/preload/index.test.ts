@@ -51,6 +51,7 @@ const invokeArguments = {
       theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      disableWindowTransparency: DEFAULT_APPLICATION_SETTINGS_STATE.disableWindowTransparency,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
       reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,

@@ -7,6 +7,7 @@ import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   DEFAULT_APPLICATION_SETTINGS_VALUES,
   DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
@@ -40,13 +41,14 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-seven file", async () => {
+  it("loads an exact private version-eight file", async () => {
     const persisted = {
-      v: 7,
+      v: APPLICATION_SETTINGS_VERSION,
       revision: 9,
       theme: "dark",
       appIcon: "passion",
       reduceMotion: true,
+      disableWindowTransparency: true,
       reportScreenshotDirectory: join(temporaryDirectory, "reports"),
       commandPaletteShortcut: "mod+shift+p",
       keyboardShortcuts: { newWindow: "mod+alt+n", terminalCloseTab: "mod+shift+e" },
@@ -73,27 +75,48 @@ describe("ApplicationSettingsStore", () => {
   });
 
   it("migrates a version-five file and retains its existing settings", async () => {
-    const { overview: _overview, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     const previous = { ...previousSettings, v: 5, revision: 12, theme: "dark", appIcon: "passion" };
     await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: 7, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
     const { v: _version, revision, ...settings } = store.getState();
     await expect(store.update({ expectedRevision: revision, settings: {
       ...settings, overview: { kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
         sidebarDisabled: true, presentation: "list" },
-    } })).resolves.toMatchObject({ ok: true, value: { revision: 13, v: 7 } });
+    } })).resolves.toMatchObject({ ok: true, value: { revision: 13, v: APPLICATION_SETTINGS_VERSION } });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toMatchObject({ revision: 13, theme: "dark", appIcon: "passion",
       overview: { kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
         sidebarDisabled: true, presentation: "list" } });
   });
 
+  it("migrates version-seven settings with native transparency enabled without changing disk on load", async () => {
+    const { disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const previous = {
+      ...previousSettings,
+      v: 7,
+      revision: 23,
+      theme: "dark",
+      appIcon: "passion",
+      terminal: { ...previousSettings.terminal, fontSize: 21, transparentWindows: false },
+      overview: { kinds: ["future-kind"], statuses: ["warning"], lightning: true,
+        sidebarDisabled: true, presentation: "list" },
+    };
+    await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    const store = await ApplicationSettingsStore.load(settingsPath);
+
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false });
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
+  });
+
   it("migrates version-four settings and persists a custom screenshot directory", async () => {
-    const { reportScreenshotDirectory: _directory, overview: _overview, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     await writeFile(settingsPath, JSON.stringify({ ...previousSettings, v: 4 }), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
@@ -106,7 +129,7 @@ describe("ApplicationSettingsStore", () => {
       expectedRevision: revision,
       settings: { ...settings, reportScreenshotDirectory },
     });
-    expect(result).toMatchObject({ ok: true, value: { v: 7, revision: 1, reportScreenshotDirectory } });
+    expect(result).toMatchObject({ ok: true, value: { v: APPLICATION_SETTINGS_VERSION, revision: 1, reportScreenshotDirectory } });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState().reportScreenshotDirectory).toBe(reportScreenshotDirectory);
   });
@@ -122,7 +145,7 @@ describe("ApplicationSettingsStore", () => {
     await expect(lstat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("migrates version-two preferences and saves version seven on the next update", async () => {
+  it("migrates version-two preferences and saves version eight on the next update", async () => {
     const previous = {
       v: 2,
       revision: 9,
@@ -141,14 +164,14 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: 7, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     const { v: _version, revision, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: 7, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS },
+      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
@@ -174,11 +197,12 @@ describe("ApplicationSettingsStore", () => {
     const store = await ApplicationSettingsStore.load(settingsPath);
 
     expect(store.getState()).toEqual({
-      v: 7,
+      v: APPLICATION_SETTINGS_VERSION,
       revision: 9,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
+      disableWindowTransparency: false,
       reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
@@ -196,7 +220,7 @@ describe("ApplicationSettingsStore", () => {
 
   it.each([
     "not-json",
-    JSON.stringify({ v: 7 }),
+    JSON.stringify({ v: APPLICATION_SETTINGS_VERSION }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
     JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "system" }),
@@ -251,7 +275,25 @@ describe("ApplicationSettingsStore", () => {
 
     expect(result.ok).toBe(true);
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
-    expect(reloaded.getState()).toMatchObject({ v: 7, revision: 1, appIcon, theme: "system" });
+    expect(reloaded.getState()).toMatchObject({ v: APPLICATION_SETTINGS_VERSION, revision: 1, appIcon, theme: "system" });
+  });
+
+  it("persists disabling and re-enabling native transparency across disk reloads", async () => {
+    let store = await ApplicationSettingsStore.load(settingsPath);
+    expect(store.getState().disableWindowTransparency).toBe(false);
+
+    for (const disableWindowTransparency of [true, false]) {
+      const { v: _version, revision, ...settings } = store.getState();
+      const result = await store.update({
+        expectedRevision: revision,
+        settings: { ...settings, disableWindowTransparency },
+      });
+
+      expect(result).toMatchObject({ ok: true, value: { disableWindowTransparency, revision: revision + 1 } });
+      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+      store = await ApplicationSettingsStore.load(settingsPath);
+      expect(store.getState()).toEqual(result.value);
+    }
   });
 
   it("rejects stale revisions without changing memory or disk", async () => {
@@ -341,7 +383,7 @@ describe("ApplicationSettingsStore", () => {
 
 function updateInput(
   expectedRevision: number,
-  overrides: Partial<Pick<ApplicationSettingsUpdateInput["settings"], "theme" | "appIcon" | "reduceMotion">>,
+  overrides: Partial<Pick<ApplicationSettingsUpdateInput["settings"], "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency">>,
 ): ApplicationSettingsUpdateInput {
   return {
     expectedRevision,
@@ -349,6 +391,7 @@ function updateInput(
       theme: overrides.theme ?? DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: overrides.appIcon ?? DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+      disableWindowTransparency: overrides.disableWindowTransparency ?? DEFAULT_APPLICATION_SETTINGS_STATE.disableWindowTransparency,
       reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
       commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
       keyboardShortcuts: {},

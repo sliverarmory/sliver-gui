@@ -28,6 +28,7 @@ const settings = {
   theme: "light" as const,
   appIcon: "passion" as const,
   reduceMotion: true,
+  disableWindowTransparency: true,
   commandPaletteShortcut: "mod+shift+p",
   keyboardShortcuts: {},
   reportScreenshotDirectory: null,
@@ -36,13 +37,14 @@ const settings = {
 };
 
 describe("application settings contracts", () => {
-  it("provides deeply frozen version-seven defaults with Desktop screenshots", () => {
+  it("provides deeply frozen version-eight defaults with native transparency enabled", () => {
     expect(DEFAULT_APPLICATION_SETTINGS_STATE).toEqual({
-      v: 7,
+      v: APPLICATION_SETTINGS_VERSION,
       revision: 0,
       theme: "system",
       appIcon: "auto",
       reduceMotion: false,
+      disableWindowTransparency: false,
       reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
@@ -65,12 +67,50 @@ describe("application settings contracts", () => {
 
   it("migrates version-six terminal preferences without losing settings", () => {
     const { transparentWindows: _transparent, ...legacyTerminal } = terminal;
-    const legacy = { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...settings, v: 6, revision: 25, terminal: legacyTerminal };
+    const { disableWindowTransparency: _disableTransparency, ...previousSettings } = settings;
+    const legacy = { ...previousSettings, v: 6, revision: 25, terminal: legacyTerminal };
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      ...legacy, v: APPLICATION_SETTINGS_VERSION, terminal: { ...legacyTerminal, transparentWindows: true },
+      ...legacy, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, terminal: { ...legacyTerminal, transparentWindows: true },
     });
     expect(() => parseApplicationSettingsState({ ...legacy, v: APPLICATION_SETTINGS_VERSION })).toThrow();
     expect(() => parseApplicationTerminalSettings({ ...terminal, transparentWindows: "yes" })).toThrow();
+  });
+
+  it("migrates version-seven settings with native transparency enabled and preserves terminal and overview preferences", () => {
+    const { disableWindowTransparency: _disableTransparency, ...previousSettings } = settings;
+    const previous = {
+      ...previousSettings,
+      v: 7,
+      revision: 31,
+      terminal: { ...terminal, transparentWindows: false },
+      keyboardShortcuts: { newWindow: "mod+alt+n" },
+      overview: { kinds: ["operator"], statuses: ["inactive"], lightning: true,
+        sidebarDisabled: true, presentation: "list" },
+    };
+
+    expect(parsePersistedApplicationSettingsState(previous)).toEqual({
+      ...previous,
+      v: APPLICATION_SETTINGS_VERSION,
+      disableWindowTransparency: false,
+    });
+    expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
+    expect(() => parseApplicationSettingsState({ ...previous, v: APPLICATION_SETTINGS_VERSION }))
+      .toThrow("Invalid application settings state");
+    expect(() => parseApplicationSettingsUpdateInput({ expectedRevision: 31, settings: previousSettings }))
+      .toThrow("Invalid application settings update");
+    expect(() => parsePersistedApplicationSettingsState({ ...previous, disableWindowTransparency: true }))
+      .toThrow("Invalid persisted application settings state");
+  });
+
+  it.each([false, true])("accepts disableWindowTransparency=%s independently of terminal transparency", (disableWindowTransparency) => {
+    expect(parseApplicationSettingsValues({
+      ...settings,
+      disableWindowTransparency,
+      terminal: { ...terminal, transparentWindows: !disableWindowTransparency },
+    })).toMatchObject({
+      disableWindowTransparency,
+      terminal: { transparentWindows: !disableWindowTransparency },
+    });
   });
 
   it("parses and deeply freezes exact state and update schemas", () => {
@@ -84,7 +124,7 @@ describe("application settings contracts", () => {
       settings,
     });
 
-    expect(state).toEqual({ v: 7, revision: 7, ...settings });
+    expect(state).toEqual({ v: APPLICATION_SETTINGS_VERSION, revision: 7, ...settings });
     expect(update).toEqual({ expectedRevision: 7, settings });
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.terminal)).toBe(true);
@@ -115,7 +155,7 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 7, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(Object.isFrozen(migrated)).toBe(true);
     expect(Object.isFrozen(migrated.terminal)).toBe(true);
   });
@@ -131,22 +171,22 @@ describe("application settings contracts", () => {
       terminal,
     };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 7, keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
     expect(Object.isFrozen(migrated.keyboardShortcuts)).toBe(true);
   });
 
   it("migrates version-four settings to the Desktop screenshot location", () => {
-    const { reportScreenshotDirectory: _directory, overview: _overview, ...previousSettings } = settings;
+    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = settings;
     const previous = { v: 4, revision: 14, ...previousSettings };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: 7, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
   });
 
   it("migrates version-five settings without discarding existing preferences", () => {
-    const { overview: _overview, ...previousSettings } = settings;
+    const { overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = settings;
     const previous = { v: 5, revision: 19, ...previousSettings };
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
-      ...previous, v: 7, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+      ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
     });
   });
 
@@ -201,11 +241,12 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(legacy)).toThrow("Invalid application settings state");
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      v: 7,
+      v: APPLICATION_SETTINGS_VERSION,
       revision: 4,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
+      disableWindowTransparency: false,
       reportScreenshotDirectory: null,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
@@ -254,6 +295,10 @@ describe("application settings contracts", () => {
     { ...settings, appIcon: "../passion.png" },
     { ...settings, appIcon: undefined },
     { ...settings, reduceMotion: "yes" },
+    { ...settings, disableWindowTransparency: "yes" },
+    { ...settings, disableWindowTransparency: 1 },
+    { ...settings, disableWindowTransparency: null },
+    { ...settings, disableWindowTransparency: undefined },
     { ...settings, reportScreenshotDirectory: "" },
     { ...settings, reportScreenshotDirectory: "Pictures" },
     { ...settings, reportScreenshotDirectory: "../Pictures" },
@@ -273,7 +318,8 @@ describe("application settings contracts", () => {
   });
 
   it.each([
-    { v: 8, revision: 0, ...settings },
+    { v: APPLICATION_SETTINGS_VERSION + 1, revision: 0, ...settings },
+    { v: 7, revision: 0, ...settings },
     { v: 5, revision: -1, ...settings },
     { v: 5, revision: 1.5, ...settings },
     { v: 5, revision: 0, ...settings, extra: true },

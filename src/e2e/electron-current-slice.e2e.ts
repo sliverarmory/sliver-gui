@@ -1315,6 +1315,7 @@ async function setApplicationTheme(
         theme: nextTheme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        disableWindowTransparency: current.disableWindowTransparency,
         reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
@@ -1706,7 +1707,11 @@ async function verifyApplicationSettings(
   });
   assert.equal(native.themeSource, "light");
   assert.equal(native.shouldUseDarkColors, false);
-  assert.match(native.background ?? "", /^#0{6}(?:00)?$/u);
+  if (process.platform === "linux") {
+    assert.equal(native.background, "#fafafa", "Linux must keep an opaque background after a theme change");
+  } else {
+    assert.match(native.background ?? "", /^#0{6}(?:00)?$/u);
+  }
 }
 
 async function verifyOperatorDataStores(

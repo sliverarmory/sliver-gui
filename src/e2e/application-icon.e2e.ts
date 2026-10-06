@@ -13,7 +13,7 @@ import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-applic
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
 
-test("app icon settings apply, follow system appearance and survive restart", { timeout: 60_000 }, async () => {
+test("app appearance and icon settings apply, follow system appearance and survive restart", { timeout: 60_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "sliver-gui-icons-"));
   const userData = join(root, "user-data");
   const artifacts = join(repositoryRoot, "artifacts", "app-icons");
@@ -39,6 +39,7 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     application = await launch();
     let page = await application.firstWindow();
     await openSettings(page);
+    await assertNativeBackground(application, "system");
     await chooseIcon(page, "light");
     await assertNativeIcon(application, "icon1a-light.png");
     await page.screenshot({ path: join(artifacts, "sidebar-light-icon.png"), animations: "disabled" });
@@ -52,6 +53,7 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: "Light" }).click();
     await page.locator("html.light").waitFor();
     await waitForTheme(page, "light");
+    await assertNativeBackground(application, "light");
     await assertNativeIcon(application, "passion.png");
     await page.screenshot({ path: join(artifacts, "settings-light.png"), animations: "disabled" });
 
@@ -63,9 +65,13 @@ test("app icon settings apply, follow system appearance and survive restart", { 
       await assertNativeIcon(application, "icon1a-dark.png");
       await setMacSystemAppearance(application, false);
       await assertNativeIcon(application, "icon1a-light.png");
-      await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: "Dark" }).click();
-      await page.locator("html.dark").waitFor();
-      await waitForTheme(page, "dark");
+    }
+
+    await page.getByRole("radiogroup", { name: "Color theme" }).getByRole("radio", { name: "Dark" }).click();
+    await page.locator("html.dark").waitFor();
+    await waitForTheme(page, "dark");
+    await assertNativeBackground(application, "dark");
+    if (process.platform === "darwin") {
       await assertNativeIcon(application, "icon1a-light.png");
     }
 
@@ -73,11 +79,15 @@ test("app icon settings apply, follow system appearance and survive restart", { 
     await page.screenshot({ path: join(artifacts, "settings-dark.png"), animations: "disabled" });
     const persisted = JSON.parse(await readFile(join(root, "client", "gui", "application-settings.json"), "utf8"));
     assert.equal(persisted.appIcon, "passion");
+    assert.equal(persisted.theme, "dark");
     await cleanupOwnedApplication(application, "application icon restart", APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS);
     application = undefined;
     application = await launch();
     page = await application.firstWindow();
     await openSettings(page);
+    await page.locator("html.dark").waitFor();
+    await waitForTheme(page, "dark");
+    await assertNativeBackground(application, "dark");
     await assertNativeIcon(application, "passion.png");
     assert.equal(await page.getByRole("radiogroup", { name: "App icon" })
       .getByRole("radio", { name: "Passion" }).getAttribute("aria-checked"), "true");
@@ -135,6 +145,27 @@ async function waitForTheme(page: Page, theme: "light" | "dark"): Promise<void> 
   const label = theme === "light" ? "Light" : "Dark";
   await page.getByRole("radiogroup", { name: "Color theme" })
     .getByRole("radio", { name: label, checked: true, disabled: false }).waitFor();
+}
+
+async function assertNativeBackground(
+  application: ElectronApplication,
+  theme: "system" | "light" | "dark",
+): Promise<void> {
+  if (process.platform !== "linux" && process.platform !== "darwin") return;
+  const native = await application.evaluate(({ BrowserWindow, nativeTheme }) => ({
+    background: BrowserWindow.getAllWindows()[0]?.getBackgroundColor().toLowerCase(),
+    shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+    themeSource: nativeTheme.themeSource,
+  }));
+  assert.equal(native.themeSource, theme);
+  if (theme !== "system") assert.equal(native.shouldUseDarkColors, theme === "dark");
+  if (process.platform === "linux") {
+    assert.equal(native.background, native.shouldUseDarkColors ? "#09090b" : "#fafafa",
+      "Linux workspace must have an opaque native background matching the application theme");
+  } else {
+    assert.match(native.background ?? "", /^#0{6}(?:00)?$/u,
+      "macOS workspace must retain its transparent native background for vibrancy");
+  }
 }
 
 async function chooseIcon(page: Page, value: ApplicationIcon): Promise<void> {

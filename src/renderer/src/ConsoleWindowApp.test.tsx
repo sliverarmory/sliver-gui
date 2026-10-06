@@ -222,6 +222,21 @@ describe("ConsoleWindowApp", () => {
     act(() => api.listeners.applicationSettings?.({
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       revision: 1,
+      disableWindowTransparency: true,
+    }));
+    expect(screen.getByRole("main")).toHaveAttribute("data-transparent", "false");
+    expect(terminal).toHaveAttribute("data-background-opacity", "1");
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 2,
+    }));
+    expect(screen.getByRole("main")).toHaveAttribute("data-transparent", String(supported));
+    expect(terminal).toHaveAttribute("data-background-opacity", supported ? "0.65" : "1");
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 3,
       terminal: { ...DEFAULT_APPLICATION_SETTINGS_STATE.terminal, transparentWindows: false },
     }));
     expect(screen.getByRole("main")).toHaveAttribute("data-transparent", "false");

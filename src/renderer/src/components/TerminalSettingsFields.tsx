@@ -113,7 +113,7 @@ export function TerminalSettingsFields({
       </Select>
 
       <SwitchRow
-        description="Use native glass in console and SSH windows on macOS and Windows 11. Turn off for an opaque background."
+        description="Use native glass in console and SSH windows where supported. Requires window transparency to be enabled in General settings."
         label="Transparent terminal windows"
         selected={settings.transparentWindows}
         onChange={(transparentWindows) => onChange({ ...settings, transparentWindows })}

@@ -216,6 +216,7 @@ describe("SSH preload bridge", () => {
         theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
+        disableWindowTransparency: DEFAULT_APPLICATION_SETTINGS_STATE.disableWindowTransparency,
         reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
@@ -390,6 +391,7 @@ describe("SSH preload bridge", () => {
       revision: 4,
       theme: "light" as const,
       appIcon: "passion" as const,
+      disableWindowTransparency: true,
       reportScreenshotDirectory: "/Users/operator/Pictures",
       keyboardShortcuts: {
         terminalNewTab: "mod+shift+t",
@@ -428,10 +430,19 @@ describe("SSH preload bridge", () => {
     const windowsRedo = {
       ...valid,
       revision: 5,
+      disableWindowTransparency: false,
       keyboardShortcuts: { ...valid.keyboardShortcuts, textEditorRedo: "mod+y" },
     };
     handler({}, windowsRedo);
     handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });
+    const { disableWindowTransparency: _disableTransparency, ...missingTransparency } = valid;
+    handler({}, missingTransparency);
+    handler({}, { ...missingTransparency, v: 7 });
+    handler({}, { ...valid, v: 7 });
+    handler({}, { ...valid, disableWindowTransparency: "yes" });
+    handler({}, { ...valid, disableWindowTransparency: 1 });
+    handler({}, { ...valid, disableWindowTransparency: null });
+    handler({}, { ...valid, disableWindowTransparency: undefined });
     expect(listener).toHaveBeenCalledTimes(2);
     expect(listener).toHaveBeenLastCalledWith(windowsRedo);
     unsubscribe();

@@ -53,6 +53,7 @@ test("Report Screenshot captures every open app window into the configured direc
           theme: current.theme,
           appIcon: current.appIcon,
           reduceMotion: current.reduceMotion,
+          disableWindowTransparency: current.disableWindowTransparency,
           reportScreenshotDirectory: directory,
           commandPaletteShortcut: current.commandPaletteShortcut,
           keyboardShortcuts: current.keyboardShortcuts,

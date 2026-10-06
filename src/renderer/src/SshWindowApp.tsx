@@ -634,7 +634,8 @@ export function SshWindowApp(): React.JSX.Element {
   }, [activeTab]);
 
   const nativeTerminalTransparency = applicationSettings?.nativeTerminalTransparency ?? false;
-  const transparentWindow = nativeTerminalTransparency && settings.transparentWindows;
+  const transparentWindow = nativeTerminalTransparency && settings.transparentWindows &&
+    !applicationSettings?.settings.disableWindowTransparency;
   const appearance = useMemo(() => applicationTerminalAppearance(
     settings,
     applicationSettings?.resolvedTheme ?? "dark",

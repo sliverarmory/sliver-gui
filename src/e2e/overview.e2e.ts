@@ -963,6 +963,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
         theme: nextTheme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        disableWindowTransparency: current.disableWindowTransparency,
         reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,

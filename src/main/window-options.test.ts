@@ -42,10 +42,35 @@ describe("standalone text editor window", () => {
 });
 
 describe("main window transparency", () => {
-  it.each(["darwin", "linux"] as const)(
-    "uses a transparent native surface on %s without weakening renderer isolation",
-    (platform) => {
-      const options = mainWindowOptions("/absolute/preload.js", platform);
+  it.each([
+    ["darwin", "24.0.0"],
+    ["win32", "10.0.22621"],
+    ["win32", "10.0.22000"],
+    ["linux", "6.12.0"],
+  ] as const)("disables native glass with an opaque background on %s (%s)", (platform, osRelease) => {
+    for (const dark of [true, false]) {
+      const options = mainWindowOptions("/preload.js", platform, undefined, dark, osRelease, true);
+      expect(options.backgroundColor).toBe(dark ? "#09090b" : "#fafafa");
+      expect(options).not.toHaveProperty("vibrancy");
+      if (supportsWindowsAcrylic(platform, osRelease)) {
+        expect(options.backgroundMaterial).toBe("none");
+        expect(options.accentColor).toBe(windowsCaptionColor(dark));
+      } else {
+        expect(options).not.toHaveProperty("backgroundMaterial");
+      }
+      if (platform === "darwin") {
+        expect(options.transparent).toBe(true);
+        expect(options.titleBarStyle).toBe("hiddenInset");
+      }
+      if (platform === "linux") expect(options.transparent).toBe(false);
+      expect(options.webPreferences).toMatchObject({ contextIsolation: true, sandbox: true, nodeIntegration: false });
+    }
+  });
+
+  it.each([true, false])(
+    "preserves macOS transparency without weakening renderer isolation (dark=%s)",
+    (dark) => {
+      const options = mainWindowOptions("/absolute/preload.js", "darwin", undefined, dark);
 
       expect(options).toMatchObject({
         transparent: true,
@@ -61,6 +86,28 @@ describe("main window transparency", () => {
       });
     },
   );
+
+  it.each([
+    [true, "#09090b"],
+    [false, "#fafafa"],
+  ] as const)("backs every translucent Linux surface with an opaque theme color (dark=%s)", (dark, backgroundColor) => {
+    const options = mainWindowOptions("/absolute/preload.js", "linux", undefined, dark);
+
+    expect(options).toMatchObject({
+      transparent: false,
+      backgroundColor,
+      webPreferences: {
+        preload: "/absolute/preload.js",
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        zoomFactor: 1,
+      },
+    });
+    expect(options).not.toHaveProperty("vibrancy");
+    expect(options).not.toHaveProperty("backgroundMaterial");
+  });
 
   it("keeps macOS glass and gives Windows a native menu bar over acrylic", () => {
     const mac = mainWindowOptions("/preload.js", "darwin", "/brand.png");

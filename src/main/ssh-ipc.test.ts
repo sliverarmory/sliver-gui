@@ -137,6 +137,7 @@ describe("SSH IPC boundary", () => {
         theme: "dark",
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: true,
+        disableWindowTransparency: true,
         commandPaletteShortcut: "mod+shift+k",
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         reportScreenshotDirectory: null,
@@ -163,7 +164,7 @@ describe("SSH IPC boundary", () => {
     expect(services.applicationSettings.getState).toHaveBeenCalledExactlyOnceWith();
     expect(services.applicationSettings.update).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       expectedRevision: 0,
-      settings: expect.objectContaining({ theme: "dark", reduceMotion: true }),
+      settings: expect.objectContaining({ theme: "dark", reduceMotion: true, disableWindowTransparency: true }),
     }));
     expect(authorizeWindow).toHaveBeenCalledWith(owner, CURRENT_WINDOW);
   });

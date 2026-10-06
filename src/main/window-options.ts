@@ -67,6 +67,7 @@ export function mainWindowOptions(
   icon?: string,
   dark = true,
   osRelease = release(),
+  disableWindowTransparency = false,
 ): BrowserWindowConstructorOptions {
   const windowsAcrylic = supportsWindowsAcrylic(platform, osRelease);
   return {
@@ -75,14 +76,18 @@ export function mainWindowOptions(
     minWidth: 960,
     minHeight: 680,
     show: false,
-    ...(platform === "win32"
-      ? windowsAcrylic ? {} : { backgroundColor: nativeWindowBackgroundColor(dark) }
-      : { transparent: true, backgroundColor: TRANSPARENT_WINDOW_COLOR }),
+    // Linux has no native glass beneath the renderer's translucent surfaces.
+    ...(platform === "linux"
+      ? { transparent: false, backgroundColor: nativeWindowBackgroundColor(dark) }
+      : platform === "win32"
+      ? windowsAcrylic && !disableWindowTransparency ? {} : { backgroundColor: nativeWindowBackgroundColor(dark) }
+      // Keep the surface capable of transparency so glass can be restored live.
+      : { transparent: true, backgroundColor: disableWindowTransparency ? nativeWindowBackgroundColor(dark) : TRANSPARENT_WINDOW_COLOR }),
     title: "Sliver GUI",
     ...(platform !== "win32" ? { titleBarStyle: platform === "darwin" ? "hiddenInset" as const : "hidden" as const } : {}),
     ...(platform === "darwin"
       ? {
-          vibrancy: "sidebar" as const,
+          ...(!disableWindowTransparency ? { vibrancy: "sidebar" as const } : {}),
           visualEffectState: "followWindow" as const,
         }
       : {}),
@@ -91,7 +96,7 @@ export function mainWindowOptions(
           frame: true,
           autoHideMenuBar: false,
           ...(windowsAcrylic ? {
-            backgroundMaterial: "acrylic" as const,
+            backgroundMaterial: disableWindowTransparency ? "none" as const : "acrylic" as const,
             accentColor: windowsCaptionColor(dark),
           } : {}),
         }

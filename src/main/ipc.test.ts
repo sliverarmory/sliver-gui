@@ -535,6 +535,7 @@ describe("trusted Electron IPC boundary", () => {
         theme: "light" as const,
         appIcon: "passion" as const,
         reduceMotion: true,
+        disableWindowTransparency: true,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,

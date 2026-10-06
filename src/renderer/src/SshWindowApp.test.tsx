@@ -7,6 +7,7 @@ import {
   type ApplicationSettingsState,
 } from "../../shared/application-settings-contracts";
 import type { OperationResult } from "../../shared/contracts";
+import type { GhosttySettingsSnapshot } from "../../shared/ghostty-settings-contracts";
 import type {
   ManagedSshTarget,
   SshHostKeyReview,
@@ -39,6 +40,7 @@ vi.mock("./components/GhosttyTerminal", () => ({
     <section
       aria-label={props.ariaLabel}
       data-cursor-blink={String(props.appearance?.cursorBlink)}
+      data-background-opacity={props.appearance?.theme?.backgroundOpacity ?? 1}
       data-font-family={props.appearance?.fontFamily}
       data-font-size={props.appearance?.fontSize}
       data-smooth-scroll-duration={props.appearance?.smoothScrollDuration}
@@ -139,10 +141,55 @@ afterEach(() => {
   vi.unstubAllGlobals();
   Reflect.deleteProperty(Element.prototype, "getAnimations");
   Reflect.deleteProperty(window, "ssh");
+  Reflect.deleteProperty(window, "ghosttySettings");
   window.localStorage.clear();
 });
 
 describe("SshWindowApp", () => {
+  it("applies the global transparency override without reconnecting SSH", async () => {
+    const transport = fakeTransport();
+    openSshTransport.mockResolvedValue(transport);
+    const api = installAPI();
+    const theme = { background: "#112233", foreground: "#ddeeff", backgroundOpacity: 0.65, palette: {} };
+    const config: GhosttySettingsSnapshot = {
+      configPath: "/test/.sliver-client/gui/ghostty/config",
+      themesDirectory: "/test/.sliver-client/gui/ghostty/themes",
+      theme: "Test",
+      themes: [],
+      dark: theme,
+      light: theme,
+      diagnostics: [],
+      revision: 1,
+      nativeTerminalTransparency: true,
+    };
+    Object.defineProperty(window, "ghosttySettings", {
+      configurable: true,
+      value: { getConfig: async () => config, onChanged: () => () => undefined },
+    });
+    renderWithApplicationContextMenu(<ApplicationSettingsProvider api={api}><SshWindowApp /></ApplicationSettingsProvider>);
+
+    const terminal = await screen.findByRole("region", { name: "SSH session test1 for ubuntu@44.240.136.251:22" });
+    await waitFor(() => expect(terminal).toHaveAttribute("data-background-opacity", "0.65"));
+    expect(screen.getByRole("main")).toHaveAttribute("data-transparent", "true");
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 1,
+      disableWindowTransparency: true,
+    }));
+    expect(screen.getByRole("main")).toHaveAttribute("data-transparent", "false");
+    expect(terminal).toHaveAttribute("data-background-opacity", "1");
+
+    act(() => api.listeners.applicationSettings?.({
+      ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      revision: 2,
+    }));
+    expect(screen.getByRole("main")).toHaveAttribute("data-transparent", "true");
+    expect(terminal).toHaveAttribute("data-background-opacity", "0.65");
+    expect(openSshTransport).toHaveBeenCalledOnce();
+    expect(transport.close).not.toHaveBeenCalled();
+  });
+
   it("claims persisted tabs and attaches Ghostty with the SSH stream and shared terminal appearance", async () => {
     const transport = fakeTransport();
     openSshTransport.mockResolvedValue(transport);

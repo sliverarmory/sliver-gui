@@ -179,6 +179,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: input.settings.theme,
         appIcon: input.settings.appIcon,
         reduceMotion: input.settings.reduceMotion,
+        disableWindowTransparency: input.settings.disableWindowTransparency,
         reportScreenshotDirectory: input.settings.reportScreenshotDirectory,
       }),
     }));
@@ -202,6 +203,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: "light",
         appIcon: "passion",
         reduceMotion: false,
+        disableWindowTransparency: false,
         reportScreenshotDirectory: "/tmp/report-screenshots",
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
@@ -259,6 +261,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: "system",
         appIcon: "passion",
         reduceMotion: false,
+        disableWindowTransparency: false,
         reportScreenshotDirectory: null,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
@@ -269,7 +272,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(document.documentElement).toHaveClass("dark");
   });
 
-  it("migrates a non-default legacy terminal preference once", async () => {
+  it.each([false, true])("migrates a legacy terminal preference while preserving disabled transparency=%s", async (disableWindowTransparency) => {
     window.localStorage.setItem(CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY, JSON.stringify({
       v: 1,
       fontId: "jetbrains-mono",
@@ -286,7 +289,10 @@ describe("ApplicationSettingsProvider", () => {
         ...input.settings,
       },
     }));
-    installSettingsAPI({ updateApplicationSettings });
+    installSettingsAPI({
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency })),
+      updateApplicationSettings,
+    });
     renderProvider();
 
     await screen.findByText("ready");
@@ -296,6 +302,7 @@ describe("ApplicationSettingsProvider", () => {
         theme: "system",
         appIcon: "auto",
         reduceMotion: false,
+        disableWindowTransparency,
         reportScreenshotDirectory: null,
         commandPaletteShortcut: DEFAULT_APPLICATION_SETTINGS_STATE.commandPaletteShortcut,
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
@@ -333,6 +340,30 @@ describe("ApplicationSettingsProvider", () => {
     await user.click(screen.getByRole("button", { name: "Remap new window" }));
     expect(updateApplicationSettings).toHaveBeenCalledTimes(2);
   });
+
+  it("persists a transparency-only change and preserves it through later updates", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+    }));
+    installSettingsAPI({ updateApplicationSettings });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    expect(screen.getByTestId("disable-transparency")).toHaveTextContent("false");
+
+    await user.click(screen.getByRole("button", { name: "Disable transparency" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("1"));
+    expect(screen.getByTestId("disable-transparency")).toHaveTextContent("true");
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.disableWindowTransparency).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Disable transparency" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
+    expect(updateApplicationSettings.mock.calls[1]?.[0].settings.disableWindowTransparency).toBe(true);
+  });
 });
 
 function renderProvider(api?: ApplicationSettingsAPI): void {
@@ -352,6 +383,7 @@ function SettingsProbe(): React.JSX.Element {
       <span data-testid="revision">{context.settings.revision}</span>
       <span data-testid="theme">{context.settings.theme}</span>
       <span data-testid="app-icon">{context.settings.appIcon}</span>
+      <span data-testid="disable-transparency">{String(context.settings.disableWindowTransparency)}</span>
       <span data-testid="report-directory">{context.settings.reportScreenshotDirectory ?? "Desktop"}</span>
       <span data-testid="resolved-app-icon">{context.resolvedAppIcon}</span>
       <button
@@ -359,6 +391,12 @@ function SettingsProbe(): React.JSX.Element {
         onClick={() => void context.updateSettings((current) => ({ ...current, theme: "light" }))}
       >
         Use light theme
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, disableWindowTransparency: true }))}
+      >
+        Disable transparency
       </button>
       <button
         type="button"
@@ -412,7 +450,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "reportScreenshotDirectory">>,
+  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

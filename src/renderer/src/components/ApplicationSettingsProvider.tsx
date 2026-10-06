@@ -137,6 +137,7 @@ export function ApplicationSettingsProvider({
               theme: current.theme,
               appIcon: current.appIcon,
               reduceMotion: current.reduceMotion,
+              disableWindowTransparency: current.disableWindowTransparency,
               reportScreenshotDirectory: current.reportScreenshotDirectory,
               commandPaletteShortcut: current.commandPaletteShortcut,
               keyboardShortcuts: current.keyboardShortcuts,
@@ -275,6 +276,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
     theme: state.theme,
     appIcon: state.appIcon,
     reduceMotion: state.reduceMotion,
+    disableWindowTransparency: state.disableWindowTransparency,
     reportScreenshotDirectory: state.reportScreenshotDirectory,
     commandPaletteShortcut: state.commandPaletteShortcut,
     keyboardShortcuts: state.keyboardShortcuts,
@@ -287,6 +289,7 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
   return left.theme === right.theme &&
     left.appIcon === right.appIcon &&
     left.reduceMotion === right.reduceMotion &&
+    left.disableWindowTransparency === right.disableWindowTransparency &&
     left.reportScreenshotDirectory === right.reportScreenshotDirectory &&
     left.commandPaletteShortcut === right.commandPaletteShortcut &&
     keyboardShortcutsEqual(left.keyboardShortcuts, right.keyboardShortcuts) &&

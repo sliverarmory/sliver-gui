@@ -740,6 +740,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       process.platform,
       applicationIcons.getIconPath(),
       nativeTheme.shouldUseDarkColors,
+      undefined,
+      applicationSettingsStore?.getState().disableWindowTransparency ?? false,
     ));
     trackWindow(window, inheritFromContentsId);
     window.webContents.on("did-start-navigation", (details) => {
@@ -1120,7 +1122,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         process.platform,
         applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
-        applicationSettingsStore?.getState().terminal.transparentWindows ?? true,
+        transparentTerminalWindowsEnabled(),
       ));
       sshWindow = window;
       sshWindowClaimedBy = undefined;
@@ -1853,7 +1855,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         process.platform,
         applicationIcons.getIconPath(),
         nativeTheme.shouldUseDarkColors,
-        applicationSettingsStore?.getState().terminal.transparentWindows ?? true,
+        transparentTerminalWindowsEnabled(),
       ));
       candidateWindow = window;
       const record: ConsoleWindowRecord = {
@@ -2433,6 +2435,11 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     shutdown.beginQuit();
   }
 
+  function transparentTerminalWindowsEnabled(): boolean {
+    const settings = applicationSettingsStore?.getState();
+    return !settings?.disableWindowTransparency && (settings?.terminal.transparentWindows ?? true);
+  }
+
   function applyNativeThemeToWindow(
     window: BrowserWindow,
     surface: NativeWindowSurface,
@@ -2442,12 +2449,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const dark = nativeTheme.shouldUseDarkColors;
     try {
       if (surface === "workspace") {
-        // An opaque background color covers DWM's acrylic client backdrop.
-        // Let the system paint that backdrop on supported Windows hosts.
-        if (!supportsWindowsAcrylic()) {
-          window.setBackgroundColor(process.platform === "win32"
-            ? nativeWindowBackgroundColor(dark)
-            : "#00000000");
+        const transparent = !(applicationSettingsStore?.getState().disableWindowTransparency ?? false);
+        const nativeGlass = process.platform === "darwin" || supportsWindowsAcrylic();
+        // Clear an opaque color when restoring glass so it cannot cover DWM's backdrop.
+        window.setBackgroundColor(transparent && nativeGlass ? "#00000000" : nativeWindowBackgroundColor(dark));
+        if (process.platform === "darwin") {
+          window.setVibrancy(transparent ? "sidebar" : null);
+        } else if (supportsWindowsAcrylic()) {
+          window.setBackgroundMaterial(transparent ? "acrylic" : "none");
         }
         if (process.platform !== "darwin" && process.platform !== "win32") {
           window.setTitleBarOverlay({
@@ -2457,7 +2466,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           });
         }
       } else if ((surface === "console" || surface === "ssh") && supportsTerminalTransparency()) {
-        const transparent = applicationSettingsStore?.getState().terminal.transparentWindows ?? true;
+        const transparent = transparentTerminalWindowsEnabled();
         const theme = dark ? ghosttyConfigStore?.getState().dark : ghosttyConfigStore?.getState().light;
         const background = transparent ? "#00000000" : theme?.background ?? (dark ? "#1e1e1e" : "#fafafa");
         window.setBackgroundColor(background);

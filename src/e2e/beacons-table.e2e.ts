@@ -1419,6 +1419,7 @@ async function assertBeaconExecutionCommands(
         const current = await api.getApplicationSettings();
         return api.updateApplicationSettings({ expectedRevision: current.revision, settings: {
           theme: nextTheme, appIcon: current.appIcon, reduceMotion: current.reduceMotion,
+          disableWindowTransparency: current.disableWindowTransparency,
           reportScreenshotDirectory: current.reportScreenshotDirectory,
           commandPaletteShortcut: current.commandPaletteShortcut, keyboardShortcuts: current.keyboardShortcuts,
           terminal: { ...current.terminal, fontSize: 18 }, overview: current.overview,
@@ -1466,6 +1467,7 @@ async function assertBeaconExecutionCommands(
       const current = await api.getApplicationSettings();
       return api.updateApplicationSettings({ expectedRevision: current.revision, settings });
     }, { theme: originalSettings.theme, appIcon: originalSettings.appIcon, reduceMotion: originalSettings.reduceMotion,
+      disableWindowTransparency: originalSettings.disableWindowTransparency,
       reportScreenshotDirectory: originalSettings.reportScreenshotDirectory,
       commandPaletteShortcut: originalSettings.commandPaletteShortcut, keyboardShortcuts: originalSettings.keyboardShortcuts,
       terminal: originalSettings.terminal, overview: originalSettings.overview });

@@ -9,11 +9,14 @@ import type { TargetMode, TargetRef } from "../shared/target-contracts.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { NETWORK_FORWARDING_IPC_EVENTS } from "../shared/network-forwarding-contracts.js";
 import { WORKSPACE_ZOOM_CHANGED_CHANNEL } from "../shared/application-zoom-contracts.js";
+import type { ApplicationSettingsState, ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
+import type { OperationResult } from "../shared/contracts.js";
 
 const harness = vi.hoisted(() => ({
   windows: [] as any[],
   focusedWindow: undefined as any,
   nextContentsId: 100,
+  osRelease: undefined as string | undefined,
   suppressReadyToShow: false,
   cloudSshWindows: undefined as any,
   sshServices: undefined as any,
@@ -31,12 +34,13 @@ const harness = vi.hoisted(() => ({
     restartToApply: vi.fn(),
   },
   settingsStore: {
-    getState: vi.fn(() => ({
-      v: 7,
+    getState: vi.fn((): ApplicationSettingsState => ({
+      v: 8,
       revision: 0,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: false,
+      disableWindowTransparency: false,
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       reportScreenshotDirectory: null,
@@ -46,10 +50,13 @@ const harness = vi.hoisted(() => ({
         cursorStyle: "block",
         cursorBlink: true,
         smoothScrolling: false,
+        transparentWindows: true,
       },
       overview: { kinds: "default", statuses: "all", lightning: false, sidebarDisabled: false, presentation: "graph" },
     })),
-    update: vi.fn(async () => ({ ok: false, error: "not used by this test" })),
+    update: vi.fn<(input: ApplicationSettingsUpdateInput) => Promise<OperationResult<ApplicationSettingsState>>>(
+      async () => ({ ok: false, error: "not used by this test" }),
+    ),
     flush: vi.fn(async () => undefined),
   },
   zoomFactor: 1,
@@ -59,6 +66,11 @@ const harness = vi.hoisted(() => ({
     flush: vi.fn(async () => undefined),
   },
 }));
+
+vi.mock("node:os", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:os")>();
+  return { ...original, release: () => harness.osRelease ?? original.release() };
+});
 
 vi.mock("electron", () => {
   class FakeEmitter {
@@ -154,6 +166,9 @@ vi.mock("electron", () => {
     readonly setTitle = vi.fn();
     readonly setIcon = vi.fn();
     readonly setBackgroundColor = vi.fn();
+    readonly setVibrancy = vi.fn();
+    readonly setBackgroundMaterial = vi.fn();
+    readonly setAccentColor = vi.fn();
     readonly setTitleBarOverlay = vi.fn();
     destroyed = false;
     visible = false;
@@ -372,6 +387,153 @@ vi.mock("./ssh-ipc.js", () => ({
 }));
 
 describe("application protocol lifecycle", () => {
+  it.each(["darwin", "win32", "linux"] as const)(
+    "applies the global transparency switch to existing and new %s workspaces",
+    async (platform) => {
+      const { nativeTheme } = await import("electron");
+      const { startApplication } = await import("./application.js");
+      const { registerIpcHandlers } = await import("./ipc.js");
+      const settings = mockMutableApplicationSettings();
+      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+      const originalTheme = { shouldUseDarkColors: nativeTheme.shouldUseDarkColors, themeSource: nativeTheme.themeSource };
+      const controller = {
+        getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+        getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+        dispose: vi.fn(),
+      } as unknown as ApplicationCloudDeploymentController;
+      let application: Awaited<ReturnType<typeof startApplication>> | undefined;
+      try {
+        application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+        const workspace = harness.windows.at(-1)!;
+        const controllerSettings = vi.mocked(registerIpcHandlers).mock.calls.at(-1)![8]!;
+        Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+        harness.osRelease = "10.0.22621";
+
+        for (const dark of [false, true]) {
+          Object.assign(nativeTheme, { shouldUseDarkColors: dark });
+          for (const disabled of [true, false]) {
+            const { v: _version, revision, ...values } = harness.settingsStore.getState();
+            expect(await controllerSettings.update({
+              expectedRevision: revision,
+              settings: { ...values, theme: dark ? "dark" : "light", disableWindowTransparency: disabled },
+            })).toMatchObject({ ok: true });
+            const color = disabled || platform === "linux" ? dark ? "#09090b" : "#fafafa" : "#00000000";
+            expect(workspace.setBackgroundColor).toHaveBeenLastCalledWith(color);
+            expect(workspace.webContents.send).toHaveBeenCalledWith(IPC.applicationSettingsChanged,
+              expect.objectContaining({ disableWindowTransparency: disabled }));
+            if (platform === "darwin") expect(workspace.setVibrancy).toHaveBeenLastCalledWith(disabled ? null : "sidebar");
+            if (platform === "win32") expect(workspace.setBackgroundMaterial).toHaveBeenLastCalledWith(disabled ? "none" : "acrylic");
+
+            application.createWindow();
+            const laterWorkspace = harness.windows.at(-1)!;
+            if (platform !== "win32" || disabled) expect(laterWorkspace.options.backgroundColor).toBe(color);
+            else expect(laterWorkspace.options.backgroundColor).toBeUndefined();
+            expect(laterWorkspace.setBackgroundColor).toHaveBeenLastCalledWith(color);
+            if (platform === "darwin") expect(laterWorkspace.options.vibrancy).toBe(disabled ? undefined : "sidebar");
+            if (platform === "win32") expect(laterWorkspace.options.backgroundMaterial).toBe(disabled ? "none" : "acrylic");
+          }
+        }
+      } finally {
+        Object.defineProperty(process, "platform", platformDescriptor);
+        harness.osRelease = undefined;
+        Object.assign(nativeTheme, originalTheme);
+        await application?.stop();
+        settings.restore();
+      }
+    },
+  );
+
+  it.each([
+    { platform: "darwin", terminalTransparent: true },
+    { platform: "darwin", terminalTransparent: false },
+    { platform: "win32", terminalTransparent: true },
+    { platform: "win32", terminalTransparent: false },
+  ] as const)("overrides terminal transparency on $platform without losing the $terminalTransparent preference", async ({ platform, terminalTransparent }) => {
+    const { registerIpcHandlers } = await import("./ipc.js");
+    const settings = mockMutableApplicationSettings(true, terminalTransparent);
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const cloudController = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      startSshSession: vi.fn(async (deploymentId: string) => ({
+        ok: true as const,
+        value: { target: managedTarget(deploymentId, "azure"), runtime: fakeRuntime() },
+      })),
+      approveSshHostKey: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    const fixture = await createConsoleLifecycleFixture(undefined, cloudController);
+    const { application, actions, workspaceWindow } = fixture;
+    try {
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+      harness.osRelease = "10.0.22621";
+      expect(await actions.open(identityFor(workspaceWindow))).toEqual({ ok: true });
+      const consoleTerminal = harness.windows.at(-1)!;
+      expect(await harness.cloudSshWindows.open("6f0a80ed-bdd5-4ec0-aa53-7ecca9df0001")).toMatchObject({ ok: true });
+      const sshTerminal = sshWindows().at(-1)!;
+      for (const terminal of [consoleTerminal, sshTerminal]) {
+        expect(terminal.options.backgroundColor).not.toBe("#00000000");
+        if (platform === "darwin") expect(terminal.options.vibrancy).toBeUndefined();
+        else expect(terminal.options.backgroundMaterial).toBe("none");
+      }
+
+      const controllerSettings = vi.mocked(registerIpcHandlers).mock.calls.at(-1)![8]!;
+      for (const disabled of [false, true]) {
+        const { v: _version, revision, ...values } = harness.settingsStore.getState();
+        expect(await controllerSettings.update({
+          expectedRevision: revision,
+          settings: { ...values, disableWindowTransparency: disabled },
+        })).toMatchObject({ ok: true });
+        const transparent = !disabled && terminalTransparent;
+        for (const terminal of [consoleTerminal, sshTerminal]) {
+          const background = terminal.setBackgroundColor.mock.calls.at(-1)![0];
+          if (transparent) expect(background).toBe("#00000000");
+          else expect(background).not.toBe("#00000000");
+          if (platform === "darwin") expect(terminal.setVibrancy).toHaveBeenLastCalledWith(transparent ? "sidebar" : null);
+          else expect(terminal.setBackgroundMaterial).toHaveBeenLastCalledWith(transparent ? "acrylic" : "none");
+        }
+        expect(harness.settingsStore.getState().terminal.transparentWindows).toBe(terminalTransparent);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+      harness.osRelease = undefined;
+      await application.stop();
+      settings.restore();
+    }
+  });
+
+  it("keeps Linux workspace backgrounds opaque across native theme changes", async () => {
+    const { nativeTheme } = await import("electron");
+    const { startApplication } = await import("./application.js");
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const originalTheme = {
+      shouldUseDarkColors: nativeTheme.shouldUseDarkColors,
+      themeSource: nativeTheme.themeSource,
+    };
+    const controller = {
+      getSnapshot: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      getTerminalRuntime: vi.fn(async () => ({ ok: false as const, error: "not needed" })),
+      dispose: vi.fn(),
+    } as unknown as ApplicationCloudDeploymentController;
+    let application: Awaited<ReturnType<typeof startApplication>> | undefined;
+    try {
+      application = await startApplication({ cloudDeploymentController: controller, registry: fakeConnectionRegistry() as never });
+      const workspaceWindow = harness.windows.at(-1)!;
+      // Exercise the Linux update branch on every host without changing the
+      // platform-specific services selected when the application starts.
+      Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+      for (const [dark, background] of [[false, "#fafafa"], [true, "#09090b"]] as const) {
+        Object.assign(nativeTheme, { shouldUseDarkColors: dark });
+        nativeTheme.emit("updated");
+        expect(workspaceWindow.setBackgroundColor).toHaveBeenLastCalledWith(background);
+      }
+    } finally {
+      Object.defineProperty(process, "platform", platformDescriptor);
+      Object.assign(nativeTheme, originalTheme);
+      await application?.stop();
+    }
+  });
+
   it("restores workspace zoom after navigation and across application starts", async () => {
     const { startApplication } = await import("./application.js");
     harness.zoomFactor = 1;
@@ -1549,6 +1711,7 @@ async function createInteractionLifecycleFixture(mode: TargetMode) {
 
 async function createConsoleLifecycleFixture(
   startRuntime: () => Promise<ReturnType<typeof fakeRuntime>> = async () => fakeRuntime(),
+  cloudController?: ApplicationCloudDeploymentController,
 ) {
   const runtimes: ReturnType<typeof fakeRuntime>[] = [];
   const startConsoleRuntime = vi.fn(async (options: { configBytes: Buffer }) => {
@@ -1575,7 +1738,7 @@ async function createConsoleLifecycleFixture(
   const { startApplication } = await import("./application.js");
   const { registerIpcHandlers } = await import("./ipc.js");
   const application = await startApplication({
-    cloudDeploymentController: controller,
+    cloudDeploymentController: cloudController ?? controller,
     registry: registry as never,
     consolePtyFactory: {} as never,
     startConsoleRuntime: startConsoleRuntime as never,
@@ -1593,6 +1756,24 @@ async function createConsoleLifecycleFixture(
 
 function sshWindows(): any[] {
   return harness.windows.filter(({ options }) => options.title === "SSH");
+}
+
+function mockMutableApplicationSettings(disableWindowTransparency = false, transparentWindows = true) {
+  const originalGetState = harness.settingsStore.getState.getMockImplementation()!;
+  const originalUpdate = harness.settingsStore.update.getMockImplementation()!;
+  let state = harness.settingsStore.getState();
+  state = { ...state, disableWindowTransparency, terminal: { ...state.terminal, transparentWindows } };
+  harness.settingsStore.getState.mockImplementation(() => state);
+  harness.settingsStore.update.mockImplementation(async (input) => {
+    state = { ...state, ...input.settings, revision: state.revision + 1 };
+    return { ok: true, value: state };
+  });
+  return {
+    restore: () => {
+      harness.settingsStore.getState.mockImplementation(originalGetState);
+      harness.settingsStore.update.mockImplementation(originalUpdate);
+    },
+  };
 }
 
 function identityFor(window: any) {

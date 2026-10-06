@@ -90,7 +90,12 @@ use native sidebar vibrancy on macOS and acrylic on Windows 11 22H2 or newer
 (build 22621+). Windows keeps its visible native File, Edit, and other menus.
 Linux and older Windows versions retain an opaque window.
 
-Turning the setting off immediately restores an opaque terminal background while
+**Settings → General → Appearance → Disable window transparency** overrides
+terminal transparency for all open and newly created windows. This switch is
+off by default and persists in `gui/application-settings.json`. Turning it back
+off restores the saved terminal transparency preference without restarting.
+
+Turning **Transparent terminal windows** off immediately restores an opaque terminal background while
 retaining the selected colors. With transparency enabled on a supported platform,
 `background-opacity` controls the terminal tint from `0` to `1`; its GUI default
 is `0.22`, matching the main sidebar's tint over the native glass material. An

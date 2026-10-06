@@ -26,6 +26,7 @@ export interface SettingsPageProps {
   readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
+  readonly onDisableWindowTransparencyChange: (value: boolean) => void;
   readonly onReportScreenshotDirectoryChange: (directory: string | null) => void;
   readonly onKeyboardShortcutChange: (action: KeyboardShortcutAction, shortcut: string | undefined) => void;
   readonly onResetKeyboardShortcuts: () => void;
@@ -38,6 +39,7 @@ export function SettingsPage({
   onAppIconChange,
   onThemeChange,
   onReduceMotionChange,
+  onDisableWindowTransparencyChange,
   onReportScreenshotDirectoryChange,
   onKeyboardShortcutChange,
   onResetKeyboardShortcuts,
@@ -176,6 +178,13 @@ export function SettingsPage({
                   <Segment.Item id="passion">Passion</Segment.Item>
                 </Segment>
               </div>
+              <SwitchRow
+                disabled={isSaving}
+                label="Disable window transparency"
+                description="Use opaque backgrounds in all application windows. Changes apply immediately."
+                selected={settings.disableWindowTransparency}
+                onChange={onDisableWindowTransparencyChange}
+              />
             </Card.Content>
           </Card>
 

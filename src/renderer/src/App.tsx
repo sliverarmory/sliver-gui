@@ -568,6 +568,7 @@ export function App() {
         theme: current.theme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        disableWindowTransparency: current.disableWindowTransparency,
         reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,
         keyboardShortcuts: current.keyboardShortcuts,
@@ -901,6 +902,10 @@ export function App() {
                 ? !applicationSettings.isReady || applicationSettings.isSaving
                 : false}
               settings={settings}
+              onDisableWindowTransparencyChange={(disableWindowTransparency) => updateSettings((current) => ({
+                ...current,
+                disableWindowTransparency,
+              }))}
               onAppIconChange={(appIcon) => updateSettings((current) => ({
                 ...current,
                 appIcon,
