@@ -41,7 +41,7 @@ tracked coverage and the feature documents below for specific boundaries.
 
 - Node.js 24.15 or newer on the 24.x line, or Node.js 26 or newer.
 - npm 11.19 or newer.
-- A HeroUI Pro license and authentication for its package artifacts.
+- A HeroUI Pro license and authentication for its package artifact, you only need this license if you want to build the code from scratch. You can download [prebuilt binaries from the Github releases](https://github.com/sliverarmory/sliver-gui/releases).
 
 The supported versions and locked dependencies are recorded in
 [package.json](package.json) and [package-lock.json](package-lock.json).
@@ -156,27 +156,6 @@ for the trust bootstrap, public fingerprints, and release key policy.
 Build targets and minimum-runtime certification are separate. See the
 [platform support ADR](docs/adr/0001-platform-support.md) for runtime requirements,
 certification status, and signing/update policy.
-
-## Continuous integration and releases
-
-The [build workflow](.github/workflows/build-and-release.yml) runs protocol and
-parity checks, Electron E2E, and native package jobs. Application jobs need the
-`HEROUI_AUTH_TOKEN` Actions secret; public-fork pull requests run only the
-non-secret protocol/parity job. Native jobs test unpacked applications against
-a loopback mTLS fixture.
-
-Stable publication starts with a signed annotated `vX.Y.Z` tag at the current
-`origin/main` commit. A credential-free tag workflow dispatches the release
-workflow on `main`; release signing secrets are available only from its
-main-only GitHub environment. Publication requires a public repository with
-immutable releases enabled, valid macOS and Windows signatures matching the
-pinned public certificates, and verified assets before publishing through a
-draft release. This self-signed profile explicitly skips Apple notarization;
-the separate Developer ID profile retains its Apple signing requirements.
-Pull-request, `main`, and manually dispatched non-release builds produce CI
-artifacts. See the workflow for signing inputs and publication gates, and the
-[private updater workflow](.github/workflows/private-updater-e2e.yml) for the
-separate update integration test.
 
 ## Security boundaries
 
