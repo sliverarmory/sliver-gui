@@ -1675,6 +1675,230 @@ describe("managed server connection metadata", () => {
 });
 
 describe("connection registry with an injected Sliver client", () => {
+  it("manages hosted websites without leaking content into inventory and uses distinct content and MIME RPCs", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    expect(await registry.createWebsite(1, { name: "landing" })).toMatchObject({ ok: true, value: { site: { name: "landing", contentCount: 0 } } });
+    expect(await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "<h1>Hosted</h1>", contentType: "text/html", overwrite: false,
+    })).toMatchObject({ ok: true, value: { site: { contentCount: 1 } } });
+    const catalog = await registry.listWebsites(1, {});
+    expect(JSON.stringify(catalog)).not.toContain("Hosted");
+    const preview = await registry.getWebsiteContent(1, { name: "landing", path: "/index.html" });
+    expect(preview).toMatchObject({ ok: true, value: { previewState: "text" } });
+    if (!preview.ok) throw new Error(preview.error);
+    expect(Buffer.from(preview.value.preview).toString()).toBe("<h1>Hosted</h1>");
+    expect(await registry.updateWebsiteContentType(1, { name: "landing", path: "/index.html", contentType: "text/plain" })).toMatchObject({ ok: true });
+    const sent = web.websiteUpdateContent.mock.calls[0]![1]["/index.html"]!;
+    expect(sent.Content.byteLength).toBe(0);
+    expect(sent).toMatchObject({ Path: "/index.html", ContentType: "text/plain", Size: "0", Sha256: "", OriginalFile: "" });
+    expect(Buffer.from(web.sites.get("landing")!.Contents["/index.html"]!.Content).toString()).toBe("<h1>Hosted</h1>");
+    expect(await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "replacement", contentType: "text/plain", overwrite: false,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/confirm replacement/) });
+    expect(await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "replacement", contentType: "text/plain", overwrite: true,
+    })).toMatchObject({ ok: true });
+    expect(await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "", contentType: "text/plain", overwrite: true,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/empty/) });
+    expect(await registry.deleteWebsiteContent(1, { name: "landing", path: "/index.html" })).toMatchObject({ ok: true, value: { site: { contentCount: 0 } } });
+    expect(await registry.deleteWebsite(1, { name: "landing" })).toEqual({ ok: true });
+    expect(web.sites.size).toBe(0);
+  });
+
+  it("imports binary content with native selection, exports exact bytes, and stops after connection changes", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    const filePath = join(root, "image.bin");
+    const data = Buffer.from([0, 255, 128, 7, 42]);
+    await writeFile(filePath, data);
+    electronMocks.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [filePath] });
+    expect(await registry.importWebsiteFiles(sender(1), {
+      name: "landing", path: "/image.bin", contentType: "application/octet-stream", overwrite: false, directory: false,
+    })).toMatchObject({ ok: true });
+    expect(web.sites.get("landing")!.Contents["/image.bin"]!.Content).toEqual(data);
+    const destination = join(root, "exported.bin");
+    electronMocks.showSaveDialog.mockResolvedValueOnce({ canceled: false, filePath: destination });
+    expect(await registry.exportWebsiteContent(sender(1), { name: "landing", path: "/image.bin" }))
+      .toMatchObject({ ok: true, value: { saved: true, size: data.length } });
+    expect(await readFile(destination)).toEqual(data);
+    const writes = web.websiteAddContent.mock.calls.length;
+    electronMocks.showOpenDialog.mockImplementationOnce(async () => {
+      await registry.disconnect(1);
+      return { canceled: false, filePaths: [filePath] };
+    });
+    expect(await registry.importWebsiteFiles(sender(1), {
+      name: "landing", path: "/new.bin", contentType: "", overwrite: false, directory: false,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/connection changed/) });
+    expect(web.websiteAddContent).toHaveBeenCalledTimes(writes);
+  });
+
+  it("does not corrupt concurrently replaced bytes when changing a website content type", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "old", contentType: "text/html", overwrite: false,
+    });
+    const replacement = Buffer.from("a different operator's newer website content");
+    const digest = createHash("sha256").update(replacement).digest("hex");
+    const updateMetadata = web.websiteUpdateContent.getMockImplementation()!;
+    web.websiteUpdateContent.mockImplementationOnce(async (name, contents) => {
+      // This occurs after both preflight reads, just before the server applies
+      // the nonempty fields from the MIME update to its latest stored metadata.
+      const latest = web.sites.get(name)!.Contents["/index.html"]!;
+      latest.Content = replacement;
+      latest.Size = String(replacement.byteLength);
+      latest.Sha256 = digest;
+      return updateMetadata(name, contents);
+    });
+    expect(await registry.updateWebsiteContentType(1, {
+      name: "landing", path: "/index.html", contentType: "text/plain",
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/did not confirm/) });
+    const current = web.sites.get("landing")!.Contents["/index.html"]!;
+    expect(current).toMatchObject({ Size: String(replacement.byteLength), Sha256: digest, ContentType: "text/plain" });
+    expect(current.Content).toEqual(replacement);
+    expect(await registry.getWebsiteContent(1, { name: "landing", path: "/index.html" }))
+      .toMatchObject({ ok: true, value: { previewState: "text" } });
+  });
+
+  it("serializes website preflights across windows sharing a backend so a concurrent add cannot overwrite", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    await registry.createWebsite(1, { name: "landing" });
+    const originalWrite = web.websiteAddContent.getMockImplementation()!;
+    let releaseFirst!: () => void;
+    let signalFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    web.websiteAddContent.mockImplementationOnce(async (name, contents) => {
+      signalFirst();
+      await firstGate;
+      return originalWrite(name, contents);
+    });
+    const first = registry.saveWebsiteText(1, {
+      name: "landing", path: "/shared.txt", contentType: "text/plain", text: "first writer", overwrite: false,
+    });
+    await firstStarted;
+    const readsBeforeSecond = web.website.mock.calls.length;
+    const second = registry.saveWebsiteText(2, {
+      name: "landing", path: "/shared.txt", contentType: "text/plain", text: "second writer", overwrite: false,
+    });
+    await Promise.resolve();
+    expect(web.website.mock.calls).toHaveLength(readsBeforeSecond);
+    releaseFirst();
+    expect(await first).toMatchObject({ ok: true });
+    expect(await second).toMatchObject({ ok: false, error: expect.stringMatching(/already exists.*confirm replacement/) });
+    expect(Buffer.from(web.sites.get("landing")!.Contents["/shared.txt"]!.Content).toString()).toBe("first writer");
+    expect(web.websiteAddContent).toHaveBeenCalledTimes(2); // Empty site creation plus the first writer.
+    // A rejected queued mutation does not poison the pool's subsequent writes.
+    expect(await registry.saveWebsiteText(2, {
+      name: "landing", path: "/next.txt", contentType: "text/plain", text: "next writer", overwrite: false,
+    })).toMatchObject({ ok: true });
+  });
+
+  it("rejects replacement content changed while the native file picker was open", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "original", contentType: "text/html", overwrite: false,
+    });
+    const filePath = join(root, "replacement.html");
+    await writeFile(filePath, "local replacement");
+    const replacement = Buffer.from("new content from another operator");
+    const writesBeforeSelection = web.websiteAddContent.mock.calls.length;
+    electronMocks.showOpenDialog.mockImplementationOnce(async () => {
+      const latest = web.sites.get("landing")!.Contents["/index.html"]!;
+      latest.Content = replacement;
+      latest.Size = String(replacement.byteLength);
+      latest.Sha256 = createHash("sha256").update(replacement).digest("hex");
+      return { canceled: false, filePaths: [filePath] };
+    });
+    expect(await registry.importWebsiteFiles(sender(1), {
+      name: "landing", path: "/index.html", contentType: "text/html", overwrite: true, directory: false,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/content changed during file selection/) });
+    expect(web.websiteAddContent).toHaveBeenCalledTimes(writesBeforeSelection);
+    expect(web.sites.get("landing")!.Contents["/index.html"]!.Content).toEqual(replacement);
+  });
+
+  it("rejects stale website replies and website recreation during native import", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    const filePath = join(root, "site.txt");
+    await writeFile(filePath, "data");
+    electronMocks.showOpenDialog.mockImplementationOnce(async () => {
+      web.sites.get("landing")!.ID = randomUUID();
+      return { canceled: false, filePaths: [filePath] };
+    });
+    expect(await registry.importWebsiteFiles(sender(1), {
+      name: "landing", path: "/site.txt", contentType: "text/plain", overwrite: false, directory: false,
+    })).toMatchObject({ ok: false, error: expect.stringMatching(/website changed/) });
+    expect(web.websiteAddContent).toHaveBeenCalledTimes(1);
+    let release!: (site: clientpb.Website) => void;
+    client.adapter.website = vi.fn(() => new Promise<clientpb.Website>((resolve) => { release = resolve; }));
+    const pending = registry.getWebsiteContent(1, { name: "landing", path: "/" });
+    await registry.disconnect(1);
+    const content = Buffer.from("late secret");
+    release(clientpb.Website.create({ Name: "landing", Contents: { "/": {
+      Path: "/", Content: content, Size: String(content.length),
+    } } }));
+    expect(await pending).toMatchObject({ ok: false, error: expect.stringMatching(/connection changed/) });
+    expect(content.every((byte) => byte === 0)).toBe(true);
+  });
+
+  it("opens rendered previews only through the main controller and closes them when the owner disconnects", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    const controller = { open: vi.fn(async () => {}), closeOwner: vi.fn(), dispose: vi.fn() };
+    registry.setWebsitePreviewController(controller);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "<h1>Static preview</h1>", contentType: "text/html", overwrite: false,
+    });
+    let observedBytes: Uint8Array | undefined;
+    controller.open.mockImplementationOnce(async (...args: unknown[]) => {
+      observedBytes = args[2] as Uint8Array;
+      expect(Buffer.from(observedBytes).toString()).toBe("<h1>Static preview</h1>");
+      expect(args[3]).toBe("text/html");
+      (args[4] as () => void)();
+    });
+    const result = await registry.openWebsiteRenderedPreview(sender(1), { name: "landing", path: "/index.html" });
+    expect(result).toEqual({ ok: true });
+    expect(controller.open).toHaveBeenCalledOnce();
+    expect(observedBytes?.every((byte) => byte === 0)).toBe(true);
+    expect(web.sites.size).toBe(1);
+    controller.closeOwner.mockClear();
+    await registry.disconnect(1);
+    expect(controller.closeOwner).toHaveBeenCalledWith(1);
+  });
+
   it("shares pools, listeners, and event subscriptions until the final window detaches", async () => {
     const clients: FakeSliverClient[] = [];
     const registry = createRegistry(() => {
@@ -9255,6 +9479,48 @@ describe("server compatibility and event redaction", () => {
     expect(JSON.stringify(summary)).not.toMatch(/credential-password|server-secret/u);
   });
 });
+
+function attachWebsiteBackend(client: FakeSliverClient) {
+  const sites = new Map<string, clientpb.Website>();
+  const copy = (site: clientpb.Website): clientpb.Website => clientpb.Website.decode(clientpb.Website.encode(site).finish());
+  const website = vi.fn(async (name: string) => {
+    const site = sites.get(name);
+    if (!site) throw new Error("Website not found");
+    return copy(site);
+  });
+  const websites = vi.fn(async () => [...sites.values()].map(copy));
+  const websiteAddContent = vi.fn(async (name: string, contents: Record<string, clientpb.WebContent>) => {
+    let site = sites.get(name);
+    if (!site) { site = clientpb.Website.create({ Name: name, ID: randomUUID() }); sites.set(name, site); }
+    for (const [path, item] of Object.entries(contents)) {
+      site.Contents[path] = clientpb.WebContent.create({
+        ...item, ID: site.Contents[path]?.ID || randomUUID(), WebsiteID: site.ID,
+        Content: Buffer.from(item.Content), Size: String(item.Content.byteLength),
+        Sha256: createHash("sha256").update(item.Content).digest("hex"),
+      });
+    }
+    return copy(site);
+  });
+  const websiteUpdateContent = vi.fn(async (name: string, contents: Record<string, clientpb.WebContent>) => {
+    const site = sites.get(name)!;
+    for (const [path, item] of Object.entries(contents)) {
+      const existing = site.Contents[path]!;
+      if (item.ContentType) existing.ContentType = item.ContentType;
+      if (item.Size !== "0") existing.Size = item.Size;
+      if (item.Sha256) existing.Sha256 = item.Sha256;
+      existing.OriginalFile = item.OriginalFile || path.split("/").at(-1) || "";
+    }
+    return copy(site);
+  });
+  const websiteRemoveContent = vi.fn(async (name: string, paths: string[]) => {
+    const site = sites.get(name)!;
+    for (const path of paths) delete site.Contents[path];
+    return copy(site);
+  });
+  const websiteRemove = vi.fn(async (name: string) => { sites.delete(name); });
+  Object.assign(client.adapter, { website, websites, websiteAddContent, websiteUpdateContent, websiteRemoveContent, websiteRemove });
+  return { sites, website, websites, websiteAddContent, websiteUpdateContent, websiteRemoveContent, websiteRemove };
+}
 
 class FakeSliverClient {
   readonly events = new Subject<clientpb.Event>();

@@ -22,6 +22,11 @@ Font Awesome.
   Activity panels.
 - Generation, builds and profiles, jobs and listeners, Loot, and Credentials
   views.
+- Hosted Websites with site creation/deletion, text editing, file and recursive
+  directory imports, content replacement/deletion, MIME updates, and export.
+  Previews include read-only Monaco source with syntax highlighting, binary hex,
+  and isolated static HTML/image rendering. Scripts, navigation, and external
+  resources are blocked. See [website limits and preview security](docs/website-preview-security.md).
 - Dedicated Sliver console and managed SSH windows with tabbed Ghostty
   terminals.
 - Separate Armory, Network, and Cloud Deployment windows, including AWS and

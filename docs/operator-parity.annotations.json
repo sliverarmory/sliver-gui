@@ -10737,7 +10737,7 @@
     {
       "id": "server.websites",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10764,16 +10764,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites"
+        "parity-contract:server.websites",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.add-content",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10804,16 +10807,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.add-content"
+        "parity-contract:server.websites.add-content",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.content-type",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10842,16 +10848,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.content-type"
+        "parity-contract:server.websites.content-type",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.list",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10876,16 +10885,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.list"
+        "parity-contract:server.websites.list",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.rm",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10910,16 +10922,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.rm"
+        "parity-contract:server.websites.rm",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.rm-content",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10948,16 +10963,19 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.rm-content"
+        "parity-contract:server.websites.rm-content",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.show",
       "operatorScope": true,
-      "status": "planned",
+      "status": "in-progress",
       "milestone": "M6",
       "restrictionReview": {
         "targetModes": [
@@ -10982,11 +11000,14 @@
       "dependencies": [
         "compatible-server"
       ],
-      "guiSurface": "operator-data",
+      "guiSurface": "websites",
       "testIds": [
-        "parity-contract:server.websites.show"
+        "parity-contract:server.websites.show",
+        "website-crud-ipc",
+        "website-inert-preview",
+        "website-electron-journey"
       ],
-      "notes": "Registered server workflow assigned to M6."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.wg",

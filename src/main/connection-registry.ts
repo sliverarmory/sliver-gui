@@ -207,6 +207,17 @@ import {
   validateImplantName,
 } from "./implant-config.js";
 import { sniffLootMediaMimeType } from "./loot-media.js";
+import type { WebsitePreviewController } from "./website-preview-windows.js";
+import {
+  WEBSITE_LIMITS,
+  type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
+  type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentInput, type WebsiteDetail,
+  type WebsiteExportResult, type WebsiteNameInput,
+} from "../shared/website-contracts.js";
+import {
+  assertWebsiteCatalogBudget, clearWebsiteContents, findWebsiteContent, readWebsiteImport, websiteContentBytes,
+  websiteContentPreview, websiteDetail, websiteSummary,
+} from "./websites.js";
 import { buildStagePayload } from "./stage-payload.js";
 import {
   MAX_SAVED_CONFIG_BYTES,
@@ -689,6 +700,7 @@ interface TargetCatalogSnapshot {
 export class ConnectionRegistry {
   private readonly windows = new Map<number, WindowContext>();
   private readonly pools = new Map<string, BackendPool>();
+  private readonly websiteMutationTails = new WeakMap<BackendPool, Promise<void>>();
   private readonly remoteTextEditorBindings = new WeakSet<object>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
@@ -713,6 +725,7 @@ export class ConnectionRegistry {
   private dotNetExecutionHistoryOutputBytes = 0;
   private credentialClipboard?: CredentialClipboardState;
   private credentialClipboardTail: Promise<void> = Promise.resolve();
+  private websitePreviews: WebsitePreviewController | undefined;
 
   private readonly configStore: OperatorConfigStore;
   private readonly savedConfigWatcher: SavedConfigDirectoryWatcher;
@@ -804,6 +817,11 @@ export class ConnectionRegistry {
     }
   }
 
+  setWebsitePreviewController(controller: WebsitePreviewController): void {
+    this.websitePreviews?.dispose();
+    this.websitePreviews = controller;
+  }
+
   registerWindow(contentsId: number): void {
     if (this.windows.size === 0) this.savedConfigWatcher.start();
     this.windows.set(contentsId, {
@@ -838,6 +856,7 @@ export class ConnectionRegistry {
   }
 
   async unregisterWindow(contentsId: number): Promise<void> {
+    this.websitePreviews?.closeOwner(contentsId);
     const context = this.windows.get(contentsId);
     this.windows.delete(contentsId);
     if (this.windows.size === 0) this.savedConfigWatcher.stop();
@@ -871,6 +890,7 @@ export class ConnectionRegistry {
     contentsId: number,
     reason: Extract<StreamCloseReason, "navigation" | "renderer-gone" | "application-shutdown">,
   ): Promise<void> {
+    this.websitePreviews?.closeOwner(contentsId);
     await this.streams.closeWindow(contentsId, reason);
   }
 
@@ -880,6 +900,8 @@ export class ConnectionRegistry {
     if (!source?.poolKey) return;
     const pool = this.pools.get(source.poolKey);
     if (!pool) return;
+
+    this.websitePreviews?.closeOwner(targetContentsId);
 
     void this.streams.closeWindow(targetContentsId, "backend-rebound");
     target.connectionAttempt += 1;
@@ -1153,6 +1175,7 @@ export class ConnectionRegistry {
   }
 
   async disconnect(contentsId: number): Promise<OperationResult<SliverSnapshot>> {
+    this.websitePreviews?.closeOwner(contentsId);
     const context = this.requireWindow(contentsId);
     await this.streams.closeWindow(contentsId, "backend-disconnected").catch(() => undefined);
     context.connectionAttempt += 1;
@@ -7153,6 +7176,281 @@ export class ConnectionRegistry {
     });
   }
 
+  async listWebsites(contentsId: number, input: ListWebsitesInput): Promise<OperationResult<WebsiteCatalogPage>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const sites = await pool.client.websites();
+      try {
+        assertBinding();
+        const query = (input.query ?? "").trim().toLocaleLowerCase();
+        return operatorDataPage(sites.map(websiteSummary)
+          .filter((site) => !query || site.name.toLocaleLowerCase().includes(query))
+          .sort((a, b) => a.name.localeCompare(b.name)), input.cursor, input.limit);
+      } finally { for (const site of sites) clearWebsiteContents(site); }
+    });
+  }
+
+  async getWebsite(contentsId: number, input: WebsiteNameInput): Promise<OperationResult<WebsiteDetail>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const site = await pool.client.website(input.name);
+      try { assertBinding(); return websiteDetail(site, input.name); }
+      finally { clearWebsiteContents(site); }
+    });
+  }
+
+  async createWebsite(contentsId: number, input: WebsiteNameInput): Promise<OperationResult<WebsiteDetail>> {
+    return this.withPool(contentsId, (pool, assertBinding) => this.queueWebsiteMutation(pool, assertBinding, async () => {
+      const sites = await pool.client.websites();
+      try {
+        assertBinding();
+        if (sites.some((site) => site.Name === input.name)) throw new Error("A website with this name already exists");
+        assertWebsiteCatalogBudget(sites, input.name, {});
+      } finally { for (const site of sites) clearWebsiteContents(site); }
+      assertBinding();
+      const site = await pool.client.websiteAddContent(input.name, {});
+      try { assertBinding(); return websiteDetail(site, input.name); }
+      finally { clearWebsiteContents(site); }
+    }));
+  }
+
+  async deleteWebsite(contentsId: number, input: WebsiteNameInput): Promise<OperationResult> {
+    return this.withPoolWithoutValue(contentsId, (pool, assertBinding) => this.queueWebsiteMutation(pool, assertBinding, async () => {
+      const site = await pool.client.website(input.name);
+      try { assertBinding(); websiteDetail(site, input.name); }
+      finally { clearWebsiteContents(site); }
+      assertBinding();
+      await pool.client.websiteRemove(input.name);
+      assertBinding();
+    }));
+  }
+
+  /** Serialize local writers through the pooled connection, excluding native dialogs and reads. */
+  private queueWebsiteMutation<T>(pool: BackendPool, assertBinding: () => void, operation: () => Promise<T>): Promise<T> {
+    const previous = this.websiteMutationTails.get(pool) ?? Promise.resolve();
+    const pending = previous.then(() => {
+      assertBinding();
+      return operation();
+    });
+    const tail = pending.then(() => undefined, () => undefined);
+    this.websiteMutationTails.set(pool, tail);
+    void tail.then(() => {
+      if (this.websiteMutationTails.get(pool) === tail) this.websiteMutationTails.delete(pool);
+    });
+    return pending;
+  }
+
+  private async writeWebsiteContents(
+    pool: BackendPool,
+    assertBinding: () => void,
+    input: WebsiteNameInput & { overwrite: boolean },
+    contents: Record<string, clientpb.WebContent>,
+    expectedSiteId?: string,
+    requireReplacement = false,
+    beforeSelectionContents?: Record<string, clientpb.WebContent>,
+  ): Promise<WebsiteDetail> {
+    const current = await pool.client.website(input.name);
+    try {
+      assertBinding();
+      websiteDetail(current, input.name);
+      if (expectedSiteId !== undefined && current.ID !== expectedSiteId) {
+        throw new Error("The website changed during file selection; refresh and try again");
+      }
+      for (const item of Object.values(contents)) {
+        const existing = Object.values(current.Contents).find((entry) => entry.Path === item.Path);
+        if (beforeSelectionContents !== undefined) {
+          const beforeSelection = Object.values(beforeSelectionContents).find((entry) => entry.Path === item.Path);
+          if (beforeSelection?.ID !== existing?.ID || beforeSelection?.Sha256 !== existing?.Sha256 ||
+              beforeSelection?.Size !== existing?.Size || beforeSelection?.ContentType !== existing?.ContentType) {
+            throw new Error("Website content changed during file selection; refresh and review the replacement");
+          }
+        }
+        if (existing && !input.overwrite) throw new Error(`Content already exists at ${item.Path}; confirm replacement first`);
+        if (!existing && requireReplacement) throw new Error("The content to replace no longer exists; refresh the website");
+        if (!item.Content.byteLength) throw new Error("This Sliver server cannot upload empty website content");
+        item.WebsiteID = current.ID;
+      }
+    } finally { clearWebsiteContents(current); }
+    const catalog = await pool.client.websites();
+    try {
+      assertBinding();
+      const latest = catalog.find((site) => site.Name === input.name);
+      for (const item of Object.values(contents)) {
+        const previous = Object.values(current.Contents).find((entry) => entry.Path === item.Path);
+        const existing = latest && Object.values(latest.Contents).find((entry) => entry.Path === item.Path);
+        if (previous?.ID !== existing?.ID || previous?.Sha256 !== existing?.Sha256) {
+          throw new Error("Website content changed before uploading; refresh and review the replacement");
+        }
+      }
+      assertWebsiteCatalogBudget(catalog, input.name, contents, current.ID);
+    } finally { for (const site of catalog) clearWebsiteContents(site); }
+    assertBinding();
+    const response = await pool.client.websiteAddContent(input.name, contents);
+    try {
+      assertBinding();
+      if (response.ID !== current.ID) throw new Error("The website changed while content was uploading; refresh its state");
+      return websiteDetail(response, input.name);
+    } finally { clearWebsiteContents(response); }
+  }
+
+  async saveWebsiteText(contentsId: number, input: SaveWebsiteTextInput): Promise<OperationResult<WebsiteDetail>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const data = Buffer.from(input.text, "utf8");
+      try {
+        if (!data.length) throw new Error("This Sliver server cannot upload empty website content");
+        if (data.length > WEBSITE_LIMITS.previewBytes) throw new Error("Website text exceeds the 1 MiB editor limit");
+        return await this.queueWebsiteMutation(pool, assertBinding, () => this.writeWebsiteContents(pool, assertBinding, input, {
+          [input.path]: clientpb.WebContent.create({
+            Path: input.path, ContentType: input.contentType, Content: data,
+            Size: String(data.length), OriginalFile: posixPath.basename(input.path) || "index.html",
+          }),
+        }, undefined, input.overwrite));
+      } finally { data.fill(0); }
+    });
+  }
+
+  async importWebsiteFiles(sender: WebContents, input: ImportWebsiteFilesInput): Promise<OperationResult<WebsiteDetail>> {
+    const owner = requireOwnerWindow(sender);
+    return this.withPool(sender.id, async (pool, assertBinding) => {
+      const before = await pool.client.website(input.name);
+      try { assertBinding(); websiteDetail(before, input.name); }
+      finally { clearWebsiteContents(before); }
+      const selection = await dialog.showOpenDialog(owner, {
+        title: input.directory ? "Import website directory" : "Import website content",
+        properties: [input.directory ? "openDirectory" : "openFile"],
+      });
+      assertBinding();
+      const selectedPath = selection.filePaths[0];
+      if (selection.canceled || !selectedPath) throw new Error("Website import canceled");
+      const contents = await readWebsiteImport(selectedPath, input, assertBinding);
+      try {
+        return await this.queueWebsiteMutation(pool, assertBinding, () => this.writeWebsiteContents(pool, assertBinding, input, contents, before.ID,
+          input.overwrite && !input.directory, before.Contents));
+      } finally { for (const item of Object.values(contents)) item.Content.fill(0); }
+    });
+  }
+
+  async updateWebsiteContentType(
+    contentsId: number, input: UpdateWebsiteContentTypeInput,
+  ): Promise<OperationResult<WebsiteDetail>> {
+    return this.withPool(contentsId, (pool, assertBinding) => this.queueWebsiteMutation(pool, assertBinding, async () => {
+      if (!input.contentType) throw new Error("Specify a content type for this content");
+      const site = await pool.client.website(input.name);
+      let update: clientpb.WebContent;
+      let expectedSize: string;
+      let expectedDigest: string;
+      try {
+        assertBinding();
+        const item = findWebsiteContent(site, input.name, input.path);
+        expectedSize = item.Size;
+        expectedDigest = item.Sha256;
+        // The pinned server applies every nonzero/nonempty metadata field. Never
+        // resend an old size or digest over content replaced after our preflight.
+        update = clientpb.WebContent.create({
+          ID: item.ID, WebsiteID: site.ID, Path: item.Path, ContentType: input.contentType,
+        });
+      } finally { clearWebsiteContents(site); }
+      const catalog = await pool.client.websites();
+      try {
+        assertBinding();
+        const currentSite = catalog.find((entry) => entry.Name === input.name);
+        if (!currentSite || currentSite.ID !== site.ID) throw new Error("The website changed; refresh before editing content type");
+        const current = findWebsiteContent(currentSite, input.name, input.path);
+        if (current.ID !== update.ID || current.Sha256 !== expectedDigest || current.Size !== expectedSize) {
+          throw new Error("Website content changed; refresh before editing content type");
+        }
+        assertWebsiteCatalogBudget(catalog, input.name, {
+          [input.path]: clientpb.WebContent.create({ ...current, ContentType: input.contentType }),
+        }, site.ID);
+      } finally { for (const entry of catalog) clearWebsiteContents(entry); }
+      assertBinding();
+      const response = await pool.client.websiteUpdateContent(input.name, { [input.path]: update });
+      try {
+        assertBinding();
+        const updated = findWebsiteContent(response, input.name, input.path);
+        if (response.ID !== site.ID || updated.ID !== update.ID || updated.ContentType !== input.contentType ||
+            updated.Size !== expectedSize || updated.Sha256 !== expectedDigest) {
+          throw new Error("The server did not confirm the content type change; refresh the website");
+        }
+        return websiteDetail(response, input.name);
+      } finally { clearWebsiteContents(response); }
+    }));
+  }
+
+  async deleteWebsiteContent(contentsId: number, input: WebsiteContentInput): Promise<OperationResult<WebsiteDetail>> {
+    return this.withPool(contentsId, (pool, assertBinding) => this.queueWebsiteMutation(pool, assertBinding, async () => {
+      const site = await pool.client.website(input.name);
+      try { assertBinding(); findWebsiteContent(site, input.name, input.path); }
+      finally { clearWebsiteContents(site); }
+      assertBinding();
+      const response = await pool.client.websiteRemoveContent(input.name, [input.path]);
+      try {
+        assertBinding();
+        if (response.ID !== site.ID || Object.values(response.Contents).some((item) => item.Path === input.path)) {
+          throw new Error("The server did not confirm content removal; refresh the website");
+        }
+        return websiteDetail(response, input.name);
+      } finally { clearWebsiteContents(response); }
+    }));
+  }
+
+  async getWebsiteContent(contentsId: number, input: WebsiteContentInput): Promise<OperationResult<WebsiteContentDetail>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const site = await pool.client.website(input.name);
+      try { assertBinding(); return websiteContentPreview(findWebsiteContent(site, input.name, input.path)); }
+      finally { clearWebsiteContents(site); }
+    });
+  }
+
+  async openWebsiteRenderedPreview(sender: WebContents, input: WebsiteContentInput): Promise<OperationResult> {
+    const owner = requireOwnerWindow(sender);
+    return this.withPoolWithoutValue(sender.id, async (pool, assertBinding) => {
+      const previews = this.websitePreviews;
+      if (!previews) throw new Error("Rendered website preview is unavailable");
+      const site = await pool.client.website(input.name);
+      try {
+        assertBinding();
+        const item = findWebsiteContent(site, input.name, input.path);
+        await previews.open(owner, input, websiteContentBytes(item), item.ContentType, assertBinding);
+        assertBinding();
+      } finally { clearWebsiteContents(site); }
+    });
+  }
+
+  async exportWebsiteContent(sender: WebContents, input: WebsiteContentInput): Promise<OperationResult<WebsiteExportResult>> {
+    const owner = requireOwnerWindow(sender);
+    return this.withPool(sender.id, async (pool, assertBinding) => {
+      const before = await pool.client.website(input.name);
+      let contentId: string;
+      let digest: string;
+      let fileName: string;
+      try {
+        assertBinding();
+        const item = findWebsiteContent(before, input.name, input.path);
+        websiteContentBytes(item);
+        contentId = item.ID;
+        digest = item.Sha256;
+        fileName = safeArtifactFileName(posixPath.basename(input.path) || "index.html");
+      } finally { clearWebsiteContents(before); }
+      const selection = await dialog.showSaveDialog(owner, { title: "Export website content", defaultPath: fileName });
+      assertBinding();
+      if (selection.canceled || !selection.filePath) return { saved: false, fileName, size: 0 };
+      const intent = await this.reserveSessionSaveIntent(selection.filePath);
+      assertBinding();
+      const site = await pool.client.website(input.name);
+      try {
+        assertBinding();
+        const item = findWebsiteContent(site, input.name, input.path);
+        if (site.ID !== before.ID || item.ID !== contentId || item.Sha256 !== digest) {
+          throw new Error("Website content changed during export; refresh and try again");
+        }
+        const data = Buffer.from(websiteContentBytes(item));
+        try {
+          await this.commitSessionSaveIntent(intent, data, assertBinding);
+          return { saved: true, fileName, size: data.byteLength };
+        } finally { data.fill(0); }
+      } finally { clearWebsiteContents(site); }
+    });
+  }
+
   async listLoot(contentsId: number, input: ListLootInput): Promise<OperationResult<LootCatalogPage>> {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       const loot = await pool.client.lootAll();
@@ -7692,6 +7990,7 @@ export class ConnectionRegistry {
       }
       const poolKey = createHash("sha256").update(data).digest("hex");
       const context = this.requireWindow(contentsId);
+      this.websitePreviews?.closeOwner(contentsId);
       await this.streams.closeWindow(contentsId, "backend-rebound").catch(() => undefined);
       attempt = ++context.connectionAttempt;
       delete context.manualRefresh;

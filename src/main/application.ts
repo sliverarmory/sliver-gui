@@ -171,6 +171,7 @@ import {
 } from "./network-forwarding-ipc.js";
 
 import { RemoteTextEditorError, TextEditorWindows } from "./text-editor-windows.js";
+import { WEBSITE_PREVIEW_SCHEME, WEBSITE_PREVIEW_SCHEME_PRIVILEGES, WebsitePreviewWindows } from "./website-preview-windows.js";
 import { TEXT_EDITOR_SESSION_PARTITION } from "./window-options.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
@@ -180,7 +181,10 @@ const WORKSPACE_ZOOM_FILE_NAME = "workspace-zoom.json";
 
 // Scheme privileges must be declared synchronously before Electron is ready,
 // including when a test entry imports this application module.
-protocol.registerSchemesAsPrivileged([{ scheme: APP_SCHEME, privileges: APP_SCHEME_PRIVILEGES }]);
+protocol.registerSchemesAsPrivileged([
+  { scheme: APP_SCHEME, privileges: APP_SCHEME_PRIVILEGES },
+  { scheme: WEBSITE_PREVIEW_SCHEME, privileges: WEBSITE_PREVIEW_SCHEME_PRIVILEGES },
+]);
 
 type NativeWindowSurface =
   | "armory"
@@ -396,6 +400,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let ghosttyConfigStore: GhosttyConfigStore | undefined;
   let ghosttySettingsIpc: ReturnType<typeof registerGhosttySettingsIpc> | undefined;
   let textEditorWindows: TextEditorWindows | undefined;
+  const websitePreviewWindows = new WebsitePreviewWindows();
+  registry.setWebsitePreviewController(websitePreviewWindows);
   let isQuitRequested = false;
   const shortcutRecordingWindows = new Set<BrowserWindow>();
   let applicationContextMenus: ApplicationContextMenuController | undefined;
@@ -2417,6 +2423,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function beginShutdown(): void {
+    websitePreviewWindows.dispose();
     ghosttySettingsIpc?.dispose();
     systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
@@ -3214,6 +3221,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
+      websitePreviewWindows.dispose();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         if (window.isDestroyed() || window.webContents.isDestroyed()) continue;

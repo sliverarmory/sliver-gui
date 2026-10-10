@@ -14,6 +14,7 @@ import {
   faComputer,
   faEllipsisVertical,
   faGear,
+  faGlobe,
   faLink,
   faLinkSlash,
   faMagnifyingGlass,
@@ -62,6 +63,7 @@ import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { LootPage } from "./pages/LootPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
+import { WebsitesPage } from "./pages/WebsitesPage";
 import { OperationsPage } from "./pages/OperationsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
@@ -71,7 +73,7 @@ import {
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
 
-type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "loot" | "credentials" | "settings";
+type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "websites" | "loot" | "credentials" | "settings";
 
 const sidebarIcons = {
   dark: sliverDarkIcon,
@@ -100,6 +102,7 @@ const infrastructureNavItems = [
     description: "Manage server jobs and listener endpoints.",
     icon: faSatelliteDish,
   },
+  { id: "websites" as const, label: "Websites", description: "Manage hosted websites and their content.", icon: faGlobe },
 ];
 
 const interactNavItems = [
@@ -991,6 +994,7 @@ export function App() {
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
               {view === "loot" ? <LootPage snapshot={snapshot} onInventoryTotal={acceptLootInventoryTotal} /> : null}
               {view === "credentials" ? <CredentialsPage snapshot={snapshot} onInventoryTotal={acceptCredentialInventoryTotal} onInventoryChanged={invalidateCredentialCount} /> : null}
+              {view === "websites" ? <WebsitesPage snapshot={snapshot} /> : null}
             </>
           ) : null}
         </div>

@@ -112,6 +112,10 @@ import type {
   RenameLootInput,
   RevealCredentialSecretInput,
 } from "./operator-data-contracts.js";
+import type {
+  ImportWebsiteFilesInput, ListWebsitesInput, SaveWebsiteTextInput, UpdateWebsiteContentTypeInput,
+  WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput,
+} from "./website-contracts.js";
 
 export const IPC_INVOKE = {
   chooseConfig: "sliver:connection:choose-config",
@@ -159,6 +163,17 @@ export const IPC_INVOKE = {
   setStagedBuilds: "sliver:build:set-staged",
   saveProfile: "sliver:profile:save",
   deleteProfile: "sliver:profile:delete",
+  listWebsites: "sliver:websites:list",
+  getWebsite: "sliver:websites:detail",
+  createWebsite: "sliver:websites:create",
+  deleteWebsite: "sliver:websites:delete",
+  saveWebsiteText: "sliver:websites:save-text",
+  importWebsiteFiles: "sliver:websites:import-files",
+  updateWebsiteContentType: "sliver:websites:content-type",
+  deleteWebsiteContent: "sliver:websites:delete-content",
+  getWebsiteContent: "sliver:websites:content",
+  exportWebsiteContent: "sliver:websites:export-content",
+  openWebsiteRenderedPreview: "sliver:websites:open-rendered-preview",
   listLoot: "sliver:loot:list",
   addLoot: "sliver:loot:add-local",
   getLootDetail: "sliver:loot:detail",
@@ -960,6 +975,17 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
     args: [input: ListLootInput];
     result: OperationResult<LootCatalogPage>;
   };
+  [IPC.listWebsites]: { args: [input: ListWebsitesInput]; result: OperationResult<WebsiteCatalogPage>; };
+  [IPC.getWebsite]: { args: [input: WebsiteNameInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.createWebsite]: { args: [input: WebsiteNameInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.deleteWebsite]: { args: [input: WebsiteNameInput]; result: OperationResult; };
+  [IPC.saveWebsiteText]: { args: [input: SaveWebsiteTextInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.importWebsiteFiles]: { args: [input: ImportWebsiteFilesInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.updateWebsiteContentType]: { args: [input: UpdateWebsiteContentTypeInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.deleteWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteDetail>; };
+  [IPC.getWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteContentDetail>; };
+  [IPC.exportWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteExportResult>; };
+  [IPC.openWebsiteRenderedPreview]: { args: [input: WebsiteContentInput]; result: OperationResult; };
   [IPC.addLoot]: {
     args: [input: AddLootInput];
     result: OperationResult<LootSummary>;

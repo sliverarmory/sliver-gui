@@ -30,7 +30,7 @@
     "build": "npm run typecheck && electron-vite build",
     "pretest": "npm run prepare:node-pty",
     "test": "vitest run",
-    "test:e2e:electron": "npm run build:e2e-app && node --test --test-concurrency=1 .e2e-dist/src/e2e/application-protocol.e2e.js .e2e-dist/src/e2e/application-navigation.e2e.js .e2e-dist/src/e2e/window-navigation.e2e.js .e2e-dist/src/e2e/keyboard-shortcuts.e2e.js .e2e-dist/src/e2e/report-screenshot.e2e.js .e2e-dist/src/e2e/application-icon.e2e.js .e2e-dist/src/e2e/electron-current-slice.e2e.js .e2e-dist/src/e2e/saved-config-watch.e2e.js .e2e-dist/src/e2e/session-registry-layout.e2e.js .e2e-dist/src/e2e/session-files-layout.e2e.js .e2e-dist/src/e2e/session-panel-popout.e2e.js .e2e-dist/src/e2e/session-shell-layout.e2e.js .e2e-dist/src/e2e/beacons-table.e2e.js .e2e-dist/src/e2e/session-process-execution.e2e.js .e2e-dist/src/e2e/session-bof-execution.e2e.js .e2e-dist/src/e2e/session-dotnet-execution.e2e.js .e2e-dist/src/e2e/session-network.e2e.js .e2e-dist/src/e2e/network-window.e2e.js .e2e-dist/src/e2e/armory-window.e2e.js .e2e-dist/src/e2e/auxiliary-context-menu.e2e.js .e2e-dist/src/e2e/overview.e2e.js .e2e-dist/src/e2e/overview-topology.e2e.js .e2e-dist/src/e2e/overview-egress.e2e.js .e2e-dist/src/e2e/cloud-dns.e2e.js .e2e-dist/src/e2e/text-editor.e2e.js .e2e-dist/src/e2e/terminal-appearance.e2e.js .e2e-dist/src/e2e/window-transparency.e2e.js .e2e-dist/src/e2e/windows-native-menu.e2e.js",
+    "test:e2e:electron": "npm run build:e2e-app && node --test --test-concurrency=1 .e2e-dist/src/e2e/application-protocol.e2e.js .e2e-dist/src/e2e/application-navigation.e2e.js .e2e-dist/src/e2e/window-navigation.e2e.js .e2e-dist/src/e2e/keyboard-shortcuts.e2e.js .e2e-dist/src/e2e/report-screenshot.e2e.js .e2e-dist/src/e2e/application-icon.e2e.js .e2e-dist/src/e2e/electron-current-slice.e2e.js .e2e-dist/src/e2e/saved-config-watch.e2e.js .e2e-dist/src/e2e/session-registry-layout.e2e.js .e2e-dist/src/e2e/session-files-layout.e2e.js .e2e-dist/src/e2e/session-panel-popout.e2e.js .e2e-dist/src/e2e/session-shell-layout.e2e.js .e2e-dist/src/e2e/beacons-table.e2e.js .e2e-dist/src/e2e/session-process-execution.e2e.js .e2e-dist/src/e2e/session-bof-execution.e2e.js .e2e-dist/src/e2e/session-dotnet-execution.e2e.js .e2e-dist/src/e2e/session-network.e2e.js .e2e-dist/src/e2e/network-window.e2e.js .e2e-dist/src/e2e/armory-window.e2e.js .e2e-dist/src/e2e/auxiliary-context-menu.e2e.js .e2e-dist/src/e2e/overview.e2e.js .e2e-dist/src/e2e/overview-topology.e2e.js .e2e-dist/src/e2e/overview-egress.e2e.js .e2e-dist/src/e2e/cloud-dns.e2e.js .e2e-dist/src/e2e/text-editor.e2e.js .e2e-dist/src/e2e/websites.e2e.js .e2e-dist/src/e2e/terminal-appearance.e2e.js .e2e-dist/src/e2e/window-transparency.e2e.js .e2e-dist/src/e2e/windows-native-menu.e2e.js",
     "test:e2e:bofs": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-bof-execution.e2e.js",
     "test:e2e:dotnet": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-dotnet-execution.e2e.js",
     "test:e2e:dotnet-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/session-dotnet-real-windows.e2e.js",
@@ -71,6 +71,7 @@
     "postdist": "npm run verify:packaged-content",
     "test:e2e:terminal-appearance": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/terminal-appearance.e2e.js",
     "test:e2e:text-editor": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/text-editor.e2e.js",
+    "test:e2e:websites": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/websites.e2e.js",
     "test:e2e:dns": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/cloud-dns.e2e.js"
   },
   "devDependencies": {
@@ -92,6 +93,7 @@
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "16.3.3",
     "@testing-library/user-event": "14.6.7",
+    "@types/css-tree": "3.2.0",
     "@types/geojson": "7946.0.16",
     "@types/node": "26.6.4",
     "@types/react": "19.3.0",
@@ -156,10 +158,12 @@
     "@azure/identity": "4.13.3",
     "@azure/msal-node": "5.6.0",
     "@noble/hashes": "2.4.0",
+    "css-tree": "3.2.1",
     "electron-updater": "6.8.9",
     "ghostty-web": "0.4.0",
     "monaco-editor": "0.57.0",
     "node-pty": "1.1.0",
+    "parse5": "8.0.1",
     "sliver-script": "2.0.0-rc.5",
     "ssh2": "1.17.0"
   }

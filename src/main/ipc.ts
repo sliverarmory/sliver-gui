@@ -110,6 +110,10 @@ import {
   parseOperatorDataId,
   parseRenameLootInput,
 } from "../shared/operator-data-contracts.js";
+import {
+  parseImportWebsiteFilesInput, parseListWebsitesInput, parseSaveWebsiteTextInput,
+  parseUpdateWebsiteContentTypeInput, parseWebsiteContentInput, parseWebsiteNameInput,
+} from "../shared/website-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
 import {
@@ -230,6 +234,17 @@ export type IpcConnectionRegistry = Pick<
   | "saveProfile"
   | "deleteProfile"
   | "listLoot"
+  | "listWebsites"
+  | "getWebsite"
+  | "createWebsite"
+  | "deleteWebsite"
+  | "saveWebsiteText"
+  | "importWebsiteFiles"
+  | "updateWebsiteContentType"
+  | "deleteWebsiteContent"
+  | "getWebsiteContent"
+  | "exportWebsiteContent"
+  | "openWebsiteRenderedPreview"
   | "addLoot"
   | "addDroppedLoot"
   | "getLootDetail"
@@ -636,6 +651,28 @@ export function registerIpcHandlers(
     (args) => parseStringArguments(args, "profile name"),
     ({ contentsId }, name) => registry.deleteProfile(contentsId, name),
   );
+  handleTrusted(IPC.listWebsites, rendererUrl, (args) => parseWebsiteArguments(args, parseListWebsitesInput),
+    ({ contentsId }, input) => registry.listWebsites(contentsId, input));
+  handleTrusted(IPC.getWebsite, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteNameInput),
+    ({ contentsId }, input) => registry.getWebsite(contentsId, input));
+  handleTrusted(IPC.createWebsite, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteNameInput),
+    ({ contentsId }, input) => registry.createWebsite(contentsId, input));
+  handleTrusted(IPC.deleteWebsite, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteNameInput),
+    ({ contentsId }, input) => registry.deleteWebsite(contentsId, input));
+  handleTrusted(IPC.saveWebsiteText, rendererUrl, (args) => parseWebsiteArguments(args, parseSaveWebsiteTextInput),
+    ({ contentsId }, input) => registry.saveWebsiteText(contentsId, input));
+  handleTrusted(IPC.importWebsiteFiles, rendererUrl, (args) => parseWebsiteArguments(args, parseImportWebsiteFilesInput),
+    ({ sender }, input) => registry.importWebsiteFiles(sender, input));
+  handleTrusted(IPC.updateWebsiteContentType, rendererUrl, (args) => parseWebsiteArguments(args, parseUpdateWebsiteContentTypeInput),
+    ({ contentsId }, input) => registry.updateWebsiteContentType(contentsId, input));
+  handleTrusted(IPC.deleteWebsiteContent, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
+    ({ contentsId }, input) => registry.deleteWebsiteContent(contentsId, input));
+  handleTrusted(IPC.getWebsiteContent, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
+    ({ contentsId }, input) => registry.getWebsiteContent(contentsId, input));
+  handleTrusted(IPC.exportWebsiteContent, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
+    ({ sender }, input) => registry.exportWebsiteContent(sender, input));
+  handleTrusted(IPC.openWebsiteRenderedPreview, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
+    ({ sender }, input) => registry.openWebsiteRenderedPreview(sender, input));
   handleTrusted(IPC.listLoot, rendererUrl, parseListLootArguments, ({ contentsId }, input) =>
     registry.listLoot(contentsId, input),
   );
@@ -1204,6 +1241,12 @@ function parseTargetRefArguments(args: readonly unknown[]): [target: TargetRef] 
     throw invalidArguments("target reference");
   }
   return [{ mode, id, backendEpoch, domainRevision, fingerprint }];
+}
+
+function parseWebsiteArguments<T>(args: readonly unknown[], parser: (value: unknown) => T): [input: T] {
+  requireArgumentCount(args, 1, "website input");
+  try { return [parser(args[0])]; }
+  catch { throw invalidArguments("website input"); }
 }
 
 function parseListLootArguments(args: readonly unknown[]): [input: ReturnType<typeof parseListLootInput>] {

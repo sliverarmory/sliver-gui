@@ -838,24 +838,58 @@
     gap: 1.5rem;
   }
 
-  .app-content:has(> .targets-page[data-presentation="catalog"]) {
+  .app-content:has(> .targets-page[data-presentation="catalog"]),
+  .app-content:has(> .websites-page) {
     overflow: hidden;
     padding-block: 0;
   }
 
-  .targets-page[data-presentation="catalog"] {
+  .targets-page[data-presentation="catalog"],
+  .websites-page {
     height: 100%;
     min-height: 0;
     gap: 0;
   }
 
-  .targets-page[data-presentation="catalog"] > .targets-page__header {
+  .targets-page[data-presentation="catalog"] > .targets-page__header,
+  .websites-page > .websites-page__header {
     flex: none;
     padding-block: 2rem;
   }
 
   .targets-page__content {
     padding-bottom: 5rem;
+  }
+
+  .websites-page__viewport {
+    --websites-selector-width: 280px;
+    --websites-column-gap: 1.5rem;
+    /* Size the sticky selector against the space below the page header. */
+    container-type: size;
+  }
+
+  .websites-page__columns {
+    gap: var(--websites-column-gap);
+  }
+
+  @media (min-width: 80rem) {
+    .websites-page__columns {
+      grid-template-columns: var(--websites-selector-width) minmax(0, 1fr);
+    }
+
+    .websites-page__viewport.scroll-shadow:has(.websites-page__selector) {
+      /* Preserve HeroUI's content fade and scrollbar, keeping the sticky column opaque. */
+      mask-image:
+        linear-gradient(var(--scroll-linear-gradient)),
+        linear-gradient(#000, #000),
+        linear-gradient(#000, #000);
+      mask-position: left top, right top, left top;
+      mask-repeat: no-repeat;
+      mask-size:
+        calc(100% - var(--scroll-shadow-scrollbar-size)) 100%,
+        var(--scroll-shadow-scrollbar-size) 100%,
+        calc(var(--websites-selector-width) + var(--websites-column-gap)) 100%;
+    }
   }
 
   .app-content:has(> .settings-page) {
@@ -1375,7 +1409,8 @@ html.dark .session-processes-grid.table-root--secondary {
     padding-top: 1.5rem;
   }
 
-  .targets-page[data-presentation="catalog"] > .targets-page__header {
+  .targets-page[data-presentation="catalog"] > .targets-page__header,
+  .websites-page > .websites-page__header {
     padding-top: 1.5rem;
   }
 

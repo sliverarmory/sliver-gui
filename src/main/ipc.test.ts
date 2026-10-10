@@ -1863,6 +1863,45 @@ describe("trusted Electron IPC boundary", () => {
     expect(clearProcessExecutionHistory).not.toHaveBeenCalled();
   });
 
+  it("routes validated website operations and rejects local paths and untrusted renderers", async () => {
+    const saveWebsiteText = vi.fn(async () => ({ ok: false as const, error: "save probe" }));
+    const importWebsiteFiles = vi.fn(async () => ({ ok: false as const, error: "import probe" }));
+    const getWebsiteContent = vi.fn(async () => ({ ok: false as const, error: "preview probe" }));
+    registerIpcHandlers(registryMock({ saveWebsiteText, importWebsiteFiles, getWebsiteContent }), vi.fn(), RENDERER_URL);
+    const { event } = invokeEvent("sliver://app/index.html#/websites", 77);
+    const save = { name: " landing ", path: "/index.html", text: "<h1>Hosted</h1>", contentType: "text/html", overwrite: false };
+    await expect(electronMocks.handlers.get(IPC.saveWebsiteText)?.(event, save))
+      .resolves.toEqual({ ok: false, error: "save probe" });
+    expect(saveWebsiteText).toHaveBeenCalledWith(77, save);
+    const imported = { name: "landing", path: "/static", contentType: "", overwrite: false, directory: true };
+    await expect(electronMocks.handlers.get(IPC.importWebsiteFiles)?.(event, imported))
+      .resolves.toEqual({ ok: false, error: "import probe" });
+    expect(importWebsiteFiles).toHaveBeenCalledWith(event.sender, { ...imported, includeHiddenDirectories: false });
+    expect(() => electronMocks.handlers.get(IPC.importWebsiteFiles)?.(event, { ...imported, sourcePath: "/etc/passwd" }))
+      .toThrow(/invalid website input/i);
+    expect(() => electronMocks.handlers.get(IPC.getWebsiteContent)?.(event, { name: "landing", path: "/../secret" }))
+      .toThrow(/invalid website input/i);
+    expect(() => electronMocks.handlers.get(IPC.getWebsiteContent)?.(event, { name: "landing", path: "/" }, "extra"))
+      .toThrow(/invalid website input/i);
+    const untrusted = invokeEvent("https://evil.example", 78);
+    expect(() => electronMocks.handlers.get(IPC.getWebsiteContent)?.(untrusted.event, { name: "landing", path: "/" }))
+      .toThrow();
+    expect(getWebsiteContent).not.toHaveBeenCalled();
+  });
+
+  it("does not grant isolated website previews any application IPC entitlement", async () => {
+    const openWebsiteRenderedPreview = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(registryMock({ openWebsiteRenderedPreview }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("sliver://app/index.html#/websites", 77);
+    const input = { name: "landing", path: "/index.html" };
+    await expect(electronMocks.handlers.get(IPC.openWebsiteRenderedPreview)?.(trusted.event, input)).resolves.toEqual({ ok: true });
+    expect(openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith(trusted.event.sender, input);
+    const preview = invokeEvent(`website-preview://${"a".repeat(64)}/document`, 88);
+    expect(() => electronMocks.handlers.get(IPC.openWebsiteRenderedPreview)?.(preview.event, input)).toThrow();
+    expect(() => electronMocks.handlers.get(IPC.getSnapshot)?.(preview.event)).toThrow();
+    expect(openWebsiteRenderedPreview).toHaveBeenCalledOnce();
+  });
+
   it("routes only field-scoped operator-data requests and immediately scrubs raw credential bytes", async () => {
     let releaseGate!: () => void;
     const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -2127,6 +2166,17 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     saveProfile: vi.fn(unavailable),
     deleteProfile: vi.fn(unavailable),
     listLoot: vi.fn(unavailable),
+    listWebsites: vi.fn(unavailable),
+    getWebsite: vi.fn(unavailable),
+    createWebsite: vi.fn(unavailable),
+    deleteWebsite: vi.fn(unavailable),
+    saveWebsiteText: vi.fn(unavailable),
+    importWebsiteFiles: vi.fn(unavailable),
+    updateWebsiteContentType: vi.fn(unavailable),
+    deleteWebsiteContent: vi.fn(unavailable),
+    getWebsiteContent: vi.fn(unavailable),
+    exportWebsiteContent: vi.fn(unavailable),
+    openWebsiteRenderedPreview: vi.fn(unavailable),
     addLoot: vi.fn(unavailable),
     addDroppedLoot: vi.fn(unavailable),
     getLootDetail: vi.fn(unavailable),

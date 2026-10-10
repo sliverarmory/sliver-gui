@@ -153,6 +153,17 @@ function installSliverAPI(
     listProcessExecutionHistory: vi.fn(failedOperation),
     clearProcessExecutionHistory: vi.fn(failedOperation),
     listLoot: vi.fn(failedOperation),
+    listWebsites: vi.fn(failedOperation),
+    getWebsite: vi.fn(failedOperation),
+    createWebsite: vi.fn(failedOperation),
+    deleteWebsite: vi.fn(failedOperation),
+    saveWebsiteText: vi.fn(failedOperation),
+    importWebsiteFiles: vi.fn(failedOperation),
+    updateWebsiteContentType: vi.fn(failedOperation),
+    deleteWebsiteContent: vi.fn(failedOperation),
+    getWebsiteContent: vi.fn(failedOperation),
+    exportWebsiteContent: vi.fn(failedOperation),
+    openWebsiteRenderedPreview: vi.fn(failedOperation),
     listCredentials: vi.fn(failedOperation),
     listLocalNetworkInterfaces: vi.fn(failedOperation),
     listSavedConfigs,
@@ -1353,6 +1364,25 @@ describe("Sidebar navigation", () => {
     });
   });
 
+  it("opens hosted websites from Operational navigation", async () => {
+    const user = userEvent.setup();
+    const snapshot = disconnectedSnapshot();
+    snapshot.connection = {
+      managedServer: null, status: "connected", epoch: 7, incarnation: 3,
+      server: "sliver.example.test:31337", operator: "alice", configName: "Production", version: "1.7.6",
+    };
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), snapshot);
+    vi.mocked(api.listWebsites).mockResolvedValue({
+      ok: true, value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(within(screen.getByRole("treegrid", { name: "Operational navigation" }))
+      .getByRole("row", { name: "Websites" }));
+    expect(await screen.findByRole("heading", { name: /^Websites$/u, level: 1 })).toBeInTheDocument();
+    await waitFor(() => expect(api.listWebsites).toHaveBeenCalled());
+  });
+
   it("shows the unfiltered credential total and refreshes it after stream recovery", async () => {
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -1631,6 +1661,7 @@ describe("Sidebar navigation", () => {
       "Generate",
       "Builds & profiles",
       "Jobs & listeners",
+      "Websites",
     ]);
     expect(within(infrastructure).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();

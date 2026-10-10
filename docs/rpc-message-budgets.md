@@ -7,7 +7,7 @@ the allocation required by payload generation and download responses.
 | Domain | Maximum send | Maximum receive | Current traffic |
 | --- | ---: | ---: | --- |
 | Control | 8 MiB | 16 MiB | version, events, operators, jobs, listeners, target mutations, and task cancellation |
-| Inventory | 4 MiB | 32 MiB | sessions, beacons, beacon-task metadata, compiler targets, implant builds, profiles, websites, and loot metadata |
+| Inventory | 4 MiB | 32 MiB | sessions, beacons, beacon-task metadata, compiler targets, implant builds, profiles, websites (including stored content), and loot metadata |
 | Task content | 1 MiB | 80 KiB | explicitly selected M1 beacon-task request/response content, bounded to a 64 KiB decoded preview plus protobuf framing |
 | Workbench artifact | 66 MiB | 66 MiB | M2 session screenshots, single-file downloads/uploads, process dumps, and registry-hive reads, each with a 64 MiB decoded cap |
 | Artifact | 256 MiB | 256 MiB | generated implants, stages, archived-build downloads, and other legacy bounded artifact payloads |
@@ -24,6 +24,15 @@ memory-impact review. The M2 session wrapper also validates the decoded payload
 at 64 MiB so gzip expansion cannot consume the channel's framing headroom.
 Future streaming features must use the separate bounded streaming plane from
 the roadmap rather than increasing these unary limits.
+
+The pinned server embeds stored file bytes in website inventory replies.
+Website uploads preflight the predicted aggregate encoded catalog against a
+31 MiB budget, retaining headroom below the existing 32 MiB inventory channel
+limit. Imports remain capped at 32 MiB and 500 files; the aggregate budget can
+reject a smaller import. Selected content reads and writes use the SDK's
+artifact channel, with a 32 MiB application content limit. Only bounded text
+or hex preview bytes cross IPC. See [website preview security](website-preview-security.md)
+for the preview, concurrent-update, and upstream limits.
 
 ## M1 typed RPC boundary
 

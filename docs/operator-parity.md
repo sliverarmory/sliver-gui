@@ -280,12 +280,12 @@ Representative alias `parity-alias` and extension `parity-extension` registered 
 | `server.use.beacons` | complete | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.beacons |
 | `server.use.sessions` | complete | M1 | not-applicable | not-applicable | targets | parity-contract:server.use.sessions |
 | `server.version` | planned | M8 | not-applicable | not-applicable | extensions | parity-contract:server.version |
-| `server.websites` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites |
-| `server.websites.add-content` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.add-content |
-| `server.websites.content-type` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.content-type |
-| `server.websites.list` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.list |
-| `server.websites.rm` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.rm |
-| `server.websites.rm-content` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.rm-content |
-| `server.websites.show` | planned | M6 | not-applicable | not-applicable | operator-data | parity-contract:server.websites.show |
+| `server.websites` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.add-content` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.add-content, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.content-type` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.content-type, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.list` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.list, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.rm` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.rm, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.rm-content` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.rm-content, website-crud-ipc, website-inert-preview, website-electron-journey |
+| `server.websites.show` | in-progress | M6 | not-applicable | not-applicable | websites | parity-contract:server.websites.show, website-crud-ipc, website-inert-preview, website-electron-journey |
 | `server.wg` | in-progress | M0 | not-applicable | not-applicable | jobs-listeners | parity-contract:server.wg |
 | `server.wg-config` | planned | M5 | not-applicable | not-applicable | networking | parity-contract:server.wg-config |

@@ -1641,7 +1641,7 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    19,
+    20,
     "the connected workspace should expose the bounded app command catalog",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
@@ -1652,6 +1652,21 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ state: "hidden" });
 
   await page.getByRole("tab", { name: "Keyboard Shortcuts", exact: true }).click();
+  // Playwright clicks can reach a visible but inactive macOS window. The main
+  // recorder intentionally requires native focus before suppressing menu keys.
+  const shortcutWindow = await electronApplication.browserWindow(page);
+  await electronApplication.evaluate(({ app }) => app.focus({ steal: true }));
+  await shortcutWindow.evaluate((window) => {
+    window.show();
+    window.focus();
+    window.webContents.focus();
+  });
+  const focusDeadline = Date.now() + 5_000;
+  while (!(await shortcutWindow.evaluate((window) => window.isFocused())) && Date.now() < focusDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(await shortcutWindow.evaluate((window) => window.isFocused()), true,
+    "the shortcut recorder requires native workspace focus");
   await page.getByRole("button", { name: "Change shortcut for Open command palette", exact: true }).click();
   await page.getByRole("button", { name: "Cancel changing shortcut for Open command palette", exact: true }).waitFor();
   await page.keyboard.press(`${primaryModifier}+Shift+p`);

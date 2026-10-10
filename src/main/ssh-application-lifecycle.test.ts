@@ -1631,6 +1631,7 @@ function fakeConnectionRegistry() {
   return {
     setManagedServerResolver: vi.fn((_resolve: (digest: string) => ManagedServerReference | null) => undefined),
     setManagedListenerFirewallController: vi.fn(),
+    setWebsitePreviewController: vi.fn(),
     refreshManagedServerMetadata: vi.fn(),
     registerWindow: vi.fn(),
     inheritConnection: vi.fn(),

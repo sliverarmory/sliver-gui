@@ -72,6 +72,7 @@ import {
   fakeBeaconWhoamiTaskResult,
 } from "./beacon-interact-fixture.js";
 import { createCloudDnsFixture } from "./cloud-dns-fixture.js";
+import { createWebsiteFixture } from "./website-fixture.js";
 
 interface FakeMainState {
   configFactoryCalls: number;
@@ -1040,6 +1041,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   return {
     event$: eventSubject.asObservable(),
     eventStreamState$: eventStreamState.asObservable(),
+    ...createWebsiteFixture(record, () => eventSubject.next(fakeEvent("website"))),
     async connect() {
       record("connect");
       if (config.token !== "FAKE_TOKEN_M0_DO_NOT_RENDER") {
