@@ -40,7 +40,9 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faAmazon, faMicrosoft } from "@fortawesome/free-brands-svg-icons";
 import {
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -53,6 +55,7 @@ import type {
   RecentEventSummary,
   SliverSnapshot,
 } from "../../../shared/contracts";
+import { WEBSITE_LIMITS } from "../../../shared/website-contracts";
 import { SwitchRow } from "../components/FormControls";
 import {
   LISTENER_PROTOCOLS,
@@ -74,6 +77,15 @@ interface Feedback {
 }
 
 const OPERATIONS_SUCCESS_TOAST_TIMEOUT_MS = 20_000;
+const NO_WEBSITE_OPTION = "none";
+const WEBSITE_OPTION_PREFIX = "website:";
+
+interface WebsiteOptions {
+  context: string;
+  status: "loading" | "ready" | "error";
+  names: string[];
+  error?: string;
+}
 
 const EVENT_TIME = new Intl.DateTimeFormat(undefined, {
   hour: "2-digit",
@@ -107,11 +119,82 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
   const [isPreparingStop, setIsPreparingStop] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [removeManagedFirewallRule, setRemoveManagedFirewallRule] = useState(true);
+  const [websiteOptions, setWebsiteOptions] = useState<WebsiteOptions>({
+    context: "",
+    status: "loading",
+    names: [],
+  });
+  const [websiteReload, setWebsiteReload] = useState(0);
 
   const jobs = snapshot.jobs;
   const profiles = snapshot.profiles;
   const recentEvents = snapshot.recentEvents;
   const isConnected = isUsableConnection(snapshot.connection.status);
+  const backend = snapshot.connection;
+  const backendIdentity = [backend.epoch, backend.incarnation, backend.server, backend.configName].join("\0");
+  const websiteEventId = recentEvents.find((event) => event.type === "website")?.id ?? "";
+  const websiteContext = [backend.status, backendIdentity, websiteEventId, websiteReload].join("\0");
+  const visibleWebsiteOptions: WebsiteOptions = websiteOptions.context === websiteContext
+    ? websiteOptions
+    : { context: websiteContext, status: "loading", names: [] };
+  const websiteRequestContext = [websiteContext, isCreateOpen, draft.kind].join("\0");
+  const websiteRequestContextRef = useRef(websiteRequestContext);
+  websiteRequestContextRef.current = websiteRequestContext;
+  const previousBackend = useRef(backendIdentity);
+
+  useEffect(() => {
+    if (previousBackend.current === backendIdentity) return;
+    previousBackend.current = backendIdentity;
+    setDraft((current) => current.website ? { ...current, website: "" } : current);
+    setDraftErrors((current) => clearDraftError(current, "website"));
+  }, [backendIdentity]);
+
+  useEffect(() => {
+    if (!isCreateOpen || !isConnected || (draft.kind !== "http" && draft.kind !== "https")) return;
+    let cancelled = false;
+    const isCurrent = () => !cancelled && websiteRequestContextRef.current === websiteRequestContext;
+    setWebsiteOptions({ context: websiteContext, status: "loading", names: [] });
+
+    const loadWebsites = async () => {
+      const names: string[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      try {
+        do {
+          const result = await window.sliver.listWebsites({
+            ...(cursor ? { cursor } : {}),
+            limit: WEBSITE_LIMITS.maxPageSize,
+          });
+          if (!isCurrent()) return;
+          if (!result.ok || !result.value) {
+            throw new Error(result.error || "Unable to list websites from the server.");
+          }
+          names.push(...result.value.items.map((site) => site.name));
+          cursor = result.value.page.nextCursor;
+          if (result.value.page.truncated && !cursor) {
+            throw new Error("The server returned an incomplete website list.");
+          }
+          if (cursor && cursors.has(cursor)) {
+            throw new Error("The server returned a repeated website page.");
+          }
+          if (cursor) cursors.add(cursor);
+        } while (cursor);
+
+        const available = [...new Set(names)].sort((left, right) => left.localeCompare(right));
+        if (!isCurrent()) return;
+        setWebsiteOptions({ context: websiteContext, status: "ready", names: available });
+        setDraft((current) => current.website && !available.includes(current.website)
+          ? { ...current, website: "" }
+          : current);
+      } catch (error: unknown) {
+        if (isCurrent()) {
+          setWebsiteOptions({ context: websiteContext, status: "error", names: [], error: errorMessage(error) });
+        }
+      }
+    };
+    void loadWebsites();
+    return () => { cancelled = true; };
+  }, [isCreateOpen, isConnected, draft.kind, websiteContext, websiteRequestContext]);
 
   const openListenerDialog = useCallback(() => {
     setDraft(createListenerDraft("mtls", profiles[0]?.name ?? ""));
@@ -306,6 +389,10 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
 
   const startListener = useCallback(async () => {
     const errors = validateListenerDraft(draft);
+    if ((draft.kind === "http" || draft.kind === "https") && draft.website &&
+        (visibleWebsiteOptions.status !== "ready" || !visibleWebsiteOptions.names.includes(draft.website))) {
+      errors.website = "Choose a website currently stored on this server.";
+    }
     setDraftErrors(errors);
     if (Object.keys(errors).length > 0) return;
 
@@ -350,7 +437,7 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
     } finally {
       setIsStarting(false);
     }
-  }, [addManagedFirewallRule, draft, snapshot.connection.managedServer]);
+  }, [addManagedFirewallRule, draft, snapshot.connection.managedServer, visibleWebsiteOptions]);
 
   const confirmStop = useCallback(async () => {
     if (!confirmation) return;
@@ -666,7 +753,9 @@ export function OperationsPage({ snapshot }: OperationsPageProps): React.JSX.Ele
                 isChoosingCertificate={isChoosingCertificate}
                 profiles={profiles.map((profile) => profile.name)}
                 setDraft={setDraft}
+                websiteOptions={visibleWebsiteOptions}
                 onChooseCertificate={() => void chooseCertificate()}
+                onRetryWebsites={() => setWebsiteReload((current) => current + 1)}
               />
             </Modal.Body>
 
@@ -805,7 +894,9 @@ interface ProtocolFieldsProps {
   isChoosingCertificate: boolean;
   profiles: string[];
   setDraft: React.Dispatch<React.SetStateAction<ListenerDraft>>;
+  websiteOptions: WebsiteOptions;
   onChooseCertificate: () => void;
+  onRetryWebsites: () => void;
 }
 
 function ProtocolFields({
@@ -815,7 +906,9 @@ function ProtocolFields({
   isChoosingCertificate,
   profiles,
   setDraft,
+  websiteOptions,
   onChooseCertificate,
+  onRetryWebsites,
 }: ProtocolFieldsProps): ReactNode {
   switch (draft.kind) {
     case "mtls":
@@ -888,13 +981,65 @@ function ProtocolFields({
               value={draft.domain}
               onChange={(domain) => setDraft((current) => ({ ...current, domain }))}
             />
-            <TextControl
-              error={errors.website}
-              label="Website profile"
-              placeholder="Optional website name"
-              value={draft.website}
-              onChange={(website) => setDraft((current) => ({ ...current, website }))}
-            />
+            <div className="min-w-0">
+              <Select
+                fullWidth
+                isDisabled={websiteOptions.status === "loading"}
+                isInvalid={Boolean(errors.website)}
+                value={draft.website ? `${WEBSITE_OPTION_PREFIX}${draft.website}` : NO_WEBSITE_OPTION}
+                variant="secondary"
+                onChange={(value) => {
+                  if (value === NO_WEBSITE_OPTION || value === null) {
+                    setDraft((current) => ({ ...current, website: "" }));
+                  } else if (typeof value === "string" && value.startsWith(WEBSITE_OPTION_PREFIX)) {
+                    const website = value.slice(WEBSITE_OPTION_PREFIX.length);
+                    if (websiteOptions.names.includes(website)) {
+                      setDraft((current) => ({ ...current, website }));
+                    }
+                  }
+                }}
+              >
+                <Label>Website profile</Label>
+                <Select.Trigger>
+                  <Select.Value />
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Description>
+                  {websiteOptions.status === "loading"
+                    ? "Loading websites from the server…"
+                    : websiteOptions.status === "error"
+                      ? "Unable to load websites. Retry or use no website."
+                      : websiteOptions.names.length === 0
+                        ? "No websites are stored on this server."
+                        : "Choose a server website or use no website."}
+                </Description>
+                {errors.website && <FieldError>{errors.website}</FieldError>}
+                <Select.Popover>
+                  <ListBox>
+                    <ListBox.Item id={NO_WEBSITE_OPTION} textValue="No website">
+                      No website
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
+                    {websiteOptions.names.map((website) => (
+                      <ListBox.Item id={`${WEBSITE_OPTION_PREFIX}${website}`} key={website} textValue={website}>
+                        <span className="font-mono text-xs">{website}</span>
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+              {websiteOptions.status === "error" && (
+                <div className="mt-1 flex items-center gap-2">
+                  <p className="min-w-0 flex-1 text-xs text-danger" role="alert">
+                    {websiteOptions.error || "Unable to list websites from the server."}
+                  </p>
+                  <Button size="sm" variant="tertiary" onPress={onRetryWebsites}>
+                    Retry website list
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <NumberControl

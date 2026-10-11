@@ -1,10 +1,11 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
-import type { JobStopPlan, SliverDesktopAPI } from "../../../shared/contracts";
+import type { JobStopPlan, OperationResult, SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
+import type { WebsiteCatalogPage } from "../../../shared/website-contracts";
 import { OperationsPage } from "./OperationsPage";
 
 beforeAll(() => {
@@ -23,7 +24,56 @@ afterEach(() => {
   cleanup();
   toast.clear();
   vi.restoreAllMocks();
+  Reflect.deleteProperty(window, "sliver");
 });
+
+function connectedWebsiteSnapshot(incarnation = 1): SliverSnapshot {
+  const snapshot = disconnectedSnapshot();
+  snapshot.connection = {
+    managedServer: null,
+    status: "connected",
+    epoch: 1,
+    incarnation,
+    server: "127.0.0.1:31337",
+    configName: "operator.cfg",
+  };
+  return snapshot;
+}
+
+function websiteCatalog(names: string[], nextCursor?: string): OperationResult<WebsiteCatalogPage> {
+  return {
+    ok: true,
+    value: {
+      items: names.map((name, index) => ({
+        id: `site-${index}-${name}`,
+        name,
+        contentCount: 1,
+        totalSizeBytes: "12",
+      })),
+      page: { limit: 100, total: names.length, truncated: Boolean(nextCursor), ...(nextCursor ? { nextCursor } : {}) },
+    },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => { resolve = next; });
+  return { promise, resolve };
+}
+
+function installWebsiteListenerAPI(listWebsites: SliverDesktopAPI["listWebsites"]) {
+  const startListener = vi.fn().mockResolvedValue({ ok: true });
+  Object.defineProperty(window, "sliver", {
+    configurable: true,
+    value: { listWebsites, startListener } as Partial<SliverDesktopAPI> as SliverDesktopAPI,
+  });
+  return { startListener };
+}
+
+async function chooseProtocol(user: ReturnType<typeof userEvent.setup>, protocol: "HTTP" | "HTTPS") {
+  await user.click(screen.getByRole("button", { name: /Protocol/i }));
+  await user.click(screen.getByRole("option", { name: protocol }));
+}
 
 describe("OperationsPage listener modal", () => {
   it("keeps stop actions pinned and accessible in a compact fixed column", () => {
@@ -75,6 +125,133 @@ describe("OperationsPage listener modal", () => {
         "Sliver provisions the listener certificate material and requires authenticated implant clients.",
       ),
     ).not.toBeInTheDocument();
+  });
+
+  it.each(["HTTP", "HTTPS"] as const)("selects a server website for a %s listener", async (protocol) => {
+    const user = userEvent.setup();
+    const listWebsites = vi.fn().mockResolvedValue(websiteCatalog(["decoy", " public "]));
+    const { startListener } = installWebsiteListenerAPI(listWebsites);
+
+    render(<OperationsPage snapshot={connectedWebsiteSnapshot()} />);
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    await chooseProtocol(user, protocol);
+
+    await waitFor(() => expect(listWebsites).toHaveBeenCalledOnce());
+    const dialog = screen.getByRole("dialog", { name: "Start a listener" });
+    const websiteSelect = within(dialog).getByRole("button", { name: /Website profile/i });
+    await waitFor(() => expect(websiteSelect).toBeEnabled());
+    await user.click(websiteSelect);
+    expect(screen.getByRole("option", { name: "No website" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "decoy" })).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: "public" }));
+    expect(websiteSelect).toHaveTextContent("public");
+
+    await user.click(within(dialog).getByRole("button", { name: "Start listener" }));
+    await waitFor(() => expect(startListener).toHaveBeenCalledOnce());
+    expect(startListener).toHaveBeenCalledWith({
+      listener: expect.objectContaining({ kind: protocol.toLowerCase(), website: " public " }),
+      addManagedFirewallRule: false,
+    });
+  });
+
+  it("uses an empty website name when No website is selected", async () => {
+    const user = userEvent.setup();
+    const listWebsites = vi.fn().mockResolvedValue(websiteCatalog(["public"]));
+    const { startListener } = installWebsiteListenerAPI(listWebsites);
+
+    render(<OperationsPage snapshot={connectedWebsiteSnapshot()} />);
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    await chooseProtocol(user, "HTTP");
+
+    const dialog = screen.getByRole("dialog", { name: "Start a listener" });
+    const websiteSelect = within(dialog).getByRole("button", { name: /Website profile/i });
+    await waitFor(() => expect(websiteSelect).toBeEnabled());
+    await user.click(websiteSelect);
+    await user.click(screen.getByRole("option", { name: "No website" }));
+    await user.click(within(dialog).getByRole("button", { name: "Start listener" }));
+
+    await waitFor(() => expect(startListener).toHaveBeenCalledOnce());
+    expect(startListener).toHaveBeenCalledWith({
+      listener: expect.objectContaining({ kind: "http", website: "" }),
+      addManagedFirewallRule: false,
+    });
+  });
+
+  it("loads every website catalog page before offering a selection", async () => {
+    const user = userEvent.setup();
+    const secondPage = deferred<OperationResult<WebsiteCatalogPage>>();
+    const listWebsites = vi.fn()
+      .mockResolvedValueOnce(websiteCatalog(["first"], "next-page"))
+      .mockReturnValueOnce(secondPage.promise);
+    installWebsiteListenerAPI(listWebsites);
+
+    render(<OperationsPage snapshot={connectedWebsiteSnapshot()} />);
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    await chooseProtocol(user, "HTTP");
+
+    await waitFor(() => expect(listWebsites).toHaveBeenCalledTimes(2));
+    expect(listWebsites).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-page" }));
+    const websiteSelect = screen.getByRole("button", { name: /Website profile/i });
+    expect(websiteSelect).toBeDisabled();
+
+    await act(async () => { secondPage.resolve(websiteCatalog(["second"])); });
+    await waitFor(() => expect(websiteSelect).toBeEnabled());
+    await user.click(websiteSelect);
+    expect(screen.getByRole("option", { name: "first" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "second" })).toBeInTheDocument();
+  });
+
+  it("ignores a late website catalog from a previous backend", async () => {
+    const user = userEvent.setup();
+    const oldPage = deferred<OperationResult<WebsiteCatalogPage>>();
+    const listWebsites = vi.fn()
+      .mockReturnValueOnce(oldPage.promise)
+      .mockResolvedValueOnce(websiteCatalog(["current"]));
+    installWebsiteListenerAPI(listWebsites);
+
+    const { rerender } = render(<OperationsPage snapshot={connectedWebsiteSnapshot(1)} />);
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    await chooseProtocol(user, "HTTP");
+    await waitFor(() => expect(listWebsites).toHaveBeenCalledOnce());
+
+    rerender(<OperationsPage snapshot={connectedWebsiteSnapshot(2)} />);
+    await waitFor(() => expect(listWebsites).toHaveBeenCalledTimes(2));
+    const websiteSelect = screen.getByRole("button", { name: /Website profile/i });
+    await waitFor(() => expect(websiteSelect).toBeEnabled());
+    await act(async () => { oldPage.resolve(websiteCatalog(["stale"])); });
+
+    await user.click(websiteSelect);
+    expect(screen.getByRole("option", { name: "current" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "stale" })).not.toBeInTheDocument();
+  });
+
+  it("offers a retry after listing websites fails", async () => {
+    const user = userEvent.setup();
+    const listWebsites = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: "Server website list unavailable" })
+      .mockResolvedValueOnce(websiteCatalog(["recovered"]));
+    const { startListener } = installWebsiteListenerAPI(listWebsites);
+
+    render(<OperationsPage snapshot={connectedWebsiteSnapshot()} />);
+    await user.click(screen.getByRole("button", { name: "New listener" }));
+    await chooseProtocol(user, "HTTP");
+
+    const retry = await screen.findByRole("button", { name: "Retry website list" });
+    expect(screen.getByText("Unable to load websites. Retry or use no website.")).toBeVisible();
+    await user.click(retry);
+    await waitFor(() => expect(listWebsites).toHaveBeenCalledTimes(2));
+    const dialog = screen.getByRole("dialog", { name: "Start a listener" });
+    const websiteSelect = within(dialog).getByRole("button", { name: /Website profile/i });
+    await waitFor(() => expect(websiteSelect).toBeEnabled());
+    await user.click(websiteSelect);
+    await user.click(screen.getByRole("option", { name: "recovered" }));
+    await user.click(within(dialog).getByRole("button", { name: "Start listener" }));
+
+    await waitFor(() => expect(startListener).toHaveBeenCalledOnce());
+    expect(startListener).toHaveBeenCalledWith({
+      listener: expect.objectContaining({ kind: "http", website: "recovered" }),
+      addManagedFirewallRule: false,
+    });
   });
 
   it("accepts complete listener port values through 65535", async () => {

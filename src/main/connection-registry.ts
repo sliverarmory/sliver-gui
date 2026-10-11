@@ -8017,7 +8017,7 @@ export class ConnectionRegistry {
       domain: input.domain.trim(),
       host: input.host.trim(),
       port: input.port,
-      website: input.website.trim(),
+      website: input.website,
       enforceOTP: input.enforceOtp,
       longPollTimeoutNanoseconds: secondsToNanoseconds(input.longPollTimeoutSeconds),
       longPollJitterNanoseconds: secondsToNanoseconds(input.longPollJitterSeconds),

@@ -260,7 +260,7 @@ export function listenerInputFromDraft(draft: ListenerDraft): ListenerInput {
         host,
         port: draft.port,
         domain: trimTrailingDot(draft.domain.trim()),
-        website: draft.website.trim(),
+        website: draft.website,
         enforceOtp: draft.enforceOtp,
         longPollTimeoutSeconds: draft.longPollTimeoutSeconds,
         longPollJitterSeconds: draft.longPollJitterSeconds,

@@ -2497,6 +2497,40 @@ describe("connection registry with an injected Sliver client", () => {
     expect(client.startMTLSListener).toHaveBeenCalledOnce();
   });
 
+  it("passes the exact selected website name to HTTP and HTTPS listeners", async () => {
+    const client = new FakeSliverClient();
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+
+    for (const kind of ["http", "https"] as const) {
+      const result = await registry.startListener(1, {
+        listener: {
+          kind,
+          host: "0.0.0.0",
+          port: kind === "http" ? 80 : 443,
+          domain: "",
+          website: " landing ",
+          enforceOtp: true,
+          longPollTimeoutSeconds: 1,
+          longPollJitterSeconds: 2,
+          acme: false,
+          randomizeJarm: false,
+          certificateToken: "",
+        },
+        addManagedFirewallRule: false,
+      });
+      expect(result).toMatchObject({ ok: true });
+    }
+
+    expect(client.startHTTPListenerWithOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ website: " landing " }),
+    );
+    expect(client.startHTTPSListenerWithOptions).toHaveBeenCalledWith(
+      expect.objectContaining({ website: " landing " }),
+    );
+  });
+
   it("adds managed firewall ingress after starting a listener and maps transport protocols", async () => {
     const client = new FakeSliverClient();
     const server: ManagedServerReference = {
