@@ -133,6 +133,11 @@ describe("WebsiteContentPreview", () => {
 });
 
 describe("decodeWebsiteEditableText", () => {
+  it.each(["image/png", "application/pdf", "application/octet-stream"])("rejects binary MIME %s even when its bytes decode as UTF-8", (contentType) => {
+    const content = detail("ASCII binary header");
+    content.item.contentType = contentType;
+    expect(decodeWebsiteEditableText(content)).toBeNull();
+  });
   it("preserves complete UTF-8 content and its BOM for editing", () => {
     expect(decodeWebsiteEditableText(detail("\ufeff<h1>Hello, 世界</h1>\r\n"))).toBe("\ufeff<h1>Hello, 世界</h1>\r\n");
     expect(decodeWebsiteEditableText(detail("", { previewState: "empty" }))).toBe("");

@@ -207,10 +207,10 @@ import {
   validateImplantName,
 } from "./implant-config.js";
 import { sniffLootMediaMimeType } from "./loot-media.js";
-import type { WebsitePreviewController } from "./website-preview-windows.js";
+import type { WebsitePreviewController } from "./website-preview-server.js";
 import {
-  WEBSITE_LIMITS,
-  type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
+  WEBSITE_LIMITS, isWebsiteTextContentType, parseOpenWebsiteTextEditorInput,
+  type OpenWebsiteTextEditorInput, type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
   type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentInput, type WebsiteDetail,
   type WebsiteExportResult, type WebsiteNameInput,
 } from "../shared/website-contracts.js";
@@ -407,6 +407,22 @@ interface RemoteTextEditorBinding {
   readonly target: TargetRef;
   readonly remotePath: string;
   expectedSha256: string;
+}
+
+type WebsiteTextEditorOwner = Pick<RemoteTextEditorBinding,
+  "owner" | "rendererUrl" | "rendererProcessId" | "rendererFrameToken" | "context" | "pool" | "epoch" | "connectionAttempt">;
+interface WebsiteTextEditorVersion {
+  id: string;
+  sha256: string;
+  size: string;
+  contentType: string;
+}
+interface WebsiteTextEditorBinding extends WebsiteTextEditorOwner {
+  readonly name: string;
+  readonly path: string;
+  readonly websiteId: string;
+  readonly contentType: string;
+  expected: WebsiteTextEditorVersion | undefined;
 }
 
 interface ActiveConfigReference {
@@ -702,6 +718,7 @@ export class ConnectionRegistry {
   private readonly pools = new Map<string, BackendPool>();
   private readonly websiteMutationTails = new WeakMap<BackendPool, Promise<void>>();
   private readonly remoteTextEditorBindings = new WeakSet<object>();
+  private readonly websiteTextEditorBindings = new WeakSet<object>();
   private readonly targetCatalogSnapshots = new Map<string, TargetCatalogSnapshot>();
   private readonly sessionArtifacts: SessionArtifactStore;
   private readonly executionArtifacts: ExecutionArtifactStore;
@@ -7291,6 +7308,158 @@ export class ConnectionRegistry {
     } finally { clearWebsiteContents(response); }
   }
 
+  /** Bind a complete textual document to its original owner, server and website. */
+  async loadWebsiteTextEditor(
+    owner: WebContents, rawInput: OpenWebsiteTextEditorInput,
+  ): Promise<{ title: string; text: string; contentType: string; binding: unknown }> {
+    const input = parseOpenWebsiteTextEditorInput(rawInput);
+    const frame = owner.mainFrame;
+    if (!frame || frame.isDestroyed()) throw new Error("The source window is no longer available");
+    const context = this.requireWindow(owner.id);
+    const pool = context.poolKey ? this.pools.get(context.poolKey) : undefined;
+    if (!pool) throw new Error("Connect to a Sliver server first");
+    const authority: WebsiteTextEditorOwner = {
+      owner, rendererUrl: owner.getURL(), rendererProcessId: frame.processId, rendererFrameToken: frame.frameToken,
+      context, pool, epoch: pool.epoch, connectionAttempt: context.connectionAttempt,
+    };
+    this.assertWebsiteTextEditorBinding(authority);
+    const site = await pool.client.website(input.name);
+    try {
+      this.assertWebsiteTextEditorBinding(authority);
+      websiteDetail(site, input.name);
+      const existing = Object.values(site.Contents).find((item) => item.Path === input.path);
+      let text = "";
+      let expected: WebsiteTextEditorVersion | undefined;
+      let contentType: string;
+      if (input.mode === "edit") {
+        if (!existing) throw new Error("The website content no longer exists; refresh the website");
+        text = this.websiteEditorText(existing);
+        expected = this.websiteEditorVersion(existing);
+        contentType = existing.ContentType;
+      } else {
+        if (existing) throw new Error("Content already exists at this path; use Edit to open it");
+        if (!isWebsiteTextContentType(input.contentType)) throw new Error("Only textual content can be opened in the website editor");
+        contentType = input.contentType;
+      }
+      const binding: WebsiteTextEditorBinding = {
+        ...authority, name: input.name, path: input.path, websiteId: site.ID, contentType, expected,
+      };
+      this.websiteTextEditorBindings.add(binding);
+      return { title: `${input.name}: ${input.path}`, text, contentType, binding };
+    } finally { clearWebsiteContents(site); }
+  }
+
+  /** Compare against the opened revision and write only through its captured backend. */
+  async saveWebsiteTextEditor(
+    opaqueBinding: unknown, text: string, confirm: () => Promise<boolean>,
+  ): Promise<boolean> {
+    if (!opaqueBinding || typeof opaqueBinding !== "object" || !this.websiteTextEditorBindings.has(opaqueBinding)) {
+      throw new Error("The website editor session is no longer available");
+    }
+    const binding = opaqueBinding as WebsiteTextEditorBinding;
+    this.assertWebsiteTextEditorBinding(binding);
+    if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > WEBSITE_LIMITS.previewBytes) {
+      throw new Error("Website text exceeds the 1 MiB editor limit");
+    }
+    const data = Buffer.from(text, "utf8");
+    try {
+      if (!data.length) throw new Error("This Sliver server cannot upload empty website content");
+      if (new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(data) !== text ||
+          /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(text)) {
+        throw new Error("The website editor requires valid UTF-8 text without binary control characters");
+      }
+      const expected = binding.expected;
+      const assertBinding = (): void => {
+        this.assertWebsiteTextEditorBinding(binding);
+        if (binding.expected !== expected) throw new Error("This website editor document was saved by another request; retry saving");
+      };
+      // Native confirmation does not hold the shared mutation queue. Recheck after it closes.
+      if (expected) {
+        const current = await binding.pool.client.website(binding.name);
+        try { assertBinding(); this.assertWebsiteTextEditorVersion(binding, current, expected); }
+        finally { clearWebsiteContents(current); }
+        const confirmed = await confirm();
+        assertBinding();
+        if (!confirmed) return false;
+      }
+      return await this.queueWebsiteMutation(binding.pool, assertBinding, async () => {
+        const current = await binding.pool.client.website(binding.name);
+        try { assertBinding(); this.assertWebsiteTextEditorVersion(binding, current, expected); }
+        finally { clearWebsiteContents(current); }
+        const item = clientpb.WebContent.create({
+          Path: binding.path, ContentType: binding.contentType, Content: data,
+          Size: String(data.length), OriginalFile: posixPath.basename(binding.path) || "index.html",
+        });
+        const contents = { [binding.path]: item };
+        const catalog = await binding.pool.client.websites();
+        try {
+          assertBinding();
+          const latest = catalog.find((site) => site.Name === binding.name);
+          if (!latest) throw new Error("The website changed; reopen its editor");
+          this.assertWebsiteTextEditorVersion(binding, latest, expected);
+          assertWebsiteCatalogBudget(catalog, binding.name, contents, binding.websiteId);
+        } finally { for (const site of catalog) clearWebsiteContents(site); }
+        assertBinding();
+        const response = await binding.pool.client.websiteAddContent(binding.name, contents);
+        try {
+          assertBinding();
+          const updated = findWebsiteContent(response, binding.name, binding.path);
+          const bytes = websiteContentBytes(updated);
+          if (response.ID !== binding.websiteId || updated.ContentType !== binding.contentType ||
+              !Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).equals(data)) {
+            throw new Error("The server did not confirm the saved website content; reopen the editor");
+          }
+          binding.expected = this.websiteEditorVersion(updated);
+          binding.pool.recordWebsiteChanged();
+          return true;
+        } finally { clearWebsiteContents(response); }
+      });
+    } finally { data.fill(0); }
+  }
+
+  private assertWebsiteTextEditorBinding(binding: WebsiteTextEditorOwner): void {
+    const { owner, context, pool } = binding;
+    const frame = owner.mainFrame;
+    if (owner.isDestroyed() || !frame || frame.isDestroyed() || owner.getURL() !== binding.rendererUrl ||
+        frame.processId !== binding.rendererProcessId || frame.frameToken !== binding.rendererFrameToken ||
+        this.windows.get(owner.id) !== context || context.poolKey !== pool.key ||
+        context.connectionAttempt !== binding.connectionAttempt || this.pools.get(pool.key) !== pool || pool.epoch !== binding.epoch ||
+        !["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status)) {
+      throw new Error("The website editor connection changed; reopen the content before saving");
+    }
+  }
+
+  private websiteEditorText(item: clientpb.WebContent): string {
+    if (!isWebsiteTextContentType(item.ContentType)) throw new Error("Only textual content can be opened in the website editor");
+    const bytes = websiteContentBytes(item);
+    if (bytes.byteLength > WEBSITE_LIMITS.previewBytes) throw new Error("Website text exceeds the 1 MiB editor limit");
+    let text: string;
+    try { text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
+    catch { throw new Error("The website editor requires complete, valid UTF-8 text"); }
+    if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(text)) throw new Error("Binary content cannot be opened in the website editor");
+    return text;
+  }
+
+  private websiteEditorVersion(item: clientpb.WebContent): WebsiteTextEditorVersion {
+    return {
+      id: item.ID, sha256: createHash("sha256").update(websiteContentBytes(item)).digest("hex"),
+      size: item.Size, contentType: item.ContentType,
+    };
+  }
+
+  private assertWebsiteTextEditorVersion(
+    binding: WebsiteTextEditorBinding, site: clientpb.Website, expected: WebsiteTextEditorVersion | undefined,
+  ): void {
+    if (site.Name !== binding.name || site.ID !== binding.websiteId) throw new Error("The website changed; reopen its editor");
+    const item = Object.values(site.Contents).find((entry) => entry.Path === binding.path);
+    if (!expected && !item) return;
+    if (!expected || !item) throw new Error("Website content changed; reopen the editor before saving");
+    const current = this.websiteEditorVersion(item);
+    if (current.id !== expected.id || current.sha256 !== expected.sha256 || current.size !== expected.size || current.contentType !== expected.contentType) {
+      throw new Error("Website content changed; reopen the editor before saving");
+    }
+  }
+
   async saveWebsiteText(contentsId: number, input: SaveWebsiteTextInput): Promise<OperationResult<WebsiteDetail>> {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       const data = Buffer.from(input.text, "utf8");
@@ -7404,14 +7573,29 @@ export class ConnectionRegistry {
     const owner = requireOwnerWindow(sender);
     return this.withPoolWithoutValue(sender.id, async (pool, assertBinding) => {
       const previews = this.websitePreviews;
-      if (!previews) throw new Error("Rendered website preview is unavailable");
-      const site = await pool.client.website(input.name);
+      if (!previews) throw new Error("Website browser preview is unavailable");
+      const initial = await pool.client.website(input.name);
+      let websiteId: string;
       try {
         assertBinding();
-        const item = findWebsiteContent(site, input.name, input.path);
-        await previews.open(owner, input, websiteContentBytes(item), item.ContentType, assertBinding);
+        websiteContentBytes(findWebsiteContent(initial, input.name, input.path));
+        websiteId = initial.ID;
+      } finally { clearWebsiteContents(initial); }
+      await previews.open(owner, input, async (path) => {
         assertBinding();
-      } finally { clearWebsiteContents(site); }
+        const site = await pool.client.website(input.name);
+        try {
+          assertBinding();
+          if (site.Name !== input.name || site.ID !== websiteId) {
+            previews.closeOwner(sender.id);
+            throw new Error("The preview website changed; reopen its preview");
+          }
+          const item = Object.values(site.Contents).find((content) => content.Path === path);
+          if (!item) return undefined;
+          return { bytes: new Uint8Array(websiteContentBytes(item)), contentType: item.ContentType };
+        } finally { clearWebsiteContents(site); }
+      }, assertBinding);
+      assertBinding();
     });
   }
 
@@ -8553,6 +8737,13 @@ class BackendPool {
         epoch,
       },
     };
+  }
+
+  recordWebsiteChanged(): void {
+    if (this.closed) return;
+    this.recentEvents = [summarizeEvent(clientpb.Event.create({ EventType: "website" })), ...this.recentEvents].slice(0, MAX_RECENT_EVENTS);
+    this.snapshot = { ...this.snapshot, recentEvents: this.recentEvents };
+    this.onSnapshot(this.snapshot);
   }
 
   get windowCount(): number {

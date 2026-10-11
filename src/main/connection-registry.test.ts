@@ -1870,33 +1870,220 @@ describe("connection registry with an injected Sliver client", () => {
     expect(content.every((byte) => byte === 0)).toBe(true);
   });
 
-  it("opens rendered previews only through the main controller and closes them when the owner disconnects", async () => {
+  describe("standalone website editor bindings", () => {
+    async function setup(text = "original", contentType = "text/html") {
+      const client = new FakeSliverClient();
+      const web = attachWebsiteBackend(client);
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      await registry.createWebsite(1, { name: "landing" });
+      await registry.saveWebsiteText(1, { name: "landing", path: "/index.html", text, contentType, overwrite: false });
+      web.websiteAddContent.mockClear();
+      const owner = sender(1);
+      return { client, web, registry, owner };
+    }
+    const edit = { name: "landing", path: "/index.html", mode: "edit" } as const;
+
+    it("loads complete fresh text, preserves BOM and MIME, confirms overwrites, and updates revision and website events after each save", async () => {
+      const { web, registry, owner } = await setup("\ufefffirst\r\nline", "text/html; charset=utf-8");
+      registry.registerWindow(2);
+      await connectSaved(registry, 2);
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      expect(loaded).toMatchObject({ title: "landing: /index.html", text: "\ufefffirst\r\nline" });
+      const declined = vi.fn(async () => false);
+      expect(await registry.saveWebsiteTextEditor(loaded.binding, "changed", declined)).toBe(false);
+      expect(declined).toHaveBeenCalledOnce();
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+      const confirmed = vi.fn(async () => true);
+      expect(await registry.saveWebsiteTextEditor(loaded.binding, "\ufeffedited\r\nline", confirmed)).toBe(true);
+      expect(confirmed).toHaveBeenCalledOnce();
+      const stored = web.sites.get("landing")!.Contents["/index.html"]!;
+      expect(Buffer.from(stored.Content).toString()).toBe("\ufeffedited\r\nline");
+      expect(stored.ContentType).toBe("text/html; charset=utf-8");
+      const firstEvent = registry.snapshot(1).recentEvents[0]!;
+      expect(firstEvent).toMatchObject({ type: "website", message: "Website inventory changed" });
+      expect(registry.snapshot(2).recentEvents[0]!.id).toBe(firstEvent.id);
+      expect(await registry.saveWebsiteTextEditor(loaded.binding, "second save", confirmed)).toBe(true);
+      expect(Buffer.from(web.sites.get("landing")!.Contents["/index.html"]!.Content).toString()).toBe("second save");
+      expect(registry.snapshot(1).recentEvents[0]!.id).not.toBe(firstEvent.id);
+      expect(JSON.stringify(registry.snapshot(1).recentEvents)).not.toContain("second save");
+      for (const call of web.websiteAddContent.mock.calls) {
+        expect(call[1]["/index.html"]!.Content.every((byte) => byte === 0)).toBe(true);
+      }
+      const response = await web.website.mock.results[0]!.value as clientpb.Website;
+      expect(Object.values(response.Contents).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
+    });
+
+    it("creates blank documents without overwrite confirmation and rejects occupied paths", async () => {
+      const { registry, owner, web } = await setup();
+      const create = { name: "landing", path: "/new.txt", mode: "create", contentType: "text/plain" } as const;
+      const loaded = await registry.loadWebsiteTextEditor(owner, create);
+      expect(loaded.text).toBe("");
+      const confirm = vi.fn(async () => true);
+      expect(await registry.saveWebsiteTextEditor(loaded.binding, "new content", confirm)).toBe(true);
+      expect(confirm).not.toHaveBeenCalled();
+      expect(web.sites.get("landing")!.Contents["/new.txt"]!.ContentType).toBe("text/plain");
+      expect(await registry.saveWebsiteTextEditor(loaded.binding, "replacement", confirm)).toBe(true);
+      expect(confirm).toHaveBeenCalledOnce();
+      await expect(registry.loadWebsiteTextEditor(owner, create)).rejects.toThrow("use Edit");
+      const pending = await registry.loadWebsiteTextEditor(owner, { ...create, path: "/competing.txt" });
+      await registry.saveWebsiteText(1, { name: "landing", path: "/competing.txt", text: "competitor", contentType: "text/plain", overwrite: false });
+      web.websiteAddContent.mockClear();
+      await expect(registry.saveWebsiteTextEditor(pending.binding, "draft", confirm)).rejects.toThrow("content changed");
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+    });
+
+    it("rejects nontext MIME types, malformed bytes, partial content, and over-limit text", async () => {
+      const { registry, web, owner } = await setup();
+      const item = web.sites.get("landing")!.Contents["/index.html"]!;
+      item.ContentType = "image/png";
+      await expect(registry.loadWebsiteTextEditor(owner, edit)).rejects.toThrow("Only textual");
+      await expect(registry.loadWebsiteTextEditor(owner, { name: "landing", path: "/binary", mode: "create", contentType: "image/png" })).rejects.toThrow("textual");
+      item.ContentType = "text/plain";
+      item.Content = Buffer.from([255]);
+      item.Size = "1";
+      item.Sha256 = "";
+      await expect(registry.loadWebsiteTextEditor(owner, edit)).rejects.toThrow("valid UTF-8");
+      item.Content = Buffer.from([0]);
+      await expect(registry.loadWebsiteTextEditor(owner, edit)).rejects.toThrow("Binary content");
+      item.Content = Buffer.from("ok");
+      item.Size = "3";
+      await expect(registry.loadWebsiteTextEditor(owner, edit)).rejects.toThrow("complete website content");
+      item.Content = Buffer.alloc(1024 * 1024 + 1, 65);
+      item.Size = String(item.Content.length);
+      await expect(registry.loadWebsiteTextEditor(owner, edit)).rejects.toThrow("1 MiB");
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+    });
+
+    it.each(["content", "mime", "content-id", "site-id", "deleted"])("rejects stale %s before asking for overwrite approval", async (change) => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      const site = web.sites.get("landing")!;
+      const item = site.Contents["/index.html"]!;
+      if (change === "content") { item.Content = Buffer.from("replaced"); item.Size = "8"; item.Sha256 = ""; }
+      if (change === "mime") item.ContentType = "text/plain";
+      if (change === "content-id") item.ID = randomUUID();
+      if (change === "site-id") site.ID = randomUUID();
+      if (change === "deleted") delete site.Contents["/index.html"];
+      const confirm = vi.fn(async () => true);
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "draft", confirm)).rejects.toThrow("changed");
+      expect(confirm).not.toHaveBeenCalled();
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+    });
+
+    it("rechecks edits made while the overwrite confirmation is open", async () => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      const confirm = async () => {
+        await registry.saveWebsiteText(1, { name: "landing", path: "/index.html", text: "other writer", contentType: "text/html", overwrite: true });
+        return true;
+      };
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "draft", confirm)).rejects.toThrow("content changed");
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(Buffer.from(web.sites.get("landing")!.Contents["/index.html"]!.Content).toString()).toBe("other writer");
+    });
+
+    it.each(["disconnect", "reconnect", "reload", "destroyed"])("rejects a binding after its owner %s", async (change) => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      if (change === "disconnect" || change === "reconnect") await registry.disconnect(1);
+      if (change === "reconnect") await connectSaved(registry, 1);
+      if (change === "reload") (owner.mainFrame as unknown as { frameToken: string }).frameToken = "changed";
+      if (change === "destroyed") owner.isDestroyed = () => true;
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "draft", async () => true)).rejects.toThrow("connection changed");
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+    });
+
+    it("rejects disconnected confirmation and invalid bindings or draft bytes", async () => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      await expect(registry.saveWebsiteTextEditor({}, "draft", async () => true)).rejects.toThrow("session is no longer available");
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "", async () => true)).rejects.toThrow("empty website");
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "\u0000binary", async () => true)).rejects.toThrow("binary control");
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "\ud800", async () => true)).rejects.toThrow("valid UTF-8");
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "x".repeat(1024 * 1024 + 1), async () => true)).rejects.toThrow("1 MiB");
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "draft", async () => {
+        await registry.disconnect(1);
+        return true;
+      })).rejects.toThrow("connection changed");
+      expect(web.websiteAddContent).not.toHaveBeenCalled();
+    });
+
+    it("rejects an in-flight load after owner rebinding and clears its late server bytes", async () => {
+      const { registry, web, owner } = await setup();
+      const response = clientpb.Website.decode(clientpb.Website.encode(web.sites.get("landing")!).finish());
+      let finish: ((value: clientpb.Website) => void) | undefined;
+      web.website.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      const loading = registry.loadWebsiteTextEditor(owner, edit);
+      const rejected = expect(loading).rejects.toThrow("connection changed");
+      await registry.disconnect(1);
+      finish!(response);
+      await rejected;
+      expect(response.Contents["/index.html"]!.Content.every((byte) => byte === 0)).toBe(true);
+    });
+
+    it("serializes simultaneous saves from the same editor without overwriting the accepted revision", async () => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      const results = await Promise.allSettled([
+        registry.saveWebsiteTextEditor(loaded.binding, "first draft", async () => true),
+        registry.saveWebsiteTextEditor(loaded.binding, "second draft", async () => true),
+      ]);
+      expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(Buffer.from(web.sites.get("landing")!.Contents["/index.html"]!.Content).toString()).toBe("first draft");
+    });
+
+    it("does not acknowledge a write whose server response omits or changes content", async () => {
+      const { registry, web, owner } = await setup();
+      const loaded = await registry.loadWebsiteTextEditor(owner, edit);
+      web.websiteAddContent.mockImplementationOnce(async () => clientpb.Website.create({
+        Name: "landing", ID: web.sites.get("landing")!.ID,
+        Contents: { "/index.html": clientpb.WebContent.create({ Path: "/index.html", ContentType: "text/html", Content: Buffer.from("wrong"), Size: "5" }) },
+      }));
+      await expect(registry.saveWebsiteTextEditor(loaded.binding, "draft", async () => true)).rejects.toThrow("did not confirm");
+      expect(registry.snapshot(1).recentEvents).not.toContainEqual(expect.objectContaining({ type: "website" }));
+    });
+  });
+
+  it("opens browser previews with fresh server content and revokes them when the website or owner changes", async () => {
     const client = new FakeSliverClient();
     const web = attachWebsiteBackend(client);
     const registry = createRegistry(() => client.adapter);
-    const controller = { open: vi.fn(async () => {}), closeOwner: vi.fn(), dispose: vi.fn() };
+    const controller = { open: vi.fn(async (..._args: unknown[]) => {}), closeOwner: vi.fn(), dispose: vi.fn() };
     registry.setWebsitePreviewController(controller);
     registry.registerWindow(1);
     await connectSaved(registry, 1);
     await registry.createWebsite(1, { name: "landing" });
     await registry.saveWebsiteText(1, {
-      name: "landing", path: "/index.html", text: "<h1>Static preview</h1>", contentType: "text/html", overwrite: false,
-    });
-    let observedBytes: Uint8Array | undefined;
-    controller.open.mockImplementationOnce(async (...args: unknown[]) => {
-      observedBytes = args[2] as Uint8Array;
-      expect(Buffer.from(observedBytes).toString()).toBe("<h1>Static preview</h1>");
-      expect(args[3]).toBe("text/html");
-      (args[4] as () => void)();
+      name: "landing", path: "/index.html", text: "<h1>First</h1>", contentType: "text/html", overwrite: false,
     });
     const result = await registry.openWebsiteRenderedPreview(sender(1), { name: "landing", path: "/index.html" });
     expect(result).toEqual({ ok: true });
     expect(controller.open).toHaveBeenCalledOnce();
-    expect(observedBytes?.every((byte) => byte === 0)).toBe(true);
-    expect(web.sites.size).toBe(1);
+    const fetchContent = controller.open.mock.calls[0]![2] as import("./website-preview-server.js").FetchWebsitePreviewContent;
+    const initial = await fetchContent("/index.html");
+    expect(Buffer.from(initial!.bytes).toString()).toBe("<h1>First</h1>");
+    expect(initial!.contentType).toBe("text/html");
+    initial!.bytes.fill(0);
+    await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "<h1>Edited</h1>", contentType: "text/plain", overwrite: true,
+    });
+    const edited = await fetchContent("/index.html");
+    expect(Buffer.from(edited!.bytes).toString()).toBe("<h1>Edited</h1>");
+    expect(edited!.contentType).toBe("text/plain");
+    edited!.bytes.fill(0);
+    expect(await fetchContent("/missing")).toBeUndefined();
+    const lastResponse = await web.website.mock.results.at(-1)!.value as clientpb.Website;
+    expect(Object.values(lastResponse.Contents).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
+    web.sites.get("landing")!.ID = randomUUID();
+    await expect(fetchContent("/index.html")).rejects.toThrow("preview website changed");
+    expect(controller.closeOwner).toHaveBeenCalledWith(1);
     controller.closeOwner.mockClear();
     await registry.disconnect(1);
     expect(controller.closeOwner).toHaveBeenCalledWith(1);
+    await expect(fetchContent("/index.html")).rejects.toThrow();
   });
 
   it("shares pools, listeners, and event subscriptions until the final window detaches", async () => {

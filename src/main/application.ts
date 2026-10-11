@@ -171,7 +171,7 @@ import {
 } from "./network-forwarding-ipc.js";
 
 import { RemoteTextEditorError, TextEditorWindows } from "./text-editor-windows.js";
-import { WEBSITE_PREVIEW_SCHEME, WEBSITE_PREVIEW_SCHEME_PRIVILEGES, WebsitePreviewWindows } from "./website-preview-windows.js";
+import { WebsitePreviewServer } from "./website-preview-server.js";
 import { TEXT_EDITOR_SESSION_PARTITION } from "./window-options.js";
 
 const APPLICATION_DISPLAY_NAME = "Sliver Desktop";
@@ -183,7 +183,6 @@ const WORKSPACE_ZOOM_FILE_NAME = "workspace-zoom.json";
 // including when a test entry imports this application module.
 protocol.registerSchemesAsPrivileged([
   { scheme: APP_SCHEME, privileges: APP_SCHEME_PRIVILEGES },
-  { scheme: WEBSITE_PREVIEW_SCHEME, privileges: WEBSITE_PREVIEW_SCHEME_PRIVILEGES },
 ]);
 
 type NativeWindowSurface =
@@ -400,8 +399,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let ghosttyConfigStore: GhosttyConfigStore | undefined;
   let ghosttySettingsIpc: ReturnType<typeof registerGhosttySettingsIpc> | undefined;
   let textEditorWindows: TextEditorWindows | undefined;
-  const websitePreviewWindows = new WebsitePreviewWindows();
-  registry.setWebsitePreviewController(websitePreviewWindows);
+  const websitePreviewServer = new WebsitePreviewServer();
+  registry.setWebsitePreviewController(websitePreviewServer);
   let isQuitRequested = false;
   const shortcutRecordingWindows = new Set<BrowserWindow>();
   let applicationContextMenus: ApplicationContextMenuController | undefined;
@@ -2423,7 +2422,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function beginShutdown(): void {
-    websitePreviewWindows.dispose();
+    websitePreviewServer.dispose();
     ghosttySettingsIpc?.dispose();
     systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
@@ -2995,6 +2994,20 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     updateEditorSettings: (input) => loadedTextEditorSettingsStore.update(input),
     prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "text-editor", false),
     icon: applicationIcons.getIconPath(),
+    website: {
+      load: async (source, input) => {
+        try { return await registry.loadWebsiteTextEditor(source, input); }
+        catch (error) {
+          throw new RemoteTextEditorError(error instanceof Error ? error.message : "The website content could not be opened");
+        }
+      },
+      save: async (binding, text, confirm) => {
+        try { return await registry.saveWebsiteTextEditor(binding, text, confirm); }
+        catch (error) {
+          throw new RemoteTextEditorError(error instanceof Error ? error.message : "The website content could not be saved");
+        }
+      },
+    },
     remote: {
       load: async (source, remotePath) => {
         try { return await registry.loadRemoteTextEditor(source, remotePath); }
@@ -3099,6 +3112,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           throw new Error("This window cannot open a remote text editor");
         }
         await textEditorWindows.openRemote(source, remotePath);
+      },
+      openWebsite: async (source, input) => {
+        const owner = windowsByContentsId.get(source.id);
+        if (!owner || owner.webContents !== source || owner.isDestroyed() ||
+          nativeWindowSurfaces.get(owner) !== "workspace" || !textEditorWindows || shutdown.isStopping) {
+          throw new Error("The website editor is unavailable from this window");
+        }
+        await textEditorWindows.openWebsite(source, input);
       },
     },
     {
@@ -3221,7 +3242,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
-      websitePreviewWindows.dispose();
+      websitePreviewServer.dispose();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
         if (window.isDestroyed() || window.webContents.isDestroyed()) continue;

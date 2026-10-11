@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Checkbox, Description, Input, Label, Modal, ScrollShadow, SearchField, TextArea, TextField, Tooltip } from "@heroui/react";
+import { Button, Card, Checkbox, Description, Dropdown, Input, Label, Modal, ScrollShadow, SearchField, TextField, Tooltip } from "@heroui/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
-import { faDownload, faEye, faGlobe, faMagnifyingGlass, faPlus, faRotate, faTrash } from "@fortawesome/free-solid-svg-icons";
+import {
+  faArrowRightArrowLeft, faDownload, faEllipsisVertical, faEye, faFileArrowUp,
+  faFileLines, faFloppyDisk, faFolderOpen, faGlobe, faMagnifyingGlass,
+  faPenToSquare, faPlus, faRotate, faTag, faTrash,
+} from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult, SliverSnapshot } from "../../../shared/contracts";
-import { WEBSITE_LIMITS, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail } from "../../../shared/website-contracts";
+import { WEBSITE_LIMITS, isWebsiteTextContentType, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail } from "../../../shared/website-contracts";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WebsiteContentPreview } from "../components/WebsiteContentPreview";
 import { decodeWebsiteEditableText } from "../components/website-content-preview";
@@ -17,12 +21,11 @@ interface WebsitesPageProps {
   snapshot: SliverSnapshot;
 }
 
-type FormKind = "create" | "text" | "file" | "directory" | "edit" | "replace" | "mime";
+type FormKind = "create" | "text" | "file" | "directory" | "replace" | "mime";
 interface ContentForm {
   kind: FormKind;
   path: string;
   contentType: string;
-  text: string;
   name: string;
   includeHiddenDirectories: boolean;
 }
@@ -31,7 +34,7 @@ type DeleteTarget = { kind: "website"; name: string } | { kind: "content"; name:
 const EMPTY_CATALOG: WebsiteCatalogPage = { items: [], page: { limit: WEBSITE_LIMITS.pageSize, total: 0, truncated: false } };
 const FORM_TITLES: Record<FormKind, string> = {
   create: "Create website", text: "Add text content", file: "Add local file", directory: "Import directory",
-  edit: "Edit content", replace: "Replace content", mime: "Change content type",
+  replace: "Replace content", mime: "Change content type",
 };
 
 export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element {
@@ -74,6 +77,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
   const mounted = useRef(true);
   const visibleCatalog = catalog.identity === catalogContext ? catalog.value : EMPTY_CATALOG;
   const visibleDetail = detail?.context === context ? detail.value : undefined;
+  const previewEntry = websitePreviewEntry(visibleDetail?.contents ?? []);
   const websiteEventId = snapshot.recentEvents.find((event) => event.type === "website")?.id;
 
   const closePreview = useCallback(() => {
@@ -215,9 +219,9 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     }
   };
 
-  const openForm = (kind: FormKind, item?: WebsiteContentSummary, text = "") => {
+  const openForm = (kind: FormKind, item?: WebsiteContentSummary) => {
     closePreview();
-    setForm({ kind, name: "", path: item?.path ?? (kind === "directory" ? "/" : ""), contentType: item?.contentType ?? (kind === "text" ? "text/html; charset=utf-8" : ""), text, includeHiddenDirectories: false });
+    setForm({ kind, name: "", path: item?.path ?? (kind === "directory" ? "/" : ""), contentType: item?.contentType ?? (kind === "text" ? "text/html; charset=utf-8" : ""), includeHiddenDirectories: false });
     setFormError(undefined);
     setActionError(undefined);
   };
@@ -255,19 +259,24 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
 
   const submitForm = async (confirmed = false): Promise<boolean> => {
     if (!form) return false;
-    const { kind, path, contentType, text } = form;
+    const { kind, path, contentType } = form;
     if (kind === "create" && !form.name.trim()) { setFormError("Enter a website name."); return false; }
     if (kind !== "create" && (!path.startsWith("/") || /[\r\n]/u.test(path))) {
       setFormError("Enter an absolute URL path beginning with /."); return false;
     }
-    if (["text", "edit", "mime"].includes(kind) && !contentType.trim()) { setFormError("Enter a content type."); return false; }
-    if ((kind === "text" || kind === "edit") && text.length === 0) { setFormError("Enter nonempty content. The server cannot store an empty replacement."); return false; }
-    const replacing = kind === "edit" || kind === "replace" || ((kind === "text" || kind === "file") && visibleDetail?.contents.some((item) => item.path === path));
+    if (["text", "mime"].includes(kind) && !contentType.trim()) { setFormError("Enter a content type."); return false; }
+    if (kind === "text") {
+      if (!isWebsiteTextContentType(contentType)) { setFormError("Choose a textual content type to open the editor."); return false; }
+      return runOperation(async () => {
+        const result = await window.sliver.openWebsiteTextEditor({ name, path, mode: "create", contentType });
+        return result.ok ? { ok: true, value: true } : result;
+      }, () => setForm(undefined), true);
+    }
+    const replacing = kind === "replace" || (kind === "file" && visibleDetail?.contents.some((item) => item.path === path));
     if (replacing && !confirmed) { setOverwriteConfirmation(true); return false; }
     return runOperation<WebsiteDetail>(async () => {
       if (kind === "create") return window.sliver.createWebsite({ name: form.name.trim() });
       if (kind === "mime") return window.sliver.updateWebsiteContentType({ name, path, contentType });
-      if (kind === "text" || kind === "edit") return window.sliver.saveWebsiteText({ name, path, contentType, text, overwrite: Boolean(replacing) });
       return window.sliver.importWebsiteFiles({ name, path, contentType, overwrite: Boolean(replacing), directory: kind === "directory",
         ...(kind === "directory" ? { includeHiddenDirectories: form.includeHiddenDirectories } : {}),
       });
@@ -311,14 +320,41 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     return result.ok ? { ok: true, value: true } : result;
   }, () => undefined);
 
+  const editContent = async (item: WebsiteContentSummary) => runOperation(async () => {
+    const result = await window.sliver.openWebsiteTextEditor({ name, path: item.path, mode: "edit" });
+    return result.ok ? { ok: true, value: true } : result;
+  }, closePreview);
+
+  const contentAction = (action: string, item: WebsiteContentSummary) => {
+    if (pendingRef.current) return;
+    if (action === "edit") void editContent(item);
+    else if (action === "replace") openForm("replace", item);
+    else if (action === "mime") openForm("mime", item);
+    else if (action === "copy") void exportContent(item);
+    else if (action === "delete") setDeleteTarget({ kind: "content", name, path: item.path });
+  };
+
   const columns: DataGridColumn<WebsiteContentSummary>[] = [
-    { id: "path", header: "URL path", accessorKey: "path", isRowHeader: true, allowsSorting: true, minWidth: 200, cellClassName: "font-mono text-xs" },
+    { id: "path", header: "URL path", accessorKey: "path", isRowHeader: true, allowsSorting: true, minWidth: 200, cell: (item) => (
+      <Button aria-label={`Inspect ${item.path}`} className="h-auto min-h-8 max-w-full justify-start whitespace-normal break-all px-0 text-start font-mono text-xs" variant="ghost" size="sm" isDisabled={pending} onPress={() => void openPreview(item)}>{item.path}</Button>
+    ) },
     { id: "contentType", header: "Content type", accessorKey: "contentType", allowsSorting: true, minWidth: 180 },
     { id: "sizeBytes", header: "Size", align: "end", minWidth: 90, cell: (item) => <span className="tabular-nums">{formatBytes(item.sizeBytes)}</span> },
     { id: "actions", header: "Actions", align: "end", width: 112, cell: (item) => (
       <div className="flex justify-end gap-1">
-        <IconButton label={`Inspect ${item.path}`} icon={faEye} disabled={pending} onPress={() => void openPreview(item)} />
-        <IconButton label={`Delete ${item.path}`} icon={faTrash} disabled={pending} danger onPress={() => setDeleteTarget({ kind: "content", name, path: item.path })} />
+        <IconButton label={`Preview ${item.path}`} icon={faEye} disabled={pending} onPress={() => void openRenderedPreview(item)} />
+        <Dropdown>
+          <Tooltip><Button aria-label={`Actions for ${item.path}`} isIconOnly isDisabled={pending} size="sm" variant="ghost"><FontAwesomeIcon aria-hidden icon={faEllipsisVertical} /></Button><Tooltip.Content>Content actions</Tooltip.Content></Tooltip>
+          <Dropdown.Popover placement="bottom end">
+            <Dropdown.Menu aria-label={`Actions for ${item.path}`} disabledKeys={isWebsiteTextContentType(item.contentType) && Number(item.sizeBytes) <= WEBSITE_LIMITS.previewBytes ? [] : ["edit"]} onAction={(key) => contentAction(String(key), item)}>
+              <Dropdown.Item id="edit" textValue="Edit"><FontAwesomeIcon aria-hidden icon={faPenToSquare} className="size-4 shrink-0 text-muted" /><Label>Edit</Label></Dropdown.Item>
+              <Dropdown.Item id="replace" textValue="Replace"><FontAwesomeIcon aria-hidden icon={faArrowRightArrowLeft} className="size-4 shrink-0 text-muted" /><Label>Replace</Label></Dropdown.Item>
+              <Dropdown.Item id="mime" textValue="Change content type"><FontAwesomeIcon aria-hidden icon={faTag} className="size-4 shrink-0 text-muted" /><Label>Change content type</Label></Dropdown.Item>
+              <Dropdown.Item id="copy" textValue="Save copy"><FontAwesomeIcon aria-hidden icon={faDownload} className="size-4 shrink-0 text-muted" /><Label>Save copy</Label></Dropdown.Item>
+              <Dropdown.Item id="delete" textValue="Delete" variant="danger"><FontAwesomeIcon aria-hidden icon={faTrash} className="size-4 shrink-0" /><Label>Delete</Label></Dropdown.Item>
+            </Dropdown.Menu>
+          </Dropdown.Popover>
+        </Dropdown>
       </div>
     ) },
   ];
@@ -372,14 +408,17 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
               </Card>
               <Card className="mb-20 min-w-0 self-start" variant="secondary">
                 <Card.Header className="flex-row flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title><Card.Description>{name ? "Inspect content to preview source, edit, replace, change its type, or save a copy." : "Select a website to manage its content."}</Card.Description></div>
-                  {name ? <Button size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}>Delete website</Button> : null}
+                  <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title><Card.Description>{name ? "Preview in your browser or use the actions menu. Select a path to inspect its source." : "Select a website to manage its content."}</Card.Description></div>
+                  {name ? <div className="flex shrink-0 flex-wrap gap-2">
+                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail || !previewEntry} onPress={() => { if (previewEntry) void openRenderedPreview(previewEntry); }}><FontAwesomeIcon aria-hidden icon={faEye} /> Preview website</Button>
+                    <Button size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}><FontAwesomeIcon aria-hidden icon={faTrash} /> Delete website</Button>
+                  </div> : null}
                 </Card.Header>
                 <Card.Content className="min-w-0 p-0">
                   {name ? <div className="flex flex-wrap gap-2 px-4 pb-4">
-                    <Button size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}>Add text</Button>
-                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}>Add local file</Button>
-                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}>Import directory</Button>
+                    <Button size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}><FontAwesomeIcon aria-hidden icon={faFileLines} /> Add text</Button>
+                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}><FontAwesomeIcon aria-hidden icon={faFileArrowUp} /> Add local file</Button>
+                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}><FontAwesomeIcon aria-hidden icon={faFolderOpen} /> Import directory</Button>
                   </div> : null}
                   {detailError ? <div className="px-4 pb-4"><InlineError message={detailError} /></div> : null}
                   {loadingDetail ? <p role="status" className="px-4 pb-3 text-sm text-muted">Loading content…</p> : null}
@@ -405,13 +444,14 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
               {preview ? <WebsiteContentPreview content={preview} /> : null}
               {previewTarget?.sha256 ? <dl className="text-xs"><dt className="text-muted">SHA-256</dt><dd className="break-all font-mono">{previewTarget.sha256}</dd></dl> : null}
               <div className="flex flex-wrap gap-2">
-                {previewTarget && supportsRenderedPreview(previewTarget.contentType) ? <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) void openRenderedPreview(previewTarget); }}>Rendered preview</Button> : null}
-                <Button size="sm" variant="secondary" isDisabled={pending || editableText === null} onPress={() => { if (previewTarget && editableText !== null) openForm("edit", previewTarget, editableText); }}>Edit text</Button>
-                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("replace", previewTarget); }}>Replace from file</Button>
-                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("mime", previewTarget); }}>Change content type</Button>
+                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) void openRenderedPreview(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faEye} /> Preview in browser</Button>
+                <Button size="sm" variant="secondary" isDisabled={pending || editableText === null} onPress={() => { if (previewTarget && editableText !== null) void editContent(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faPenToSquare} /> Edit text</Button>
+                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("replace", previewTarget); }}><FontAwesomeIcon aria-hidden icon={faArrowRightArrowLeft} /> Replace from file</Button>
+                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("mime", previewTarget); }}><FontAwesomeIcon aria-hidden icon={faTag} /> Change content type</Button>
                 <Button size="sm" variant="secondary" isPending={pending} onPress={() => { if (previewTarget) void exportContent(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faDownload} /> Save copy</Button>
+                <Button size="sm" variant="danger-soft" isDisabled={pending} onPress={() => { if (previewTarget) setDeleteTarget({ kind: "content", name, path: previewTarget.path }); }}><FontAwesomeIcon aria-hidden icon={faTrash} /> Delete</Button>
               </div>
-              {previewTarget && supportsRenderedPreview(previewTarget.contentType) ? <p className="text-xs text-muted">Rendered preview opens a separate protected window. Scripts and external resources are blocked; interactive content is disabled.</p> : null}
+              <p className="text-xs text-muted">Preview opens in your default browser. Refresh the browser after saving to see the latest hosted content.</p>
               {preview && editableText === null ? <p className="text-xs text-muted">Text editing requires complete UTF-8 content within the editor limit. Use Replace from file for other content.</p> : null}
               {actionError ? <InlineError message={actionError} /> : null}
             </Modal.Body>
@@ -428,26 +468,25 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
 
 function EditorDialog({ form, error, pending, onChange, onClose, onSubmit }: { form: ContentForm | undefined; error: string | undefined; pending: boolean; onChange: (value: ContentForm) => void; onClose: () => void; onSubmit: () => void }): React.JSX.Element {
   const kind = form?.kind;
-  const textMode = kind === "text" || kind === "edit";
   const update = <K extends keyof ContentForm,>(key: K, value: ContentForm[K]) => { if (form) onChange({ ...form, [key]: value }); };
   return <Modal.Backdrop isOpen={Boolean(form)} isDismissable={!pending} isKeyboardDismissDisabled={pending} variant="blur" onOpenChange={(open) => { if (!open) onClose(); }}>
-    <Modal.Container placement="center" scroll="inside" size={textMode ? "lg" : "sm"}>
+    <Modal.Container placement="center" scroll="inside" size="sm">
       <Modal.Dialog>
         <Modal.CloseTrigger isDisabled={pending} />
         <Modal.Header className="pr-10"><Modal.Heading>{kind ? FORM_TITLES[kind] : "Website content"}</Modal.Heading></Modal.Header>
         <Modal.Body className="flex flex-col gap-4">
           {kind === "create" ? <TextField fullWidth isDisabled={pending} value={form?.name ?? ""} variant="secondary" onChange={(value) => update("name", value)}><Label>Website name</Label><Input maxLength={256} autoFocus placeholder="public-site" /><Description>Use this name in the listener’s Website profile field.</Description></TextField> : <>
-            <TextField fullWidth isDisabled={pending || kind === "edit" || kind === "replace" || kind === "mime"} value={form?.path ?? ""} variant="secondary" onChange={(value) => update("path", value)}><Label>{kind === "directory" ? "Base URL path" : "URL path"}</Label><Input maxLength={2048} placeholder={kind === "directory" ? "/assets/" : "/index.html"} /><Description>{kind === "directory" ? "Files retain their relative paths. Existing paths are not overwritten." : "The exact path to serve, beginning with /."}</Description></TextField>
-            <TextField fullWidth isDisabled={pending} value={form?.contentType ?? ""} variant="secondary" onChange={(value) => update("contentType", value)}><Label>Content type</Label><Input maxLength={256} placeholder={textMode ? "text/html; charset=utf-8" : "Detect from file"} /><Description>{kind === "file" || kind === "directory" ? "Optional. Leave blank to detect each file’s content type." : "The HTTP Content-Type sent to visitors."}</Description></TextField>
+            <TextField fullWidth isDisabled={pending || kind === "replace" || kind === "mime"} value={form?.path ?? ""} variant="secondary" onChange={(value) => update("path", value)}><Label>{kind === "directory" ? "Base URL path" : "URL path"}</Label><Input maxLength={2048} placeholder={kind === "directory" ? "/assets/" : "/index.html"} /><Description>{kind === "directory" ? "Files retain their relative paths. Existing paths are not overwritten." : "The exact path to serve, beginning with /."}</Description></TextField>
+            <TextField fullWidth isDisabled={pending} value={form?.contentType ?? ""} variant="secondary" onChange={(value) => update("contentType", value)}><Label>Content type</Label><Input maxLength={256} placeholder={kind === "text" ? "text/html; charset=utf-8" : "Detect from file"} /><Description>{kind === "file" || kind === "directory" ? "Optional. Leave blank to detect each file’s content type." : "The HTTP Content-Type sent to visitors."}</Description></TextField>
             {kind === "directory" ? <Checkbox isDisabled={pending} isSelected={form?.includeHiddenDirectories ?? false} variant="secondary" onChange={(value) => update("includeHiddenDirectories", value)}>
               <Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>Include hidden directories</Checkbox.Content>
               <Description>Include folders with a leading dot, such as .git.</Description>
             </Checkbox> : null}
-            {textMode ? <TextField fullWidth isDisabled={pending} value={form?.text ?? ""} variant="secondary" onChange={(value) => update("text", value)}><Label>Content source</Label><TextArea className="min-h-64 font-mono text-xs" rows={14} maxLength={1024 * 1024} spellCheck={false} /><Description>UTF-8 source only. HTML and scripts are never executed in this editor.</Description></TextField> : null}
+            {kind === "text" ? <p className="text-sm text-muted">Write content in a separate editor window. Saving publishes it to this website.</p> : null}
           </>}
           {error ? <InlineError message={error} /> : null}
         </Modal.Body>
-        <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={onClose}>Cancel</Button><Button isPending={pending} onPress={onSubmit}>{kind === "create" ? "Create website" : kind === "file" || kind === "replace" ? "Choose file and upload" : kind === "directory" ? "Choose directory and upload" : "Save content"}</Button></Modal.Footer>
+        <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={onClose}>Cancel</Button><Button isPending={pending} onPress={onSubmit}><FontAwesomeIcon aria-hidden icon={kind === "create" ? faPlus : kind === "file" || kind === "replace" ? faFileArrowUp : kind === "directory" ? faFolderOpen : kind === "text" ? faPenToSquare : faFloppyDisk} />{kind === "create" ? "Create website" : kind === "file" || kind === "replace" ? "Choose file and upload" : kind === "directory" ? "Choose directory and upload" : kind === "text" ? "Open editor" : "Save content"}</Button></Modal.Footer>
       </Modal.Dialog>
     </Modal.Container>
   </Modal.Backdrop>;
@@ -482,6 +521,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The website operation failed.";
 }
 
-function supportsRenderedPreview(contentType: string): boolean {
-  return ["text/html", "application/xhtml+xml", "image/png", "image/jpeg"].includes(contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "");
+function websitePreviewEntry(contents: WebsiteContentSummary[]): WebsiteContentSummary | undefined {
+  for (const path of ["/", "/index.html", "/index.htm"]) {
+    const entry = contents.find((item) => item.path === path);
+    if (entry) return entry;
+  }
+  return contents.find((item) => ["text/html", "application/xhtml+xml"].includes(item.contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "")) ?? contents[0];
 }

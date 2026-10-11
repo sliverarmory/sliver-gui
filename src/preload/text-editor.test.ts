@@ -123,6 +123,7 @@ describe("text editor preload", () => {
   it("rejects malformed inputs and extra path authority before crossing IPC", () => {
     mocks.invoke.mockClear();
     expect(() => api().save({ text: "hello", saveAs: false, path: "/tmp/hidden" } as never)).toThrow();
+    expect(() => api().save({ text: "hello", saveAs: false, website: { name: "other", path: "/" } } as never)).toThrow();
     expect(() => api().save({ text: new Uint8Array([1]), saveAs: false } as never)).toThrow();
     expect(() => api().save({ text: "a".repeat(2 * 1024 * 1024 + 1), saveAs: false })).toThrow();
     expect(() => api().setDirty("true" as never)).toThrow();

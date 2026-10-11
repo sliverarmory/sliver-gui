@@ -113,7 +113,7 @@ import type {
   RevealCredentialSecretInput,
 } from "./operator-data-contracts.js";
 import type {
-  ImportWebsiteFilesInput, ListWebsitesInput, SaveWebsiteTextInput, UpdateWebsiteContentTypeInput,
+  ImportWebsiteFilesInput, ListWebsitesInput, OpenWebsiteTextEditorInput, SaveWebsiteTextInput, UpdateWebsiteContentTypeInput,
   WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput,
 } from "./website-contracts.js";
 
@@ -174,6 +174,7 @@ export const IPC_INVOKE = {
   getWebsiteContent: "sliver:websites:content",
   exportWebsiteContent: "sliver:websites:export-content",
   openWebsiteRenderedPreview: "sliver:websites:open-rendered-preview",
+  openWebsiteTextEditor: "sliver:websites:open-text-editor",
   listLoot: "sliver:loot:list",
   addLoot: "sliver:loot:add-local",
   getLootDetail: "sliver:loot:detail",
@@ -986,6 +987,7 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteContentDetail>; };
   [IPC.exportWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteExportResult>; };
   [IPC.openWebsiteRenderedPreview]: { args: [input: WebsiteContentInput]; result: OperationResult; };
+  [IPC.openWebsiteTextEditor]: { args: [input: OpenWebsiteTextEditorInput]; result: OperationResult; };
   [IPC.addLoot]: {
     args: [input: AddLootInput];
     result: OperationResult<LootSummary>;

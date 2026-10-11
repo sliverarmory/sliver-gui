@@ -5,12 +5,13 @@ import { EventEmitter } from "node:events";
 import type { App, Session, WebContents } from "electron";
 import { describe, expect, it, vi } from "vitest";
 
-import { installApplicationNavigationSecurity, registerIsolatedWebsitePreviewSession } from "./navigation-security.js";
+import { installApplicationNavigationSecurity } from "./navigation-security.js";
 
 const APP_URL = "sliver://app/index.html";
 const BLOCKED_URLS = [
   "https://example.test/",
   "http://127.0.0.1:5173/",
+  "website-preview://obsolete/document",
   "file:///tmp/index.html",
   "data:text/html,benign",
   "blob:sliver://app/fixture",
@@ -58,46 +59,6 @@ function contentsFixture(session: Session, type = "window") {
 }
 
 describe("global application navigation security", () => {
-  it("admits only the registered isolated preview document without adding app preload or app navigation trust", async () => {
-    const application = new EventEmitter();
-    installApplicationNavigationSecurity(application as App, "/app/preload/navigation.cjs");
-    const fixture = sessionFixture();
-    application.emit("session-created", fixture.session);
-    const url = `website-preview://${"a".repeat(64)}/document`;
-    const revoke = registerIsolatedWebsitePreviewSession(fixture.session, url);
-    expect(fixture.unregisterPreloadScript).toHaveBeenCalledWith("navigation-preload-id");
-    const contents = contentsFixture(fixture.session);
-    application.emit("web-contents-created", {}, contents);
-    await expect(contents.loadURL(url)).resolves.toBeUndefined();
-    await expect(contents.loadURL(APP_URL)).rejects.toThrow();
-    for (const url of BLOCKED_URLS) await expect(contents.loadURL(url)).rejects.toThrow();
-    const typed = contents as unknown as WebContents;
-    expect(fixture.request(url, "mainFrame", typed)).toEqual({ cancel: false });
-    expect(fixture.request(url, "subFrame", typed)).toEqual({ cancel: true });
-    expect(fixture.request(url, "image", typed)).toEqual({ cancel: true });
-    expect(fixture.request(url, "mainFrame", typed, "POST")).toEqual({ cancel: true });
-    expect(fixture.request(APP_URL, "mainFrame", typed)).toEqual({ cancel: true });
-    const other = contentsFixture(fixture.session);
-    application.emit("web-contents-created", {}, other);
-    await expect(other.loadURL(url)).rejects.toThrow();
-    expect(fixture.request(url, "mainFrame", other as unknown as WebContents)).toEqual({ cancel: true });
-    revoke();
-    await expect(contents.loadURL(url)).rejects.toThrow();
-    await expect(contents.loadURL(APP_URL)).rejects.toThrow();
-    expect(fixture.request(url, "mainFrame", typed)).toEqual({ cancel: true });
-  });
-
-  it("rejects preview registrations for existing contents, persistent sessions and nonopaque URLs", () => {
-    const application = new EventEmitter();
-    installApplicationNavigationSecurity(application as App, "/app/preload/navigation.cjs");
-    const fixture = sessionFixture();
-    const url = `website-preview://${"a".repeat(64)}/document`;
-    expect(() => registerIsolatedWebsitePreviewSession(fixture.session, APP_URL)).toThrow();
-    application.emit("web-contents-created", {}, contentsFixture(fixture.session));
-    expect(() => registerIsolatedWebsitePreviewSession(fixture.session, url)).toThrow();
-    expect(() => registerIsolatedWebsitePreviewSession({ ...fixture.session, isPersistent: () => true } as Session, url)).toThrow();
-  });
-
   it.each(["window", "browserView", "webview", "offscreen", "remote"])(
     "guards new %s contents before its first load, including previously created sessions",
     (type) => {

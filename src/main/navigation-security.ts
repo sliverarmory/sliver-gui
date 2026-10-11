@@ -4,31 +4,6 @@ import { APP_RENDERER_URL } from "./app-protocol.js";
 import { isTrustedRendererUrl } from "./security.js";
 
 const guardedApplications = new WeakSet<App>();
-const navigationPreloads = new WeakMap<Session, string>();
-interface IsolatedWebsitePreview {
-  url: string;
-  active: boolean;
-  contents?: WebContents;
-}
-const isolatedWebsitePreviews = new WeakMap<Session, IsolatedWebsitePreview>();
-const sessionsWithContents = new WeakSet<Session>();
-
-/** A dedicated untrusted preview session never becomes an application session, even after revocation. */
-export function registerIsolatedWebsitePreviewSession(session: Session, url: string): () => void {
-  if (session.isPersistent() || isolatedWebsitePreviews.has(session) || sessionsWithContents.has(session) ||
-      !/^website-preview:\/\/[0-9a-f]{64}\/document$/u.test(url)) {
-    throw new Error("Invalid isolated website preview registration");
-  }
-  const preloadId = navigationPreloads.get(session);
-  if (preloadId !== undefined) {
-    session.unregisterPreloadScript(preloadId);
-    navigationPreloads.delete(session);
-  }
-  const registration: IsolatedWebsitePreview = { url, active: true };
-  isolatedWebsitePreviews.set(session, registration);
-  return () => { registration.active = false; registration.url = ""; };
-}
-
 /** Install before creating app windows so every window, view, and session is guarded. */
 export function installApplicationNavigationSecurity(application: App, navigationPreloadPath: string): void {
   if (guardedApplications.has(application)) return;
@@ -40,19 +15,11 @@ export function installApplicationNavigationSecurity(application: App, navigatio
     guardedSessions.add(session);
     // Session preloads run before each window's own preload, including for
     // future windows/views which have no application-specific preload at all.
-    if (!isolatedWebsitePreviews.has(session)) {
-      navigationPreloads.set(session, session.registerPreloadScript({ type: "frame", filePath: navigationPreloadPath }));
-    }
+    session.registerPreloadScript({ type: "frame", filePath: navigationPreloadPath });
     // This is the sole onBeforeRequest listener: Electron replaces an existing
     // listener rather than composing them. Only document loads are restricted;
     // main-process fetches, downloads, and renderer assets retain their policies.
     session.webRequest.onBeforeRequest((details, callback) => {
-      const preview = isolatedWebsitePreviews.get(session);
-      if (preview) {
-        callback({ cancel: !preview.active || details.method !== "GET" || details.resourceType !== "mainFrame" ||
-          details.url !== preview.url || !details.webContents || details.webContents !== preview.contents });
-        return;
-      }
       const cancel = details.resourceType === "subFrame"
         ? !isDevToolsNavigation(details.url, details.webContents)
         : details.resourceType === "mainFrame" && !allowsNavigation(details.url, details.webContents);
@@ -62,11 +29,8 @@ export function installApplicationNavigationSecurity(application: App, navigatio
 
   application.on("session-created", guardSession);
   application.on("web-contents-created", (_event, contents) => {
-    sessionsWithContents.add(contents.session);
     // Also covers sessions created before this hook was installed.
     guardSession(contents.session);
-    const preview = isolatedWebsitePreviews.get(contents.session);
-    if (preview && !preview.contents && contents.getType() === "window") preview.contents = contents;
     // Electron's loadURL/loadFile APIs bypass will-navigate. Request-level
     // cancellation alone can still replace the page with a Chromium error
     // document, while about:/data: loads may not issue a request at all.
@@ -95,8 +59,6 @@ export function installApplicationNavigationSecurity(application: App, navigatio
 }
 
 function allowsNavigation(url: string, contents?: WebContents): boolean {
-  const preview = contents && isolatedWebsitePreviews.get(contents.session);
-  if (preview) return preview.active && preview.contents === contents && url === preview.url;
   return isTrustedRendererUrl(url, APP_RENDERER_URL) || isDevToolsNavigation(url, contents);
 }
 

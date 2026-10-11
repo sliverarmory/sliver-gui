@@ -1889,6 +1889,30 @@ describe("trusted Electron IPC boundary", () => {
     expect(getWebsiteContent).not.toHaveBeenCalled();
   });
 
+  it("opens website editors through a validated native controller without accepting source bytes", async () => {
+    const openWebsite = vi.fn(async () => undefined);
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, { open: vi.fn(), openWebsite });
+    const trusted = invokeEvent("sliver://app/index.html#/websites", 77);
+    const input = { name: "landing", path: "/index.html", mode: "edit" };
+    const handler = electronMocks.handlers.get(IPC.openWebsiteTextEditor)!;
+    await expect(handler(trusted.event, input)).resolves.toEqual({ ok: true });
+    expect(openWebsite).toHaveBeenCalledExactlyOnceWith(trusted.event.sender, input);
+    expect(() => handler(trusted.event, { ...input, text: "untrusted" })).toThrow(/invalid website input/i);
+    expect(() => handler(trusted.event, { ...input, path: "/../secret" })).toThrow();
+    expect(() => handler(invokeEvent("http://127.0.0.1:40000/index.html", 78).event, input)).toThrow();
+    expect(openWebsite).toHaveBeenCalledOnce();
+    openWebsite.mockRejectedValueOnce(new Error("Website changed"));
+    await expect(handler(trusted.event, input)).resolves.toEqual({ ok: false, error: "Website changed" });
+  });
+
+  it("reports unavailable website editors", async () => {
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    await expect(electronMocks.handlers.get(IPC.openWebsiteTextEditor)?.(
+      invokeEvent(RENDERER_URL, 77).event, { name: "landing", path: "/", mode: "edit" },
+    )).resolves.toEqual({ ok: false, error: "The text editor is unavailable" });
+  });
+
   it("does not grant isolated website previews any application IPC entitlement", async () => {
     const openWebsiteRenderedPreview = vi.fn(async () => ({ ok: true as const }));
     registerIpcHandlers(registryMock({ openWebsiteRenderedPreview }), vi.fn(), RENDERER_URL);

@@ -111,8 +111,9 @@ import {
   parseRenameLootInput,
 } from "../shared/operator-data-contracts.js";
 import {
-  parseImportWebsiteFilesInput, parseListWebsitesInput, parseSaveWebsiteTextInput,
+  parseImportWebsiteFilesInput, parseListWebsitesInput, parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput,
   parseUpdateWebsiteContentTypeInput, parseWebsiteContentInput, parseWebsiteNameInput,
+  type OpenWebsiteTextEditorInput,
 } from "../shared/website-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
@@ -131,6 +132,7 @@ import {
 import { isTrustedRendererUrl } from "./security.js";
 
 export interface RemoteTextEditorController {
+  openWebsite?(source: WebContents, input: OpenWebsiteTextEditorInput): Promise<void>;
   open(source: WebContents, remotePath: string): Promise<void>;
 }
 
@@ -673,6 +675,15 @@ export function registerIpcHandlers(
     ({ sender }, input) => registry.exportWebsiteContent(sender, input));
   handleTrusted(IPC.openWebsiteRenderedPreview, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
     ({ sender }, input) => registry.openWebsiteRenderedPreview(sender, input));
+  handleTrusted(IPC.openWebsiteTextEditor, rendererUrl, (args) => parseWebsiteArguments(args, parseOpenWebsiteTextEditorInput), async ({ sender }, input) => {
+    if (!remoteTextEditor?.openWebsite) return { ok: false, error: "The text editor is unavailable" };
+    try {
+      await remoteTextEditor.openWebsite(sender, input);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "The website content could not be opened" };
+    }
+  });
   handleTrusted(IPC.listLoot, rendererUrl, parseListLootArguments, ({ contentsId }, input) =>
     registry.listLoot(contentsId, input),
   );

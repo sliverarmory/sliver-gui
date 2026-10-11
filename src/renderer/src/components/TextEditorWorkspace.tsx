@@ -271,7 +271,7 @@ export function TextEditorWorkspace({
   }, []);
 
   const save = useCallback(async (saveAs = false): Promise<void> => {
-    if (pendingRef.current || document.readOnly || (saveAs && document.remote) || !ready || (!dirty && !saveAs)) return;
+    if (pendingRef.current || document.readOnly || (saveAs && (document.remote || document.website)) || !ready || (!dirty && !saveAs)) return;
     pendingRef.current = true;
     setPending("save");
     setError(undefined);
@@ -289,17 +289,17 @@ export function TextEditorWorkspace({
       pendingRef.current = false;
       setPending(null);
     }
-  }, [dirty, document.readOnly, document.remote, onSave, ready, text]);
+  }, [dirty, document.readOnly, document.remote, document.website, onSave, ready, text]);
 
   const open = useCallback(async (): Promise<void> => {
-    if (!onOpen || pendingRef.current) return;
+    if (!onOpen || document.remote || document.website || pendingRef.current) return;
     pendingRef.current = true;
     setPending("open");
     setError(undefined);
     try { await onOpen(); }
     catch (cause) { setError(cause instanceof Error ? cause.message : "The document could not be opened."); }
     finally { pendingRef.current = false; setPending(null); }
-  }, [onOpen]);
+  }, [document.remote, document.website, onOpen]);
 
   useEffect(() => {
     const run = (action: TextEditorShortcutAction): void => {
@@ -358,12 +358,12 @@ export function TextEditorWorkspace({
         <p className="shrink-0 text-xs text-muted" role="status">{document.readOnly ? "Read only" : pending === "save" ? "Saving…" : dirty ? "Unsaved changes" : "Saved"}</p>
       </div>
       <div className="flex items-center gap-2">
-        {onOpen && <Tooltip delay={250}>
+        {onOpen && !document.remote && !document.website && <Tooltip delay={250}>
           <Button size="sm" variant="tertiary" onPress={() => void open()} isDisabled={pending !== null}
             render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorOpen")} />}>Open…</Button>
           <Tooltip.Content>{`Open · ${shortcutLabel("textEditorOpen")}`}</Tooltip.Content>
         </Tooltip>}
-        {!document.remote && <Tooltip delay={250}>
+        {!document.remote && !document.website && <Tooltip delay={250}>
           <Button size="sm" variant="tertiary" onPress={() => void save(true)} isDisabled={!ready || document.readOnly || pending !== null}
             render={(props) => <button {...props} aria-keyshortcuts={shortcutAria("textEditorSaveAs")} />}>Save As…</Button>
           <Tooltip.Content>{`Save As · ${shortcutLabel("textEditorSaveAs")}`}</Tooltip.Content>

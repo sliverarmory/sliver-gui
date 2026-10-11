@@ -49,6 +49,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}) {
     getWebsiteContent: vi.fn().mockImplementation(async () => ({ ok: true, value: contentDetail() })),
     exportWebsiteContent: vi.fn().mockResolvedValue({ ok: true, value: { saved: true, fileName: "index.html", size: SOURCE.length } }),
     openWebsiteRenderedPreview: vi.fn().mockResolvedValue({ ok: true }),
+    openWebsiteTextEditor: vi.fn().mockResolvedValue({ ok: true }),
     ...overrides,
   };
   Object.defineProperty(window, "sliver", { configurable: true, value: api });
@@ -80,7 +81,7 @@ describe("WebsitesPage", () => {
     expect([...detail.preview]).toEqual(Array(detail.preview.byteLength).fill(0));
   });
 
-  it("creates a site and adds nonempty text through typed operations", async () => {
+  it("creates a site and opens a standalone editor with new content metadata", async () => {
     const user = userEvent.setup();
     const api = installAPI();
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
@@ -94,30 +95,25 @@ describe("WebsitesPage", () => {
     await user.click(screen.getByRole("button", { name: "Add text" }));
     const addDialog = await screen.findByRole("dialog", { name: "Add text content" });
     await user.type(within(addDialog).getByLabelText("URL path"), "/new.html");
-    await user.click(within(addDialog).getByRole("button", { name: "Save content" }));
-    expect(await within(addDialog).findByRole("alert")).toHaveTextContent("Enter nonempty content");
+    expect(within(addDialog).queryByLabelText("Content source")).not.toBeInTheDocument();
+    await user.click(within(addDialog).getByRole("button", { name: "Open editor" }));
+    await waitFor(() => expect(api.openWebsiteTextEditor).toHaveBeenCalledExactlyOnceWith({ name: "new-site", path: "/new.html", contentType: "text/html; charset=utf-8", mode: "create" }));
     expect(api.saveWebsiteText).not.toHaveBeenCalled();
-    fireEvent.change(within(addDialog).getByLabelText("Content source"), { target: { value: SOURCE } });
-    await user.click(within(addDialog).getByRole("button", { name: "Save content" }));
-    await waitFor(() => expect(api.saveWebsiteText).toHaveBeenCalledWith({ name: "new-site", path: "/new.html", contentType: "text/html; charset=utf-8", text: SOURCE, overwrite: false }));
+    await waitFor(() => expect(addDialog).not.toBeInTheDocument());
   });
 
-  it("requires confirmation before editing existing content and sends complete source", async () => {
+  it("opens the standalone editor from inspection and clears source bytes", async () => {
     const user = userEvent.setup();
-    const api = installAPI();
+    const detail = contentDetail();
+    const api = installAPI({ getWebsiteContent: vi.fn().mockResolvedValue({ ok: true, value: detail }) });
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
     const previewDialog = await inspect(user);
     await waitFor(() => expect(within(previewDialog).getByRole("button", { name: "Edit text" })).toBeEnabled());
     await user.click(within(previewDialog).getByRole("button", { name: "Edit text" }));
-    const editor = await screen.findByRole("dialog", { name: "Edit content" });
-    expect(within(editor).getByLabelText("Content source")).toHaveValue(SOURCE);
-    expect(within(editor).getByLabelText("URL path")).toBeDisabled();
-    fireEvent.change(within(editor).getByLabelText("Content source"), { target: { value: "<h1>Changed</h1>" } });
-    await user.click(within(editor).getByRole("button", { name: "Save content" }));
+    await waitFor(() => expect(api.openWebsiteTextEditor).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html", mode: "edit" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect([...detail.preview]).toEqual(Array(detail.preview.byteLength).fill(0));
     expect(api.saveWebsiteText).not.toHaveBeenCalled();
-    const confirmation = await screen.findByRole("alertdialog", { name: "Replace hosted content?" });
-    await user.click(within(confirmation).getByRole("button", { name: "Replace content" }));
-    await waitFor(() => expect(api.saveWebsiteText).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html", contentType: "text/html", text: "<h1>Changed</h1>", overwrite: true }));
   });
 
   it("confirms adding to an existing path and importing replacement bytes", async () => {
@@ -174,7 +170,8 @@ describe("WebsitesPage", () => {
     const user = userEvent.setup();
     const api = installAPI({ deleteWebsiteContent: vi.fn().mockResolvedValue({ ok: false, error: "Permission denied" }) });
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
-    await user.click(await screen.findByRole("button", { name: "Delete /index.html" }));
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
     const contentConfirm = await screen.findByRole("alertdialog", { name: "Delete hosted content?" });
     expect(api.deleteWebsiteContent).not.toHaveBeenCalled();
     await user.click(within(contentConfirm).getByRole("button", { name: "Delete content" }));
@@ -196,24 +193,201 @@ describe("WebsitesPage", () => {
     expect(within(dialog).getByRole("button", { name: "Replace from file" })).toBeEnabled();
   });
 
-  it("opens supported rendered previews through the native boundary without sending renderer bytes", async () => {
+  it("opens browser previews through the native boundary without sending renderer bytes", async () => {
     const user = userEvent.setup();
     const api = installAPI();
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
     const dialog = await inspect(user);
-    await user.click(within(dialog).getByRole("button", { name: "Rendered preview" }));
+    await user.click(within(dialog).getByRole("button", { name: "Preview in browser" }));
     await waitFor(() => expect(api.openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html" }));
     expect(dialog.querySelector("iframe, webview, img, object, embed")).toBeNull();
-    expect(within(dialog).getByText(/separate protected window/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/default browser/)).toBeInTheDocument();
   });
 
-  it("does not offer a rendered preview for active SVG or PDF content", async () => {
+  it.each(["image/svg+xml", "application/pdf", "application/octet-stream"])("offers direct browser preview for %s without opening the modal", async (contentType) => {
     const user = userEvent.setup();
-    const item = { ...ITEM, contentType: "image/svg+xml" };
-    installAPI({ getWebsite: vi.fn().mockResolvedValue({ ok: true, value: { ...SITE, contents: [item] } }) });
+    const item = { ...ITEM, contentType };
+    const api = installAPI({ getWebsite: vi.fn().mockResolvedValue({ ok: true, value: { ...SITE, contents: [item] } }) });
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
-    const dialog = await inspect(user);
-    expect(within(dialog).queryByRole("button", { name: "Rendered preview" })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Preview /index.html" }));
+    await waitFor(() => expect(api.openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html" }));
+    expect(api.getWebsiteContent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each<{
+    description: string;
+    entries: Array<[path: string, contentType: string]>;
+    expectedPath: string;
+  }>([
+    {
+      description: "the root path before index files and other HTML",
+      entries: [["/welcome.html", "text/html"], ["/index.htm", "text/html"], ["/index.html", "text/html"], ["/", "text/html"]],
+      expectedPath: "/",
+    },
+    {
+      description: "index.html before index.htm and other HTML",
+      entries: [["/welcome.html", "text/html"], ["/index.htm", "text/html"], ["/index.html", "text/html"]],
+      expectedPath: "/index.html",
+    },
+    {
+      description: "index.htm before other HTML",
+      entries: [["/welcome.html", "text/html"], ["/index.htm", "text/html"]],
+      expectedPath: "/index.htm",
+    },
+    {
+      description: "the first HTML document when no root or index exists",
+      entries: [["/logo.png", "image/png"], ["/welcome", "Text/HTML; charset=utf-8"], ["/later.html", "text/html"]],
+      expectedPath: "/welcome",
+    },
+    {
+      description: "an XHTML document when no root or index exists",
+      entries: [["/logo.png", "image/png"], ["/welcome.xhtml", "application/xhtml+xml; charset=utf-8"]],
+      expectedPath: "/welcome.xhtml",
+    },
+    {
+      description: "the first content item when no HTML exists",
+      entries: [["/guide.pdf", "application/pdf"], ["/logo.png", "image/png"]],
+      expectedPath: "/guide.pdf",
+    },
+  ])("previews the website using $description", async ({ entries, expectedPath }) => {
+    const user = userEvent.setup();
+    const contents = entries.map(([path, contentType], index) => ({ ...ITEM, id: `entry-${index}`, path, contentType }));
+    const api = installAPI({ getWebsite: vi.fn().mockResolvedValue({ ok: true, value: { ...SITE, contents } }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    const button = await screen.findByRole("button", { name: "Preview website" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    await waitFor(() => expect(api.openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith({ name: "public", path: expectedPath }));
+    expect(api.getWebsiteContent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("disables website preview when the selected website has no content", async () => {
+    const user = userEvent.setup();
+    const api = installAPI({ getWebsite: vi.fn().mockResolvedValue({ ok: true, value: { ...SITE, contents: [] } }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByText("No content yet");
+    const button = screen.getByRole("button", { name: "Preview website" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(api.openWebsiteRenderedPreview).not.toHaveBeenCalled();
+  });
+
+  it("disables website preview while metadata loads or refreshes before choosing its current entry", async () => {
+    const user = userEvent.setup();
+    const initial = deferred<OperationResult<WebsiteDetail>>();
+    const refresh = deferred<OperationResult<WebsiteDetail>>();
+    const api = installAPI({ getWebsite: vi.fn().mockReturnValueOnce(initial.promise).mockReturnValueOnce(refresh.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    const button = await screen.findByRole("button", { name: "Preview website" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(api.openWebsiteRenderedPreview).not.toHaveBeenCalled();
+    await act(async () => { initial.resolve({ ok: true, value: SITE }); });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(api.getWebsite).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "Preview website" })).toBeDisabled();
+    expect(api.openWebsiteRenderedPreview).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve({ ok: true, value: { ...SITE, contents: [{ ...ITEM, path: "/" }] } }); });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Preview website" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "Preview website" }));
+    await waitFor(() => expect(api.openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/" }));
+  });
+
+  it("disables website preview while another browser preview request is pending", async () => {
+    const user = userEvent.setup();
+    const opening = deferred<OperationResult>();
+    const api = installAPI({ openWebsiteRenderedPreview: vi.fn().mockReturnValue(opening.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    const button = await screen.findByRole("button", { name: "Preview website" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await user.click(button);
+    expect(button).toBeDisabled();
+    await user.click(button);
+    expect(api.openWebsiteRenderedPreview).toHaveBeenCalledOnce();
+    await act(async () => { opening.resolve({ ok: true }); });
+    await waitFor(() => expect(button).toBeEnabled());
+  });
+
+  it("opens a native editor directly from the row menu without retrieving source in the workspace", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await waitFor(() => expect(api.openWebsiteTextEditor).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html", mode: "edit" }));
+    expect(api.getWebsiteContent).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each(["switch backend", "unmount"])("ignores a pending editor error after %s", async (transition) => {
+    const user = userEvent.setup();
+    const opening = deferred<OperationResult>();
+    const api = installAPI({ openWebsiteTextEditor: vi.fn().mockReturnValue(opening.promise) });
+    const { rerender, unmount } = render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    await waitFor(() => expect(api.openWebsiteTextEditor).toHaveBeenCalledOnce());
+    if (transition === "switch backend") rerender(<WebsitesPage snapshot={connectedSnapshot(2)} />);
+    else unmount();
+    await act(async () => { opening.resolve({ ok: false, error: "Old backend error" }); });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    if (transition === "switch backend") {
+      expect(await screen.findByRole("button", { name: "Actions for /index.html" })).toBeEnabled();
+    }
+  });
+
+  it.each(["Replace", "Change content type", "Save copy"])("exposes %s directly in the row menu", async (action) => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    await user.click(screen.getByRole("menuitem", { name: action }));
+    if (action === "Save copy") await waitFor(() => expect(api.exportWebsiteContent).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/index.html" }));
+    else await screen.findByRole("dialog", { name: action === "Replace" ? "Replace content" : action });
+    expect(api.getWebsiteContent).not.toHaveBeenCalled();
+  });
+
+  it("disables direct editing of binary content", async () => {
+    const user = userEvent.setup();
+    const item = { ...ITEM, contentType: "image/png" };
+    const api = installAPI({ getWebsite: vi.fn().mockResolvedValue({ ok: true, value: { ...SITE, contents: [item] } }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    expect(screen.getByRole("menuitem", { name: "Edit" })).toHaveAttribute("aria-disabled", "true");
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    expect(api.getWebsiteContent).not.toHaveBeenCalled();
+  });
+
+  it("shows native editor validation failures despite stale textual row metadata", async () => {
+    const user = userEvent.setup();
+    installAPI({ openWebsiteTextEditor: vi.fn().mockResolvedValue({ ok: false, error: "Website content is no longer textual" }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await user.click(await screen.findByRole("button", { name: "Actions for /index.html" }));
+    await user.click(screen.getByRole("menuitem", { name: "Edit" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Website content is no longer textual");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps creation metadata when opening fails and rejects nontextual types", async () => {
+    const user = userEvent.setup();
+    const api = installAPI({ openWebsiteTextEditor: vi.fn().mockResolvedValue({ ok: false, error: "Path already exists; use Edit" }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    await user.click(screen.getByRole("button", { name: "Add text" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add text content" });
+    fireEvent.change(within(dialog).getByLabelText("URL path"), { target: { value: "/index.html" } });
+    fireEvent.change(within(dialog).getByLabelText("Content type"), { target: { value: "image/png" } });
+    await user.click(within(dialog).getByRole("button", { name: "Open editor" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("textual content type");
+    expect(api.openWebsiteTextEditor).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText("Content type"), { target: { value: "text/html" } });
+    await user.click(within(dialog).getByRole("button", { name: "Open editor" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("Path already exists");
+    expect(within(dialog).getByLabelText("URL path")).toHaveValue("/index.html");
   });
 
   it("ignores an old backend catalog and does not request content when disconnected", async () => {
@@ -234,11 +408,11 @@ describe("WebsitesPage", () => {
   it("wipes late preview bytes after switching backends and ignores a late mutation result", async () => {
     const user = userEvent.setup();
     const latePreview = deferred<OperationResult<WebsiteContentDetail>>();
-    const lateWrite = deferred<OperationResult<WebsiteDetail>>();
+    const lateWrite = deferred<OperationResult>();
     const api = installAPI({
       listWebsites: vi.fn().mockResolvedValue({ ok: true, value: catalog([SITE.site, { ...SITE.site, id: "site-2", name: "other" }]) }),
       getWebsiteContent: vi.fn().mockReturnValue(latePreview.promise),
-      saveWebsiteText: vi.fn().mockReturnValue(lateWrite.promise),
+      openWebsiteTextEditor: vi.fn().mockReturnValue(lateWrite.promise),
     });
     const { rerender } = render(<WebsitesPage snapshot={connectedSnapshot()} />);
     await inspect(user);
@@ -251,11 +425,10 @@ describe("WebsitesPage", () => {
     await user.click(screen.getByRole("button", { name: "Add text" }));
     const editor = await screen.findByRole("dialog", { name: "Add text content" });
     fireEvent.change(within(editor).getByLabelText("URL path"), { target: { value: "/fresh" } });
-    fireEvent.change(within(editor).getByLabelText("Content source"), { target: { value: "Fresh" } });
-    await user.click(within(editor).getByRole("button", { name: "Save content" }));
-    await waitFor(() => expect(api.saveWebsiteText).toHaveBeenCalledOnce());
+    await user.click(within(editor).getByRole("button", { name: "Open editor" }));
+    await waitFor(() => expect(api.openWebsiteTextEditor).toHaveBeenCalledOnce());
     rerender(<WebsitesPage snapshot={connectedSnapshot(3)} />);
-    await act(async () => { lateWrite.resolve({ ok: true, value: { ...SITE, site: { ...SITE.site, name: "stale-write" } } }); });
+    await act(async () => { lateWrite.resolve({ ok: false, error: "stale-write" }); });
     expect(screen.queryByText("stale-write")).not.toBeInTheDocument();
     expect(screen.queryByText("Website content saved.")).not.toBeInTheDocument();
   });

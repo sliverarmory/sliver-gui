@@ -21,16 +21,19 @@ vi.mock("./components/TextEditorWorkspace", () => ({
     editorSettings,
     onEditorSettingsChange,
     onOpenSettings,
+    onOpen,
   }: {
     document: { readonly title: string };
     onSave: (text: string, saveAs: boolean) => Promise<unknown>;
     editorSettings: TextEditorSettingsValues;
     onEditorSettingsChange: (settings: TextEditorSettingsValues) => void;
     onOpenSettings: () => void;
+    onOpen?: () => Promise<void>;
   }) => (
     <div data-testid="text-editor-workspace">
       {document.title}
       <button type="button" onClick={() => void onSave("updated\n", false)}>Save test document</button>
+      {onOpen ? <button type="button" onClick={() => void onOpen()}>Open local test file</button> : null}
       <button type="button" onClick={onOpenSettings}>Open editor settings</button>
       <button type="button" onClick={() => onEditorSettingsChange({
         ...editorSettings,
@@ -137,6 +140,20 @@ afterEach(() => {
 });
 
 describe("TextEditorWindowApp remote overwrite review", () => {
+  it("loads a website document into the existing standalone workspace without offering local file access", async () => {
+    vi.mocked(api.getDocument).mockResolvedValueOnce({ ok: true, value: {
+      id: "website-document-1", title: "public /index.html", text: "<h1>Original</h1>", language: "html",
+      readOnly: false, website: true,
+    } });
+    const user = userEvent.setup();
+    render(<TextEditorWindowApp />);
+    expect(await screen.findByTestId("text-editor-workspace")).toHaveTextContent("public /index.html");
+    expect(screen.queryByRole("button", { name: "Open local test file" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save test document" }));
+    await waitFor(() => expect(api.save).toHaveBeenCalledWith({ text: "updated\n", saveAs: false }));
+    expect(api.openFile).not.toHaveBeenCalled();
+  });
+
   it("loads, opens, and persists standalone editor settings through the narrow bridge", async () => {
     const user = userEvent.setup();
     render(<TextEditorWindowApp />);

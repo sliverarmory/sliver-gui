@@ -183,7 +183,7 @@ export function TextEditorWindowApp(): React.JSX.Element {
             if (saveSequenceRef.current === sequence) clearOverwriteRequest();
           }
         }}
-        {...(document.remote ? {} : { onOpen: async () => {
+        {...(document.remote || document.website ? {} : { onOpen: async () => {
           const result = await api.openFile();
           if (!result.ok) throw new Error(result.error);
           if (result.value) setDocument(result.value);

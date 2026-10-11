@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { isSafeExternalWebUrl } from "./external-web-url.js";
+import { isSafeExternalWebUrl, openExternalWebUrl } from "./external-web-url.js";
 
 import {
   BrowserWindow,
@@ -510,7 +510,7 @@ function buildContextMenuRequest(
             kind: "open-link",
             label: "Open Link in Browser",
             enabled: true,
-            action: () => shell.openExternal(linkURL),
+            action: () => openExternalWebUrl(linkURL, (url) => shell.openExternal(url)),
           })]
         : []),
       actionItem({

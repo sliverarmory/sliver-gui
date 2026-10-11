@@ -16,6 +16,7 @@ import {
   type TextEditorDocument, type TextEditorRemoteOverwriteRequest, type TextEditorSaveInput,
 } from "../shared/text-editor-contracts.js";
 import { SESSION_EDITOR_MAX_BYTES, type SessionDestructiveActionPlan } from "../shared/session-contracts.js";
+import { WEBSITE_LIMITS, type OpenWebsiteTextEditorInput } from "../shared/website-contracts.js";
 import { hardenWindow, isSameRendererDocument } from "./security.js";
 import { textEditorWindowOptions } from "./window-options.js";
 
@@ -35,6 +36,10 @@ interface TextEditorWindowsOptions {
     save(binding: unknown, remotePath: string, expectedSha256: string, text: string,
       confirm: (plan: SessionDestructiveActionPlan) => Promise<boolean>): Promise<{ expectedSha256: string } | null>;
   };
+  readonly website?: {
+    load(source: WebContents, input: OpenWebsiteTextEditorInput): Promise<{ title: string; text: string; contentType?: string; binding: unknown }>;
+    save(binding: unknown, text: string, confirm: () => Promise<boolean>): Promise<boolean>;
+  };
 }
 
 export interface InitialTextEditorDocument {
@@ -48,6 +53,7 @@ export interface InitialTextEditorDocument {
   readonly localFileSha256?: string;
   readonly bom?: boolean;
   readonly remote?: { binding: unknown; path: string; expectedSha256: string };
+  readonly website?: { binding: unknown };
 }
 
 interface EditorState {
@@ -56,6 +62,7 @@ interface EditorState {
   filePath?: string;
   localFileSha256?: string;
   remote?: { binding: unknown; path: string; expectedSha256: string };
+  website?: { binding: unknown };
   bom: boolean;
   eol: "\r\n" | "\n" | "\r" | undefined;
   dirty: boolean;
@@ -143,8 +150,9 @@ export class TextEditorWindows {
     const window = new BrowserWindow(textEditorWindowOptions(this.#options.preloadPath, process.platform, this.#options.icon, dark));
     const state: EditorState = {
       window, document: { id: randomUUID(), title, text, language, readOnly: initial.readOnly ?? false,
-        ...(initial.remote ? { remote: true } : {}) },
+        ...(initial.remote ? { remote: true } : {}), ...(initial.website ? { website: true } : {}) },
       ...(initial.remote ? { remote: initial.remote } : {}),
+      ...(initial.website ? { website: initial.website } : {}),
       ...(initial.localFilePath ? { filePath: initial.localFilePath } : {}),
       ...(initial.localFileSha256 ? { localFileSha256: initial.localFileSha256 } : {}),
       bom: initial.bom ?? false, eol: detectEol(text), dirty: false, dirtyRevision: 0, busy: false, allowClose: false,
@@ -215,6 +223,20 @@ export class TextEditorWindows {
     }
     await this.open({ title: loaded.title, text: loaded.text,
       remote: { binding: loaded.binding, path: remotePath, expectedSha256: loaded.expectedSha256 } });
+  }
+
+  async openWebsite(source: WebContents, input: OpenWebsiteTextEditorInput): Promise<void> {
+    if (!this.#options.website) throw new EditorError("Website text editing is unavailable");
+    const loaded = await this.#options.website.load(source, input);
+    validateText(loaded.text);
+    if (Buffer.byteLength(loaded.text, "utf8") > WEBSITE_LIMITS.previewBytes) {
+      throw new EditorError("Website text content must be 1 MiB or smaller");
+    }
+    // Keep the encoding marker outside Monaco, just as native file editing does.
+    const bom = loaded.text.startsWith("\ufeff");
+    await this.open({ title: loaded.title, text: bom ? loaded.text.slice(1) : loaded.text, bom,
+      language: languageForWebsiteContent(loaded.contentType, loaded.title),
+      website: { binding: loaded.binding } });
   }
 
   /** Call before app shutdown begins, while cancelling quit is still possible. */
@@ -349,6 +371,8 @@ export class TextEditorWindows {
   }
 
   async #openFile(state: EditorState, event: IpcMainInvokeEvent): Promise<OperationResult<TextEditorDocument | null>> {
+    if (state.website) throw new EditorError("Opening local files is unavailable for website content");
+    if (state.remote) throw new EditorError("Opening local files is unavailable for remote files");
     if (state.busy) throw new EditorError("Another file operation is already in progress");
     if (!this.#canDiscard(state)) return { ok: true, value: null };
     state.busy = true;
@@ -371,6 +395,7 @@ export class TextEditorWindows {
       state.filePath = path;
       delete state.localFileSha256;
       delete state.remote;
+      delete state.website;
       state.bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
       state.eol = detectEol(text);
       state.dirty = false;
@@ -384,6 +409,34 @@ export class TextEditorWindows {
     if (state.document.readOnly) throw new EditorError("This document is read-only");
     if (state.busy) throw new EditorError("Another file operation is already in progress");
     validateText(input.text);
+    if (state.website) {
+      if (input.saveAs) throw new EditorError("Save As is unavailable for website content");
+      if (!this.#options.website) throw new EditorError("Website text editing is unavailable");
+      const normalized = state.eol ? input.text.replace(/\r\n|\r|\n/gu, state.eol) : input.text;
+      const text = `${state.bom ? "\ufeff" : ""}${normalized}`;
+      if (Buffer.byteLength(text, "utf8") > WEBSITE_LIMITS.previewBytes) {
+        throw new EditorError("Website text content must be 1 MiB or smaller");
+      }
+      state.busy = true;
+      state.allowClose = false;
+      try {
+        const saved = await this.#options.website.save(state.website.binding, text, async () => {
+          this.#requireSender(event);
+          const result = await dialog.showMessageBox(state.window, {
+            type: "warning", title: "Replace hosted content?", message: `Replace ${state.document.title}?`,
+            detail: "The existing website content will be overwritten on the connected server.",
+            buttons: ["Cancel", "Replace content"], defaultId: 0, cancelId: 0, noLink: true,
+          });
+          this.#requireSender(event);
+          return result.response === 1;
+        });
+        this.#requireSender(event);
+        if (!saved) return { ok: true, value: null };
+        // The renderer owns the saved snapshot comparison; newer typing stays dirty.
+        state.document = { ...state.document, text: input.text };
+        return { ok: true, value: { title: state.document.title } };
+      } finally { state.busy = false; }
+    }
     if (state.remote) {
       if (input.saveAs) throw new EditorError("Save As is unavailable for remote files");
       if (Buffer.byteLength(input.text, "utf8") > SESSION_EDITOR_MAX_BYTES) {
@@ -510,6 +563,22 @@ function displayTitle(title: string): string {
 function detectEol(text: string): EditorState["eol"] {
   const endings = new Set(text.match(/\r\n|\r|\n/gu));
   return endings.size === 1 ? [...endings][0] as EditorState["eol"] : undefined;
+}
+
+function languageForWebsiteContent(contentType: string | undefined, title: string): string {
+  const mime = contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  const languages: Readonly<Record<string, string>> = {
+    "text/html": "html", "application/xhtml+xml": "html", "text/css": "css",
+    "text/javascript": "javascript", "application/javascript": "javascript",
+    "text/ecmascript": "javascript", "application/ecmascript": "javascript",
+    "text/typescript": "typescript", "application/typescript": "typescript",
+    "application/json": "json", "text/xml": "xml", "application/xml": "xml",
+    "text/markdown": "markdown", "text/yaml": "yaml", "application/yaml": "yaml", "application/x-yaml": "yaml",
+  };
+  if (languages[mime]) return languages[mime];
+  if (mime.endsWith("+json")) return "json";
+  if (mime.endsWith("+xml")) return "xml";
+  return languageForTitle(title);
 }
 
 function languageForTitle(title: string): string {

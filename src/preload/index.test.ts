@@ -100,6 +100,7 @@ const invokeArguments = {
   getWebsiteContent: [{ name: "landing", path: "/" }],
   exportWebsiteContent: [{ name: "landing", path: "/" }],
   openWebsiteRenderedPreview: [{ name: "landing", path: "/" }],
+  openWebsiteTextEditor: [{ name: "landing", path: "/", mode: "edit" }],
   addLoot: [{ name: "operator report", fileType: "auto" }],
   getLootDetail: ["80ae1382-e6e2-44d6-a663-537cafb60e74"],
   downloadLoot: ["80ae1382-e6e2-44d6-a663-537cafb60e74"],

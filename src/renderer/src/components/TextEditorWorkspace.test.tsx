@@ -99,6 +99,29 @@ afterEach(() => {
 });
 
 describe("TextEditorWorkspace", () => {
+  it("keeps website edits dirty after cancellation or connection failure and blocks local file buttons and shortcuts", async () => {
+    const onSave = vi.fn().mockResolvedValueOnce(null)
+      .mockRejectedValueOnce(new Error("The backend connection changed; reopen the website editor"));
+    const onOpen = vi.fn();
+    const onDirtyChange = vi.fn();
+    render(<TextEditorWorkspace document={{ ...document, website: true }} onSave={onSave} onOpen={onOpen} onDirtyChange={onDirtyChange} />);
+    expect(screen.queryByRole("button", { name: "Save As…" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open…" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Document text"), { target: { value: "website draft" } });
+    fireEvent.keyDown(window, { key: "S", code: "KeyS", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
+    expect(onSave).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledWith("website draft", false));
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The backend connection changed");
+    expect(screen.getByLabelText("Document text")).toHaveValue("website draft");
+    expect(screen.getByRole("status")).toHaveTextContent("Unsaved changes");
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  });
+
   it("keeps remote documents in the editor when overwrite is canceled and hides local file actions", async () => {
     const onSave = vi.fn().mockResolvedValue(null);
     render(<TextEditorWorkspace document={{ ...document, remote: true }} onSave={onSave} />);

@@ -29,6 +29,9 @@ export interface WebsiteCatalogPage { items: WebsiteSummary[]; page: OperatorDat
 export interface ListWebsitesInput { query?: string; cursor?: string; limit?: number; }
 export interface WebsiteNameInput { name: string; }
 export interface WebsiteContentInput extends WebsiteNameInput { path: string; }
+export type OpenWebsiteTextEditorInput =
+  | (WebsiteContentInput & { mode: "edit" })
+  | (WebsiteContentInput & { mode: "create"; contentType: string });
 export interface UpdateWebsiteContentTypeInput extends WebsiteContentInput { contentType: string; }
 export interface SaveWebsiteTextInput extends UpdateWebsiteContentTypeInput { text: string; overwrite: boolean; }
 export interface ImportWebsiteFilesInput extends UpdateWebsiteContentTypeInput {
@@ -43,6 +46,13 @@ export interface WebsiteContentDetail {
   truncated: boolean;
 }
 export interface WebsiteExportResult { saved: boolean; fileName: string; size: number; }
+
+/** Metadata gates editing; callers must also verify complete, valid UTF-8 bytes. */
+export function isWebsiteTextContentType(contentType: string): boolean {
+  const mime = contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+  return mime.startsWith("text/") || /^application\/(?:json|xml|javascript|ecmascript|typescript|yaml|x-yaml|x-www-form-urlencoded)$/u.test(mime) ||
+    /^(?:application|image)\/[\w.+-]+\+(?:json|xml)$/u.test(mime);
+}
 
 function record(value: unknown, required: string[], optional: string[] = []): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value) ||
@@ -118,6 +128,17 @@ export function parseWebsiteNameInput(value: unknown): WebsiteNameInput {
 export function parseWebsiteContentInput(value: unknown): WebsiteContentInput {
   const input = record(value, ["name", "path"]);
   return { name: name(input["name"]), path: path(input["path"]) };
+}
+export function parseOpenWebsiteTextEditorInput(value: unknown): OpenWebsiteTextEditorInput {
+  const input = record(value, ["name", "path", "mode"], ["contentType"]);
+  const target = { name: name(input["name"]), path: path(input["path"]) };
+  if (input["mode"] === "edit" && !Object.hasOwn(input, "contentType")) return { ...target, mode: "edit" };
+  if (input["mode"] === "create") {
+    const mime = contentType(input["contentType"]);
+    if (!isWebsiteTextContentType(mime)) throw new TypeError("The editor requires a textual content type");
+    return { ...target, mode: "create", contentType: mime };
+  }
+  throw new TypeError("Invalid website editor mode or fields");
 }
 export function parseUpdateWebsiteContentTypeInput(value: unknown): UpdateWebsiteContentTypeInput {
   const input = record(value, ["name", "path", "contentType"]);

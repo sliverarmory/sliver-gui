@@ -1,10 +1,34 @@
 import { describe, expect, it } from "vitest";
 import {
-  WEBSITE_LIMITS, parseImportWebsiteFilesInput, parseListWebsitesInput,
-  parseSaveWebsiteTextInput, parseWebsiteContentInput, parseWebsiteNameInput, parseUpdateWebsiteContentTypeInput,
+  WEBSITE_LIMITS, isWebsiteTextContentType, parseImportWebsiteFilesInput, parseListWebsitesInput,
+  parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput, parseWebsiteContentInput, parseWebsiteNameInput, parseUpdateWebsiteContentTypeInput,
 } from "./website-contracts.js";
 
 describe("website IPC contracts", () => {
+  it("accepts exact editor targets and textual creation metadata", () => {
+    expect(parseOpenWebsiteTextEditorInput({ name: " site ", path: "/a ", mode: "edit" }))
+      .toEqual({ name: " site ", path: "/a ", mode: "edit" });
+    expect(parseOpenWebsiteTextEditorInput({ name: "site", path: "/a", mode: "create", contentType: " text/html " }))
+      .toEqual({ name: "site", path: "/a", mode: "create", contentType: "text/html" });
+  });
+  it.each([
+    { mode: "edit", contentType: "text/html" },
+    { mode: "edit", text: "injected" },
+    { mode: "create" },
+    { mode: "create", contentType: "image/png" },
+    { mode: "create", contentType: "" },
+    { mode: "other" },
+    { mode: "edit", path: "/../a" },
+    { mode: "edit", sourcePath: "/etc/passwd" },
+  ])("rejects invalid editor request %j", (input) => {
+    expect(() => parseOpenWebsiteTextEditorInput({ name: "site", path: "/a", ...input })).toThrow();
+  });
+  it.each(["text/html; charset=utf-8", "text/plain", "application/json", "application/ld+json", "image/svg+xml", "application/xhtml+xml", "application/javascript"])("recognizes textual MIME %s", (mime) => {
+    expect(isWebsiteTextContentType(mime)).toBe(true);
+  });
+  it.each(["image/png", "application/pdf", "application/octet-stream", ""])("does not classify binary MIME %s as editable text", (mime) => {
+    expect(isWebsiteTextContentType(mime)).toBe(false);
+  });
   it("defaults directory imports to skipping hidden directories and accepts explicit boolean choices", () => {
     const input = { name: "landing", path: "/", contentType: "", overwrite: false, directory: true };
     expect(parseImportWebsiteFilesInput(input)).toEqual({ ...input, includeHiddenDirectories: false });

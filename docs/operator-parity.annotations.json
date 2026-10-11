@@ -10771,7 +10771,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.add-content",
@@ -10814,7 +10814,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.content-type",
@@ -10855,7 +10855,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.list",
@@ -10892,7 +10892,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.rm",
@@ -10929,7 +10929,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.rm-content",
@@ -10970,7 +10970,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.websites.show",
@@ -11007,7 +11007,7 @@
         "website-inert-preview",
         "website-electron-journey"
       ],
-      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, read-only Monaco source/hex previews, and isolated static rendering. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
+      "notes": "Native Websites page implements site and content CRUD, recursive native file import, MIME updates, export, Monaco text editing, source/hex inspection, direct content actions, and uncached localhost browser previews. Bounded content and catalog limits apply; the pinned server cannot write zero-byte content. Real-server and packaged-platform certification remain open."
     },
     {
       "id": "server.wg",

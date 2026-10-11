@@ -11,12 +11,13 @@ import {
   TEXT_EDITOR_IPC, TEXT_EDITOR_MAX_BYTES, type TextEditorRemoteOverwriteRequest,
 } from "../shared/text-editor-contracts.js";
 import type { SessionDestructiveActionPlan } from "../shared/session-contracts.js";
-import { TextEditorWindows } from "./text-editor-windows.js";
+import { WEBSITE_LIMITS } from "../shared/website-contracts.js";
+import { RemoteTextEditorError, TextEditorWindows } from "./text-editor-windows.js";
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>>(),
   windows: [] as MockWindow[],
-  showOpenDialog: vi.fn(), showSaveDialog: vi.fn(), showMessageBoxSync: vi.fn(),
+  showOpenDialog: vi.fn(), showSaveDialog: vi.fn(), showMessageBox: vi.fn(), showMessageBoxSync: vi.fn(),
 }));
 
 interface MockWindow {
@@ -55,7 +56,8 @@ vi.mock("electron", async () => {
       }
       destroy(): void { this.destroyed = true; this.emit("closed"); }
     },
-    dialog: { showOpenDialog: mocks.showOpenDialog, showSaveDialog: mocks.showSaveDialog, showMessageBoxSync: mocks.showMessageBoxSync },
+    dialog: { showOpenDialog: mocks.showOpenDialog, showSaveDialog: mocks.showSaveDialog,
+      showMessageBox: mocks.showMessageBox, showMessageBoxSync: mocks.showMessageBoxSync },
     nativeTheme: { shouldUseDarkColors: true },
     ipcMain: {
       handle: (channel: string, handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>) => mocks.handlers.set(channel, handler),
@@ -74,6 +76,7 @@ beforeEach(async () => {
   mocks.windows.length = 0;
   mocks.showOpenDialog.mockReset().mockResolvedValue({ canceled: true, filePaths: [] });
   mocks.showSaveDialog.mockReset().mockResolvedValue({ canceled: true });
+  mocks.showMessageBox.mockReset().mockResolvedValue({ response: 0 });
   mocks.showMessageBoxSync.mockReset().mockReturnValue(0);
   updateEditorSettings.mockReset().mockResolvedValue({ ok: true, value: DEFAULT_TEXT_EDITOR_SETTINGS_STATE });
   directory = await mkdtemp(join(tmpdir(), "text-editor-test-"));
@@ -168,6 +171,126 @@ async function openRemoteEditor(plan = remotePlan()): Promise<{
   await manager.openRemote(source, "/opt/notes.txt");
   return { binding, load, save };
 }
+
+async function openWebsiteEditor(text = "original") {
+  const source = currentWindow().webContents;
+  manager.dispose();
+  const binding = { secret: "main-only-website-binding" };
+  const load = vi.fn(async (): Promise<{ title: string; text: string; contentType?: string; binding: unknown }> =>
+    ({ title: "public /index.html", text, binding }));
+  const save = vi.fn(async (_binding: unknown, _text: string, confirm: () => Promise<boolean>) => confirm());
+  manager = new TextEditorWindows({
+    rendererUrl: URL, preloadPath: "/text-editor.cjs",
+    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+    getEditorSettings: () => DEFAULT_TEXT_EDITOR_SETTINGS_STATE,
+    updateEditorSettings, prepareWindow: vi.fn(), website: { load, save },
+  });
+  const input = { name: "public", path: "/index.html", mode: "edit" as const };
+  await manager.openWebsite(source, input);
+  return { source, input, binding, load, save };
+}
+
+describe("standalone website text editor host", () => {
+  it.each([
+    ["/", "text/html; charset=utf-8", "html"],
+    ["/api", "Application/JSON", "json"],
+    ["/source.txt", "application/ld+json", "json"],
+    ["/notes.md", "text/x-custom", "markdown"],
+  ])("uses website MIME or filename syntax for %s (%s)", async (path, contentType, language) => {
+    const { source, binding, load } = await openWebsiteEditor();
+    load.mockResolvedValueOnce({ title: `public: ${path}`, text: "", contentType, binding });
+    await manager.openWebsite(source, { name: "public", path, mode: "edit" });
+    expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { language, website: true } });
+  });
+
+  it("loads into the existing editor while keeping website bindings private and rejecting local file authority", async () => {
+    const { source, input, load, save } = await openWebsiteEditor();
+    expect(load).toHaveBeenCalledWith(source, input);
+    const document = await invoke(TEXT_EDITOR_IPC.getDocument);
+    expect(document).toMatchObject({ ok: true, value: {
+      title: "public /index.html", text: "original", language: "html", readOnly: false, website: true,
+    } });
+    expect(JSON.stringify(document)).not.toContain("main-only-website-binding");
+    expect(await invoke(TEXT_EDITOR_IPC.openFile)).toMatchObject({ ok: false, error: "Opening local files is unavailable for website content" });
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: true })).toMatchObject({ ok: false, error: "Save As is unavailable for website content" });
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false, website: { name: "other", path: "/" } })).toMatchObject({ ok: false });
+    expect(mocks.showOpenDialog).not.toHaveBeenCalled();
+    expect(mocks.showSaveDialog).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it("confirms overwrites in the editor window and preserves BOM, CRLF and the unsaved close guard", async () => {
+    const { binding, save } = await openWebsiteEditor("\ufefffirst\r\nsecond\r\n");
+    expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "first\r\nsecond\r\n" } });
+    await invoke(TEXT_EDITOR_IPC.setDirty, true);
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited\nsecond\n", saveAs: false })).toEqual({ ok: true, value: null });
+    expect(save).toHaveBeenCalledWith(binding, "\ufeffedited\r\nsecond\r\n", expect.any(Function));
+    expect(mocks.showMessageBox).toHaveBeenCalledWith(currentWindow(), expect.objectContaining({
+      title: "Replace hosted content?", buttons: ["Cancel", "Replace content"], defaultId: 0, cancelId: 0,
+    }));
+    expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "first\r\nsecond\r\n" } });
+    expect(manager.allowQuit()).toBe(false);
+    mocks.showMessageBox.mockResolvedValueOnce({ response: 1 });
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "edited\nsecond\n", saveAs: false }))
+      .toEqual({ ok: true, value: { title: "public /index.html" } });
+    expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "edited\nsecond\n" } });
+    expect(manager.allowQuit()).toBe(false);
+    await invoke(TEXT_EDITOR_IPC.setDirty, false);
+    expect(manager.allowQuit()).toBe(true);
+  });
+
+  it("retains website edits and the close guard when the captured backend rejects saving", async () => {
+    const { save } = await openWebsiteEditor();
+    save.mockRejectedValueOnce(new RemoteTextEditorError("The backend connection changed; reopen the website editor"));
+    await invoke(TEXT_EDITOR_IPC.setDirty, true);
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "my draft", saveAs: false })).toEqual({
+      ok: false, error: "The backend connection changed; reopen the website editor",
+    });
+    expect(await invoke(TEXT_EDITOR_IPC.getDocument)).toMatchObject({ ok: true, value: { text: "original", website: true } });
+    const close = cancelableEvent();
+    currentWindow().emit("close", close);
+    expect(close.preventDefault).toHaveBeenCalledOnce();
+    expect(mocks.showMessageBoxSync).toHaveBeenCalledWith(currentWindow(), expect.objectContaining({ title: "Unsaved changes" }));
+    expect(mocks.showSaveDialog).not.toHaveBeenCalled();
+  });
+
+  it("enforces the website byte limit after restoring BOM and CRLF and before starting a save", async () => {
+    const { source, input, binding, load, save } = await openWebsiteEditor("\ufeffa\r\n");
+    load.mockResolvedValueOnce({ title: "large.html", text: "a".repeat(WEBSITE_LIMITS.previewBytes + 1), binding });
+    await expect(manager.openWebsite(source, input)).rejects.toThrow("1 MiB");
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "a".repeat(WEBSITE_LIMITS.previewBytes - 4) + "\n", saveAs: false }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("1 MiB") });
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "é".repeat(WEBSITE_LIMITS.previewBytes / 2 + 1), saveAs: false }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("1 MiB") });
+    expect(save).not.toHaveBeenCalled();
+    expect(mocks.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it("rejects a native overwrite confirmation after the editor window is destroyed", async () => {
+    await openWebsiteEditor();
+    let resolve!: (result: { response: number }) => void;
+    mocks.showMessageBox.mockImplementationOnce(() => new Promise<{ response: number }>((done) => { resolve = done; }));
+    const save = invoke(TEXT_EDITOR_IPC.save, { text: "edited", saveAs: false });
+    await vi.waitFor(() => expect(mocks.showMessageBox).toHaveBeenCalledOnce());
+    currentWindow().destroy();
+    resolve({ response: 1 });
+    expect(await save).toMatchObject({ ok: false, error: "The text editor request was rejected" });
+  });
+
+  it("opens a new website document and delegates saving without an unnecessary overwrite prompt", async () => {
+    const { source, binding, load, save } = await openWebsiteEditor();
+    load.mockResolvedValueOnce({ title: "public /new.html", text: "", binding });
+    const input = { name: "public", path: "/new.html", mode: "create" as const, contentType: "text/html" };
+    await manager.openWebsite(source, input);
+    expect(load).toHaveBeenLastCalledWith(source, input);
+    save.mockResolvedValueOnce(true);
+    expect(await invoke(TEXT_EDITOR_IPC.save, { text: "<h1>New</h1>", saveAs: false }))
+      .toEqual({ ok: true, value: { title: "public /new.html" } });
+    expect(save).toHaveBeenLastCalledWith(binding, "<h1>New</h1>", expect.any(Function));
+    expect(mocks.showMessageBox).not.toHaveBeenCalled();
+    expect(mocks.showSaveDialog).not.toHaveBeenCalled();
+  });
+});
 
 describe("standalone local text editor host", () => {
   it("validates, updates, and broadcasts standalone editor settings", async () => {

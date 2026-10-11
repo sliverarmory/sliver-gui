@@ -27,6 +27,8 @@ export interface TextEditorDocument {
   readonly readOnly: boolean;
   /** Remote documents save back to the captured session and cannot use local file pickers. */
   readonly remote?: boolean;
+  /** Website documents save to their main-owned website binding, never a local file. */
+  readonly website?: boolean;
 }
 
 export interface TextEditorSaveInput {

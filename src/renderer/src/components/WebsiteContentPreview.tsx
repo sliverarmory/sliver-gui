@@ -5,7 +5,7 @@ import { websitePreviewLanguage } from "../editor/website-preview-languages";
 import { WebsiteSourceEditor } from "./WebsiteSourceEditor";
 import { createWebsiteContentPreview } from "./website-content-preview";
 
-/** Source uses a read-only syntax viewer. Rendered content belongs in the isolated native window. */
+/** Source stays inert in the application; rendered content opens in the default browser. */
 export function WebsiteContentPreview({ content }: { readonly content: WebsiteContentDetail }): React.JSX.Element {
   const preview = useMemo(() => createWebsiteContentPreview(content), [content]);
 

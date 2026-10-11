@@ -1,4 +1,4 @@
-import { WEBSITE_LIMITS, type WebsiteContentDetail } from "../../../shared/website-contracts";
+import { WEBSITE_LIMITS, isWebsiteTextContentType, type WebsiteContentDetail } from "../../../shared/website-contracts";
 
 export const WEBSITE_SOURCE_DISPLAY_BYTES = 64 * 1024;
 
@@ -11,7 +11,7 @@ interface WebsitePreview {
 
 /** Decode only complete content, so saving an editor cannot replace a file with a preview prefix. */
 export function decodeWebsiteEditableText(content: WebsiteContentDetail): string | null {
-  if (content.truncated || content.preview.byteLength > WEBSITE_LIMITS.previewBytes ||
+  if (!isWebsiteTextContentType(content.item.contentType) || content.truncated || content.preview.byteLength > WEBSITE_LIMITS.previewBytes ||
       content.item.sizeBytes !== String(content.preview.byteLength)) return null;
   if (content.previewState === "empty" && content.preview.byteLength === 0) return "";
   if (content.previewState !== "text") return null;

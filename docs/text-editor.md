@@ -59,6 +59,17 @@ and rejects a changed file. The upstream upload is not atomic, so another
 remote writer can still race after this check. Remote documents do not offer
 local Open or Save As actions.
 
+In **Websites**, choose **Edit** from a content row's actions menu or **Edit text**
+from its source preview to open this same standalone window. **Add text** asks
+for the URL path and content type, then opens a blank editor. Hosted editing
+accepts complete UTF-8 textual content up to 1 MiB. Save publishes to the bound
+website and path, preserving its MIME type, BOM, and consistent line endings.
+Replacing existing content requires a native confirmation. Changes to the
+original content, website identity, or connection reject the save and preserve
+the draft. New content cannot overwrite an existing path; use Edit instead.
+Website documents do not offer local Open or Save As. After saving, refresh an
+open browser preview to load the latest hosted content.
+
 ## Reuse
 
 The implementation has three layers:
@@ -72,8 +83,9 @@ The implementation has three layers:
   cancellation, and throw on failure.
 - `src/main/text-editor-windows.ts` owns native windows and local file access.
   `TextEditorWindows.open({ title, text, language, readOnly })` opens an optional
-  initial text buffer. `openRemote` accepts a main-owned binding to the exact
-  source session. `TextEditorWindowApp.tsx` connects its dedicated preload to
+  initial text buffer. `openRemote` binds to the exact source session, and
+  `openWebsite` binds to the source website and connection in main.
+  `TextEditorWindowApp.tsx` connects its dedicated preload to
   the reusable workspace.
 
 Only Electron main holds local paths. Each window has a sandboxed preload with

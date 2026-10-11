@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { _electron as electron, type ElectronApplication } from "playwright-core";
+import { chromium, _electron as electron, type Browser, type ElectronApplication, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
+import type { TextEditorAPI } from "../shared/text-editor-contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 
-test("hosted websites support CRUD, read-only source, and isolated static rendering", { timeout: 90_000 }, async (context) => {
+test("hosted websites support standalone editing, row actions, and fresh browser previews", { timeout: 120_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "sliver-gui-websites-"));
   const artifacts = join(repositoryRoot, "artifacts", "websites");
   await Promise.all(["saved", "managed", "client", "user-data", "upload"].map((name) => mkdir(join(root, name))));
@@ -21,28 +23,30 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     ca_certificate: "FAKE_WEBSITE_CA", certificate: "FAKE_WEBSITE_CERT",
     private_key: "FAKE_WEBSITE_KEY", token: "FAKE_TOKEN_M0_DO_NOT_RENDER",
   }), { mode: 0o600 });
-  const hostile = [
+  const hostedHtml = [
     "<!doctype html><html><head>",
-    '<base href="https://website-preview.invalid/">',
-    '<meta http-equiv="refresh" content="0;url=https://website-preview.invalid/redirect">',
-    '<style>@import url("https://website-preview.invalid/style");</style>',
+    '<link rel="stylesheet" href="./site.css"><script src="./site.js" defer></script>',
     '</head><body onload="window.__WEBSITE_EXECUTED__=true">',
-    '<h1>Rendered safely</h1><p style="color:rgb(30,70,120)">Static content</p>',
-    '<script>window.__WEBSITE_EXECUTED__=true;window.sliver.disconnect();fetch("https://website-preview.invalid/leak");</script>',
-    '<img src="https://website-preview.invalid/image" onerror="window.__WEBSITE_EXECUTED__=true">',
-    '<iframe src="file:///etc/passwd"></iframe><object data="https://website-preview.invalid/object"></object>',
-    '<svg onload="window.__WEBSITE_EXECUTED__=true"><image href="https://website-preview.invalid/svg"/></svg>',
-    '<a href="javascript:window.__WEBSITE_EXECUTED__=true">unsafe link</a>',
-    '<form action="https://website-preview.invalid/form"><input autofocus></form>',
+    '<h1>Browser preview</h1><p class="website-color">Static content</p>',
+    '<script>window.__WEBSITE_EXECUTED__=true;if(window.sliver)window.sliver.disconnect();</script>',
+    '<img src="./pixel.png" alt="Hosted image"><p id="script-result"></p>',
     '</body></html>',
   ].join("\n");
-  await writeFile(join(root, "upload", "index.html"), hostile);
+  const stylesheet = ".website-color { color: rgb(30, 70, 120); }";
+  const script = 'document.querySelector("#script-result").textContent="External script loaded";';
+  await writeFile(join(root, "upload", "index.html"), hostedHtml);
+  await writeFile(join(root, "upload", "site.css"), stylesheet);
+  await writeFile(join(root, "upload", "site.js"), script);
+  const bomText = "\uFEFFfirst\r\nsecond\r\n";
+  await writeFile(join(root, "upload", "bom.txt"), bomText);
   await writeFile(join(root, "upload", "asset.bin"), Buffer.from([0, 1, 2, 0xff]));
   await mkdir(join(root, "upload", ".git"));
   await writeFile(join(root, "upload", ".git", "fixture.txt"), "Hidden directory fixture");
   await writeFile(join(root, "upload", ".nojekyll"), "Dot file fixture");
   await writeFile(join(root, "upload", "pixel.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGOQc6v4DwADPgHc8bhcNQAAAABJRU5ErkJggg==", "base64"));
   let application: ElectronApplication | undefined;
+  let browser: Browser | undefined;
+  let browserPreview: Page | undefined;
   let failure: unknown;
   try {
     application = await electron.launch({
@@ -52,9 +56,14 @@ test("hosted websites support CRUD, read-only source, and isolated static render
         `--console-client-root-directory=${join(root, "client")}`],
       cwd: repositoryRoot, bypassCSP: false, timeout: 20_000,
     });
-    const process = application.process();
-    context.signal.addEventListener("abort", () => process.kill("SIGKILL"), { once: true });
+    const ownedProcess = application.process();
+    context.signal.addEventListener("abort", () => ownedProcess.kill("SIGKILL"), { once: true });
     const page = await application.firstWindow();
+    await application.evaluate(({ shell }) => {
+      const state = globalThis as unknown as { __websiteExternalUrls?: string[] };
+      state.__websiteExternalUrls = [];
+      shell.openExternal = async (url) => { state.__websiteExternalUrls?.push(url); };
+    });
     page.setDefaultTimeout(10_000);
     await page.emulateMedia({ reducedMotion: "reduce" });
     const errors: string[] = [];
@@ -131,49 +140,56 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     assert.equal(await page.evaluate(async () => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot().then((snapshot) => snapshot.connection.status)), "connected");
     await page.screenshot({ path: join(artifacts, "inert-source-preview.png"), animations: "disabled" });
 
-    const renderedPromise = application.waitForEvent("window");
-    await preview.getByRole("button", { name: "Rendered preview", exact: true }).click();
-    const rendered = await renderedPromise;
-    rendered.setDefaultTimeout(10_000);
-    rendered.on("request", (request) => {
-      if (/^(?:https?:|file:)/u.test(request.url())) externalRequests.push(request.url());
-    });
-    await rendered.getByRole("heading", { name: "Rendered safely", exact: true }).waitFor();
-    assert.match(rendered.url(), /^website-preview:\/\/[a-f0-9]{64}\/document$/u);
-    assert.equal(await rendered.locator("script, iframe, webview, object, embed, img, form, input, svg, base, link").count(), 0);
-    assert.equal(await rendered.locator("[href], [src], [onload], [onerror], [autofocus]").count(), 0);
-    assert.equal(await rendered.getByText("Static content", { exact: true }).evaluate((element) => element.ownerDocument.defaultView!.getComputedStyle(element).color), "rgb(30, 70, 120)");
-    assert.deepEqual(await rendered.evaluate(() => ["sliver", "require", "process", "__WEBSITE_EXECUTED__"].map((key) => typeof Reflect.get(globalThis, key))), ["undefined", "undefined", "undefined", "undefined"]);
-    const renderedWindow = await application.browserWindow(rendered);
-    const isolation = await renderedWindow.evaluate((window) => {
-      const preferences = window.webContents.getLastWebPreferences();
-      return {
-        javascript: preferences.javascript, sandbox: preferences.sandbox,
-        contextIsolation: preferences.contextIsolation, nodeIntegration: preferences.nodeIntegration,
-        webSecurity: preferences.webSecurity, webviewTag: preferences.webviewTag,
-        preload: preferences.preload,
-        preloads: window.webContents.session.getPreloadScripts(), persistent: window.webContents.session.isPersistent(),
-      };
-    });
-    assert.deepEqual(isolation, {
-      javascript: false, sandbox: true, contextIsolation: true, nodeIntegration: false,
-      webSecurity: true, webviewTag: false, preload: undefined, preloads: [], persistent: false,
-    });
-    assert.equal(await renderedWindow.evaluate(async (window) => {
-      window.webContents.openDevTools();
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      return window.webContents.isDevToolsOpened();
-    }), false);
-    const blockedLoads = await renderedWindow.evaluate(async (window) => {
-      const urls = ["sliver://app/index.html", "file:///etc/passwd", "https://website-preview.invalid/escape", "data:text/html,escape"];
-      return Promise.all(urls.map(async (url) => {
-        try { await window.loadURL(url); return false; } catch { return true; }
-      }));
-    });
-    assert.deepEqual(blockedLoads, [true, true, true, true]);
-    assert.equal(await renderedWindow.evaluate((window) => window.getTitle()), "Website preview");
-    await rendered.screenshot({ path: join(artifacts, "isolated-rendered-preview.png"), animations: "disabled" });
-    await rendered.close();
+    for (const action of ["Edit text", "Replace from file", "Change content type", "Save copy", "Delete"]) {
+      assert.equal(await preview.getByRole("button", { name: action, exact: true }).count(), 1,
+        `the source modal retains its ${action} action`);
+    }
+    await preview.getByRole("button", { name: "Preview in browser", exact: true }).click();
+    const previewUrl = await waitForExternalUrl(application, 1);
+    const parsedPreview = new URL(previewUrl);
+    assert.equal(parsedPreview.protocol, "http:");
+    assert.equal(parsedPreview.hostname, "127.0.0.1");
+    assert.notEqual(parsedPreview.port, "");
+    assert.equal(parsedPreview.pathname, "/index.html");
+    assert.equal(parsedPreview.username, "");
+    assert.equal(parsedPreview.password, "");
+    assert.equal(application.windows().length, 1, "browser preview never creates an Electron window");
+    const documentResponse = await fetchPreview(previewUrl);
+    assert.equal(documentResponse.status, 200);
+    assert.match(documentResponse.headers.get("content-type") ?? "", /^text\/html(?:;|$)/u);
+    assertUncached(documentResponse);
+    assert.equal(await documentResponse.text(), hostedHtml);
+    for (const [path, expected] of [["/site.css", stylesheet], ["/site.js", script]]) {
+      const response = await fetchPreview(new URL(path!, previewUrl).href);
+      assert.equal(response.status, 200);
+      assertUncached(response);
+      assert.equal(await response.text(), expected);
+    }
+    const binaryResponse = await fetchPreview(new URL("/asset.bin", previewUrl).href);
+    assert.equal(binaryResponse.status, 200);
+    assert.deepEqual(Buffer.from(await binaryResponse.arrayBuffer()), Buffer.from([0, 1, 2, 0xff]));
+
+    // Use an owned, temporary browser profile rather than launching the operator's browser.
+    const browserExecutable = [chromium.executablePath(), ...(process.platform === "darwin"
+      ? ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"] : [])].find(existsSync);
+    if (browserExecutable) {
+      browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
+      browserPreview = await browser.newPage();
+      browserPreview.setDefaultTimeout(10_000);
+      await browserPreview.goto(previewUrl);
+      await browserPreview.getByRole("heading", { name: "Browser preview", exact: true }).waitFor();
+      await browserPreview.getByText("External script loaded", { exact: true }).waitFor();
+      assert.equal(await browserPreview.getByText("Static content", { exact: true })
+        .evaluate((element) => element.ownerDocument.defaultView!.getComputedStyle(element).color), "rgb(30, 70, 120)");
+      await browserPreview.getByRole("img", { name: "Hosted image", exact: true }).evaluate(async (element) => {
+        await (element as unknown as { decode(): Promise<void> }).decode();
+      });
+      assert.deepEqual(await browserPreview.evaluate(() => ["sliver", "require", "process", "__WEBSITE_EXECUTED__"]
+        .map((key) => typeof Reflect.get(globalThis, key))), ["undefined", "undefined", "undefined", "boolean"]);
+      await browserPreview.screenshot({ path: join(artifacts, "browser-rendered-preview.png"), animations: "disabled" });
+    } else {
+      context.diagnostic("No installed Chromium executable: verified preview HTTP bytes and resources; browser rendering was unavailable.");
+    }
 
     const exportedPath = join(root, "exported.html");
     await application.evaluate(({ dialog }, filePath) => {
@@ -181,7 +197,7 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     }, exportedPath);
     await preview.getByRole("button", { name: "Save copy", exact: true }).click();
     await page.getByText("Saved index.html.", { exact: true }).waitFor();
-    assert.equal(await readFile(exportedPath, "utf8"), hostile);
+    assert.equal(await readFile(exportedPath, "utf8"), hostedHtml);
 
     await preview.getByRole("button", { name: "Change content type", exact: true }).click();
     const mimeDialog = page.getByRole("dialog", { name: "Change content type", exact: true });
@@ -194,13 +210,89 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     await preview.locator(".view-lines").filter({ hasText: /__WEBSITE_EXECUTED__/u }).waitFor();
     assert.match(await preview.locator(".view-lines").innerText(), /__WEBSITE_EXECUTED__/u,
       "content-type updates preserve stored bytes");
-    await preview.getByRole("button", { name: "Edit text", exact: true }).click();
-    const editDialog = page.getByRole("dialog", { name: "Edit content", exact: true });
-    assert.equal(await editDialog.getByLabel("Content source", { exact: true }).inputValue(), hostile);
-    await editDialog.getByLabel("Content source", { exact: true }).fill("Updated website content");
-    await editDialog.getByRole("button", { name: "Save content", exact: true }).click();
-    await page.getByRole("alertdialog", { name: "Replace hosted content?", exact: true }).getByRole("button", { name: "Replace content", exact: true }).click();
-    await editDialog.waitFor({ state: "hidden" });
+    await preview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await page.getByRole("button", { name: "Actions for /index.html", exact: true }).click();
+    const contentMenu = page.getByRole("menu", { name: "Actions for /index.html", exact: true });
+    for (const action of ["Edit", "Replace", "Change content type", "Save copy", "Delete"]) {
+      assert.equal(await contentMenu.getByRole("menuitem", { name: action, exact: true }).count(), 1);
+    }
+    await page.screenshot({ path: join(artifacts, "content-actions.png"), animations: "disabled" });
+    const editorOpened = application.waitForEvent("window");
+    await contentMenu.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    const editor = await editorOpened;
+    await prepareWebsiteEditor(application, editor, errors);
+    assert.equal(await page.getByRole("dialog", { name: "Edit content", exact: true }).count(), 0,
+      "editing opens the existing standalone editor instead of a modal");
+    await editor.locator(".view-lines").filter({ hasText: /__WEBSITE_EXECUTED__/u }).waitFor();
+    const editorInput = editor.getByRole("textbox", { name: "Document text", exact: true });
+    assert.notEqual(await editorInput.getAttribute("aria-readonly"), "true");
+    assert.ok(await editor.locator('.view-lines span[class*="mtk"]').count() > 5, "editor has real syntax tokens");
+    assert.equal(await editor.evaluate(() => Reflect.get(globalThis, "__WEBSITE_EXECUTED__")), undefined,
+      "hosted scripts stay inert in the standalone editor");
+    await editor.screenshot({ path: join(artifacts, "standalone-website-editor.png"), animations: "disabled" });
+    await editorInput.focus();
+    await editor.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await editor.keyboard.insertText("Updated website content");
+    await editor.getByText("Unsaved changes", { exact: true }).waitFor();
+    const nativeEditor = await application.browserWindow(editor);
+    await waitUntil(async () => (await nativeEditor.evaluate((window) => window.getTitle())).startsWith("● "));
+    const editorId = await nativeEditor.evaluate((window) => window.id);
+    const closePrompts = await application.evaluate(({ BrowserWindow, dialog }, windowId) => {
+      const original = dialog.showMessageBoxSync;
+      const prompts: string[] = [];
+      dialog.showMessageBoxSync = (...args: unknown[]) => {
+        const options = args[args.length - 1] as { message: string; buttons: string[] };
+        prompts.push(options.message);
+        return options.buttons.indexOf("Cancel");
+      };
+      try { BrowserWindow.fromId(windowId)!.close(); }
+      finally { dialog.showMessageBoxSync = original; }
+      return prompts;
+    }, editorId);
+    assert.equal(closePrompts.length, 1);
+    assert.match(closePrompts[0]!, /^Discard changes to /u);
+    assert.equal(editor.isClosed(), false, "canceling the native close preserves the unsaved website draft");
+    await editor.getByText("Unsaved changes", { exact: true }).waitFor();
+    assert.equal(await (await fetchPreview(previewUrl)).text(), hostedHtml, "the draft does not change hosted content before Save");
+    await editor.screenshot({ path: join(artifacts, "monaco-content-editor.png"), animations: "disabled" });
+    await application.evaluate(({ dialog }) => {
+      const state = globalThis as unknown as { __websiteOverwriteTitles?: string[] };
+      state.__websiteOverwriteTitles = [];
+      dialog.showMessageBox = async (...args: unknown[]) => {
+        const options = args[args.length - 1] as { title: string; buttons: string[] };
+        if (options.title !== "Replace hosted content?") throw new Error("Unexpected native website confirmation");
+        state.__websiteOverwriteTitles?.push(options.title);
+        const response = options.buttons.indexOf("Replace content");
+        if (response < 0) throw new Error("Missing website overwrite confirmation");
+        return { response, checkboxChecked: false };
+      };
+    });
+    await editor.getByRole("button", { name: "Save", exact: true }).click();
+    await editor.getByText("Saved", { exact: true }).waitFor();
+    assert.deepEqual(await application.evaluate(() =>
+      (globalThis as unknown as { __websiteOverwriteTitles?: string[] }).__websiteOverwriteTitles), ["Replace hosted content?"]);
+    await closeWebsiteEditor(application, editor);
+    const updatedResponse = await fetchPreview(previewUrl, { headers: { "If-None-Match": "old-content", "If-Modified-Since": new Date().toUTCString() } });
+    assert.equal(updatedResponse.status, 200, "conditional requests must still fetch fresh content");
+    assertUncached(updatedResponse);
+    assert.equal(updatedResponse.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(await updatedResponse.text(), "Updated website content", "the existing browser URL fetches the saved bytes");
+    if (browserPreview) {
+      await browserPreview.reload();
+      await browserPreview.getByText("Updated website content", { exact: true }).waitFor();
+    }
+    await page.getByRole("button", { name: "Preview website", exact: true }).click();
+    const directPreviewUrl = await waitForExternalUrl(application, 2);
+    assert.equal(new URL(directPreviewUrl).pathname, "/index.html", "website preview opens its index path");
+    assert.equal(await page.getByRole("dialog", { name: "/index.html", exact: true }).count(), 0,
+      "website preview opens the browser without requiring the source modal");
+    await page.screenshot({ path: join(artifacts, "website-header-actions.png"), animations: "disabled" });
+    assert.equal(await (await fetchPreview(directPreviewUrl)).text(), "Updated website content");
+    await page.getByRole("button", { name: "Actions for /index.html", exact: true }).click();
+    await page.getByRole("menu", { name: "Actions for /index.html", exact: true })
+      .getByRole("menuitem", { name: "Save copy", exact: true }).click();
+    await page.getByText("Saved index.html.", { exact: true }).waitFor();
+    assert.equal(await readFile(exportedPath, "utf8"), "Updated website content");
     await page.getByRole("button", { name: "Inspect /index.html", exact: true }).click();
     preview = page.getByRole("dialog", { name: "/index.html", exact: true });
     await preview.getByLabel("Website content source", { exact: true }).waitFor();
@@ -212,35 +304,103 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     assert.match(await binaryPreview.getByLabel("Website content hex", { exact: true }).textContent() ?? "", /00 01 02 ff/u);
     assert.equal(await binaryPreview.getByRole("button", { name: "Edit text", exact: true }).isDisabled(), true);
     await binaryPreview.getByRole("button", { name: "Close", exact: true }).last().click();
-    await page.getByRole("button", { name: "Inspect /pixel.png", exact: true }).click();
-    const imagePreviewPromise = application.waitForEvent("window");
-    await page.getByRole("dialog", { name: "/pixel.png", exact: true }).getByRole("button", { name: "Rendered preview", exact: true }).click();
-    const imagePreview = await imagePreviewPromise;
-    const image = imagePreview.getByRole("img", { name: "Hosted image preview", exact: true });
-    await image.waitFor();
-    await image.evaluate(async (element) => {
-      const raster = element as unknown as { decode(): Promise<void> };
-      await raster.decode();
-    });
-    assert.equal(await image.evaluate((element) => Reflect.get(element, "naturalWidth")), 1);
-    await imagePreview.close();
-    await page.getByRole("dialog", { name: "/pixel.png", exact: true }).getByRole("button", { name: "Close", exact: true }).last().click();
+    await page.getByRole("button", { name: "Actions for /asset.bin", exact: true }).click();
+    const binaryMenu = page.getByRole("menu", { name: "Actions for /asset.bin", exact: true });
+    // Unknown extensions use the server's default textual MIME, but the bytes
+    // still must be validated before an editor can open.
+    await binaryMenu.getByRole("menuitem", { name: "Edit", exact: true }).click();
+    await page.getByText("The website editor requires complete, valid UTF-8 text", { exact: true }).waitFor();
+    assert.equal(application.windows().length, 1, "binary bytes must not open a text editor window");
+    await page.getByRole("button", { name: "Actions for /asset.bin", exact: true }).click();
+    const replacement = Buffer.from([0xff, 0xfe, 0x02, 0x00]);
+    const replacementPath = join(root, "replacement.bin");
+    await writeFile(replacementPath, replacement);
+    await application.evaluate(({ dialog }, filePath) => {
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] });
+    }, replacementPath);
+    await binaryMenu.getByRole("menuitem", { name: "Replace", exact: true }).click();
+    const replaceDialog = page.getByRole("dialog", { name: "Replace content", exact: true });
+    await replaceDialog.getByRole("button", { name: "Choose file and upload", exact: true }).click();
+    await page.getByRole("alertdialog", { name: "Replace hosted content?", exact: true })
+      .getByRole("button", { name: "Replace content", exact: true }).click();
+    await replaceDialog.waitFor({ state: "hidden" });
+    const replacedResponse = await fetchPreview(new URL("/asset.bin", directPreviewUrl).href);
+    assert.equal(replacedResponse.status, 200);
+    assert.deepEqual(Buffer.from(await replacedResponse.arrayBuffer()), replacement);
+    await page.getByRole("button", { name: "Actions for /asset.bin", exact: true }).click();
+    await page.getByRole("menu", { name: "Actions for /asset.bin", exact: true })
+      .getByRole("menuitem", { name: "Change content type", exact: true }).click();
+    await mimeDialog.getByLabel("Content type", { exact: true }).fill("application/x-fixture");
+    await mimeDialog.getByRole("button", { name: "Save content", exact: true }).click();
+    await mimeDialog.waitFor({ state: "hidden" });
+    const retypedResponse = await fetchPreview(new URL("/asset.bin", directPreviewUrl).href);
+    assert.equal(retypedResponse.headers.get("content-type"), "application/x-fixture");
+    assert.deepEqual(Buffer.from(await retypedResponse.arrayBuffer()), replacement);
+    await page.getByRole("button", { name: "Actions for /asset.bin", exact: true }).click();
+    assert.equal(await binaryMenu.getByRole("menuitem", { name: "Edit", exact: true }).getAttribute("aria-disabled"), "true");
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Preview /pixel.png", exact: true }).click();
+    const imagePreviewUrl = await waitForExternalUrl(application, 3);
+    const imageResponse = await fetchPreview(imagePreviewUrl);
+    assert.equal(imageResponse.status, 200);
+    assert.match(imageResponse.headers.get("content-type") ?? "", /^image\/png(?:;|$)/u);
+    assertUncached(imageResponse);
+    assert.deepEqual(Buffer.from(await imageResponse.arrayBuffer()), await readFile(join(root, "upload", "pixel.png")));
     await page.screenshot({ path: join(artifacts, "website-content.png"), animations: "disabled" });
-    await page.getByRole("button", { name: "Delete /asset.bin", exact: true }).click();
+    await page.getByRole("button", { name: "Actions for /asset.bin", exact: true }).click();
+    await page.getByRole("menu", { name: "Actions for /asset.bin", exact: true }).getByRole("menuitem", { name: "Delete", exact: true }).click();
     await page.getByRole("alertdialog", { name: "Delete hosted content?", exact: true }).getByRole("button", { name: "Delete content", exact: true }).click();
     await page.getByRole("button", { name: "Inspect /asset.bin", exact: true }).waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "Inspect /bom.txt", exact: true }).click();
+    const bomEditorOpened = application.waitForEvent("window");
+    await page.getByRole("dialog", { name: "/bom.txt", exact: true }).getByRole("button", { name: "Edit text", exact: true }).click();
+    const bomEditor = await bomEditorOpened;
+    await prepareWebsiteEditor(application, bomEditor, errors);
+    await bomEditor.locator(".view-lines").filter({ hasText: /second/u }).waitFor();
+    await bomEditor.getByRole("textbox", { name: "Document text", exact: true }).focus();
+    await bomEditor.keyboard.press(process.platform === "darwin" ? "Meta+ArrowDown" : "Control+End");
+    await bomEditor.keyboard.insertText("!");
+    await bomEditor.getByRole("button", { name: "Save", exact: true }).click();
+    await bomEditor.getByText("Saved", { exact: true }).waitFor();
+    await closeWebsiteEditor(application, bomEditor);
+    const bomResponse = await fetchPreview(new URL("/bom.txt", imagePreviewUrl).href);
+    assert.equal(bomResponse.status, 200);
+    assert.deepEqual(Buffer.from(await bomResponse.arrayBuffer()), Buffer.from(`${bomText}!`, "utf8"),
+      "editing preserves the UTF-8 BOM exactly once and the existing CRLF line endings");
+    await page.getByRole("button", { name: "Add text", exact: true }).click();
+    const addTextDialog = page.getByRole("dialog", { name: "Add text content", exact: true });
+    await addTextDialog.getByLabel("URL path", { exact: true }).fill("/created.txt");
+    await addTextDialog.getByLabel("Content type", { exact: true }).fill("text/plain; charset=utf-8");
+    assert.equal(await addTextDialog.locator(".monaco-editor, textarea").count(), 0,
+      "the Add text modal collects destination metadata only");
+    const createEditorOpened = application.waitForEvent("window");
+    await addTextDialog.getByRole("button", { name: "Open editor", exact: true }).click();
+    await addTextDialog.waitFor({ state: "hidden" });
+    const createEditor = await createEditorOpened;
+    await prepareWebsiteEditor(application, createEditor, errors);
+    await createEditor.getByRole("textbox", { name: "Document text", exact: true }).focus();
+    await createEditor.keyboard.insertText("Created website content");
+    await createEditor.getByRole("button", { name: "Save", exact: true }).click();
+    await createEditor.getByText("Saved", { exact: true }).waitFor();
+    await closeWebsiteEditor(application, createEditor);
+    await page.getByRole("button", { name: "Inspect /created.txt", exact: true }).waitFor();
+    const createdResponse = await fetchPreview(new URL("/created.txt", imagePreviewUrl).href);
+    assert.equal(createdResponse.status, 200);
+    assert.equal(createdResponse.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(await createdResponse.text(), "Created website content");
+    assert.deepEqual(await application.evaluate(() =>
+      (globalThis as unknown as { __websiteOverwriteTitles?: string[] }).__websiteOverwriteTitles),
+    ["Replace hosted content?", "Replace hosted content?"], "creating a new path needs no overwrite confirmation");
     await page.getByRole("button", { name: "Delete website", exact: true }).click();
     await page.getByRole("alertdialog", { name: "Delete website?", exact: true }).getByRole("button", { name: "Delete website", exact: true }).click();
     await page.getByRole("button", { name: /^preview-test/u }).waitFor({ state: "hidden" });
     await page.getByRole("button", { name: /^landing/u }).click();
     await page.getByRole("button", { name: "Inspect /index.html", exact: true }).click();
-    const closingPreviewPromise = application.waitForEvent("window");
-    await page.getByRole("dialog", { name: "/index.html", exact: true }).getByRole("button", { name: "Rendered preview", exact: true }).click();
-    const closingPreview = await closingPreviewPromise;
-    await closingPreview.getByRole("heading", { name: "Welcome", exact: true }).waitFor();
-    const closedPromise = closingPreview.waitForEvent("close");
+    await page.getByRole("dialog", { name: "/index.html", exact: true }).getByRole("button", { name: "Preview in browser", exact: true }).click();
+    const closingPreviewUrl = await waitForExternalUrl(application, 4);
+    assert.match(await (await fetchPreview(closingPreviewUrl)).text(), /Welcome/u);
     await page.evaluate(async () => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.disconnect());
-    await closedPromise;
+    await assert.rejects(fetchPreview(closingPreviewUrl), "disconnect revokes the loopback server");
     assert.equal(page.url(), "sliver://app/index.html");
     assert.equal(application.windows().length, 1);
     assert.deepEqual(externalRequests, []);
@@ -248,10 +408,91 @@ test("hosted websites support CRUD, read-only source, and isolated static render
   } catch (error) {
     failure = error;
     await application?.windows()[0]?.screenshot({ path: join(artifacts, "failure.png"), animations: "disabled" }).catch(() => {});
+    for (const editor of application?.windows().slice(1) ?? []) {
+      if (!editor.isClosed()) await editor.screenshot({ path: join(artifacts, "editor-failure.png"), animations: "disabled" }).catch(() => {});
+    }
     throw error;
   } finally {
+    await browser?.close();
+    await application?.evaluate(({ dialog }) => {
+      dialog.showMessageBoxSync = (...args: unknown[]) => {
+        const options = args[args.length - 1] as { buttons?: string[] };
+        return Math.max(0, options.buttons?.indexOf("Discard Changes") ?? 0);
+      };
+    }).catch(() => {});
     try { if (application) await cleanupOwnedApplication(application, "website fixture", 5_000); }
     catch (error) { if (failure) attachCleanupFailure(failure, error); else throw error; }
     await rm(root, { recursive: true, force: true });
   }
 });
+
+async function waitForExternalUrl(application: ElectronApplication, expectedCount: number): Promise<string> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const urls = await application.evaluate(() =>
+      (globalThis as unknown as { __websiteExternalUrls?: string[] }).__websiteExternalUrls ?? []);
+    if (urls.length >= expectedCount) {
+      assert.equal(urls.length, expectedCount);
+      return urls[expectedCount - 1]!;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Expected browser preview URL ${expectedCount}`);
+}
+
+function fetchPreview(url: string, options: RequestInit = {}): Promise<Response> {
+  return fetch(url, { ...options, cache: "no-store", signal: AbortSignal.timeout(5_000) });
+}
+
+function assertUncached(response: Response): void {
+  assert.match(response.headers.get("cache-control") ?? "", /no-store/u);
+  assert.equal(response.headers.get("etag"), null);
+  assert.equal(response.headers.get("last-modified"), null);
+}
+
+async function prepareWebsiteEditor(application: ElectronApplication, page: Page, errors: string[]): Promise<void> {
+  page.setDefaultTimeout(10_000);
+  page.on("dialog", (dialog) => { void dialog.accept().catch(() => undefined); });
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.locator(".monaco-editor").waitFor();
+  // The existing editor uses Monaco's native EditContext accessibility element,
+  // which intentionally has no layout box until focused.
+  await page.getByRole("textbox", { name: "Document text", exact: true }).waitFor({ state: "attached" });
+  assert.equal(new URL(page.url()).searchParams.get("surface"), "text-editor");
+  assert.deepEqual(await page.evaluate(() => {
+    const state = globalThis as unknown as { textEditor: TextEditorAPI; sliver?: unknown; network?: unknown; armory?: unknown };
+    return { frozen: Object.isFrozen(state.textEditor), sliver: typeof state.sliver,
+      network: typeof state.network, armory: typeof state.armory };
+  }), { frozen: true, sliver: "undefined", network: "undefined", armory: "undefined" });
+  const document = await page.evaluate(() =>
+    (globalThis as unknown as { textEditor: TextEditorAPI }).textEditor.getDocument());
+  assert.equal(document.ok, true);
+  if (document.ok) {
+    assert.equal(document.value.website, true, "the editor keeps its main-owned website save destination");
+    assert.equal(document.value.readOnly, false);
+  }
+  assert.equal(await page.getByRole("button", { name: "Open…", exact: true }).count(), 0);
+  assert.equal(await page.getByRole("button", { name: "Save As…", exact: true }).count(), 0);
+  const native = await application.browserWindow(page);
+  assert.deepEqual(await native.evaluate((window) => {
+    const preferences = window.webContents.getLastWebPreferences();
+    return { sandbox: preferences.sandbox, contextIsolation: preferences.contextIsolation, nodeIntegration: preferences.nodeIntegration };
+  }), { sandbox: true, contextIsolation: true, nodeIntegration: false });
+}
+
+async function closeWebsiteEditor(application: ElectronApplication, page: Page): Promise<void> {
+  const native = await application.browserWindow(page);
+  const closed = page.waitForEvent("close", { timeout: 10_000 });
+  await native.evaluate((window) => window.close());
+  await closed;
+}
+
+async function waitUntil(check: () => Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Website editor state did not settle");
+}

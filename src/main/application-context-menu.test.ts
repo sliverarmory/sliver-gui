@@ -706,19 +706,39 @@ describe("ApplicationContextMenuController", () => {
     expect(electronMocks.clipboardWriteText).not.toHaveBeenCalled();
   });
 
-  it("omits unsafe external-open actions while retaining copy-link capability", async () => {
+  it.each([
+    "javascript:alert(1)",
+    "file:///tmp/preview.html",
+    "https://user:password@example.test/",
+    "https:///example.test/",
+    "https://exam\nple.test/",
+    "\nhttps://example.test/",
+    "https://example.test\\path",
+  ])("omits unsafe external-open actions for %j while retaining copy-link capability", async (linkURL) => {
     const contents = new FakeWebContents(49);
     controller.install(contents as unknown as WebContents);
-    emitContextMenu(contents, contextParams({ linkURL: "javascript:alert(1)" }));
+    emitContextMenu(contents, contextParams({ linkURL }));
     const request = sentRequest(contents);
 
     expect(actionKinds(request)).not.toContain("open-link");
     const copyLink = actionItem(request, "copy-link");
     await expect(execute(contents, request, copyLink)).resolves.toBe(true);
     expect(electronMocks.clipboardWriteText).toHaveBeenCalledExactlyOnceWith(
-      "javascript:alert(1)",
+      linkURL,
     );
     expect(electronMocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("opens only the validated canonical HTTP URL through the browser action", async () => {
+    const contents = new FakeWebContents(49);
+    controller.install(contents as unknown as WebContents);
+    emitContextMenu(contents, contextParams({ linkURL: " HTTP://LOCALHOST:49152/preview.html " }));
+    const request = sentRequest(contents);
+
+    await expect(execute(contents, request, actionItem(request, "open-link"))).resolves.toBe(true);
+    expect(electronMocks.openExternal).toHaveBeenCalledExactlyOnceWith(
+      "http://localhost:49152/preview.html",
+    );
   });
 
   it("disposes installed listeners, pending capabilities, and the fixed handler", async () => {
