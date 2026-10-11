@@ -65,8 +65,27 @@ test("hosted websites support CRUD, read-only source, and isolated static render
     });
     await page.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
     await page.getByRole("heading", { name: "Overview", exact: true }).waitFor();
-    await page.getByRole("treegrid", { name: "Operational navigation" }).getByRole("row", { name: "Websites" }).click();
+    const infrastructure = page.getByRole("treegrid", { name: "Operational navigation" });
+    assert.equal(await infrastructure.getByRole("row", { name: "Websites" }).count(), 0);
+    await infrastructure.getByRole("row", { name: "Jobs & listeners" }).click();
+    await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+    const jobsTab = page.getByRole("tab", { name: "Jobs & listeners", exact: true });
+    const websitesTab = page.getByRole("tab", { name: "Websites", exact: true });
+    assert.equal(await page.getByRole("button", { name: "Websites", exact: true }).count(), 0);
+    assert.equal(await jobsTab.getAttribute("aria-selected"), "true");
+    assert.equal(await websitesTab.getAttribute("aria-selected"), "false");
+    await page.screenshot({ path: join(artifacts, "jobs-websites-tabs.png"), animations: "disabled" });
+    await websitesTab.click();
     await page.getByRole("heading", { name: "Websites", exact: true, level: 1 }).waitFor();
+    assert.equal(await websitesTab.getAttribute("aria-selected"), "true");
+    assert.equal(await jobsTab.getAttribute("aria-selected"), "false");
+    assert.equal(await infrastructure.getByRole("row", { name: "Jobs & listeners" }).getAttribute("data-current"), "true");
+    await jobsTab.click();
+    await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+    await jobsTab.press("ArrowRight");
+    await websitesTab.press("Enter");
+    await page.getByRole("heading", { name: "Websites", exact: true, level: 1 }).waitFor();
+    assert.equal(await websitesTab.getAttribute("aria-selected"), "true");
 
     // Native dialogs are selected in main; no renderer API receives a local path.
     await application.evaluate(({ dialog }, directory) => {

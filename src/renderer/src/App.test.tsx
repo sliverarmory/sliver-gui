@@ -1364,7 +1364,7 @@ describe("Sidebar navigation", () => {
     });
   });
 
-  it("opens hosted websites from Operational navigation", async () => {
+  it("switches Jobs & listeners tabs while preserving history and command palette access", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -1377,10 +1377,43 @@ describe("Sidebar navigation", () => {
     });
     render(<App />);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
-    await user.click(within(screen.getByRole("treegrid", { name: "Operational navigation" }))
-      .getByRole("row", { name: "Websites" }));
+    const infrastructure = within(screen.getByRole("treegrid", { name: "Operational navigation" }));
+    expect(infrastructure.queryByRole("row", { name: "Websites" })).not.toBeInTheDocument();
+    await user.click(infrastructure.getByRole("row", { name: "Jobs & listeners" }));
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Websites$/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Jobs & listeners" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Websites" })).toHaveAttribute("aria-selected", "false");
+    await user.click(screen.getByRole("tab", { name: "Websites" }));
     expect(await screen.findByRole("heading", { name: /^Websites$/u, level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Websites" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Jobs & listeners" })).toHaveAttribute("aria-selected", "false");
+    expect(infrastructure.getByRole("row", { name: "Jobs & listeners" })).toHaveAttribute("data-current", "true");
     await waitFor(() => expect(api.listWebsites).toHaveBeenCalled());
+
+    const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
+    await user.click(navigation.getByRole("button", { name: "Go back" }));
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Jobs & listeners" })).toHaveAttribute("aria-selected", "true");
+    await user.click(navigation.getByRole("button", { name: "Go forward" }));
+    expect(await screen.findByRole("heading", { name: /^Websites$/u, level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Websites" })).toHaveAttribute("aria-selected", "true");
+    expect(infrastructure.getByRole("row", { name: "Jobs & listeners" })).toHaveAttribute("data-current", "true");
+
+    await user.click(screen.getByRole("tab", { name: "Jobs & listeners" }));
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Jobs & listeners" })).toHaveAttribute("aria-selected", "true");
+    await user.keyboard("{ArrowRight}{Enter}");
+    expect(await screen.findByRole("heading", { name: /^Websites$/u, level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Websites" })).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("tab", { name: "Jobs & listeners" }));
+    expect(await screen.findByRole("heading", { name: "Jobs & listeners" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const palette = await screen.findByRole("dialog", { name: "Command palette" });
+    await user.click(within(palette).getByRole("menuitem", { name: /^Websites/u }));
+    expect(await screen.findByRole("heading", { name: /^Websites$/u, level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Websites" })).toHaveAttribute("aria-selected", "true");
+    expect(infrastructure.getByRole("row", { name: "Jobs & listeners" })).toHaveAttribute("data-current", "true");
   });
 
   it("shows the unfiltered credential total and refreshes it after stream recovery", async () => {
@@ -1661,7 +1694,6 @@ describe("Sidebar navigation", () => {
       "Generate",
       "Builds & profiles",
       "Jobs & listeners",
-      "Websites",
     ]);
     expect(within(infrastructure).queryByRole("row", { name: "Sessions" })).not.toBeInTheDocument();
     expect(within(infrastructure).queryByRole("row", { name: "Beacons" })).not.toBeInTheDocument();
@@ -1964,6 +1996,7 @@ describe("Sidebar navigation", () => {
       const interact = await screen.findByRole("treegrid", { name: "Interact navigation" });
       const data = await screen.findByRole("treegrid", { name: "Data navigation" });
       expect(within(infrastructure).getByRole("row", { name: "Jobs & listeners" })).toBeInTheDocument();
+      expect(within(infrastructure).queryByRole("row", { name: "Websites" })).not.toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Generate" })).toBeInTheDocument();
       expect(within(infrastructure).getByRole("row", { name: "Builds & profiles" })).toBeInTheDocument();
       expect(within(interact).getByRole("row", { name: "Sessions" })).toBeInTheDocument();

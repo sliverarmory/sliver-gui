@@ -63,8 +63,7 @@ import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { LootPage } from "./pages/LootPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
-import { WebsitesPage } from "./pages/WebsitesPage";
-import { OperationsPage } from "./pages/OperationsPage";
+import { OperationsWorkspacePage } from "./pages/OperationsWorkspacePage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import {
@@ -102,8 +101,9 @@ const infrastructureNavItems = [
     description: "Manage server jobs and listener endpoints.",
     icon: faSatelliteDish,
   },
-  { id: "websites" as const, label: "Websites", description: "Manage hosted websites and their content.", icon: faGlobe },
 ];
+
+const websitesNavItem = { id: "websites" as const, label: "Websites", description: "Manage hosted websites and their content.", icon: faGlobe };
 
 const interactNavItems = [
   { id: "sessions" as const, label: "Sessions", description: "Browse interactive sessions.", icon: faComputer },
@@ -656,6 +656,7 @@ export function App() {
   const navigationCommands = [
     overviewNavItem,
     ...infrastructureNavItems,
+    websitesNavItem,
     ...interactNavItems,
     ...dataNavItems,
   ].map((item): AppCommandPaletteCommand => ({
@@ -944,7 +945,9 @@ export function App() {
             />
           ) : connected ? (
             <>
-              {view === "operations" ? <OperationsPage snapshot={snapshot} /> : null}
+              {view === "operations" || view === "websites" ? (
+                <OperationsWorkspacePage snapshot={snapshot} selectedTab={view} onTabChange={changeView} />
+              ) : null}
               {view === "sessions" ? (
                 sessionWorkspaceRoute ? (
                   <SessionWorkspacePage
@@ -994,7 +997,6 @@ export function App() {
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
               {view === "loot" ? <LootPage snapshot={snapshot} onInventoryTotal={acceptLootInventoryTotal} /> : null}
               {view === "credentials" ? <CredentialsPage snapshot={snapshot} onInventoryTotal={acceptCredentialInventoryTotal} onInventoryChanged={invalidateCredentialCount} /> : null}
-              {view === "websites" ? <WebsitesPage snapshot={snapshot} /> : null}
             </>
           ) : null}
         </div>
@@ -1156,7 +1158,7 @@ export function NavigationContent({
                 key={item.id}
                 count={item.id === "operations" ? snapshot.jobs.length : undefined}
                 item={item}
-                isCurrent={view === item.id}
+                isCurrent={view === item.id || (item.id === "operations" && view === "websites")}
                 isDisabled={!connected}
                 onAction={() => navigate(item.id)}
               />
