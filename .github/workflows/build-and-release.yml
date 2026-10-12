@@ -83,8 +83,6 @@ jobs:
 
   application-e2e:
     name: Electron current-slice E2E
-    # Keep this check visible while its CI execution is disabled.
-    if: ${{ false }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
