@@ -124,18 +124,26 @@ test("Generate actions stay visible while scrolling and notifications stay botto
     const progress = page.getByRole("progressbar", { name: /Downloading Sliver server/ });
     await progress.waitFor();
     const toast = page.locator('[data-slot="toast"]').filter({ has: progress });
+    // HeroUI clears its offscreen entering state after two animation frames.
+    // Before then, getAnimations() can be empty because the transition has not
+    // started yet, even though the progressbar is already visible to Playwright.
+    await toast.and(page.locator(':not([data-entering="true"])')).waitFor({ state: "visible" });
     await toast.evaluate(async (element) => {
       await Promise.all(element.getAnimations().map((animation: { finished: Promise<unknown> }) =>
         animation.finished.catch(() => undefined)));
     });
     const toastBounds = await toast.boundingBox();
-    const viewport = await page.locator("html").boundingBox();
-    assert.ok(toastBounds && viewport, "the download notification must be rendered");
+    const viewport = await page.evaluate(() => {
+      const browserWindow = globalThis as unknown as { innerWidth: number; innerHeight: number };
+      return { x: 0, y: 0, width: browserWindow.innerWidth, height: browserWindow.innerHeight };
+    });
+    assert.ok(toastBounds, "the download notification must be rendered");
+    const geometry = JSON.stringify({ toast: toastBounds, viewport });
     assert.ok(Math.abs(toastBounds.x + toastBounds.width / 2 - (viewport.x + viewport.width / 2)) <= 2,
-      "application notifications must stay horizontally centered");
+      `application notifications must stay horizontally centered: ${geometry}`);
     assert.ok(toastBounds.y > viewport.y + viewport.height / 2 &&
       toastBounds.y + toastBounds.height <= viewport.y + viewport.height,
-    "application notifications must remain visible near the bottom of the window");
+    `application notifications must remain visible near the bottom of the window: ${geometry}`);
   } finally {
     await application?.close().catch(() => undefined);
     await rm(temporaryRoot, { recursive: true, force: true });
@@ -3420,12 +3428,15 @@ async function verifyM2SessionWorkspace(
   assert.equal((await readFakeState(electronApplication)).dialogCalls, nativeDialogCalls,
     "confirming the HeroUI overwrite review must not invoke a native dialog");
   await textEditor.close();
-  await page.keyboard.press("Escape");
+  // Closing the editor does not synchronously restore focus to the workspace.
+  // Re-activate it and focus the inspector before testing Escape dismissal.
+  await page.bringToFront();
+  await inspector.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
   await activateDataGridRow(notesRow, "notes.txt", inspector);
   await inspector.getByText(M2_EDITED_CONTENT, { exact: true }).waitFor();
-  await page.keyboard.press("Escape");
+  await inspector.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
   await page.getByRole("button", { name: "New folder", exact: true }).click();

@@ -6,11 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import ssh2 from "ssh2";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import type { CloudDnsProvider, CloudDnsZone, CloudDnsRecord, CloudDnsRecordSpec } from "../shared/cloud-dns-contracts.js";
 import { CLOUD_DEPLOYMENT_STATUSES } from "../shared/cloud-deployment-contracts.js";
 import { AwsConsoleLoginError } from "./cloud/aws-console-login.js";
+import { AzureCliAccountSource } from "./cloud/azure-cli-accounts.js";
 import type {
   AwsConsoleLoginSession,
   AwsFirewallRule,
@@ -94,15 +95,25 @@ const TEST_SSH_PRIVATE_KEY = generateKeyPairSync("rsa", {
 let temporaryDirectory = "";
 let rootDirectory = "";
 let operatorConfigDirectory = "";
+let realAzureDiscovery: MockInstance<AzureCliAccountSource["list"]>;
 
 beforeEach(async () => {
+  // Snapshot reads discover both cloud providers. Keep unit fixtures independent
+  // of installed CLI tools and fail if a fixture forgets its Azure source.
+  realAzureDiscovery = vi.spyOn(AzureCliAccountSource.prototype, "list")
+    .mockRejectedValue(new Error("Unit fixtures must supply an Azure account source"));
   temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-gui-cloud-service-"));
   rootDirectory = join(temporaryDirectory, ".sliver-client", "gui", "cloud-deployment", "v1");
   operatorConfigDirectory = join(temporaryDirectory, ".sliver-client", "configs");
 });
 
 afterEach(async () => {
-  if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+  try {
+    expect(realAzureDiscovery).not.toHaveBeenCalled();
+  } finally {
+    realAzureDiscovery.mockRestore();
+    if (temporaryDirectory) await rm(temporaryDirectory, { recursive: true, force: true });
+  }
 });
 
 describe("CloudDeploymentService DNS management", () => {
@@ -769,6 +780,7 @@ describe("CloudDeploymentService", () => {
       }
 
       const service = await CloudDeploymentService.create({
+        azureAccountSource: fakeAzureAccountSource(),
         rootDirectory,
         operatorConfigDirectory,
         safeStorage,
@@ -851,6 +863,7 @@ describe("CloudDeploymentService", () => {
     const provisioner = fakeProvisioner();
     const operatorDirectoryClient = fakeOperatorDirectoryClient();
     const service = await CloudDeploymentService.create({
+      azureAccountSource: fakeAzureAccountSource(),
       rootDirectory,
       operatorConfigDirectory,
       safeStorage: new XorSafeStorage(),
@@ -2038,6 +2051,7 @@ describe("CloudDeploymentService", () => {
     const provider = new FakeAwsProvider();
     const permissionChecker = fakeAwsPermissionChecker();
     const service = await CloudDeploymentService.create({
+      azureAccountSource: fakeAzureAccountSource(),
       rootDirectory,
       operatorConfigDirectory,
       safeStorage,
@@ -2210,6 +2224,7 @@ describe("CloudDeploymentService", () => {
     const provider = new FakeAwsProvider();
     const provisioner = fakeProvisioner();
     const service = await CloudDeploymentService.create({
+      azureAccountSource: fakeAzureAccountSource(),
       rootDirectory,
       operatorConfigDirectory,
       safeStorage,
@@ -2433,6 +2448,7 @@ describe("CloudDeploymentService", () => {
     const awsProviderFactory = vi.fn(() => provider);
     const awsPermissionCheckerFactory = vi.fn(() => fakeAwsPermissionChecker());
     const service = await CloudDeploymentService.create({
+      azureAccountSource: fakeAzureAccountSource(),
       rootDirectory,
       operatorConfigDirectory,
       safeStorage,
@@ -4998,6 +5014,7 @@ async function authService(awsConsoleLogin: CloudAwsConsoleLogin, awsProfileSour
   const seen: AwsEc2Credentials[] = [];
   const service = await CloudDeploymentService.create({ ...deps, rootDirectory, operatorConfigDirectory,
     awsConsoleLogin, awsProfileSource, now: options.now ?? (() => NOW.getTime()),
+    azureAccountSource: fakeAzureAccountSource(),
     awsPermissionCheckerFactory: (connection) => ({ check: async () => {
       seen.push(typeof connection.credentials === "function" ? await connection.credentials() : connection.credentials);
       return fakeAwsPermissionChecker().check();

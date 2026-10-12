@@ -76,15 +76,13 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyPreloadBundles.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
 
   application-e2e:
     name: Electron current-slice E2E
-    # Keep this check visible while its CI execution is disabled.
-    if: ${{ false }}
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 

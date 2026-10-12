@@ -2,15 +2,15 @@ import { resolve } from "node:path";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import { defineConfig } from "electron-vite";
 
 import { monacoCspPlugin } from "./scripts/monacoCspPlugin.mjs";
 import { ghosttyAppearancePlugin } from "./scripts/ghosttyAppearancePlugin.mjs";
 
 export default defineConfig({
   main: {
-    plugins: [
-      externalizeDepsPlugin({
+    build: {
+      externalizeDeps: {
         // Bundle sliver-script into Electron main's runtime graph so packaged
         // applications do not load it as a separate installed npm module.
         exclude: [
@@ -21,25 +21,22 @@ export default defineConfig({
           "nice-grpc-common",
           "rxjs",
         ],
-      }),
-    ],
-    build: {
+      },
       outDir: resolve("dist/main"),
       sourcemap: false,
-      commonjsOptions: {
-        include: [/node_modules/],
-      },
-      rollupOptions: {
+      rolldownOptions: {
         input: resolve("src/main/index.ts"),
       },
     },
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
     build: {
+      // Sandboxed preloads cannot require shared chunks or npm packages.
+      externalizeDeps: false,
+      isolatedEntries: true,
       outDir: resolve("dist/preload"),
       sourcemap: false,
-      rollupOptions: {
+      rolldownOptions: {
         input: {
           index: resolve("src/preload/index.ts"),
           navigation: resolve("src/preload/navigation.ts"),
@@ -65,7 +62,7 @@ export default defineConfig({
     build: {
       outDir: resolve("dist/renderer"),
       sourcemap: false,
-      rollupOptions: {
+      rolldownOptions: {
         input: resolve("src/renderer/index.html"),
       },
     },

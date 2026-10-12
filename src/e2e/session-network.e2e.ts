@@ -310,11 +310,16 @@ test("Session network, process details, and zoom controls", { timeout: 120_000 }
     await settleVisualTransitions(zoomRegion);
     await page.waitForFunction((element) => element !== null &&
       Math.abs(element.getBoundingClientRect().width - 56) <= 1, await page.locator(".app-sidebar:visible").elementHandle());
-    const collapsedBounds = await zoomRegion.boundingBox();
-    const resetBounds = await resetZoom.boundingBox();
+    // Keep both measurements in one renderer layout snapshot at fractional
+    // native zoom, without separate protocol coordinate conversions.
+    const { collapsedBounds, resetBounds } = await zoomRegion.evaluate((element) => ({
+      collapsedBounds: element.getBoundingClientRect().toJSON() as { x: number; width: number },
+      resetBounds: element.querySelector('button[aria-label="Reset zoom"]')?.getBoundingClientRect().toJSON() as
+        { x: number; width: number } | undefined,
+    }));
     assert.ok(collapsedBounds && resetBounds && resetBounds.x >= collapsedBounds.x &&
       resetBounds.x + resetBounds.width <= collapsedBounds.x + collapsedBounds.width + 1,
-    "the zoom reset control must fit within the collapsed sidebar");
+    `the zoom reset control must fit within the collapsed sidebar: ${JSON.stringify({ collapsedBounds, resetBounds })}`);
     const collapsedScreenshot = await nativeWindow.evaluate(async (window) =>
       (await window.webContents.capturePage()).toPNG().toString("base64"));
     await writeFile(join(artifactDirectory, "sidebar-window-zoom-90-collapsed.png"), Buffer.from(collapsedScreenshot, "base64"));
