@@ -16,6 +16,7 @@ import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedCloudOverview, type M
 import { OPERATOR_DATA_LIMITS } from "../shared/operator-data-contracts.js";
 import type { ExecuteAssemblyDraft } from "../shared/execution-contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
+import type { WebsiteRenderedPreview } from "../shared/website-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
   type PrepareSessionShellInput,
@@ -2051,7 +2052,10 @@ describe("connection registry with an injected Sliver client", () => {
     const client = new FakeSliverClient();
     const web = attachWebsiteBackend(client);
     const registry = createRegistry(() => client.adapter);
-    const controller = { open: vi.fn(async (..._args: unknown[]) => {}), closeOwner: vi.fn(), dispose: vi.fn() };
+    const controller = {
+      open: vi.fn(async (..._args: unknown[]) => {}), closeOwner: vi.fn(), dispose: vi.fn(),
+      getOwnerPreview: vi.fn(() => null), setChangeListener: vi.fn(),
+    };
     registry.setWebsitePreviewController(controller);
     registry.registerWindow(1);
     await connectSaved(registry, 1);
@@ -2077,13 +2081,83 @@ describe("connection registry with an injected Sliver client", () => {
     expect(await fetchContent("/missing")).toBeUndefined();
     const lastResponse = await web.website.mock.results.at(-1)!.value as clientpb.Website;
     expect(Object.values(lastResponse.Contents).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
+    controller.closeOwner.mockClear();
     web.sites.get("landing")!.ID = randomUUID();
     await expect(fetchContent("/index.html")).rejects.toThrow("preview website changed");
-    expect(controller.closeOwner).toHaveBeenCalledWith(1);
+    // The controller revokes the requesting instance, so a late stale fetch cannot stop a replacement.
+    expect(controller.closeOwner).not.toHaveBeenCalled();
     controller.closeOwner.mockClear();
     await registry.disconnect(1);
     expect(controller.closeOwner).toHaveBeenCalledWith(1);
     await expect(fetchContent("/index.html")).rejects.toThrow();
+  });
+
+  it("keeps preview snapshots scoped to their windows and broadcasts stop and deletion cleanup", async () => {
+    const client = new FakeSliverClient();
+    attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    const previews = new Map<number, WebsiteRenderedPreview>();
+    let changed: (contentsId: number) => void = () => {};
+    const controller = {
+      open: vi.fn(async () => {}), dispose: vi.fn(),
+      getOwnerPreview: (id: number) => previews.get(id) ?? null,
+      setChangeListener: (listener: typeof changed) => { changed = listener; },
+      closeOwner: vi.fn((id: number) => { previews.delete(id); changed(id); }),
+    };
+    registry.setWebsitePreviewController(controller);
+    registry.registerWindow(1);
+    registry.registerWindow(2);
+    await connectSaved(registry, 1);
+    await connectSaved(registry, 2);
+    await registry.createWebsite(1, { name: "landing" });
+    const first = { name: "landing", path: "/", origin: "http://127.0.0.1:40001", url: "http://127.0.0.1:40001/" };
+    const second = { ...first, origin: "http://127.0.0.1:40002", url: "http://127.0.0.1:40002/" };
+    previews.set(1, first);
+    previews.set(2, second);
+    changed(1);
+    changed(2);
+    expect(registry.snapshot(1).websitePreview).toEqual(first);
+    expect(registry.snapshot(2).websitePreview).toEqual(second);
+    const rendererSend = electronMocks.fromId.mock.results.at(-1)!.value.send;
+    expect(rendererSend).toHaveBeenCalledWith(IPC.snapshotChanged, expect.objectContaining({ websitePreview: second }));
+    await expect(registry.stopWebsiteRenderedPreview(1)).resolves.toEqual({ ok: true });
+    expect(registry.snapshot(1).websitePreview).toBeNull();
+    expect(registry.snapshot(2).websitePreview).toEqual(second);
+    expect(rendererSend).toHaveBeenLastCalledWith(IPC.snapshotChanged, expect.objectContaining({ websitePreview: null }));
+    await expect(registry.deleteWebsite(1, { name: "landing" })).resolves.toEqual({ ok: true });
+    expect(registry.snapshot(2).websitePreview).toBeNull();
+    expect(controller.closeOwner).toHaveBeenCalledWith(2);
+    await registry.disconnect(1);
+    await expect(registry.stopWebsiteRenderedPreview(1)).resolves.toEqual({ ok: true });
+    controller.closeOwner.mockClear();
+    expect((await registry.stopWebsiteRenderedPreview(99)).ok).toBe(false);
+    expect(controller.closeOwner).not.toHaveBeenCalled();
+  });
+
+  it("cancels a preview start stopped while its initial website fetch is pending", async () => {
+    const client = new FakeSliverClient();
+    const web = attachWebsiteBackend(client);
+    const registry = createRegistry(() => client.adapter);
+    const controller = {
+      open: vi.fn(async () => {}), closeOwner: vi.fn(), dispose: vi.fn(),
+      getOwnerPreview: () => null, setChangeListener: vi.fn(),
+    };
+    registry.setWebsitePreviewController(controller);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    await registry.createWebsite(1, { name: "landing" });
+    await registry.saveWebsiteText(1, {
+      name: "landing", path: "/index.html", text: "<h1>First</h1>", contentType: "text/html", overwrite: false,
+    });
+    const response = await web.website("landing");
+    let release!: (site: clientpb.Website) => void;
+    web.website.mockImplementationOnce(() => new Promise<clientpb.Website>((resolve) => { release = resolve; }));
+    const opening = registry.openWebsiteRenderedPreview(sender(1), { name: "landing", path: "/index.html" });
+    await expect(registry.stopWebsiteRenderedPreview(1)).resolves.toEqual({ ok: true });
+    release(response);
+    await expect(opening).resolves.toMatchObject({ ok: false, error: "Website preview was stopped or replaced" });
+    expect(controller.open).not.toHaveBeenCalled();
+    expect(Object.values(response.Contents).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
   });
 
   it("shares pools, listeners, and event subscriptions until the final window detaches", async () => {

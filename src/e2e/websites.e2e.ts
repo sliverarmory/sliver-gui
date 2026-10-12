@@ -281,7 +281,17 @@ test("hosted websites support standalone editing, row actions, and fresh browser
       await browserPreview.reload();
       await browserPreview.getByText("Updated website content", { exact: true }).waitFor();
     }
-    await page.getByRole("button", { name: "Preview website", exact: true }).click();
+    const localPreviewButton = page.getByRole("button", { name: "Local preview", exact: true });
+    const localPreview = page.getByRole("dialog", { name: "Local preview", exact: true });
+    assert.equal(await localPreview.count(), 0, "the local server controls stay closed until requested");
+    await localPreviewButton.click();
+    await localPreview.getByText("Running", { exact: true }).waitFor();
+    await localPreview.getByText("Hosting preview-test", { exact: true }).waitFor();
+    await localPreview.getByText(previewUrl, { exact: true }).waitFor();
+    await localPreview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await localPreview.waitFor({ state: "hidden" });
+    assert.equal((await fetchPreview(previewUrl)).status, 200, "closing the controls keeps the preview server running");
+    await page.getByRole("button", { name: "Open preview", exact: true }).click();
     const directPreviewUrl = await waitForExternalUrl(application, 2);
     assert.equal(new URL(directPreviewUrl).pathname, "/index.html", "website preview opens its index path");
     assert.equal(await page.getByRole("dialog", { name: "/index.html", exact: true }).count(), 0,
@@ -391,13 +401,143 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     assert.deepEqual(await application.evaluate(() =>
       (globalThis as unknown as { __websiteOverwriteTitles?: string[] }).__websiteOverwriteTitles),
     ["Replace hosted content?", "Replace hosted content?"], "creating a new path needs no overwrite confirmation");
+
+    // Selecting a different website leaves the active server clearly identified.
+    await page.getByRole("button", { name: /^landing/u }).click();
+    await page.getByRole("button", { name: "Preview website", exact: true }).waitFor();
+    assert.equal(await localPreview.count(), 0);
+    await page.screenshot({ path: join(artifacts, "local-preview-toolbar.png"), animations: "disabled" });
+    await localPreviewButton.click();
+    await localPreview.getByText("Hosting preview-test", { exact: true }).waitFor();
+    await localPreview.getByText(imagePreviewUrl, { exact: true }).waitFor();
+    assert.equal((await fetchPreview(imagePreviewUrl)).status, 200);
+    await page.screenshot({ path: join(artifacts, "local-preview-running.png"), animations: "disabled" });
+    await localPreview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await localPreview.waitFor({ state: "hidden" });
+
+    // The main-owned server and its controls survive leaving the Websites tab.
+    await jobsTab.click();
+    await page.getByRole("heading", { name: "Jobs & listeners", exact: true }).waitFor();
+    await websitesTab.click();
+    await page.getByRole("heading", { name: "Websites", exact: true, level: 1 }).waitFor();
+    await page.getByRole("button", { name: /^preview-test/u }).click();
+    await page.getByPlaceholder("Search websites", { exact: true }).fill("preview-test");
+    await page.getByRole("button", { name: /^preview-test/u }).waitFor();
+    assert.equal(await page.getByRole("button", { name: /^landing/u }).count(), 0);
+    await localPreviewButton.click();
+    await localPreview.getByText("Running", { exact: true }).waitFor();
+    await localPreview.getByText("Hosting preview-test", { exact: true }).waitFor();
+    await localPreview.getByText(imagePreviewUrl, { exact: true }).waitFor();
+    const previewWebsiteDropdown = localPreview.getByRole("button", { name: /Preview website/u });
+    await previewWebsiteDropdown.click();
+    await page.getByRole("option", { name: "landing", exact: true }).waitFor();
+    await page.screenshot({ path: join(artifacts, "local-preview-dropdown.png"), animations: "disabled" });
+    await page.getByRole("option", { name: "landing", exact: true }).click();
+    const switchedPreviewUrl = await waitForExternalUrl(application, 4);
+    assert.equal(new URL(switchedPreviewUrl).pathname, "/index.html");
+    assert.notEqual(new URL(switchedPreviewUrl).origin, new URL(imagePreviewUrl).origin);
+    await localPreview.getByText("Hosting landing", { exact: true }).waitFor();
+    await localPreview.getByText(switchedPreviewUrl, { exact: true }).waitFor();
+    assert.match(await (await fetchPreview(switchedPreviewUrl)).text(), /Welcome/u);
+    await assert.rejects(fetchPreview(imagePreviewUrl), "switching websites revokes the previous loopback server");
+    await page.screenshot({ path: join(artifacts, "local-preview-switched.png"), animations: "disabled" });
+    await localPreview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await localPreview.waitFor({ state: "hidden" });
+    assert.equal(await page.getByRole("button", { name: /^preview-test/u }).getAttribute("aria-pressed"), "true",
+      "the preview dropdown changes the running website without changing the website selected for editing");
+    assert.equal(await page.getByPlaceholder("Search websites", { exact: true }).inputValue(), "preview-test",
+      "the preview dropdown includes websites hidden by the sidebar filter");
+    await localPreviewButton.click();
+
+    await localPreview.getByRole("button", { name: "Stop server", exact: true }).click();
+    await localPreview.getByText("Stopped", { exact: true }).waitFor();
+    assert.equal(await localPreview.getByText(switchedPreviewUrl, { exact: true }).count(), 0);
+    await assert.rejects(fetchPreview(switchedPreviewUrl), "Stop server closes the loopback listener");
+    await previewWebsiteDropdown.getByText("Choose a website", { exact: true }).waitFor();
+    await page.screenshot({ path: join(artifacts, "local-preview-stopped.png"), animations: "disabled" });
+
+    await previewWebsiteDropdown.click();
+    await page.getByRole("option", { name: "landing", exact: true }).click();
+    const restartedPreviewUrl = await waitForExternalUrl(application, 5);
+    await localPreview.getByText("Running", { exact: true }).waitFor();
+    await localPreview.getByText("Hosting landing", { exact: true }).waitFor();
+    await localPreview.getByRole("button", { name: "Open in browser", exact: true }).click();
+    assert.equal(await waitForExternalUrl(application, 6), restartedPreviewUrl,
+      "opening the active preview retains its running server and URL");
+    assert.match(await (await fetchPreview(restartedPreviewUrl)).text(), /Welcome/u);
+    await localPreview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await localPreview.waitFor({ state: "hidden" });
+    assert.equal((await fetchPreview(restartedPreviewUrl)).status, 200);
+
+    await page.getByPlaceholder("Search websites", { exact: true }).fill("");
+    await page.getByRole("button", { name: /^landing/u }).waitFor();
+
+    // Website context actions target the clicked row without changing the editing selection.
+    const landingWebsite = page.getByRole("button", { name: /^landing/u });
+    const contextWebsite = page.getByRole("button", { name: /^preview-test/u });
+    const websiteContextMenu = page.getByRole("menu", { name: "Application context menu", exact: true });
+    await landingWebsite.click();
+    await contextWebsite.click({ button: "right" });
+    await websiteContextMenu.getByRole("menuitem", { name: "Preview website", exact: true }).waitFor();
+    await websiteContextMenu.getByRole("menuitem", { name: "Delete website", exact: true }).waitFor();
+    assert.equal(await websiteContextMenu.getByRole("menuitem", { name: "Stop preview server", exact: true }).count(), 0,
+      "a website that is not being previewed has no stop action");
+    await page.screenshot({ path: join(artifacts, "website-selector-context-menu.png"), animations: "disabled" });
+    await websiteContextMenu.getByRole("menuitem", { name: "Preview website", exact: true }).click();
+    await websiteContextMenu.waitFor({ state: "hidden" });
+    let contextPreviewUrl = await waitForExternalUrl(application, 7);
+    assert.equal(new URL(contextPreviewUrl).pathname, "/index.html");
+    assert.equal(await (await fetchPreview(contextPreviewUrl)).text(), "Updated website content",
+      "the website context menu previews its clicked row rather than the selected website");
+    assert.equal(await landingWebsite.getAttribute("aria-pressed"), "true");
+    assert.equal(await contextWebsite.getAttribute("aria-pressed"), "false");
+
+    await contextWebsite.click({ button: "right" });
+    const stopPreviewAction = websiteContextMenu.getByRole("menuitem", { name: "Stop preview server", exact: true });
+    await stopPreviewAction.waitFor();
+    assert.equal(await stopPreviewAction.locator('svg[data-icon="stop"]').count(), 1,
+      "the running website's stop action uses the stop icon");
+    await page.screenshot({ path: join(artifacts, "website-selector-stop-preview.png"), animations: "disabled" });
+    await stopPreviewAction.click();
+    await websiteContextMenu.waitFor({ state: "hidden" });
+    await localPreviewButton.click();
+    await localPreview.getByText("Stopped", { exact: true }).waitFor();
+    await assert.rejects(fetchPreview(contextPreviewUrl), "the website context menu stops its loopback server");
+    await localPreview.getByRole("button", { name: "Close", exact: true }).last().click();
+    await localPreview.waitFor({ state: "hidden" });
+    assert.equal(await landingWebsite.getAttribute("aria-pressed"), "true",
+      "stopping the clicked website leaves the editing selection unchanged");
+    assert.equal(await contextWebsite.getAttribute("aria-pressed"), "false");
+
+    await contextWebsite.click({ button: "right" });
+    await websiteContextMenu.getByRole("menuitem", { name: "Preview website", exact: true }).waitFor();
+    assert.equal(await stopPreviewAction.count(), 0, "a stopped website no longer has a stop action");
+    await websiteContextMenu.getByRole("menuitem", { name: "Preview website", exact: true }).click();
+    await websiteContextMenu.waitFor({ state: "hidden" });
+    contextPreviewUrl = await waitForExternalUrl(application, 8);
+    assert.equal(await (await fetchPreview(contextPreviewUrl)).text(), "Updated website content");
+
+    await contextWebsite.click({ button: "right" });
+    await websiteContextMenu.getByRole("menuitem", { name: "Delete website", exact: true }).click();
+    const deleteWebsiteDialog = page.getByRole("alertdialog", { name: "Delete website?", exact: true });
+    await deleteWebsiteDialog.getByText("Delete preview-test and all its hosted content? Listeners using this website will no longer serve its content.", { exact: true }).waitFor();
+    await deleteWebsiteDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await deleteWebsiteDialog.waitFor({ state: "hidden" });
+    assert.equal(await landingWebsite.getAttribute("aria-pressed"), "true",
+      "canceling context-menu deletion preserves the website selected for editing");
+    assert.equal(await contextWebsite.count(), 1);
+    assert.equal(await (await fetchPreview(contextPreviewUrl)).text(), "Updated website content",
+      "canceling context-menu deletion preserves the clicked website and its running preview");
+
+    await page.getByRole("button", { name: /^preview-test/u }).click();
     await page.getByRole("button", { name: "Delete website", exact: true }).click();
     await page.getByRole("alertdialog", { name: "Delete website?", exact: true }).getByRole("button", { name: "Delete website", exact: true }).click();
     await page.getByRole("button", { name: /^preview-test/u }).waitFor({ state: "hidden" });
+    await assert.rejects(fetchPreview(contextPreviewUrl), "deleting the previewed website revokes its loopback server");
     await page.getByRole("button", { name: /^landing/u }).click();
     await page.getByRole("button", { name: "Inspect /index.html", exact: true }).click();
     await page.getByRole("dialog", { name: "/index.html", exact: true }).getByRole("button", { name: "Preview in browser", exact: true }).click();
-    const closingPreviewUrl = await waitForExternalUrl(application, 4);
+    const closingPreviewUrl = await waitForExternalUrl(application, 9);
     assert.match(await (await fetchPreview(closingPreviewUrl)).text(), /Welcome/u);
     await page.evaluate(async () => (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.disconnect());
     await assert.rejects(fetchPreview(closingPreviewUrl), "disconnect revokes the loopback server");

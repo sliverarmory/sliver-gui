@@ -1,6 +1,6 @@
 import { createServer, validateHeaderValue, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { shell, type BrowserWindow } from "electron";
-import { parseWebsiteContentInput, parseUpdateWebsiteContentTypeInput, WEBSITE_LIMITS, type WebsiteContentInput } from "../shared/website-contracts.js";
+import { parseWebsiteContentInput, parseUpdateWebsiteContentTypeInput, WEBSITE_LIMITS, type WebsiteContentInput, type WebsiteRenderedPreview } from "../shared/website-contracts.js";
 import { openExternalWebUrl } from "./external-web-url.js";
 
 const MAX_PREVIEW_SERVERS = 4;
@@ -17,9 +17,13 @@ export const WEBSITE_PREVIEW_CSP = [
 
 /** The returned bytes belong to the preview server and are cleared after the response. */
 export interface WebsitePreviewContent { bytes: Uint8Array; contentType: string; }
+/** Invalidates only the server instance that requested these backend bytes. */
+export class WebsitePreviewInvalidatedError extends Error {}
 export type FetchWebsitePreviewContent = (path: string) => Promise<WebsitePreviewContent | undefined>;
 export interface WebsitePreviewController {
-  open(owner: BrowserWindow, input: WebsiteContentInput, fetchContent: FetchWebsitePreviewContent, assertBinding: () => void): Promise<void>;
+  open(owner: BrowserWindow, input: WebsiteContentInput, fetchContent: FetchWebsitePreviewContent, assertBinding: () => void, websiteId: string): Promise<void>;
+  getOwnerPreview(contentsId: number): WebsiteRenderedPreview | null;
+  setChangeListener(listener: (contentsId: number) => void): void;
   closeOwner(contentsId: number): void;
   dispose(): void;
 }
@@ -32,32 +36,62 @@ interface PreviewServer {
   ready: boolean;
   activeRequests: number;
   pendingRequests: Array<(allowed: boolean) => void>;
+  input: WebsiteContentInput;
+  fetchContent: FetchWebsitePreviewContent;
+  assertBinding: () => void;
+  websiteId: string;
 }
 
 /** Hosted bytes only enter the default browser, never an Electron application view. */
 export class WebsitePreviewServer implements WebsitePreviewController {
   readonly #servers = new Map<number, PreviewServer>();
   #disposed = false;
+  #onChanged: (contentsId: number) => void = () => {};
+
+  setChangeListener(listener: (contentsId: number) => void): void {
+    this.#onChanged = listener;
+  }
+
+  getOwnerPreview(contentsId: number): WebsiteRenderedPreview | null {
+    const state = this.#servers.get(contentsId);
+    if (!state || state.closed || !state.origin) return null;
+    return { ...state.input, origin: state.origin, url: this.#previewUrl(state) };
+  }
 
   async open(
-    owner: BrowserWindow, input: WebsiteContentInput, fetchContent: FetchWebsitePreviewContent, assertBinding: () => void,
+    owner: BrowserWindow, input: WebsiteContentInput, fetchContent: FetchWebsitePreviewContent, assertBinding: () => void, websiteId: string,
   ): Promise<void> {
     const parsed = parseWebsiteContentInput(input);
     assertBinding();
     if (this.#disposed || owner.isDestroyed() || owner.webContents.isDestroyed()) throw new Error("Website preview owner is unavailable");
     const ownerId = owner.webContents.id;
+    const existing = this.#servers.get(ownerId);
+    if (existing && !existing.closed && existing.origin && existing.input.name === parsed.name && existing.websiteId === websiteId) {
+      existing.input = parsed;
+      existing.fetchContent = fetchContent;
+      existing.assertBinding = assertBinding;
+      this.#onChanged(ownerId);
+      // Reopening a document on the active site preserves its origin and resource URLs.
+      await openExternalWebUrl(this.#previewUrl(existing), (url) => shell.openExternal(url));
+      assertBinding();
+      if (existing.closed) throw new Error("Website preview was closed");
+      return;
+    }
     this.closeOwner(ownerId);
     if (this.#servers.size >= MAX_PREVIEW_SERVERS) throw new Error("Close an existing website preview before opening another");
     const server = createServer({ maxHeaderSize: 32 * 1024, requestTimeout: 15_000, headersTimeout: 10_000, keepAliveTimeout: 1000 });
     const state: PreviewServer = {
       server, owner, origin: "", closed: false, ready: false, activeRequests: 0, pendingRequests: [],
+      input: parsed, fetchContent, assertBinding, websiteId,
       ownerDestroyed: () => this.closeOwner(ownerId),
     };
     this.#servers.set(ownerId, state);
     owner.webContents.once("destroyed", state.ownerDestroyed);
     server.maxConnections = 64;
     server.setTimeout(30_000, (socket) => socket.destroy());
-    server.on("request", (request, response) => { void this.#serve(state, request, response, parsed.name, fetchContent, assertBinding); });
+    server.on("request", (request, response) => {
+      void this.#serve(state, request, response, state.input.name, state.fetchContent, state.assertBinding);
+    });
     server.on("upgrade", (_request, socket) => socket.destroy());
     server.on("connect", (_request, socket) => socket.destroy());
     server.on("error", () => this.#clean(ownerId, state));
@@ -76,8 +110,8 @@ export class WebsitePreviewServer implements WebsitePreviewController {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Website preview did not bind a local port");
       state.origin = `http://127.0.0.1:${address.port}`;
-      const path = parsed.path.split("/").map(encodeURIComponent).join("/");
-      await openExternalWebUrl(`${state.origin}${path}`, (url) => shell.openExternal(url));
+      this.#onChanged(ownerId);
+      await openExternalWebUrl(this.#previewUrl(state), (url) => shell.openExternal(url));
       assertBinding();
       if (state.closed) throw new Error("Website preview was closed");
     } catch (error) {
@@ -98,6 +132,11 @@ export class WebsitePreviewServer implements WebsitePreviewController {
     for (const [ownerId, state] of this.#servers) this.#clean(ownerId, state);
   }
 
+  #previewUrl(state: PreviewServer): string {
+    const path = state.input.path.split("/").map(encodeURIComponent).join("/");
+    return `${state.origin}${path}`;
+  }
+
   #clean(ownerId: number, state: PreviewServer): void {
     if (state.closed) return;
     state.closed = true;
@@ -107,6 +146,7 @@ export class WebsitePreviewServer implements WebsitePreviewController {
     // Closing before the listening event can suppress that event and strand open().
     if (state.ready) state.server.close(() => {});
     state.server.closeAllConnections();
+    this.#onChanged(ownerId);
   }
 
   async #serve(
@@ -178,7 +218,8 @@ export class WebsitePreviewServer implements WebsitePreviewController {
         response.once("close", finished);
         response.end(request.method === "HEAD" ? undefined : content!.bytes);
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof WebsitePreviewInvalidatedError) this.#clean(state.owner.webContents.id, state);
       if (!response.headersSent) fail(502, "Website content could not be retrieved; refresh the website in Sliver Desktop");
       else response.destroy();
     } finally {

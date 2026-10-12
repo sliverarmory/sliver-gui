@@ -486,6 +486,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     getWebsiteContent: vi.fn(failed),
     exportWebsiteContent: vi.fn(failed),
     openWebsiteRenderedPreview: vi.fn(failed),
+    stopWebsiteRenderedPreview: vi.fn(failed),
     openWebsiteTextEditor: vi.fn(failed),
     listCredentials: vi.fn(failed),
     listLocalNetworkInterfaces: vi.fn(failed),

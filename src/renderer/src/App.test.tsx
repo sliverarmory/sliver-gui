@@ -164,6 +164,7 @@ function installSliverAPI(
     getWebsiteContent: vi.fn(failedOperation),
     exportWebsiteContent: vi.fn(failedOperation),
     openWebsiteRenderedPreview: vi.fn(failedOperation),
+    stopWebsiteRenderedPreview: vi.fn(failedOperation),
     openWebsiteTextEditor: vi.fn(failedOperation),
     listCredentials: vi.fn(failedOperation),
     listLocalNetworkInterfaces: vi.fn(failedOperation),

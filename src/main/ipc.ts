@@ -247,6 +247,7 @@ export type IpcConnectionRegistry = Pick<
   | "getWebsiteContent"
   | "exportWebsiteContent"
   | "openWebsiteRenderedPreview"
+  | "stopWebsiteRenderedPreview"
   | "addLoot"
   | "addDroppedLoot"
   | "getLootDetail"
@@ -675,6 +676,8 @@ export function registerIpcHandlers(
     ({ sender }, input) => registry.exportWebsiteContent(sender, input));
   handleTrusted(IPC.openWebsiteRenderedPreview, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
     ({ sender }, input) => registry.openWebsiteRenderedPreview(sender, input));
+  handleTrusted(IPC.stopWebsiteRenderedPreview, rendererUrl, parseNoArguments,
+    ({ contentsId }) => registry.stopWebsiteRenderedPreview(contentsId));
   handleTrusted(IPC.openWebsiteTextEditor, rendererUrl, (args) => parseWebsiteArguments(args, parseOpenWebsiteTextEditorInput), async ({ sender }, input) => {
     if (!remoteTextEditor?.openWebsite) return { ok: false, error: "The text editor is unavailable" };
     try {

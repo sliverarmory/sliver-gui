@@ -29,6 +29,8 @@ export interface WebsiteCatalogPage { items: WebsiteSummary[]; page: OperatorDat
 export interface ListWebsitesInput { query?: string; cursor?: string; limit?: number; }
 export interface WebsiteNameInput { name: string; }
 export interface WebsiteContentInput extends WebsiteNameInput { path: string; }
+/** A main-owned loopback preview belonging to the current application window. */
+export interface WebsiteRenderedPreview extends WebsiteContentInput { origin: string; url: string; }
 export type OpenWebsiteTextEditorInput =
   | (WebsiteContentInput & { mode: "edit" })
   | (WebsiteContentInput & { mode: "create"; contentType: string });

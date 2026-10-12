@@ -207,7 +207,7 @@ import {
   validateImplantName,
 } from "./implant-config.js";
 import { sniffLootMediaMimeType } from "./loot-media.js";
-import type { WebsitePreviewController } from "./website-preview-server.js";
+import { WebsitePreviewInvalidatedError, type WebsitePreviewController } from "./website-preview-server.js";
 import {
   WEBSITE_LIMITS, isWebsiteTextContentType, parseOpenWebsiteTextEditorInput,
   type OpenWebsiteTextEditorInput, type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
@@ -358,6 +358,7 @@ interface WindowContext {
   certificateTimers: Map<string, NodeJS.Timeout>;
   savedConfigs: Map<string, SavedConfigRecord>;
   connectionAttempt: number;
+  websitePreviewAttempt: number;
   stopPlans: Map<string, InternalStopPlan>;
   activeTarget?: TargetRef;
   beaconWatch: boolean;
@@ -837,6 +838,12 @@ export class ConnectionRegistry {
   setWebsitePreviewController(controller: WebsitePreviewController): void {
     this.websitePreviews?.dispose();
     this.websitePreviews = controller;
+    controller.setChangeListener((contentsId) => {
+      const context = this.windows.get(contentsId);
+      if (!context) return;
+      context.snapshot = { ...context.snapshot, websitePreview: controller.getOwnerPreview(contentsId) };
+      this.pushSnapshot(contentsId, context.snapshot);
+    });
   }
 
   registerWindow(contentsId: number): void {
@@ -848,6 +855,7 @@ export class ConnectionRegistry {
       certificateTimers: new Map(),
       savedConfigs: new Map(),
       connectionAttempt: 0,
+      websitePreviewAttempt: 0,
       stopPlans: new Map(),
       beaconWatch: false,
       targetPlans: new Map(),
@@ -7237,6 +7245,11 @@ export class ConnectionRegistry {
       assertBinding();
       await pool.client.websiteRemove(input.name);
       assertBinding();
+      for (const context of this.windows.values()) {
+        if (context.poolKey === pool.key && this.websitePreviews?.getOwnerPreview(context.contentsId)?.name === input.name) {
+          this.websitePreviews.closeOwner(context.contentsId);
+        }
+      }
     }));
   }
 
@@ -7571,13 +7584,19 @@ export class ConnectionRegistry {
 
   async openWebsiteRenderedPreview(sender: WebContents, input: WebsiteContentInput): Promise<OperationResult> {
     const owner = requireOwnerWindow(sender);
+    const context = this.requireWindow(sender.id);
+    const attempt = ++context.websitePreviewAttempt;
     return this.withPoolWithoutValue(sender.id, async (pool, assertBinding) => {
+      const assertOpenCurrent = (): void => {
+        assertBinding();
+        if (context.websitePreviewAttempt !== attempt) throw new Error("Website preview was stopped or replaced");
+      };
       const previews = this.websitePreviews;
       if (!previews) throw new Error("Website browser preview is unavailable");
       const initial = await pool.client.website(input.name);
       let websiteId: string;
       try {
-        assertBinding();
+        assertOpenCurrent();
         websiteContentBytes(findWebsiteContent(initial, input.name, input.path));
         websiteId = initial.ID;
       } finally { clearWebsiteContents(initial); }
@@ -7587,16 +7606,23 @@ export class ConnectionRegistry {
         try {
           assertBinding();
           if (site.Name !== input.name || site.ID !== websiteId) {
-            previews.closeOwner(sender.id);
-            throw new Error("The preview website changed; reopen its preview");
+            throw new WebsitePreviewInvalidatedError("The preview website changed; reopen its preview");
           }
           const item = Object.values(site.Contents).find((content) => content.Path === path);
           if (!item) return undefined;
           return { bytes: new Uint8Array(websiteContentBytes(item)), contentType: item.ContentType };
         } finally { clearWebsiteContents(site); }
-      }, assertBinding);
-      assertBinding();
+      }, assertBinding, websiteId);
+      assertOpenCurrent();
     });
+  }
+
+  async stopWebsiteRenderedPreview(contentsId: number): Promise<OperationResult> {
+    try {
+      this.requireWindow(contentsId).websitePreviewAttempt++;
+      this.websitePreviews?.closeOwner(contentsId);
+      return { ok: true };
+    } catch (error) { return { ok: false, error: errorMessage(error) }; }
   }
 
   async exportWebsiteContent(sender: WebContents, input: WebsiteContentInput): Promise<OperationResult<WebsiteExportResult>> {
@@ -8648,6 +8674,7 @@ export class ConnectionRegistry {
     }
     return {
       ...snapshot,
+      websitePreview: this.websitePreviews?.getOwnerPreview(context.contentsId) ?? null,
       domains: {
         ...snapshot.domains,
         sessions: { ...snapshot.domains.sessions, page: sessionsPage },

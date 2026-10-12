@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ openExternal: vi.fn(async (_url: string) => {}) }));
 vi.mock("electron", () => ({ shell: { openExternal: mocks.openExternal } }));
-import { WebsitePreviewServer, type WebsitePreviewContent } from "./website-preview-server.js";
+import { WebsitePreviewInvalidatedError, WebsitePreviewServer, type WebsitePreviewContent } from "./website-preview-server.js";
+import type { WebsiteRenderedPreview } from "../shared/website-contracts.js";
 
 let controller: WebsitePreviewServer;
 beforeEach(() => { mocks.openExternal.mockReset(); controller = new WebsitePreviewServer(); });
@@ -35,6 +36,83 @@ function get(url: string, options: { method?: string; path?: string; headers?: R
 }
 
 describe("local website browser preview", () => {
+  it("publishes owner-scoped lifecycle status and stops only the requested owner's server", async () => {
+    const updates: Array<{ ownerId: number; preview: WebsiteRenderedPreview | null }> = [];
+    controller.setChangeListener((ownerId) => updates.push({ ownerId, preview: controller.getOwnerPreview(ownerId) }));
+    expect(controller.getOwnerPreview(1)).toBeNull();
+    await controller.open(owner(1), input, async () => content("first"), () => {}, "website-id");
+    const firstUrl = openedUrl();
+    expect(controller.getOwnerPreview(1)).toEqual({ ...input, origin: new URL(firstUrl).origin, url: firstUrl });
+    const copy = controller.getOwnerPreview(1)!;
+    copy.name = "tampered";
+    expect(controller.getOwnerPreview(1)?.name).toBe(input.name);
+    await controller.open(owner(2), { ...input, name: "other" }, async () => content("second"), () => {}, "other-id");
+    const secondUrl = openedUrl();
+    controller.closeOwner(1);
+    expect(controller.getOwnerPreview(1)).toBeNull();
+    await expect(get(firstUrl)).rejects.toThrow();
+    expect((await get(secondUrl)).bytes.toString()).toBe("second");
+    expect(updates.map(({ ownerId, preview }) => [ownerId, preview?.name ?? null])).toEqual([
+      [1, "landing"], [2, "other"], [1, null],
+    ]);
+    controller.closeOwner(1);
+    expect(updates).toHaveLength(3);
+    controller.dispose();
+    expect(updates.at(-1)).toEqual({ ownerId: 2, preview: null });
+  });
+
+  it("reuses the active website origin but revokes it when the website identity changes", async () => {
+    const sameOwner = owner();
+    await controller.open(sameOwner, input, async () => content("first"), () => {}, "website-id");
+    const firstUrl = openedUrl();
+    const nextInput = { ...input, path: "/another file.html" };
+    await controller.open(sameOwner, nextInput, async () => content("fresh"), () => {}, "website-id");
+    const reopened = openedUrl();
+    expect(new URL(reopened).origin).toBe(new URL(firstUrl).origin);
+    expect(controller.getOwnerPreview(1)).toEqual({ ...nextInput, origin: new URL(firstUrl).origin, url: reopened });
+    expect((await get(firstUrl)).bytes.toString()).toBe("fresh");
+    await controller.open(sameOwner, input, async () => content("replacement"), () => {}, "replacement-id");
+    expect(new URL(openedUrl()).origin).not.toBe(new URL(firstUrl).origin);
+    await expect(get(firstUrl)).rejects.toThrow();
+    expect((await get(openedUrl())).bytes.toString()).toBe("replacement");
+  });
+
+  it("clears running status when opening fails or the owner is destroyed", async () => {
+    const updated = vi.fn();
+    controller.setChangeListener(updated);
+    mocks.openExternal.mockRejectedValueOnce(new Error("No browser"));
+    await expect(controller.open(owner(), input, async () => content("ok"), () => {}, "website-id"))
+      .rejects.toThrow("No browser");
+    expect(controller.getOwnerPreview(1)).toBeNull();
+    expect(updated).toHaveBeenCalledTimes(2);
+    const activeOwner = owner();
+    await controller.open(activeOwner, input, async () => content("ok"), () => {}, "website-id");
+    activeOwner.webContents.emit("destroyed");
+    expect(controller.getOwnerPreview(1)).toBeNull();
+    expect(updated).toHaveBeenCalledTimes(4);
+  });
+
+  it("revokes changed website identities without letting a late request stop a replacement preview", async () => {
+    const activeOwner = owner();
+    await controller.open(activeOwner, input, async () => {
+      throw new WebsitePreviewInvalidatedError("Website replaced");
+    }, () => {}, "website-id");
+    await expect(get(openedUrl())).rejects.toThrow();
+    expect(controller.getOwnerPreview(1)).toBeNull();
+
+    let rejectContent!: (reason: Error) => void;
+    const fetchContent = vi.fn(() => new Promise<WebsitePreviewContent>((_resolve, reject) => { rejectContent = reject; }));
+    await controller.open(activeOwner, input, fetchContent, () => {}, "website-id");
+    const pending = expect(get(openedUrl())).rejects.toThrow();
+    await vi.waitFor(() => expect(fetchContent).toHaveBeenCalledOnce());
+    await controller.open(activeOwner, { ...input, name: "replacement" }, async () => content("replacement"), () => {}, "replacement-id");
+    const replacementUrl = openedUrl();
+    rejectContent(new WebsitePreviewInvalidatedError("Old website replaced"));
+    await pending;
+    expect(controller.getOwnerPreview(1)?.name).toBe("replacement");
+    expect((await get(replacementUrl)).bytes.toString()).toBe("replacement");
+  });
+
   it("opens a loopback URL and serves fresh exact bytes and MIME types for documents and site resources", async () => {
     let source = '<h1>First</h1><script src="/app.js"></script><link rel="stylesheet" href="../style.css">';
     const delivered: Uint8Array[] = [];
@@ -44,7 +122,7 @@ describe("local website browser preview", () => {
       if (value) delivered.push(value.bytes);
       return value;
     });
-    await controller.open(owner(), input, fetchContent, () => {});
+    await controller.open(owner(), input, fetchContent, () => {}, "website-id");
     const url = openedUrl();
     expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/pages\/index\.html$/u);
     const first = await get(url);
@@ -77,7 +155,7 @@ describe("local website browser preview", () => {
 
   it("encodes literal percent signs, Unicode and spaces and ignores cache-busting queries", async () => {
     const fetchContent = vi.fn(async () => content("ok"));
-    await controller.open(owner(), { name: "landing", path: "/file 100%/日本.txt" }, fetchContent, () => {});
+    await controller.open(owner(), { name: "landing", path: "/file 100%/日本.txt" }, fetchContent, () => {}, "website-id");
     const url = openedUrl();
     expect(url).toContain("/file%20100%25/%E6%97%A5%E6%9C%AC.txt");
     expect((await get(`${url}?version=2`)).status).toBe(200);
@@ -88,7 +166,7 @@ describe("local website browser preview", () => {
     const path = `/${"日".repeat(2042)}.html`;
     expect(path.length).toBe(2048);
     const fetchContent = vi.fn(async () => content("long Unicode path"));
-    await controller.open(owner(), { name: "landing", path }, fetchContent, () => {});
+    await controller.open(owner(), { name: "landing", path }, fetchContent, () => {}, "website-id");
     const url = openedUrl();
     expect(new URL(url).pathname.length).toBeGreaterThan(18 * 1024 - 100);
     const response = await get(`${url}?version=2`);
@@ -99,7 +177,7 @@ describe("local website browser preview", () => {
 
   it("rejects cross-origin, mutation, worker, malformed paths and hostile hosts before fetching", async () => {
     const fetchContent = vi.fn(async () => content("private"));
-    await controller.open(owner(), input, fetchContent, () => {});
+    await controller.open(owner(), input, fetchContent, () => {}, "website-id");
     const url = openedUrl();
     for (const headers of [
       { Host: "evil.test" }, { Origin: "https://evil.test" }, { Origin: "null" },
@@ -121,7 +199,7 @@ describe("local website browser preview", () => {
   it("clears bytes and rejects invalid backend headers or backend failures without exposing details", async () => {
     const bad = content("private", "text/html\r\nSet-Cookie: secret");
     const fetchContent = vi.fn(async () => bad);
-    await controller.open(owner(), input, fetchContent, () => {});
+    await controller.open(owner(), input, fetchContent, () => {}, "website-id");
     const response = await get(openedUrl());
     expect(response.status).toBe(502);
     expect(response.headers["set-cookie"]).toBeUndefined();
@@ -132,49 +210,49 @@ describe("local website browser preview", () => {
 
   it("closes replaced previews and cleans up on owner destruction, disconnect, disposal and open failure", async () => {
     const firstOwner = owner();
-    await controller.open(firstOwner, input, async () => content("ok"), () => {});
+    await controller.open(firstOwner, input, async () => content("ok"), () => {}, "website-id");
     const old = openedUrl();
-    await controller.open(firstOwner, input, async () => content("new"), () => {});
+    await controller.open(firstOwner, { ...input, name: "replacement" }, async () => content("new"), () => {}, "website-id");
     await expect(get(old)).rejects.toThrow();
     const current = openedUrl();
     firstOwner.webContents.emit("destroyed");
     await expect(get(current)).rejects.toThrow();
-    await controller.open(owner(), input, async () => content("ok"), () => {});
+    await controller.open(owner(), input, async () => content("ok"), () => {}, "website-id");
     const detached = openedUrl();
     controller.closeOwner(1);
     await expect(get(detached)).rejects.toThrow();
     mocks.openExternal.mockRejectedValueOnce(new Error("No browser"));
-    await expect(controller.open(owner(), input, async () => content("ok"), () => {})).rejects.toThrow("No browser");
+    await expect(controller.open(owner(), input, async () => content("ok"), () => {}, "website-id")).rejects.toThrow("No browser");
     await expect(get(openedUrl())).rejects.toThrow();
-    await controller.open(owner(), input, async () => content("ok"), () => {});
+    await controller.open(owner(), input, async () => content("ok"), () => {}, "website-id");
     controller.dispose();
     await expect(get(openedUrl())).rejects.toThrow();
-    await expect(controller.open(owner(), input, async () => content("ok"), () => {})).rejects.toThrow("unavailable");
+    await expect(controller.open(owner(), input, async () => content("ok"), () => {}, "website-id")).rejects.toThrow("unavailable");
   });
 
   it("settles pending opens when owners disappear or a concurrent open replaces them", async () => {
     const vanished = owner();
-    const opening = controller.open(vanished, input, async () => content("ok"), () => {});
+    const opening = controller.open(vanished, input, async () => content("ok"), () => {}, "website-id");
     vanished.webContents.emit("destroyed");
     await expect(opening).rejects.toThrow("closed");
     expect(mocks.openExternal).not.toHaveBeenCalled();
     const replacementOwner = owner();
-    const first = controller.open(replacementOwner, input, async () => content("first"), () => {});
+    const first = controller.open(replacementOwner, input, async () => content("first"), () => {}, "website-id");
     const firstResult = expect(first).rejects.toThrow("closed");
-    const second = controller.open(replacementOwner, input, async () => content("second"), () => {});
+    const second = controller.open(replacementOwner, input, async () => content("second"), () => {}, "website-id");
     await firstResult;
     await second;
     expect((await get(openedUrl())).bytes.toString()).toBe("second");
   });
 
   it("limits preview count and revalidates connection binding after fetching", async () => {
-    for (const id of [1, 2, 3, 4]) await controller.open(owner(id), input, async () => content("ok"), () => {});
-    await expect(controller.open(owner(5), input, async () => content("ok"), () => {})).rejects.toThrow("existing website preview");
+    for (const id of [1, 2, 3, 4]) await controller.open(owner(id), input, async () => content("ok"), () => {}, "website-id");
+    await expect(controller.open(owner(5), input, async () => content("ok"), () => {}, "website-id")).rejects.toThrow("existing website preview");
     let current = true;
     const bytes = content("stale");
     await controller.open(owner(1), input, async () => { current = false; return bytes; }, () => {
       if (!current) throw new Error("Connection changed");
-    });
+    }, "website-id");
     await expect(get(openedUrl())).rejects.toThrow();
     expect(bytes.bytes.every((byte) => byte === 0)).toBe(true);
     await expect(get(openedUrl())).rejects.toThrow();
@@ -191,7 +269,7 @@ describe("local website browser preview", () => {
       active--;
       return content("resource");
     });
-    await controller.open(owner(), input, fetchContent, () => {});
+    await controller.open(owner(), input, fetchContent, () => {}, "website-id");
     const requests = Array.from({ length: 12 }, () => get(openedUrl()));
     for (const expected of [4, 8, 12]) {
       await vi.waitFor(() => expect(fetchContent).toHaveBeenCalledTimes(expected));
@@ -204,7 +282,7 @@ describe("local website browser preview", () => {
   it("clears in-flight bytes when a preview is revoked during its backend request", async () => {
     let resolveContent: ((value: WebsitePreviewContent) => void) | undefined;
     const fetchContent = vi.fn(() => new Promise<WebsitePreviewContent>((resolve) => { resolveContent = resolve; }));
-    await controller.open(owner(), input, fetchContent, () => {});
+    await controller.open(owner(), input, fetchContent, () => {}, "website-id");
     const pending = get(openedUrl());
     const result = expect(pending).rejects.toThrow();
     await vi.waitFor(() => expect(fetchContent).toHaveBeenCalledOnce());

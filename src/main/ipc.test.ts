@@ -1926,6 +1926,18 @@ describe("trusted Electron IPC boundary", () => {
     expect(openWebsiteRenderedPreview).toHaveBeenCalledOnce();
   });
 
+  it("stops only the trusted caller's local preview without accepting owner or website overrides", async () => {
+    const stopWebsiteRenderedPreview = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(registryMock({ stopWebsiteRenderedPreview }), vi.fn(), RENDERER_URL);
+    const trusted = invokeEvent("sliver://app/index.html#/websites", 77);
+    const stop = electronMocks.handlers.get(IPC.stopWebsiteRenderedPreview)!;
+    await expect(stop(trusted.event)).resolves.toEqual({ ok: true });
+    expect(stopWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith(77);
+    expect(() => stop(trusted.event, { contentsId: 88 })).toThrow();
+    expect(() => stop(invokeEvent("http://127.0.0.1:40000/index.html", 88).event)).toThrow();
+    expect(stopWebsiteRenderedPreview).toHaveBeenCalledOnce();
+  });
+
   it("routes only field-scoped operator-data requests and immediately scrubs raw credential bytes", async () => {
     let releaseGate!: () => void;
     const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -2201,6 +2213,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     getWebsiteContent: vi.fn(unavailable),
     exportWebsiteContent: vi.fn(unavailable),
     openWebsiteRenderedPreview: vi.fn(unavailable),
+    stopWebsiteRenderedPreview: vi.fn(unavailable),
     addLoot: vi.fn(unavailable),
     addDroppedLoot: vi.fn(unavailable),
     getLootDetail: vi.fn(unavailable),

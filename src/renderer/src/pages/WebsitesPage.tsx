@@ -1,20 +1,22 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Checkbox, Description, Dropdown, Input, Label, Modal, ScrollShadow, SearchField, TextField, Tooltip } from "@heroui/react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Button, Card, Checkbox, Chip, Description, Dropdown, Input, Label, Modal, ScrollShadow, SearchField, TextField, Tooltip } from "@heroui/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import {
-  faArrowRightArrowLeft, faDownload, faEllipsisVertical, faEye, faFileArrowUp,
+  faArrowRightArrowLeft, faArrowUpRightFromSquare, faChevronDown, faDownload, faEllipsisVertical, faEye, faFileArrowUp,
   faFileLines, faFloppyDisk, faFolderOpen, faGlobe, faMagnifyingGlass,
-  faPenToSquare, faPlus, faRotate, faTag, faTrash,
+  faPenToSquare, faPlus, faRotate, faServer, faStop, faTag, faTrash, faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult, SliverSnapshot } from "../../../shared/contracts";
 import { WEBSITE_LIMITS, isWebsiteTextContentType, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail } from "../../../shared/website-contracts";
+import { ApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WebsiteContentPreview } from "../components/WebsiteContentPreview";
+import { WebsitePreviewSelect } from "../components/WebsitePreviewSelect";
 import { decodeWebsiteEditableText } from "../components/website-content-preview";
 
 interface WebsitesPageProps {
@@ -65,6 +67,16 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
   const [previewError, setPreviewError] = useState<string>();
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [pending, setPending] = useState(false);
+  const [serverPending, setServerPending] = useState<"open" | "stop">();
+  const [serverDialogOpen, setServerDialogOpen] = useState(false);
+  const serverStatusId = useId();
+  const [serverError, setServerError] = useState<string>();
+  const serverPendingRef = useRef<"open" | "stop" | undefined>(undefined);
+  const serverSequence = useRef(0);
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
+  const hostedPreviewRef = useRef(snapshot.websitePreview);
+  hostedPreviewRef.current = snapshot.websitePreview;
   const contextRef = useRef(context);
   contextRef.current = context;
   const catalogContextRef = useRef(catalogContext);
@@ -78,6 +90,8 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
   const visibleCatalog = catalog.identity === catalogContext ? catalog.value : EMPTY_CATALOG;
   const visibleDetail = detail?.context === context ? detail.value : undefined;
   const previewEntry = websitePreviewEntry(visibleDetail?.contents ?? []);
+  const hostedPreview = snapshot.websitePreview;
+  const previewActionLabel = hostedPreview?.name === name ? "Open preview" : "Preview website";
   const websiteEventId = snapshot.recentEvents.find((event) => event.type === "website")?.id;
 
   const closePreview = useCallback(() => {
@@ -98,9 +112,17 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
       detailSequence.current += 1;
       previewSequence.current += 1;
       mutationSequence.current += 1;
+      serverSequence.current += 1;
       previewRef.current?.preview.fill(0);
     };
   }, []);
+
+  useEffect(() => {
+    serverSequence.current += 1;
+    serverPendingRef.current = undefined;
+    setServerPending(undefined);
+    setServerError(undefined);
+  }, [identity]);
 
   useEffect(() => {
     closePreview();
@@ -302,7 +324,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     }, () => {
       setDeleteTarget(undefined);
       closePreview();
-      if (target.kind === "website") setSelection({ identity, name: "" });
+      if (target.kind === "website" && target.name === name) setSelection({ identity, name: "" });
       setRevision((current) => current + 1);
       setNotice(target.kind === "website" ? "Website deleted." : "Content deleted.");
     });
@@ -315,10 +337,45 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     (result) => { if (result.saved) setNotice(`Saved ${result.fileName}.`); },
   );
 
-  const openRenderedPreview = async (item: WebsiteContentSummary) => runOperation(async () => {
-    const result = await window.sliver.openWebsiteRenderedPreview({ name, path: item.path });
-    return result.ok ? { ok: true, value: true } : result;
-  }, () => undefined);
+  const runServerOperation = async (kind: "open" | "stop", operation: (isCurrent: () => boolean) => Promise<OperationResult>) => {
+    if (serverPendingRef.current && !(kind === "stop" && serverPendingRef.current === "open")) return;
+    const expectedIdentity = identity;
+    const request = ++serverSequence.current;
+    serverPendingRef.current = kind;
+    setServerPending(kind);
+    setServerError(undefined);
+    const isCurrent = () => mounted.current && expectedIdentity === identityRef.current && request === serverSequence.current;
+    try {
+      const result = await operation(isCurrent);
+      if (isCurrent() && !result.ok) setServerError(result.error);
+    } catch (error) {
+      if (isCurrent()) setServerError(errorMessage(error));
+    } finally {
+      if (isCurrent()) {
+        serverPendingRef.current = undefined;
+        setServerPending(undefined);
+      }
+    }
+  };
+
+  const openRenderedPreview = (item: WebsiteContentSummary) => runServerOperation("open",
+    () => window.sliver.openWebsiteRenderedPreview({ name, path: item.path }));
+
+  const previewWebsite = (website: string) => {
+    if (!mounted.current || identityRef.current !== identity || !connected || pendingRef.current) return;
+    void runServerOperation("open", async (isCurrent) => {
+      const result = await window.sliver.getWebsite({ name: website });
+      if (!isCurrent()) return { ok: true };
+      if (!result.ok) return result;
+      const entry = websitePreviewEntry(result.value.contents);
+      if (!entry) return { ok: false, error: "This website has no content to preview." };
+      return window.sliver.openWebsiteRenderedPreview({ name: website, path: entry.path });
+    });
+  };
+
+  const selectPreviewWebsite = (website: string) => {
+    if (website !== hostedPreview?.name) previewWebsite(website);
+  };
 
   const editContent = async (item: WebsiteContentSummary) => runOperation(async () => {
     const result = await window.sliver.openWebsiteTextEditor({ name, path: item.path, mode: "edit" });
@@ -342,7 +399,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     { id: "sizeBytes", header: "Size", align: "end", minWidth: 90, cell: (item) => <span className="tabular-nums">{formatBytes(item.sizeBytes)}</span> },
     { id: "actions", header: "Actions", align: "end", width: 112, cell: (item) => (
       <div className="flex justify-end gap-1">
-        <IconButton label={`Preview ${item.path}`} icon={faEye} disabled={pending} onPress={() => void openRenderedPreview(item)} />
+        <IconButton label={`Preview ${item.path}`} icon={faEye} disabled={pending || Boolean(serverPending)} onPress={() => void openRenderedPreview(item)} />
         <Dropdown>
           <Tooltip><Button aria-label={`Actions for ${item.path}`} isIconOnly isDisabled={pending} size="sm" variant="ghost"><FontAwesomeIcon aria-hidden icon={faEllipsisVertical} /></Button><Tooltip.Content>Content actions</Tooltip.Content></Tooltip>
           <Dropdown.Popover placement="bottom end">
@@ -368,7 +425,14 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
           <h1 id="websites-page-heading">Websites</h1>
           <p>Manage content served by HTTP and HTTPS listeners.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Tooltip>
+            <Button aria-label="Local preview" aria-describedby={serverStatusId} aria-haspopup="dialog" size="sm" variant="secondary" onPress={() => setServerDialogOpen(true)}>
+              <FontAwesomeIcon aria-hidden icon={faServer} className={hostedPreview ? "text-success" : "text-muted"} /> Local preview
+            </Button>
+            <Tooltip.Content>{hostedPreview ? `Hosting ${hostedPreview.name}` : "Preview server stopped"}</Tooltip.Content>
+          </Tooltip>
+          <span id={serverStatusId} className="sr-only">{hostedPreview ? `Hosting ${hostedPreview.name}` : "Preview server stopped"}</span>
           <Button variant="secondary" isDisabled={!connected || pending} onPress={() => setRevision((current) => current + 1)}><FontAwesomeIcon aria-hidden icon={faRotate} /> Refresh</Button>
           <Button isDisabled={!connected || pending} onPress={() => openForm("create")}><FontAwesomeIcon aria-hidden icon={faPlus} /> Create website</Button>
         </div>
@@ -384,6 +448,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
       >
         <div className="page-stack websites-page__content">
           {actionError ? <InlineError message={actionError} /> : null}
+          {serverError && !serverDialogOpen ? <InlineError message={serverError} /> : null}
           {notice ? <p role="status" className="text-sm text-success">{notice}</p> : null}
           {!connected ? <WebsiteEmpty title="Connect to a server" description="Hosted websites are available after connecting to a Sliver server." /> : (
             <div className="websites-page__columns grid min-w-0">
@@ -397,28 +462,61 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
                   {loadingCatalog ? <p role="status" className="text-sm text-muted">Loading websites…</p> : null}
                   <ScrollShadow aria-label="Website selection" className="min-h-0 max-h-[520px] overflow-y-auto overscroll-contain" hideScrollBar={false} orientation="vertical" role="region" size={24} tabIndex={0}>
                     <div className="flex flex-col gap-1">
-                      {visibleCatalog.items.map((site) => <Button key={site.name} className="h-auto min-h-12 w-full justify-start px-3 py-2 text-start" variant={name === site.name ? "secondary" : "ghost"} aria-pressed={name === site.name} onPress={() => setSelection({ identity, name: site.name })}>
-                        <span className="min-w-0"><span className="block truncate">{site.name}</span><span className="block text-xs font-normal tabular-nums text-muted">{site.contentCount} {site.contentCount === 1 ? "file" : "files"} · {formatBytes(site.totalSizeBytes)}</span></span>
-                      </Button>)}
+                      {visibleCatalog.items.map((site) => <ApplicationContextMenuScope key={site.name} actions={[
+                        {
+                          id: "preview-website", label: "Preview website", icon: faEye,
+                          isDisabled: pending || Boolean(serverPending) || site.contentCount === 0,
+                          onAction: () => previewWebsite(site.name),
+                        },
+                        ...(hostedPreview?.name === site.name ? [{
+                          id: "stop-preview-server", label: "Stop preview server", icon: faStop,
+                          isDisabled: serverPending === "stop",
+                          onAction: () => {
+                            if (mounted.current && identityRef.current === identity
+                              && hostedPreviewRef.current?.name === site.name
+                              && hostedPreviewRef.current?.origin === hostedPreview.origin) {
+                              void runServerOperation("stop", () => window.sliver.stopWebsiteRenderedPreview());
+                            }
+                          },
+                        }] : []),
+                        {
+                          id: "delete-website", label: "Delete website", icon: faTrash, variant: "danger",
+                          isDisabled: pending,
+                          onAction: () => {
+                            if (mounted.current && identityRef.current === identity && !pendingRef.current) {
+                              setDeleteTarget({ kind: "website", name: site.name });
+                            }
+                          },
+                        },
+                      ]}>
+                        <Button className="h-auto min-h-12 w-full justify-start px-3 py-2 text-start" variant={name === site.name ? "secondary" : "ghost"} aria-pressed={name === site.name} onPress={() => setSelection({ identity, name: site.name })}>
+                          <span className="min-w-0 flex-1"><span className="block truncate">{site.name}</span><span className="block text-xs font-normal tabular-nums text-muted">{site.contentCount} {site.contentCount === 1 ? "file" : "files"} · {formatBytes(site.totalSizeBytes)}</span></span>
+                          {hostedPreview?.name === site.name ? <Chip size="sm" color="success" variant="soft" className="shrink-0">Previewing</Chip> : null}
+                        </Button>
+                      </ApplicationContextMenuScope>)}
                     </div>
                   </ScrollShadow>
                   {!loadingCatalog && visibleCatalog.items.length === 0 && !catalogError ? <p className="py-4 text-sm text-muted">{query ? "No matching websites." : "No websites yet. Create one to add content."}</p> : null}
-                  {visibleCatalog.page.nextCursor ? <Button className="shrink-0" variant="secondary" size="sm" isPending={loadingMore} onPress={() => void loadMore()}>Load more websites</Button> : null}
+                  {visibleCatalog.page.nextCursor ? <Button className="shrink-0" variant="secondary" size="sm" isPending={loadingMore} onPress={() => void loadMore()}><FontAwesomeIcon aria-hidden icon={faChevronDown} /> Load more websites</Button> : null}
                 </Card.Content>
               </Card>
               <Card className="mb-20 min-w-0 self-start" variant="secondary">
-                <Card.Header className="flex-row flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title><Card.Description>{name ? "Preview in your browser or use the actions menu. Select a path to inspect its source." : "Select a website to manage its content."}</Card.Description></div>
-                  {name ? <div className="flex shrink-0 flex-wrap gap-2">
-                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail || !previewEntry} onPress={() => { if (previewEntry) void openRenderedPreview(previewEntry); }}><FontAwesomeIcon aria-hidden icon={faEye} /> Preview website</Button>
-                    <Button size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}><FontAwesomeIcon aria-hidden icon={faTrash} /> Delete website</Button>
-                  </div> : null}
+                <Card.Header>
+                  <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title>{!name ? <Card.Description>Select a website to manage its content.</Card.Description> : null}</div>
                 </Card.Header>
                 <Card.Content className="min-w-0 p-0">
-                  {name ? <div className="flex flex-wrap gap-2 px-4 pb-4">
-                    <Button size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}><FontAwesomeIcon aria-hidden icon={faFileLines} /> Add text</Button>
-                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}><FontAwesomeIcon aria-hidden icon={faFileArrowUp} /> Add local file</Button>
-                    <Button size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}><FontAwesomeIcon aria-hidden icon={faFolderOpen} /> Import directory</Button>
+                  {name ? <div role="group" aria-label="Website actions" className="flex items-center gap-2 overflow-x-auto px-4 pt-1 pb-4">
+                    <Tooltip>
+                      <Button aria-label={previewActionLabel} className="shrink-0" isIconOnly size="sm" variant="secondary" isDisabled={pending || Boolean(serverPending) || loadingDetail || !previewEntry} onPress={() => { if (previewEntry) void openRenderedPreview(previewEntry); }}><FontAwesomeIcon aria-hidden icon={faEye} /></Button>
+                      <Tooltip.Content>{previewActionLabel}</Tooltip.Content>
+                    </Tooltip>
+                    <Button className="shrink-0" size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}><FontAwesomeIcon aria-hidden icon={faFileLines} /> Add text</Button>
+                    <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}><FontAwesomeIcon aria-hidden icon={faFileArrowUp} /> Add local file</Button>
+                    <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}><FontAwesomeIcon aria-hidden icon={faFolderOpen} /> Import directory</Button>
+                    <Tooltip>
+                      <Button aria-label="Delete website" className="ml-auto shrink-0" isIconOnly size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}><FontAwesomeIcon aria-hidden icon={faTrash} /></Button>
+                      <Tooltip.Content>Delete website</Tooltip.Content>
+                    </Tooltip>
                   </div> : null}
                   {detailError ? <div className="px-4 pb-4"><InlineError message={detailError} /></div> : null}
                   {loadingDetail ? <p role="status" className="px-4 pb-3 text-sm text-muted">Loading content…</p> : null}
@@ -431,6 +529,37 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
         </div>
       </ScrollShadow>
 
+      <Modal.Backdrop isOpen={serverDialogOpen} onOpenChange={setServerDialogOpen} variant="blur">
+        <Modal.Container placement="center" scroll="inside" size="sm">
+          <Modal.Dialog className="sm:max-w-[480px]">
+            <Modal.CloseTrigger />
+            <Modal.Header className="pr-10">
+              <Modal.Heading>Local preview</Modal.Heading>
+              <p className="text-sm text-muted">Manage the website preview running on this computer.</p>
+            </Modal.Header>
+            <Modal.Body className="flex flex-col gap-4">
+              <div className="min-w-0" aria-live="polite">
+                <Chip size="sm" color={hostedPreview ? "success" : "default"} variant="soft">{hostedPreview ? "Running" : "Stopped"}</Chip>
+                {hostedPreview ? <>
+                  <p className="mt-3 break-all text-sm text-foreground">Hosting <strong>{hostedPreview.name}</strong></p>
+                  <p className="mt-1 break-all font-mono text-xs text-muted">{hostedPreview.url}</p>
+                </> : <p className="mt-3 text-sm text-muted">No website is being previewed.</p>}
+              </div>
+              <WebsitePreviewSelect identity={identity} connected={connected} websiteEventId={websiteEventId} currentName={hostedPreview?.name} disabled={pending || Boolean(serverPending)} onChange={selectPreviewWebsite} />
+              {serverPending === "open" ? <p role="status" className="text-xs text-muted">Opening browser preview…</p> : null}
+              {serverError ? <InlineError message={serverError} /> : null}
+            </Modal.Body>
+            <Modal.Footer className="flex-wrap">
+              <Button size="sm" variant="tertiary" onPress={() => setServerDialogOpen(false)}><FontAwesomeIcon aria-hidden icon={faXmark} /> Close</Button>
+              {hostedPreview ? <>
+                <Button size="sm" variant="secondary" isDisabled={!connected || pending || Boolean(serverPending)} onPress={() => void runServerOperation("open", () => window.sliver.openWebsiteRenderedPreview({ name: hostedPreview.name, path: hostedPreview.path }))}><FontAwesomeIcon aria-hidden icon={faArrowUpRightFromSquare} /> Open in browser</Button>
+                <Button size="sm" variant="danger-soft" isDisabled={serverPending === "stop"} isPending={serverPending === "stop"} onPress={() => void runServerOperation("stop", () => window.sliver.stopWebsiteRenderedPreview())}><FontAwesomeIcon aria-hidden icon={faStop} /> {serverPending === "stop" ? "Stopping…" : "Stop server"}</Button>
+              </> : null}
+            </Modal.Footer>
+          </Modal.Dialog>
+        </Modal.Container>
+      </Modal.Backdrop>
+
       <EditorDialog form={form} error={formError} pending={pending} onChange={(next) => { setForm(next); setFormError(undefined); }} onClose={() => { if (!pending) setForm(undefined); }} onSubmit={() => void submitForm()} />
 
       <Modal.Backdrop isOpen={Boolean(previewTarget)} variant="blur" onOpenChange={(open) => { if (!open && !pending) closePreview(); }}>
@@ -441,10 +570,11 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
             <Modal.Body className="flex flex-col gap-4">
               {loadingPreview ? <p role="status">Loading content preview…</p> : null}
               {previewError ? <InlineError message={previewError} /> : null}
+              {serverError ? <InlineError message={serverError} /> : null}
               {preview ? <WebsiteContentPreview content={preview} /> : null}
               {previewTarget?.sha256 ? <dl className="text-xs"><dt className="text-muted">SHA-256</dt><dd className="break-all font-mono">{previewTarget.sha256}</dd></dl> : null}
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) void openRenderedPreview(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faEye} /> Preview in browser</Button>
+                <Button size="sm" variant="secondary" isDisabled={pending || Boolean(serverPending)} onPress={() => { if (previewTarget) void openRenderedPreview(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faEye} /> Preview in browser</Button>
                 <Button size="sm" variant="secondary" isDisabled={pending || editableText === null} onPress={() => { if (previewTarget && editableText !== null) void editContent(previewTarget); }}><FontAwesomeIcon aria-hidden icon={faPenToSquare} /> Edit text</Button>
                 <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("replace", previewTarget); }}><FontAwesomeIcon aria-hidden icon={faArrowRightArrowLeft} /> Replace from file</Button>
                 <Button size="sm" variant="secondary" isDisabled={pending} onPress={() => { if (previewTarget) openForm("mime", previewTarget); }}><FontAwesomeIcon aria-hidden icon={faTag} /> Change content type</Button>
@@ -455,7 +585,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
               {preview && editableText === null ? <p className="text-xs text-muted">Text editing requires complete UTF-8 content within the editor limit. Use Replace from file for other content.</p> : null}
               {actionError ? <InlineError message={actionError} /> : null}
             </Modal.Body>
-            <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={closePreview}>Close</Button></Modal.Footer>
+            <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={closePreview}><FontAwesomeIcon aria-hidden icon={faXmark} /> Close</Button></Modal.Footer>
           </Modal.Dialog>
         </Modal.Container>
       </Modal.Backdrop>
@@ -486,7 +616,7 @@ function EditorDialog({ form, error, pending, onChange, onClose, onSubmit }: { f
           </>}
           {error ? <InlineError message={error} /> : null}
         </Modal.Body>
-        <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={onClose}>Cancel</Button><Button isPending={pending} onPress={onSubmit}><FontAwesomeIcon aria-hidden icon={kind === "create" ? faPlus : kind === "file" || kind === "replace" ? faFileArrowUp : kind === "directory" ? faFolderOpen : kind === "text" ? faPenToSquare : faFloppyDisk} />{kind === "create" ? "Create website" : kind === "file" || kind === "replace" ? "Choose file and upload" : kind === "directory" ? "Choose directory and upload" : kind === "text" ? "Open editor" : "Save content"}</Button></Modal.Footer>
+        <Modal.Footer><Button variant="tertiary" isDisabled={pending} onPress={onClose}><FontAwesomeIcon aria-hidden icon={faXmark} /> Cancel</Button><Button isPending={pending} onPress={onSubmit}><FontAwesomeIcon aria-hidden icon={kind === "create" ? faPlus : kind === "file" || kind === "replace" ? faFileArrowUp : kind === "directory" ? faFolderOpen : kind === "text" ? faPenToSquare : faFloppyDisk} />{kind === "create" ? "Create website" : kind === "file" || kind === "replace" ? "Choose file and upload" : kind === "directory" ? "Choose directory and upload" : kind === "text" ? "Open editor" : "Save content"}</Button></Modal.Footer>
       </Modal.Dialog>
     </Modal.Container>
   </Modal.Backdrop>;

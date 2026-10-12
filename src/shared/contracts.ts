@@ -114,7 +114,7 @@ import type {
 } from "./operator-data-contracts.js";
 import type {
   ImportWebsiteFilesInput, ListWebsitesInput, OpenWebsiteTextEditorInput, SaveWebsiteTextInput, UpdateWebsiteContentTypeInput,
-  WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput,
+  WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput, WebsiteRenderedPreview,
 } from "./website-contracts.js";
 
 export const IPC_INVOKE = {
@@ -174,6 +174,7 @@ export const IPC_INVOKE = {
   getWebsiteContent: "sliver:websites:content",
   exportWebsiteContent: "sliver:websites:export-content",
   openWebsiteRenderedPreview: "sliver:websites:open-rendered-preview",
+  stopWebsiteRenderedPreview: "sliver:websites:stop-rendered-preview",
   openWebsiteTextEditor: "sliver:websites:open-text-editor",
   listLoot: "sliver:loot:list",
   addLoot: "sliver:loot:add-local",
@@ -522,6 +523,7 @@ export interface RecentEventSummary {
 }
 
 export interface SliverSnapshot {
+  websitePreview: WebsiteRenderedPreview | null;
   /** Passive server-reported service inventory for infrastructure views. */
   infrastructureServices?: import("./topology-contracts.js").InfrastructureServicesSnapshot;
   /** Bounded display-only hierarchy reported by the server's passive graph RPC. */
@@ -987,6 +989,7 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.getWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteContentDetail>; };
   [IPC.exportWebsiteContent]: { args: [input: WebsiteContentInput]; result: OperationResult<WebsiteExportResult>; };
   [IPC.openWebsiteRenderedPreview]: { args: [input: WebsiteContentInput]; result: OperationResult; };
+  [IPC.stopWebsiteRenderedPreview]: { args: []; result: OperationResult; };
   [IPC.openWebsiteTextEditor]: { args: [input: OpenWebsiteTextEditorInput]; result: OperationResult; };
   [IPC.addLoot]: {
     args: [input: AddLootInput];
@@ -1287,6 +1290,7 @@ export function disconnectedSnapshot(error?: string): SliverSnapshot {
     page: { limit: 0, total: 0, truncated: false },
   });
   return {
+    websitePreview: null,
     connection: {
       status: "disconnected",
       managedServer: null,
