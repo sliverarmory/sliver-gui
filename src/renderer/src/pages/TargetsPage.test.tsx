@@ -3816,7 +3816,9 @@ describe("TargetsPage", () => {
       const initial = targetSnapshot();
       const rendered = render(<TargetsPage mode={mode} snapshot={initial} onSnapshot={vi.fn()} />);
 
-      await user.type(screen.getByRole("searchbox", { name: `Filter ${mode}s` }), target.name);
+      fireEvent.change(screen.getByRole("searchbox", { name: `Filter ${mode}s` }), {
+        target: { value: target.name },
+      });
       await waitFor(() => expect(listTargets).toHaveBeenCalledOnce());
       expect(await screen.findByRole("row", { name: new RegExp(target.name) })).toBeInTheDocument();
 
@@ -3859,7 +3861,6 @@ describe("TargetsPage", () => {
   it.each(["query", "backend"] as const)(
     "clears settled search rows when the %s identity changes",
     async (change) => {
-      const user = userEvent.setup();
       const oldTarget = { ...session, name: "payments-old" };
       const newTarget = { ...session, id: "session-new", name: "payments-new" };
       const newRef = { ...sessionRef, id: newTarget.id };
@@ -3874,12 +3875,11 @@ describe("TargetsPage", () => {
       const rendered = render(<TargetsPage mode="session" snapshot={initial} onSnapshot={vi.fn()} />);
       const search = screen.getByRole("searchbox", { name: "Filter sessions" });
 
-      await user.type(search, "payments");
+      fireEvent.change(search, { target: { value: "payments" } });
       expect(await screen.findByRole("row", { name: /payments-old/i })).toBeInTheDocument();
 
       if (change === "query") {
-        await user.clear(search);
-        await user.type(search, "pay");
+        fireEvent.change(search, { target: { value: "pay" } });
       } else {
         const reconnected = targetSnapshot();
         reconnected.connection.incarnation = 2;
