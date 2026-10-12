@@ -1915,15 +1915,21 @@ async function assertBeaconWorkspaceHeader(
   await details.waitFor({ state: "hidden" });
   assert.equal(await trigger.getAttribute("aria-expanded"), "false");
   const nativeWindow = await application.browserWindow(page);
-  const originalSize = await nativeWindow.evaluate((window) => window.getSize());
+  const originalSize = await nativeWindow.evaluate((window) => window.getContentSize());
   try {
-    await nativeWindow.evaluate((window, width) => window.setSize(width, 768), originalSize[0]);
-    await page.waitForFunction(() => (globalThis as unknown as { innerHeight: number }).innerHeight === 768);
+    // The Linux popout has native chrome, unlike the main window's hidden
+    // titlebar. Size the renderer so both exercise the same 768px viewport.
+    await nativeWindow.evaluate((window, width) => window.setContentSize(width, 768), originalSize[0]);
+    await page.waitForFunction((expectedWidth) => {
+      const viewport = globalThis as unknown as { innerWidth: number; innerHeight: number };
+      return viewport.innerWidth === expectedWidth && viewport.innerHeight === 768;
+    }, originalSize[0]);
     await assertBeaconHeaderScrollLayout(page, join(screenshotDirectory, `${screenshotPrefix}-scrolled.png`));
-    await nativeWindow.evaluate((window, width) => window.setSize(width, 768), narrowWidth);
-    await page.waitForFunction((expectedWidth) => (
-      globalThis as unknown as { innerWidth: number }
-    ).innerWidth === expectedWidth, narrowWidth);
+    await nativeWindow.evaluate((window, width) => window.setContentSize(width, 768), narrowWidth);
+    await page.waitForFunction((expectedWidth) => {
+      const viewport = globalThis as unknown as { innerWidth: number; innerHeight: number };
+      return viewport.innerWidth === expectedWidth && viewport.innerHeight === 768;
+    }, narrowWidth);
     await assertBeaconHeaderLayout(page);
     await assertBeaconTaskColumns(page);
     const overflow = await summary.evaluate((header) => {
@@ -1948,10 +1954,11 @@ async function assertBeaconWorkspaceHeader(
     await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, `${screenshotPrefix}-narrow.png`) });
     await assertBeaconHeaderScrollLayout(page, join(screenshotDirectory, `${screenshotPrefix}-narrow-scrolled.png`));
   } finally {
-    await nativeWindow.evaluate((window, size) => window.setSize(size[0]!, size[1]!), originalSize);
-    await page.waitForFunction((expectedWidth) => (
-      globalThis as unknown as { innerWidth: number }
-    ).innerWidth === expectedWidth, originalSize[0]);
+    await nativeWindow.evaluate((window, size) => window.setContentSize(size[0]!, size[1]!), originalSize);
+    await page.waitForFunction((size) => {
+      const viewport = globalThis as unknown as { innerWidth: number; innerHeight: number };
+      return viewport.innerWidth === size[0] && viewport.innerHeight === size[1];
+    }, originalSize);
   }
 }
 
