@@ -1,5 +1,9 @@
 import type { OperatorDataPageSummary } from "./operator-data-contracts.js";
 
+/** Private preload-to-main transport; never expose a renderer path-based import API. */
+export const WEBSITE_DROPPED_IMPORT_IPC_CHANNEL = "sliver:websites:import-dropped";
+export const WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH = 32 * 1024;
+
 export const WEBSITE_LIMITS = Object.freeze({
   nameCharacters: 256,
   pathCharacters: 2048,
@@ -28,6 +32,8 @@ export interface WebsiteDetail { site: WebsiteSummary; contents: WebsiteContentS
 export interface WebsiteCatalogPage { items: WebsiteSummary[]; page: OperatorDataPageSummary; }
 export interface ListWebsitesInput { query?: string; cursor?: string; limit?: number; }
 export interface WebsiteNameInput { name: string; }
+/** Native paths are resolved exclusively by preload from OS-backed dropped File objects. */
+export interface DroppedWebsiteFilesIpcRequest { sourcePaths: string[]; input: WebsiteNameInput; }
 export interface WebsiteContentInput extends WebsiteNameInput { path: string; }
 /** A main-owned loopback preview belonging to the current application window. */
 export interface WebsiteRenderedPreview extends WebsiteContentInput { origin: string; url: string; }
@@ -126,6 +132,22 @@ export function parseListWebsitesInput(value: unknown): ListWebsitesInput {
 export function parseWebsiteNameInput(value: unknown): WebsiteNameInput {
   const input = record(value, ["name"]);
   return { name: name(input["name"]) };
+}
+export function parseDroppedWebsiteFilesIpcRequest(value: unknown): DroppedWebsiteFilesIpcRequest {
+  const request = record(value, ["sourcePaths", "input"]);
+  const paths = request["sourcePaths"];
+  if (!Array.isArray(paths) || paths.length === 0 || paths.length > WEBSITE_LIMITS.importFiles) {
+    throw new TypeError(`Dropped website imports require 1 to ${WEBSITE_LIMITS.importFiles} files or directories`);
+  }
+  const sourcePaths = Array.from(paths, (value: unknown) => {
+    string(value, "sourcePath", WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH);
+    const sourcePath = value as string;
+    if (!sourcePath.startsWith("/") && !/^[a-z]:[\\/]/iu.test(sourcePath) && !/^\\\\[^\\/]+[\\/][^\\/]+/u.test(sourcePath)) {
+      throw new TypeError("Dropped website sourcePath must be an absolute local path");
+    }
+    return sourcePath;
+  });
+  return { sourcePaths, input: parseWebsiteNameInput(request["input"]) };
 }
 export function parseWebsiteContentInput(value: unknown): WebsiteContentInput {
   const input = record(value, ["name", "path"]);

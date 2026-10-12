@@ -17,6 +17,7 @@ import {
 } from "../shared/application-context-menu-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 import { LOOT_DROPPED_ADD_IPC_CHANNEL } from "../shared/operator-data-contracts.js";
+import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_LIMITS } from "../shared/website-contracts.js";
 import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 
 type InvokeArgumentsByMethod = {
@@ -323,6 +324,53 @@ describe("sandboxed preload bridge", () => {
     electronMocks.invoke.mockClear();
     electronMocks.getPathForFile.mockReturnValue("");
     expect(() => exposed.addDroppedLoot(file)).toThrow(/must be backed by a local file/u);
+    expect(electronMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("resolves a native dropped website batch in preload and sends only the private typed envelope", async () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const files = [new File(["<h1>Welcome</h1>"], "index.html"), new File([], "assets")];
+    const input = { name: " public " };
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReset();
+    electronMocks.getPathForFile.mockReturnValueOnce("/private/operator/index.html").mockReturnValueOnce("/private/operator/assets");
+
+    await exposed.importDroppedWebsiteFiles(files, input);
+
+    expect(electronMocks.getPathForFile).toHaveBeenNthCalledWith(1, files[0]);
+    expect(electronMocks.getPathForFile).toHaveBeenNthCalledWith(2, files[1]);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, {
+      sourcePaths: ["/private/operator/index.html", "/private/operator/assets"], input,
+    });
+    expect(Object.values(IPC_INVOKE)).not.toContain(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
+    expect(Object.keys(exposed)).not.toContain("getPathForFile");
+  });
+
+  it.each(["missing path", "non-File object", "relative native path"])("rejects an entire dropped website batch with a %s", (failure) => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const files = [new File(["valid"], "index.html"), new File(["synthetic"], "generated.html")];
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReset();
+    electronMocks.getPathForFile.mockReturnValueOnce("/private/operator/index.html");
+    if (failure === "non-File object") {
+      electronMocks.getPathForFile.mockImplementationOnce(() => { throw new TypeError("Expected File"); });
+      files[1] = { path: "/private/forged", name: "forged.html" } as unknown as File;
+    } else electronMocks.getPathForFile.mockReturnValueOnce(failure === "missing path" ? "" : "relative.html");
+    expect(() => exposed.importDroppedWebsiteFiles(files, { name: "public" })).toThrow();
+    expect(electronMocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it("rejects raw paths, malformed batches, and renderer path overrides before native resolution", () => {
+    const exposed = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const invoke = exposed.importDroppedWebsiteFiles as (files: unknown, input: unknown) => unknown;
+    electronMocks.invoke.mockClear();
+    electronMocks.getPathForFile.mockReset();
+    for (const files of [[], new Array(1), ["/private/forged"], { sourcePaths: ["/private/forged"] }, Array.from({ length: WEBSITE_LIMITS.importFiles + 1 }, () => new File([], "x"))]) {
+      expect(() => invoke(files, { name: "public" })).toThrow();
+    }
+    expect(() => invoke([new File([], "index.html")], { name: "public", sourcePath: "/private/forged" })).toThrow();
+    expect(() => invoke([new File([], "index.html")], { name: "public", overwrite: true })).toThrow();
+    expect(electronMocks.getPathForFile).not.toHaveBeenCalled();
     expect(electronMocks.invoke).not.toHaveBeenCalled();
   });
 

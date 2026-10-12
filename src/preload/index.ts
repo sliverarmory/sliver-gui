@@ -28,6 +28,12 @@ import {
   LOOT_DROPPED_ADD_IPC_CHANNEL,
   parseDroppedLootIpcRequest,
 } from "../shared/operator-data-contracts.js";
+import {
+  WEBSITE_DROPPED_IMPORT_IPC_CHANNEL,
+  WEBSITE_LIMITS,
+  parseDroppedWebsiteFilesIpcRequest,
+  parseWebsiteNameInput,
+} from "../shared/website-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
 import { isResolvedApplicationIcon, parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import { parseSliverReleaseDownloadEvent } from "../shared/release-contracts.js";
@@ -160,6 +166,25 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
+  importDroppedWebsiteFiles: (files, input) => {
+    const parsedInput = parseWebsiteNameInput(input);
+    if (!Array.isArray(files) || files.length === 0 || files.length > WEBSITE_LIMITS.importFiles) {
+      throw new TypeError(`Dropped website imports require 1 to ${WEBSITE_LIMITS.importFiles} files or directories`);
+    }
+    const sourcePaths = Array.from(files, (file) => {
+      let sourcePath: string;
+      try {
+        if (typeof file !== "object" || file === null) throw new TypeError("Invalid dropped File");
+        sourcePath = webUtils.getPathForFile(file);
+      } catch {
+        throw new TypeError("Dropped website content must be backed by a local file or directory");
+      }
+      if (!sourcePath) throw new TypeError("Dropped website content must be backed by a local file or directory");
+      return sourcePath;
+    });
+    const request = parseDroppedWebsiteFilesIpcRequest({ sourcePaths, input: parsedInput });
+    return ipcRenderer.invoke(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, request);
+  },
   addDroppedLoot: (file) => {
     let sourcePath: string;
     try {

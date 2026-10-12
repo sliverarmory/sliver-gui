@@ -1,10 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
-  WEBSITE_LIMITS, isWebsiteTextContentType, parseImportWebsiteFilesInput, parseListWebsitesInput,
+  WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH, WEBSITE_LIMITS, isWebsiteTextContentType,
+  parseDroppedWebsiteFilesIpcRequest, parseImportWebsiteFilesInput, parseListWebsitesInput,
   parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput, parseWebsiteContentInput, parseWebsiteNameInput, parseUpdateWebsiteContentTypeInput,
 } from "./website-contracts.js";
 
 describe("website IPC contracts", () => {
+  it("preserves exact website names and bounded native paths for dropped files and directories", () => {
+    const request = { sourcePaths: ["/private/operator/index.html ", "C:\\operator\\assets", "D:/site/index.html", "\\\\server\\share\\site"], input: { name: " public " } };
+    const parsed = parseDroppedWebsiteFilesIpcRequest(request);
+    expect(parsed).toEqual(request);
+    expect(parsed.sourcePaths).not.toBe(request.sourcePaths);
+    expect(parseDroppedWebsiteFilesIpcRequest({ sourcePaths: Array.from({ length: WEBSITE_LIMITS.importFiles }, (_, index) => `/site/${index}`), input: { name: "public" } }).sourcePaths).toHaveLength(WEBSITE_LIMITS.importFiles);
+  });
+
+  it.each(["", "relative.html", "C:relative.html", "\\relative.html", "\\\\server", "/file\n", "/file\0", "/file\u007f", "/" + "a".repeat(WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH), null, 42])(
+    "rejects invalid native dropped source path %j", (sourcePath) => {
+      expect(() => parseDroppedWebsiteFilesIpcRequest({ sourcePaths: [sourcePath], input: { name: "public" } })).toThrow();
+    },
+  );
+
+  it.each([
+    { sourcePaths: [] },
+    { sourcePaths: "/site/index.html" },
+    { sourcePaths: [undefined] },
+    { sourcePaths: new Array(1) },
+    { sourcePaths: Array.from({ length: WEBSITE_LIMITS.importFiles + 1 }, () => "/site/index.html") },
+    { input: { name: " " } },
+    { input: { name: "public", sourcePath: "/override" } },
+    { input: { name: "public", overwrite: true } },
+    { sourcePath: "/override" },
+    { websiteId: "another-website" },
+  ])("rejects malformed dropped website envelope %j", (input) => {
+    expect(() => parseDroppedWebsiteFilesIpcRequest({ sourcePaths: ["/site/index.html"], input: { name: "public" }, ...input })).toThrow();
+  });
+
   it("accepts exact editor targets and textual creation metadata", () => {
     expect(parseOpenWebsiteTextEditorInput({ name: " site ", path: "/a ", mode: "edit" }))
       .toEqual({ name: " site ", path: "/a ", mode: "edit" });

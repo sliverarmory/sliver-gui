@@ -21,6 +21,7 @@ import { parseConfig, SliverClient, type SliverClientConfig } from "sliver-scrip
 
 import {
   IPC_INVOKE,
+  SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
   SLIVER_PROTOCOL_COMPATIBILITY,
   type SliverDesktopAPI,
   type SliverSnapshot,
@@ -302,20 +303,7 @@ async function assertPackagedRendererSecurity(
 ): Promise<void> {
   const expectedApiKeys = [
     ...Object.keys(IPC_INVOKE),
-    "onSnapshotChanged",
-    "onOperationChanged",
-    "onBeaconTasksInvalidated",
-    "onSessionShellsChanged",
-    "onReleaseDownloadChanged",
-    "onApplicationUpdateChanged",
-    "onApplicationSettingsChanged",
-    "onCommandPaletteRequested",
-    "onConsoleNewTabRequested",
-    "onConsoleCloseTabRequested",
-    "onConsoleSelectTabRequested",
-    "onConsoleSettingsRequested",
-    "openStream",
-    "openConsoleStream",
+    ...SLIVER_DESKTOP_NON_INVOKE_API_KEYS,
   ].sort();
   const rendererState = await page.evaluate(async () => {
     const browserGlobal = globalThis as unknown as {

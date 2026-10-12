@@ -412,6 +412,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
   const api: SliverDesktopAPI = {
     addDroppedLoot: vi.fn(failed),
     uploadDroppedSessionFile: vi.fn(failed),
+    importDroppedWebsiteFiles: vi.fn(failed),
     onSavedConfigsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     backgroundTarget: vi.fn(failed),

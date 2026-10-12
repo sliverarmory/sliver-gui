@@ -17,6 +17,7 @@ import { ApplicationContextMenuScope } from "../components/ApplicationContextMen
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WebsiteContentPreview } from "../components/WebsiteContentPreview";
 import { WebsitePreviewSelect } from "../components/WebsitePreviewSelect";
+import { WebsiteUploadDropZone } from "../components/WebsiteUploadDropZone";
 import { decodeWebsiteEditableText } from "../components/website-content-preview";
 
 interface WebsitesPageProps {
@@ -67,6 +68,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
   const [previewError, setPreviewError] = useState<string>();
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [pending, setPending] = useState(false);
+  const [dropUpload, setDropUpload] = useState<{ context: string }>();
   const [serverPending, setServerPending] = useState<"open" | "stop">();
   const [serverDialogOpen, setServerDialogOpen] = useState(false);
   const serverStatusId = useId();
@@ -313,6 +315,27 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     }, true);
   };
 
+  const importDroppedFiles = async (files: File[]) => {
+    if (!name || !connected || pendingRef.current || form || deleteTarget || previewTarget) return;
+    if (files.length > WEBSITE_LIMITS.importFiles) {
+      setActionError("Website import exceeds the 500-file limit");
+      return;
+    }
+    if (!files.length) return;
+    const upload = { context };
+    setDropUpload(upload);
+    try {
+      await runOperation(() => window.sliver.importDroppedWebsiteFiles(files, { name }), (value) => {
+        if (!value) return;
+        setDetail({ context, value });
+        setRevision((current) => current + 1);
+        setNotice("Website content uploaded.");
+      });
+    } finally {
+      if (mounted.current) setDropUpload((current) => current === upload ? undefined : current);
+    }
+  };
+
   const deleteSelected = async (): Promise<boolean> => {
     if (!deleteTarget) return false;
     const target = deleteTarget;
@@ -500,30 +523,35 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
                   {visibleCatalog.page.nextCursor ? <Button className="shrink-0" variant="secondary" size="sm" isPending={loadingMore} onPress={() => void loadMore()}><FontAwesomeIcon aria-hidden icon={faChevronDown} /> Load more websites</Button> : null}
                 </Card.Content>
               </Card>
-              <Card className="mb-20 min-w-0 self-start" variant="secondary">
-                <Card.Header>
-                  <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title>{!name ? <Card.Description>Select a website to manage its content.</Card.Description> : null}</div>
-                </Card.Header>
-                <Card.Content className="min-w-0 p-0">
-                  {name ? <div role="group" aria-label="Website actions" className="flex items-center gap-2 overflow-x-auto px-4 pt-1 pb-4">
-                    <Tooltip>
-                      <Button aria-label={previewActionLabel} className="shrink-0" isIconOnly size="sm" variant="secondary" isDisabled={pending || Boolean(serverPending) || loadingDetail || !previewEntry} onPress={() => { if (previewEntry) void openRenderedPreview(previewEntry); }}><FontAwesomeIcon aria-hidden icon={faEye} /></Button>
-                      <Tooltip.Content>{previewActionLabel}</Tooltip.Content>
-                    </Tooltip>
-                    <Button className="shrink-0" size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}><FontAwesomeIcon aria-hidden icon={faFileLines} /> Add text</Button>
-                    <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}><FontAwesomeIcon aria-hidden icon={faFileArrowUp} /> Add local file</Button>
-                    <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}><FontAwesomeIcon aria-hidden icon={faFolderOpen} /> Import directory</Button>
-                    <Tooltip>
-                      <Button aria-label="Delete website" className="ml-auto shrink-0" isIconOnly size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}><FontAwesomeIcon aria-hidden icon={faTrash} /></Button>
-                      <Tooltip.Content>Delete website</Tooltip.Content>
-                    </Tooltip>
-                  </div> : null}
-                  {detailError ? <div className="px-4 pb-4"><InlineError message={detailError} /></div> : null}
-                  {loadingDetail ? <p role="status" className="px-4 pb-3 text-sm text-muted">Loading content…</p> : null}
-                  {name ? <DataGrid aria-label="Website content" columns={columns} contentClassName="min-w-[620px]" data={visibleDetail?.contents ?? []} getRowId={(item) => item.path} variant="secondary" onRowAction={(key) => { const item = visibleDetail?.contents.find((entry) => entry.path === key); if (item) void openPreview(item); }} renderEmptyState={() => <WebsiteEmpty title={loadingDetail ? "Loading content" : detailError ? "Content unavailable" : "No content yet"} description={loadingDetail ? "Fetching website metadata…" : detailError ? "Refresh to try again." : "Add text, a local file, or a directory to this website."} />} /> : <WebsiteEmpty title="Select a website" description="Your website’s paths, content types, and sizes will appear here." />}
-                  {visibleDetail?.truncated ? <p role="status" className="px-4 py-3 text-sm text-warning">This website exceeds the content listing limit. Some paths are omitted.</p> : null}
-                </Card.Content>
-              </Card>
+              <WebsiteUploadDropZone key={context} name={name}
+                isDisabled={!name || pending || loadingDetail || Boolean(form || deleteTarget || previewTarget)}
+                isPending={dropUpload?.context === context && pending}
+                onDropFiles={(files) => { void importDroppedFiles(files); }}>
+                <Card className="min-w-0" variant="secondary">
+                  <Card.Header>
+                    <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title>{!name ? <Card.Description>Select a website to manage its content.</Card.Description> : null}</div>
+                  </Card.Header>
+                  <Card.Content className="min-w-0 p-0">
+                    {name ? <div role="group" aria-label="Website actions" className="flex items-center gap-2 overflow-x-auto px-4 pt-1 pb-4">
+                      <Tooltip>
+                        <Button aria-label={previewActionLabel} className="shrink-0" isIconOnly size="sm" variant="secondary" isDisabled={pending || Boolean(serverPending) || loadingDetail || !previewEntry} onPress={() => { if (previewEntry) void openRenderedPreview(previewEntry); }}><FontAwesomeIcon aria-hidden icon={faEye} /></Button>
+                        <Tooltip.Content>{previewActionLabel}</Tooltip.Content>
+                      </Tooltip>
+                      <Button className="shrink-0" size="sm" isDisabled={pending || loadingDetail} onPress={() => openForm("text")}><FontAwesomeIcon aria-hidden icon={faFileLines} /> Add text</Button>
+                      <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("file")}><FontAwesomeIcon aria-hidden icon={faFileArrowUp} /> Add local file</Button>
+                      <Button className="shrink-0" size="sm" variant="secondary" isDisabled={pending || loadingDetail} onPress={() => openForm("directory")}><FontAwesomeIcon aria-hidden icon={faFolderOpen} /> Import directory</Button>
+                      <Tooltip>
+                        <Button aria-label="Delete website" className="ml-auto shrink-0" isIconOnly size="sm" variant="danger-soft" isDisabled={pending} onPress={() => setDeleteTarget({ kind: "website", name })}><FontAwesomeIcon aria-hidden icon={faTrash} /></Button>
+                        <Tooltip.Content>Delete website</Tooltip.Content>
+                      </Tooltip>
+                    </div> : null}
+                    {detailError ? <div className="px-4 pb-4"><InlineError message={detailError} /></div> : null}
+                    {loadingDetail ? <p role="status" className="px-4 pb-3 text-sm text-muted">Loading content…</p> : null}
+                    {name ? <DataGrid aria-label="Website content" columns={columns} contentClassName="min-w-[620px]" data={visibleDetail?.contents ?? []} getRowId={(item) => item.path} variant="secondary" onRowAction={(key) => { const item = visibleDetail?.contents.find((entry) => entry.path === key); if (item) void openPreview(item); }} renderEmptyState={() => <WebsiteEmpty title={loadingDetail ? "Loading content" : detailError ? "Content unavailable" : "No content yet"} description={loadingDetail ? "Fetching website metadata…" : detailError ? "Refresh to try again." : "Add text, a local file, or a directory to this website."} />} /> : <WebsiteEmpty title="Select a website" description="Your website’s paths, content types, and sizes will appear here." />}
+                    {visibleDetail?.truncated ? <p role="status" className="px-4 py-3 text-sm text-warning">This website exceeds the content listing limit. Some paths are omitted.</p> : null}
+                  </Card.Content>
+                </Card>
+              </WebsiteUploadDropZone>
             </div>
           )}
         </div>

@@ -87,6 +87,7 @@ function installSliverAPI(
   const api: SliverDesktopAPI = {
     addDroppedLoot: vi.fn(failedOperation),
     uploadDroppedSessionFile: vi.fn(failedOperation),
+    importDroppedWebsiteFiles: vi.fn(failedOperation),
     onSavedConfigsChanged: vi.fn(() => vi.fn()),
     setKeyboardShortcutRecording: vi.fn().mockResolvedValue(undefined),
     chooseConfig: vi.fn(failedOperation),

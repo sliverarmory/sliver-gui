@@ -22,6 +22,7 @@ import { LOOT_DROPPED_ADD_IPC_CHANNEL, type AddCredentialInput } from "../shared
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
+import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_LIMITS } from "../shared/website-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -97,8 +98,9 @@ describe("trusted Electron IPC boundary", () => {
       ...Object.values(IPC_INVOKE),
       LOOT_DROPPED_ADD_IPC_CHANNEL,
       SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
+      WEBSITE_DROPPED_IMPORT_IPC_CHANNEL,
     ].sort());
-    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 2);
+    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 3);
   });
 
   it("registers and unregisters the isolated shell and console port listeners", () => {
@@ -1889,6 +1891,34 @@ describe("trusted Electron IPC boundary", () => {
     expect(getWebsiteContent).not.toHaveBeenCalled();
   });
 
+  it("imports dropped website paths only through the trusted private batch envelope", async () => {
+    const result = { ok: true as const, value: { site: { id: "site", name: " public ", contentCount: 0, totalSizeBytes: "0" }, contents: [], truncated: false } };
+    const importDroppedWebsiteFiles = vi.fn(async () => result);
+    registerIpcHandlers(registryMock({ importDroppedWebsiteFiles }), vi.fn(), RENDERER_URL);
+    const { event, sender } = invokeEvent("sliver://app/index.html#/websites", 77);
+    const handler = electronMocks.handlers.get(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL)!;
+    const request = { sourcePaths: ["/private/operator/index.html", "/private/operator/assets"], input: { name: " public " } };
+    await expect(handler(event, request)).resolves.toEqual(result);
+    expect(importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith(sender, request);
+    for (const invalid of [
+      { ...request, sourcePaths: [] },
+      { ...request, sourcePaths: ["relative.html"] },
+      { ...request, sourcePaths: Array.from({ length: WEBSITE_LIMITS.importFiles + 1 }, () => "/file") },
+      { ...request, input: { name: "public", overwrite: true } },
+      { ...request, input: { name: "public", sourcePath: "/override" } },
+      { ...request, contentsId: 99 },
+    ]) expect(() => handler(event, invalid)).toThrow(/invalid website input/i);
+    expect(() => handler(event, request, true)).toThrow(/invalid website input/i);
+    for (const url of ["https://evil.example", "http://127.0.0.1:40000/index.html", "sliver://app/index.html?surface=armory"]) {
+      expect(() => handler(invokeEvent(url, 88).event, request)).toThrow(/untrusted renderer/i);
+    }
+    const subframe = { ...event, senderFrame: { ...event.senderFrame, frameToken: "child-frame" } } as IpcMainInvokeEvent;
+    expect(() => handler(subframe, request)).toThrow(/untrusted renderer/i);
+    expect(importDroppedWebsiteFiles).toHaveBeenCalledOnce();
+    unregisterIpcHandlers();
+    expect(electronMocks.removeHandler).toHaveBeenCalledWith(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
+  });
+
   it("opens website editors through a validated native controller without accepting source bytes", async () => {
     const openWebsite = vi.fn(async () => undefined);
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL, undefined, undefined, undefined, undefined,
@@ -2208,6 +2238,7 @@ function registryMock(overrides: Partial<IpcConnectionRegistry> = {}): IpcConnec
     deleteWebsite: vi.fn(unavailable),
     saveWebsiteText: vi.fn(unavailable),
     importWebsiteFiles: vi.fn(unavailable),
+    importDroppedWebsiteFiles: vi.fn(unavailable),
     updateWebsiteContentType: vi.fn(unavailable),
     deleteWebsiteContent: vi.fn(unavailable),
     getWebsiteContent: vi.fn(unavailable),

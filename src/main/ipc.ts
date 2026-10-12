@@ -19,9 +19,7 @@ import {
   type GenerateFromProfileInput,
   type GenerateInput,
   type ImportConfigInput,
-  type IpcInvokeArgs,
-  type IpcInvokeChannel,
-  type IpcInvokeResult,
+  type IpcInvokeContract,
   type ListenerInput,
   type OpenSessionShellWindowInput,
   type OpenSessionPanelWindowInput,
@@ -111,9 +109,10 @@ import {
   parseRenameLootInput,
 } from "../shared/operator-data-contracts.js";
 import {
+  WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, parseDroppedWebsiteFilesIpcRequest,
   parseImportWebsiteFilesInput, parseListWebsitesInput, parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput,
   parseUpdateWebsiteContentTypeInput, parseWebsiteContentInput, parseWebsiteNameInput,
-  type OpenWebsiteTextEditorInput,
+  type DroppedWebsiteFilesIpcRequest, type OpenWebsiteTextEditorInput, type WebsiteDetail,
 } from "../shared/website-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import type { CloudDeploymentNavigationRequest } from "../shared/cloud-deployment-ipc.js";
@@ -210,9 +209,12 @@ export interface ConsoleWindowController {
 }
 
 type MaybePromise<T> = T | Promise<T>;
-type IpcArgumentParser<Channel extends IpcInvokeChannel> = (
+type TrustedInvokeContract = IpcInvokeContract & {
+  [WEBSITE_DROPPED_IMPORT_IPC_CHANNEL]: { args: [request: DroppedWebsiteFilesIpcRequest]; result: OperationResult<WebsiteDetail | null> };
+};
+type IpcArgumentParser<Channel extends keyof TrustedInvokeContract> = (
   args: readonly unknown[],
-) => IpcInvokeArgs<Channel>;
+) => TrustedInvokeContract[Channel]["args"];
 export type IpcConnectionRegistry = Pick<
   ConnectionRegistry,
   | "chooseAndConnect"
@@ -242,6 +244,7 @@ export type IpcConnectionRegistry = Pick<
   | "deleteWebsite"
   | "saveWebsiteText"
   | "importWebsiteFiles"
+  | "importDroppedWebsiteFiles"
   | "updateWebsiteContentType"
   | "deleteWebsiteContent"
   | "getWebsiteContent"
@@ -666,6 +669,8 @@ export function registerIpcHandlers(
     ({ contentsId }, input) => registry.saveWebsiteText(contentsId, input));
   handleTrusted(IPC.importWebsiteFiles, rendererUrl, (args) => parseWebsiteArguments(args, parseImportWebsiteFilesInput),
     ({ sender }, input) => registry.importWebsiteFiles(sender, input));
+  handleTrusted(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, rendererUrl, (args) => parseWebsiteArguments(args, parseDroppedWebsiteFilesIpcRequest),
+    ({ sender }, request) => registry.importDroppedWebsiteFiles(sender, request));
   handleTrusted(IPC.updateWebsiteContentType, rendererUrl, (args) => parseWebsiteArguments(args, parseUpdateWebsiteContentTypeInput),
     ({ contentsId }, input) => registry.updateWebsiteContentType(contentsId, input));
   handleTrusted(IPC.deleteWebsiteContent, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),
@@ -947,6 +952,7 @@ export function registerIpcHandlers(
 }
 
 export function unregisterIpcHandlers(): void {
+  ipcMain.removeHandler(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
   for (const channel of Object.values(IPC_INVOKE)) ipcMain.removeHandler(channel);
   ipcMain.removeHandler(LOOT_DROPPED_ADD_IPC_CHANNEL);
   ipcMain.removeHandler(SESSION_DROPPED_UPLOAD_IPC_CHANNEL);
@@ -1082,14 +1088,14 @@ function closeTransferredPorts(ports: readonly MessagePortMain[]): void {
   }
 }
 
-function handleTrusted<Channel extends IpcInvokeChannel>(
+function handleTrusted<Channel extends keyof TrustedInvokeContract>(
   channel: Channel,
   rendererUrl: string,
   parseArguments: IpcArgumentParser<Channel>,
   handler: (
     sender: TrustedSender,
-    ...args: IpcInvokeArgs<Channel>
-  ) => MaybePromise<IpcInvokeResult<Channel>>,
+    ...args: TrustedInvokeContract[Channel]["args"]
+  ) => MaybePromise<TrustedInvokeContract[Channel]["result"]>,
   cleanupRawArguments?: (args: readonly unknown[]) => void,
 ): void {
   ipcMain.handle(channel, (event, ...rawArguments: unknown[]) => {

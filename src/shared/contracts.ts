@@ -1205,6 +1205,8 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
+  /** Import native-backed drops without exposing local paths; null means overwrite was canceled. */
+  importDroppedWebsiteFiles: (files: File[], input: WebsiteNameInput) => Promise<OperationResult<WebsiteDetail | null>>;
   /** Add one native-backed dropped file to loot without exposing its local path to the renderer. */
   addDroppedLoot: (file: File) => Promise<OperationResult<LootSummary>>;
   /** Upload one native-backed dropped file without exposing its local path to the renderer. */
@@ -1259,6 +1261,7 @@ function defineSliverDesktopNonInvokeAPIKeys<
  * each manually adapted capability is deliberately reviewed and added here.
  */
 export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAPIKeys([
+  "importDroppedWebsiteFiles",
   "addDroppedLoot",
   "uploadDroppedSessionFile",
   "onSavedConfigsChanged",

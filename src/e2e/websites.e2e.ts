@@ -4,13 +4,29 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { chromium, _electron as electron, type Browser, type ElectronApplication, type Page } from "playwright-core";
+import { chromium, _electron as electron, type Browser, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
 import type { SliverDesktopAPI } from "../shared/contracts.js";
 import type { TextEditorAPI } from "../shared/text-editor-contracts.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
 
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
+
+interface WebsiteDropOverwritePrompt {
+  ownerId: number;
+  title: string;
+  type: string;
+  message: string;
+  detail: string;
+  buttons: string[];
+  defaultId: number;
+  cancelId: number;
+}
+
+interface WebsiteDropOverwriteState {
+  __websiteDropOverwritePrompts: WebsiteDropOverwritePrompt[];
+  __websiteDropOverwriteResponse?: (response: number) => void;
+}
 
 test("hosted websites support standalone editing, row actions, and fresh browser previews", { timeout: 120_000 }, async (context) => {
   const root = await mkdtemp(join(tmpdir(), "sliver-gui-websites-"));
@@ -43,7 +59,34 @@ test("hosted websites support standalone editing, row actions, and fresh browser
   await mkdir(join(root, "upload", ".git"));
   await writeFile(join(root, "upload", ".git", "fixture.txt"), "Hidden directory fixture");
   await writeFile(join(root, "upload", ".nojekyll"), "Dot file fixture");
+  await writeFile(join(root, "upload", ".empty-marker"), "");
   await writeFile(join(root, "upload", "pixel.png"), Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGOQc6v4DwADPgHc8bhcNQAAAABJRU5ErkJggg==", "base64"));
+  const droppedText = "A file dropped at the website root";
+  const droppedHtml = "<!doctype html><h1>Dropped website document</h1>";
+  const droppedCss = "body { color: rgb(20, 40, 60); }";
+  const droppedScript = 'document.body.dataset.dropped = "yes";';
+  const droppedNested = "Nested directory content";
+  const droppedDirectory = join(root, "drop-folder");
+  const droppedFile = join(root, "drop-note.txt");
+  const droppedExtraFile = join(root, "drop-extra.txt");
+  const droppedApprovedFile = join(root, "drop-approved.txt");
+  const droppedReplacementText = "A replacement approved in the overwrite prompt";
+  const droppedApprovedText = "A new file uploaded with the approved replacement";
+  await mkdir(join(droppedDirectory, "nested"), { recursive: true });
+  await mkdir(join(droppedDirectory, ".private"));
+  await Promise.all([
+    writeFile(droppedFile, droppedText),
+    writeFile(droppedExtraFile, "A second file in the same native drop"),
+    writeFile(join(droppedDirectory, "dropped.html"), droppedHtml),
+    writeFile(join(droppedDirectory, "dropped.css"), droppedCss),
+    writeFile(join(droppedDirectory, "dropped.js"), droppedScript),
+    writeFile(join(droppedDirectory, "dropped.png"), await readFile(join(root, "upload", "pixel.png"))),
+    writeFile(join(droppedDirectory, "nested", "drop-data.txt"), droppedNested),
+    writeFile(join(droppedDirectory, ".private", "hidden.txt"), "Hidden directory stays local"),
+    writeFile(join(droppedDirectory, ".drop-marker"), "A dropped dot file"),
+    writeFile(join(droppedDirectory, ".empty-drop-marker"), ""),
+    writeFile(join(droppedDirectory, "nested", "empty.txt"), ""),
+  ]);
   let application: ElectronApplication | undefined;
   let browser: Browser | undefined;
   let browserPreview: Page | undefined;
@@ -113,6 +156,8 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     await importDialog.waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "Inspect /.nojekyll", exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: "Inspect /.git/fixture.txt", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Inspect /.empty-marker", exact: true }).count(), 0,
+      "native directory imports skip empty marker files while importing non-empty content");
     await page.getByRole("button", { name: "Import directory", exact: true }).click();
     assert.equal(await importDialog.getByRole("checkbox", { name: "Include hidden directories", exact: true }).isChecked(), false);
     await importDialog.getByLabel("Base URL path", { exact: true }).fill("/included/");
@@ -122,6 +167,114 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     await importDialog.getByRole("button", { name: "Choose directory and upload", exact: true }).click();
     await importDialog.waitFor({ state: "hidden" });
     await page.getByRole("button", { name: "Inspect /included/.git/fixture.txt", exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "Inspect /included/.empty-marker", exact: true }).count(), 0,
+      "including hidden directories does not import empty files");
+
+    // CDP supplies native-backed File objects, including a directory root, without a file picker.
+    await application.evaluate(({ dialog }) => {
+      const state = globalThis as unknown as { __websiteDropDialogCalls?: number };
+      state.__websiteDropDialogCalls = 0;
+      dialog.showOpenDialog = async () => {
+        state.__websiteDropDialogCalls = (state.__websiteDropDialogCalls ?? 0) + 1;
+        return { canceled: true, filePaths: [] };
+      };
+    });
+    const websiteDropTarget = page.locator(".drop-zone__area").filter({
+      has: page.getByRole("button", { name: "Upload files or directories to preview-test", exact: true }),
+    });
+    await observeWebsiteUploadPending(websiteDropTarget);
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedExtraFile]);
+    await page.getByRole("button", { name: "Inspect /drop-note.txt", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Inspect /drop-extra.txt", exact: true }).waitFor();
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedDirectory], join(artifacts, "website-directory-drop.png"));
+    for (const path of ["/dropped.html", "/dropped.css", "/dropped.js", "/dropped.png", "/nested/drop-data.txt", "/.drop-marker"]) {
+      await page.getByRole("button", { name: `Inspect ${path}`, exact: true }).waitFor();
+    }
+    await page.getByText("Website content uploaded.", { exact: true }).waitFor();
+    assert.equal(await websiteDropTarget.getAttribute("data-e2e-upload-pending"), "observed",
+      "native drops display upload progress before completing");
+    assert.equal(await page.getByRole("button", { name: "Inspect /drop-folder/dropped.html", exact: true }).count(), 0,
+      "dropping a directory maps its contents directly beneath the website root");
+    assert.equal(await page.getByRole("button", { name: "Inspect /.private/hidden.txt", exact: true }).count(), 0,
+      "native directory drops skip hidden subdirectories by default");
+    for (const path of ["/.empty-drop-marker", "/nested/empty.txt"]) {
+      assert.equal(await page.getByRole("button", { name: `Inspect ${path}`, exact: true }).count(), 0,
+        "directory drops skip empty files at every depth without failing the upload");
+    }
+    assert.equal(await page.getByRole("button", { name: /^preview-test/u }).getAttribute("aria-pressed"), "true");
+    assert.equal(await application.evaluate(() =>
+      (globalThis as unknown as { __websiteDropDialogCalls?: number }).__websiteDropDialogCalls), 0,
+    "native drops upload immediately without opening a file picker");
+    assert.equal((await page.locator("body").innerText()).includes(droppedDirectory), false,
+      "native source paths are not rendered");
+
+    await application.evaluate(({ dialog }) => {
+      const state = globalThis as unknown as WebsiteDropOverwriteState;
+      state.__websiteDropOverwritePrompts = [];
+      dialog.showMessageBox = async (...args: unknown[]) => {
+        const options = args[args.length - 1] as Omit<WebsiteDropOverwritePrompt, "ownerId">;
+        if (options.title !== "Overwrite website files?") throw new Error("Unexpected native dropped-file confirmation");
+        state.__websiteDropOverwritePrompts.push({
+          ownerId: (args[0] as { id: number }).id,
+          title: options.title, type: options.type, message: options.message, detail: options.detail,
+          buttons: options.buttons, defaultId: options.defaultId, cancelId: options.cancelId,
+        });
+        if (state.__websiteDropOverwriteResponse) throw new Error("Overlapping dropped-file confirmations");
+        return new Promise<{ response: number; checkboxChecked: boolean }>((resolve) => {
+          state.__websiteDropOverwriteResponse = (response) => {
+            delete state.__websiteDropOverwriteResponse;
+            resolve({ response, checkboxChecked: false });
+          };
+        });
+      };
+    });
+    await writeFile(droppedFile, droppedReplacementText);
+    await writeFile(droppedApprovedFile, droppedApprovedText);
+    const writesBeforeOverwrite = await websiteWriteCount(application);
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedApprovedFile]);
+    const overwritePrompt = await waitForWebsiteDropOverwrite(application, 1);
+    const ownerId = await (await application.browserWindow(page)).evaluate((window) => window.id);
+    assert.equal(overwritePrompt.ownerId, ownerId, "overwrite confirmation belongs to the source window");
+    assert.equal(overwritePrompt.title, "Overwrite website files?");
+    assert.equal(overwritePrompt.type, "warning");
+    assert.deepEqual(overwritePrompt.buttons, ["Cancel", "Overwrite"]);
+    assert.equal(overwritePrompt.defaultId, 0, "the safe default is Cancel");
+    assert.equal(overwritePrompt.cancelId, 0);
+    assert.match(overwritePrompt.message, /preview-test/u);
+    assert.match(overwritePrompt.message, /\b1\b/u);
+    assert.match(overwritePrompt.detail, /\/drop-note\.txt/u);
+    assert.match(overwritePrompt.detail, /Overwrite replaces these files and uploads any new files in this drop/u);
+    assert.match(overwritePrompt.detail, /Cancel leaves the website unchanged/u);
+    assert.equal(overwritePrompt.detail.includes(droppedFile), false, "the confirmation lists website paths, not local source paths");
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite,
+      "no part of a mixed new-and-existing drop uploads before the decision");
+    assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedText);
+    assert.equal(await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).count(), 0);
+    await resolveWebsiteDropOverwrite(application, 0);
+    await page.getByText("Uploading website content…", { exact: true }).waitFor({ state: "hidden" });
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite, "Cancel uploads none of the dropped batch");
+    assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedText, "Cancel preserves the existing file bytes");
+    assert.equal(await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).count(), 0);
+    assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
+      "canceling an overwrite does not display a website error");
+
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedApprovedFile]);
+    const approvedPrompt = await waitForWebsiteDropOverwrite(application, 2);
+    assert.deepEqual(approvedPrompt, overwritePrompt);
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite);
+    await writeFile(droppedFile, "Local edits after confirmation opened are not part of the staged drop");
+    await writeFile(droppedApprovedFile, "Later local edits must not replace the staged new file");
+    await resolveWebsiteDropOverwrite(application, 1);
+    await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).waitFor();
+    await page.getByText("Website content uploaded.", { exact: true }).waitFor();
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 1,
+      "Overwrite continues the original staged batch exactly once without another drop");
+    assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedReplacementText);
+    assert.equal(await readWebsiteText(page, "/drop-approved.txt"), droppedApprovedText);
+    assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
+      "approving an overwrite does not display a website error");
+    assert.equal(await page.getByRole("button", { name: /^preview-test/u }).getAttribute("aria-pressed"), "true");
+
     await page.getByRole("button", { name: "Inspect /index.html", exact: true }).click();
     let preview = page.getByRole("dialog", { name: "/index.html", exact: true });
     const source = preview.getByLabel("Website content source", { exact: true });
@@ -168,6 +321,30 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     const binaryResponse = await fetchPreview(new URL("/asset.bin", previewUrl).href);
     assert.equal(binaryResponse.status, 200);
     assert.deepEqual(Buffer.from(await binaryResponse.arrayBuffer()), Buffer.from([0, 1, 2, 0xff]));
+    for (const [path, expected, mime] of [
+      ["/drop-note.txt", droppedReplacementText, /^text\/plain(?:;|$)/u],
+      ["/drop-approved.txt", droppedApprovedText, /^text\/plain(?:;|$)/u],
+      ["/drop-extra.txt", "A second file in the same native drop", /^text\/plain(?:;|$)/u],
+      ["/dropped.html", droppedHtml, /^text\/html(?:;|$)/u],
+      ["/dropped.css", droppedCss, /^text\/css(?:;|$)/u],
+      ["/dropped.js", droppedScript, /^(?:application|text)\/javascript(?:;|$)/u],
+      ["/nested/drop-data.txt", droppedNested, /^text\/plain(?:;|$)/u],
+    ] as const) {
+      const response = await fetchPreview(new URL(path, previewUrl).href);
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") ?? "", mime);
+      assert.equal(await response.text(), expected, "native drops preserve the approved file bytes");
+    }
+    const droppedImageResponse = await fetchPreview(new URL("/dropped.png", previewUrl).href);
+    assert.equal(droppedImageResponse.status, 200);
+    assert.match(droppedImageResponse.headers.get("content-type") ?? "", /^image\/png(?:;|$)/u);
+    assert.deepEqual(Buffer.from(await droppedImageResponse.arrayBuffer()), await readFile(join(root, "upload", "pixel.png")));
+    assert.equal((await fetchPreview(new URL("/.private/hidden.txt", previewUrl).href)).status, 404);
+    assert.equal((await fetchPreview(new URL("/drop-folder/dropped.html", previewUrl).href)).status, 404);
+    for (const path of ["/.empty-marker", "/included/.empty-marker", "/.empty-drop-marker", "/nested/empty.txt"]) {
+      assert.equal((await fetchPreview(new URL(path, previewUrl).href)).status, 404,
+        "empty files skipped during directory import are absent from the preview server");
+    }
 
     // Use an owned, temporary browser profile rather than launching the operator's browser.
     const browserExecutable = [chromium.executablePath(), ...(process.platform === "darwin"
@@ -555,6 +732,7 @@ test("hosted websites support standalone editing, row actions, and fresh browser
   } finally {
     await browser?.close();
     await application?.evaluate(({ dialog }) => {
+      (globalThis as unknown as WebsiteDropOverwriteState).__websiteDropOverwriteResponse?.(0);
       dialog.showMessageBoxSync = (...args: unknown[]) => {
         const options = args[args.length - 1] as { buttons?: string[] };
         return Math.max(0, options.buttons?.indexOf("Discard Changes") ?? 0);
@@ -578,6 +756,86 @@ async function waitForExternalUrl(application: ElectronApplication, expectedCoun
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Expected browser preview URL ${expectedCount}`);
+}
+
+async function websiteWriteCount(application: ElectronApplication): Promise<number> {
+  return application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.methods
+    .filter((method) => method === "websiteAddContent" || method === "websiteUpdateContent").length);
+}
+
+async function readWebsiteText(page: Page, path: string): Promise<string> {
+  const bytes = await page.evaluate(async (contentPath) => {
+    const result = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver
+      .getWebsiteContent({ name: "preview-test", path: contentPath });
+    if (!result.ok) throw new Error(result.error);
+    return Array.from(result.value.preview);
+  }, path);
+  return Buffer.from(bytes).toString("utf8");
+}
+
+async function waitForWebsiteDropOverwrite(application: ElectronApplication, count: number): Promise<WebsiteDropOverwritePrompt> {
+  await waitUntil(async () => application.evaluate((_electron, expected) =>
+    (globalThis as unknown as WebsiteDropOverwriteState).__websiteDropOverwritePrompts.length === expected, count));
+  return application.evaluate((_electron, index) =>
+    (globalThis as unknown as WebsiteDropOverwriteState).__websiteDropOverwritePrompts[index]!, count - 1);
+}
+
+async function resolveWebsiteDropOverwrite(application: ElectronApplication, response: number): Promise<void> {
+  await application.evaluate((_electron, decision) => {
+    const resolve = (globalThis as unknown as WebsiteDropOverwriteState).__websiteDropOverwriteResponse;
+    if (!resolve) throw new Error("No pending website overwrite confirmation");
+    resolve(decision);
+  }, response);
+}
+
+async function dropNativeWebsitePaths(page: Page, target: Locator, paths: string[], screenshotPath?: string): Promise<void> {
+  await target.scrollIntoViewIfNeeded();
+  const bounds = await target.boundingBox();
+  assert.ok(bounds, "the selected website exposes a visible upload target");
+  const viewport = await page.evaluate(() => {
+    const state = globalThis as unknown as { innerWidth: number; innerHeight: number };
+    return { width: state.innerWidth, height: state.innerHeight };
+  });
+  const left = Math.max(0, bounds.x);
+  const top = Math.max(0, bounds.y);
+  const right = Math.min(viewport.width, bounds.x + bounds.width);
+  const bottom = Math.min(viewport.height, bounds.y + bounds.height);
+  assert.ok(right > left && bottom > top, "the website upload target intersects the viewport");
+  const point = { x: (left + right) / 2, y: top + Math.min(80, (bottom - top) / 2) };
+  const data = { items: [], files: paths, dragOperationsMask: 1 };
+  const session = await page.context().newCDPSession(page);
+  let dropped = false;
+  try {
+    await page.mouse.move(point.x, point.y);
+    await session.send("Input.dispatchDragEvent", { type: "dragEnter", ...point, data });
+    await session.send("Input.dispatchDragEvent", { type: "dragOver", ...point, data });
+    await page.getByText("Drop to upload to preview-test", { exact: true }).waitFor();
+    if (screenshotPath) await page.screenshot({ path: screenshotPath, animations: "disabled" });
+    await session.send("Input.dispatchDragEvent", { type: "drop", ...point, data });
+    dropped = true;
+  } finally {
+    if (!dropped) await session.send("Input.dispatchDragEvent", { type: "dragCancel", ...point, data }).catch(() => {});
+    await session.detach();
+  }
+}
+
+async function observeWebsiteUploadPending(target: Locator): Promise<void> {
+  await target.evaluate((element) => {
+    const browser = element.ownerDocument.defaultView as unknown as {
+      MutationObserver: new(callback: () => void) => {
+        observe(target: unknown, options: { childList: boolean; subtree: boolean; characterData: boolean }): void;
+        disconnect(): void;
+      };
+    };
+    const observer = new browser.MutationObserver(() => {
+      if ([...element.ownerDocument.querySelectorAll('[role="status"]')]
+        .some((status) => status.textContent?.includes("Uploading website content…"))) {
+        element.setAttribute("data-e2e-upload-pending", "observed");
+        observer.disconnect();
+      }
+    });
+    observer.observe(element.ownerDocument.body, { childList: true, subtree: true, characterData: true });
+  });
 }
 
 function fetchPreview(url: string, options: RequestInit = {}): Promise<Response> {

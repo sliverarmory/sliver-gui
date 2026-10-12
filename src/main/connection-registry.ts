@@ -210,12 +210,12 @@ import { sniffLootMediaMimeType } from "./loot-media.js";
 import { WebsitePreviewInvalidatedError, type WebsitePreviewController } from "./website-preview-server.js";
 import {
   WEBSITE_LIMITS, isWebsiteTextContentType, parseOpenWebsiteTextEditorInput,
-  type OpenWebsiteTextEditorInput, type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
+  type DroppedWebsiteFilesIpcRequest, type OpenWebsiteTextEditorInput, type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
   type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentInput, type WebsiteDetail,
   type WebsiteExportResult, type WebsiteNameInput,
 } from "../shared/website-contracts.js";
 import {
-  assertWebsiteCatalogBudget, clearWebsiteContents, findWebsiteContent, readWebsiteImport, websiteContentBytes,
+  assertWebsiteCatalogBudget, clearWebsiteContents, findWebsiteContent, readDroppedWebsiteImport, readWebsiteImport, websiteContentBytes,
   websiteContentPreview, websiteDetail, websiteSummary,
 } from "./websites.js";
 import { buildStagePayload } from "./stage-payload.js";
@@ -7506,6 +7506,50 @@ export class ConnectionRegistry {
       try {
         return await this.queueWebsiteMutation(pool, assertBinding, () => this.writeWebsiteContents(pool, assertBinding, input, contents, before.ID,
           input.overwrite && !input.directory, before.Contents));
+      } finally { for (const item of Object.values(contents)) item.Content.fill(0); }
+    });
+  }
+
+  async importDroppedWebsiteFiles(sender: WebContents, request: DroppedWebsiteFilesIpcRequest): Promise<OperationResult<WebsiteDetail | null>> {
+    const owner = requireOwnerWindow(sender);
+    const { input, sourcePaths } = request;
+    return this.withPool(sender.id, async (pool, assertBinding) => {
+      const before = await pool.client.website(input.name);
+      try { assertBinding(); websiteDetail(before, input.name); }
+      finally { clearWebsiteContents(before); }
+      const contents = await readDroppedWebsiteImport(sourcePaths, input, assertBinding);
+      try {
+        const reviewed = await pool.client.website(input.name);
+        let conflicts: string[];
+        try {
+          assertBinding();
+          websiteDetail(reviewed, input.name);
+          if (reviewed.ID !== before.ID) throw new Error("The website changed during file selection; refresh and try again");
+          const existingPaths = new Set(Object.values(reviewed.Contents).map((item) => item.Path));
+          conflicts = Object.keys(contents).filter((path) => existingPaths.has(path)).sort();
+        } finally { clearWebsiteContents(reviewed); }
+        const overwrite = conflicts.length > 0;
+        if (overwrite) {
+          const listedPaths = conflicts.slice(0, 20).join("\n");
+          const remaining = conflicts.length > 20 ? `\n… and ${conflicts.length - 20} more` : "";
+          // Retain the exact dropped bytes, but leave the mutation queue free
+          // while the owner decides. Revalidate all reviewed paths afterward.
+          const decision = await dialog.showMessageBox(owner, {
+            type: "warning",
+            title: "Overwrite website files?",
+            message: `Replace ${conflicts.length} existing ${conflicts.length === 1 ? "file" : "files"} on ${input.name}?`,
+            detail: `${listedPaths}${remaining}\n\nOverwrite replaces these files and uploads any new files in this drop. Cancel leaves the website unchanged.`,
+            buttons: ["Cancel", "Overwrite"],
+            defaultId: 0,
+            cancelId: 0,
+            noLink: true,
+          });
+          assertBinding();
+          if (decision.response !== 1) return null;
+        }
+        return await this.queueWebsiteMutation(pool, assertBinding, () => this.writeWebsiteContents(
+          pool, assertBinding, { ...input, overwrite }, contents, before.ID, false, reviewed.Contents,
+        ));
       } finally { for (const item of Object.values(contents)) item.Content.fill(0); }
     });
   }

@@ -47,6 +47,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}) {
     deleteWebsite: vi.fn().mockResolvedValue({ ok: true }),
     saveWebsiteText: vi.fn().mockResolvedValue({ ok: true, value: SITE }),
     importWebsiteFiles: vi.fn().mockResolvedValue({ ok: true, value: SITE }),
+    importDroppedWebsiteFiles: vi.fn().mockResolvedValue({ ok: true, value: SITE }),
     updateWebsiteContentType: vi.fn().mockResolvedValue({ ok: true, value: SITE }),
     deleteWebsiteContent: vi.fn().mockResolvedValue({ ok: true, value: SITE }),
     getWebsiteContent: vi.fn().mockImplementation(async () => ({ ok: true, value: contentDetail() })),
@@ -97,7 +98,149 @@ async function openWebsiteContextMenu(view: ApplicationContextMenuTestRender, na
   return screen.findByRole("menu", { name: "Application context menu" });
 }
 
+function droppedFilesDataTransfer(files: File[]): DataTransfer {
+  return {
+    dropEffect: "none", effectAllowed: "all", files, types: ["Files"],
+    items: files.map((file) => ({ kind: "file", type: file.type, getAsFile: () => file })),
+    getData: () => "", setData: () => undefined, clearData: () => undefined, setDragImage: () => undefined,
+  } as unknown as DataTransfer;
+}
+
+function dropFiles(target: HTMLElement, files: File[]): void {
+  const dataTransfer = droppedFilesDataTransfer(files);
+  fireEvent.dragEnter(target, { dataTransfer });
+  fireEvent.drop(target, { dataTransfer });
+}
+
+function websiteDropTarget(name: string): HTMLElement {
+  return screen.getByLabelText(`Upload files or directories to ${name}`).closest<HTMLElement>(".drop-zone__area")!;
+}
+
 describe("WebsitesPage", () => {
+  it("uploads a dropped batch directly to the selected website and refreshes its content", async () => {
+    const uploaded = { ...SITE, contents: [...SITE.contents, { ...ITEM, id: "style", path: "/style.css", contentType: "text/css" }] };
+    const api = installAPI({
+      getWebsite: vi.fn().mockResolvedValueOnce({ ok: true, value: SITE }).mockResolvedValue({ ok: true, value: uploaded }),
+      importDroppedWebsiteFiles: vi.fn().mockResolvedValue({ ok: true, value: uploaded }),
+    });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    const files = [new File(["body {}"], "style.css"), new File(["image"], "logo.png")];
+    const dataTransfer = droppedFilesDataTransfer(files);
+    fireEvent.dragEnter(target, { dataTransfer });
+    expect(screen.getByText("Drop to upload to public")).toBeInTheDocument();
+    expect(screen.getByText(/File types detected automatically/)).toBeInTheDocument();
+    fireEvent.drop(target, { dataTransfer });
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith(files, { name: "public" }));
+    await screen.findByText("Website content uploaded.");
+    await waitFor(() => expect(api.listWebsites).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: "Inspect /style.css" })).toBeInTheDocument();
+    expect(api.importWebsiteFiles).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Website selection" })).getByRole("button", { name: /public/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("passes native directory objects to preload without traversing folders in the renderer", async () => {
+    const api = installAPI();
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    const folder = new File([], "site-folder");
+    const createReader = vi.fn();
+    const dataTransfer = droppedFilesDataTransfer([folder]);
+    Object.assign(dataTransfer.items[0]!, {
+      webkitGetAsEntry: () => ({ isFile: false, isDirectory: true, name: folder.name, createReader }),
+    });
+    fireEvent.dragEnter(target, { dataTransfer });
+    fireEvent.drop(target, { dataTransfer });
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith([folder], { name: "public" }));
+    expect(createReader).not.toHaveBeenCalled();
+  });
+
+  it("ignores repeated drops while uploading and surfaces changed content errors for retry", async () => {
+    const upload = deferred<OperationResult<WebsiteDetail>>();
+    const api = installAPI({ importDroppedWebsiteFiles: vi.fn().mockReturnValueOnce(upload.promise).mockResolvedValue({ ok: true, value: SITE }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    dropFiles(target, [new File(["first"], "index.html")]);
+    expect(await screen.findByText("Uploading website content…")).toBeInTheDocument();
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "true");
+    dropFiles(target, [new File(["second"], "other.html")]);
+    expect(api.importDroppedWebsiteFiles).toHaveBeenCalledOnce();
+    await act(async () => { upload.resolve({ ok: false, error: "Website content changed at /index.html" }); });
+    expect(await screen.findByRole("alert")).toHaveTextContent("Website content changed at /index.html");
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
+    const retry = [new File(["new"], "new.html")];
+    dropFiles(target, retry);
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" }));
+    await screen.findByText("Website content uploaded.");
+  });
+
+  it("clears a cancelled overwrite without refreshing or reporting success and allows another drop", async () => {
+    const upload = deferred<OperationResult<WebsiteDetail | null>>();
+    const api = installAPI({ importDroppedWebsiteFiles: vi.fn().mockReturnValueOnce(upload.promise).mockResolvedValue({ ok: true, value: SITE }) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    dropFiles(target, [new File(["replacement"], "index.html")]);
+    expect(await screen.findByText("Uploading website content…")).toBeInTheDocument();
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "true");
+    await act(async () => { upload.resolve({ ok: true, value: null }); });
+    await waitFor(() => expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false"));
+    expect(screen.queryByText("Uploading website content…")).not.toBeInTheDocument();
+    expect(screen.queryByText("Website content uploaded.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inspect /index.html" })).toBeInTheDocument();
+    expect(api.listWebsites).toHaveBeenCalledOnce();
+    expect(api.getWebsite).toHaveBeenCalledOnce();
+
+    const retry = [new File(["new"], "new.html")];
+    dropFiles(target, retry);
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledTimes(2));
+    expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" });
+    await screen.findByText("Website content uploaded.");
+    await waitFor(() => expect(api.listWebsites).toHaveBeenCalledTimes(2));
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("keeps a new website upload pending when the previous website upload finishes", async () => {
+    const user = userEvent.setup();
+    const first = deferred<OperationResult<WebsiteDetail>>();
+    const second = deferred<OperationResult<WebsiteDetail>>();
+    const api = installWebsiteChoices({ importDroppedWebsiteFiles: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    dropFiles(websiteDropTarget("public"), [new File(["first"], "first.txt")]);
+    await user.click(screen.getByRole("button", { name: /other/ }));
+    await screen.findByRole("button", { name: "Inspect /other.html" });
+    const target = websiteDropTarget("other");
+    dropFiles(target, [new File(["second"], "second.txt")]);
+    expect(api.importDroppedWebsiteFiles).toHaveBeenCalledTimes(2);
+    await act(async () => { first.resolve({ ok: false, error: "Stale upload failure" }); });
+    expect(screen.queryByText("Stale upload failure")).not.toBeInTheDocument();
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByText("Uploading website content…")).toBeInTheDocument();
+    await act(async () => { second.resolve({ ok: true, value: OTHER_SITE }); });
+    expect(await screen.findByText("Website content uploaded.")).toBeInTheDocument();
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
+  });
+
+  it("rejects oversized drop counts and ignores text-only drops", async () => {
+    const api = installAPI();
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    dropFiles(target, Array.from({ length: WEBSITE_LIMITS.importFiles + 1 }, (_, index) => new File(["file"], `${index}.txt`)));
+    expect(await screen.findByRole("alert")).toHaveTextContent("500-file limit");
+    const textDrop = { ...droppedFilesDataTransfer([]), types: ["text/plain"], items: [{ kind: "string", type: "text/plain" }], getData: () => "/private/file.txt" };
+    fireEvent.dragEnter(target, { dataTransfer: textDrop });
+    fireEvent.drop(target, { dataTransfer: textDrop });
+    expect(api.importDroppedWebsiteFiles).not.toHaveBeenCalled();
+    expect(screen.queryByText("Drop to upload to public")).not.toBeInTheDocument();
+  });
+
   it("loads metadata only until inspection, renders hostile source inertly, and wipes the preview on close", async () => {
     const user = userEvent.setup();
     const detail = contentDetail();
@@ -1031,7 +1174,7 @@ describe("WebsitesPage", () => {
     const { rerender } = render(<WebsitesPage snapshot={connectedSnapshot()} />);
     await waitFor(() => expect(api.listWebsites).toHaveBeenCalledOnce());
     rerender(<WebsitesPage snapshot={connectedSnapshot(2)} />);
-    await screen.findByRole("button", { name: /current/ });
+    await within(screen.getByRole("region", { name: "Website selection" })).findByRole("button", { name: /current/ });
     await act(async () => { old.resolve({ ok: true, value: catalog([{ ...SITE.site, name: "stale" }]) }); });
     expect(screen.queryByRole("button", { name: /stale/ })).not.toBeInTheDocument();
     rerender(<WebsitesPage snapshot={disconnectedSnapshot()} />);
