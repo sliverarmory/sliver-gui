@@ -2,7 +2,7 @@
 
 import { request } from "node:http";
 
-import type { AccountInfo, AuthenticationResult, Configuration, InteractiveRequest } from "@azure/msal-node";
+import type { AccountInfo, AuthenticationResult, Configuration } from "@azure/msal-node";
 import { describe, expect, it, vi } from "vitest";
 
 import { AZURE_DEVELOPER_CLIENT_ID, AZURE_MANAGEMENT_SCOPE, AzureBrowserLogin, type AzureBrowserLoginSession, type AzureMsalClient } from "./azure-browser-login.js";
@@ -53,14 +53,18 @@ function subscriptions(overrides: Record<string, unknown> = {}): Record<string, 
   return { value: [{ subscriptionId: SUBSCRIPTION, tenantId: TENANT, displayName: "Test subscription", state: "Enabled" }], ...overrides };
 }
 
-function callback(url: string, params: Record<string, string>, options: { method?: string; host?: string; path?: string } = {}): Promise<{ status: number; body: string }> {
+function callback(url: string, params: Record<string, string>, options: { method?: string; host?: string; path?: string; contentType?: string; body?: string | Buffer; chunked?: boolean } = {}): Promise<{ status: number; body: string }> {
   const target = new URL(url);
-  target.search = new URLSearchParams(params).toString();
+  const form = options.body ?? new URLSearchParams(params).toString();
   return new Promise((resolve, reject) => {
     const req = request(target, {
       hostname: "127.0.0.1",
-      method: options.method ?? "GET",
-      headers: { Host: options.host ?? target.host },
+      method: options.method ?? "POST",
+      headers: {
+        Host: options.host ?? target.host,
+        "Content-Type": options.contentType ?? "application/x-www-form-urlencoded",
+        ...(options.chunked ? {} : { "Content-Length": Buffer.byteLength(form) }),
+      },
       ...(options.path ? { path: options.path } : {}),
     }, (response) => {
       let body = "";
@@ -70,7 +74,8 @@ function callback(url: string, params: Record<string, string>, options: { method
     });
     req.setTimeout(2000, () => req.destroy(new Error("test timeout")));
     req.on("error", reject);
-    req.end();
+    if (options.chunked) req.write(form);
+    req.end(options.chunked ? undefined : form);
   });
 }
 
@@ -85,7 +90,6 @@ function fixture(options: {
   timeoutMs?: number;
   accounts?: AccountInfo[];
   result?: AuthenticationResult;
-  interactive?: (request: InteractiveRequest, config: Configuration) => Promise<AuthenticationResult>;
 } = {}) {
   let configuration!: Configuration;
   const cache = {
@@ -93,31 +97,20 @@ function fixture(options: {
     deserialize: vi.fn((_cache: string) => undefined),
     getAllAccounts: vi.fn(async () => options.accounts ?? [ACCOUNT]),
   };
-  const acquireTokenInteractive = vi.fn<AzureMsalClient["acquireTokenInteractive"]>(async (input) => {
-    if (options.interactive) return options.interactive(input, configuration);
-    const loopback = input.loopbackClient!;
-    const code = loopback.listenForAuthCode();
-    let redirectUri = "";
-    for (let attempt = 0; attempt < 100; attempt++) {
-      try { redirectUri = loopback.getRedirectUri(); break; }
-      catch { await new Promise((resolve) => setTimeout(resolve, 1)); }
-    }
-    if (!redirectUri) throw new Error("test listener unavailable");
+  const getAuthCodeUrl = vi.fn<AzureMsalClient["getAuthCodeUrl"]>(async (input) => {
     const url = new URL(`${configuration.auth.authority}/oauth2/v2.0/authorize`);
     url.search = new URLSearchParams({
       client_id: configuration.auth.clientId, state: input.state ?? "",
-      redirect_uri: redirectUri, response_type: "code", code_challenge_method: "S256",
+      redirect_uri: input.redirectUri, response_type: "code", code_challenge_method: input.codeChallengeMethod ?? "",
+      code_challenge: input.codeChallenge ?? "", response_mode: input.responseMode ?? "", nonce: input.nonce ?? "",
     }).toString();
-    try {
-      await input.openBrowser(url.toString());
-      await code;
-      return options.result ?? authResult();
-    } finally { loopback.closeServer(); }
+    return url.toString();
   });
+  const acquireTokenByCode = vi.fn<AzureMsalClient["acquireTokenByCode"]>(async () => options.result ?? authResult());
   const acquireTokenSilent = vi.fn<AzureMsalClient["acquireTokenSilent"]>(async () => options.result ?? authResult());
   const msalFactory = vi.fn((config: Configuration): AzureMsalClient => {
     configuration = config;
-    return { getTokenCache: () => cache, acquireTokenInteractive, acquireTokenSilent };
+    return { getTokenCache: () => cache, getAuthCodeUrl, acquireTokenByCode, acquireTokenSilent };
   });
   const fetchImpl = options.fetch ?? vi.fn<typeof fetch>(async () => Response.json(subscriptions()));
   const openExternal = options.openExternal ?? (async (url) => {
@@ -125,7 +118,7 @@ function fixture(options: {
     expect((await callback(redirectUri, { state, code: "valid-authorization" })).status).toBe(200);
   });
   const login = new AzureBrowserLogin({ openExternal, fetch: fetchImpl, msalFactory, ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) });
-  return { login, msalFactory, cache, acquireTokenInteractive, acquireTokenSilent, fetchImpl, config: () => configuration };
+  return { login, msalFactory, cache, getAuthCodeUrl, acquireTokenByCode, acquireTokenSilent, fetchImpl, config: () => configuration };
 }
 
 describe("native Azure login", () => {
@@ -133,7 +126,12 @@ describe("native Azure login", () => {
     const f = fixture();
     const result = await f.login.login(null, null);
     expect(f.config().auth).toEqual({ clientId: AZURE_DEVELOPER_CLIENT_ID, authority: "https://login.microsoftonline.com/common" });
-    expect(f.acquireTokenInteractive.mock.calls[0]?.[0]).toMatchObject({ scopes: [AZURE_MANAGEMENT_SCOPE], prompt: "select_account", responseMode: "query" });
+    expect(f.getAuthCodeUrl.mock.calls[0]?.[0]).toMatchObject({ scopes: [AZURE_MANAGEMENT_SCOPE], prompt: "select_account", responseMode: "form_post" });
+    const authorize = f.getAuthCodeUrl.mock.calls[0]![0];
+    expect(f.acquireTokenByCode).toHaveBeenCalledWith(expect.objectContaining({
+      redirectUri: authorize.redirectUri, state: authorize.state, nonce: authorize.nonce,
+      code: "valid-authorization", codeVerifier: expect.any(String),
+    }), { code: "valid-authorization", state: authorize.state });
     expect(result.session).toEqual(session());
     expect(result.subscriptions).toEqual([{ subscriptionId: SUBSCRIPTION, tenantId: TENANT, homeTenantId: TENANT, name: "Test subscription", isDefault: false, cloudName: "AzureCloud" }]);
     expect(JSON.stringify(result.subscriptions)).not.toMatch(/private|accessToken|RefreshToken/u);
@@ -155,10 +153,15 @@ describe("native Azure login", () => {
       redirectUri = info.redirectUri;
       expect(redirectUri).toMatch(/^http:\/\/localhost:\d+$/u);
       expect((await callback(redirectUri, { state: "wrong", code: "invalid" })).status).toBe(400);
-      expect((await callback(redirectUri, { state: info.state, code: "invalid" }, { method: "POST" })).status).toBe(405);
+      expect((await callback(redirectUri, { state: info.state, code: "invalid" }, { method: "GET" })).status).toBe(405);
       expect((await callback(redirectUri, { state: info.state, code: "invalid" }, { host: "attacker.test" })).status).toBe(400);
       expect((await callback(redirectUri, {}, { path: `/other?state=${info.state}&code=invalid` })).status).toBe(400);
-      expect((await callback(redirectUri, {}, { path: `/?state=${info.state}&state=${info.state}&code=invalid` })).status).toBe(400);
+      expect((await callback(redirectUri, {}, { body: `state=${info.state}&state=${info.state}&code=invalid` })).status).toBe(400);
+      expect((await callback(redirectUri, {}, { body: `state=${info.state}&code=first&code=second` })).status).toBe(400);
+      expect((await callback(redirectUri, { state: info.state, code: "invalid" }, { contentType: "text/plain" })).status).toBe(415);
+      expect((await callback(redirectUri, {}, { body: "x".repeat(32 * 1024 + 1) })).status).toBe(413);
+      expect((await callback(redirectUri, {}, { body: "x".repeat(32 * 1024 + 1), chunked: true })).status).toBe(413);
+      expect((await callback(redirectUri, {}, { body: Buffer.from([0xff, 0xfe]) })).status).toBe(400);
       const response = await callback(redirectUri, { state: info.state, code: "valid-code" });
       expect(response.status).toBe(200);
       expect(response.body).not.toContain("valid-code");
@@ -195,6 +198,40 @@ describe("native Azure login", () => {
     expect(error).toMatchObject({ code: "cancelled" });
     expect(String(error)).not.toContain("PRIVATE_CANCEL_REASON");
     await expect(callback(redirectUri, { state: "late", code: "late" })).rejects.toThrow();
+  });
+
+  it("closes an unfinished form upload on cancellation without exchanging a code", async () => {
+    const controller = new AbortController();
+    let uploadClosed!: Promise<void>;
+    const f = fixture({ openExternal: async (value) => {
+      const { redirectUri, state } = callbackInfo(value);
+      const url = new URL(redirectUri);
+      const upload = request(url, {
+        hostname: "127.0.0.1", method: "POST",
+        headers: { Host: url.host, "Content-Type": "application/x-www-form-urlencoded", "Content-Length": "1000" },
+      });
+      upload.on("error", () => undefined);
+      uploadClosed = new Promise<void>((resolve) => upload.once("close", resolve));
+      await new Promise<void>((resolve, reject) => upload.write(`state=${state}&code=unfinished`, (error) => error ? reject(error) : resolve()));
+      controller.abort();
+    } });
+    await expect(f.login.login(null, null, controller.signal)).rejects.toMatchObject({ code: "cancelled" });
+    await uploadClosed;
+    expect(f.acquireTokenByCode).not.toHaveBeenCalled();
+  });
+
+  it.each(["state", "nonce", "code_challenge", "response_mode", "redirect_uri"])("rejects a changed authorization URL %s before opening the browser", async (parameter) => {
+    const openExternal = vi.fn();
+    const f = fixture({ openExternal });
+    const original = f.getAuthCodeUrl.getMockImplementation()!;
+    f.getAuthCodeUrl.mockImplementationOnce(async (input) => {
+      const url = new URL(await original(input));
+      url.searchParams.set(parameter, "changed");
+      return url.toString();
+    });
+    await expect(f.login.login(null, null)).rejects.toMatchObject({ code: "token-request-failed" });
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(f.acquireTokenByCode).not.toHaveBeenCalled();
   });
 
   it("does not start an already cancelled or invalid login", async () => {
@@ -247,7 +284,8 @@ describe("native Azure token cache and network boundary", () => {
     f.cache.serialize.mockReturnValue('{"RefreshToken":{"secret":"rotated-refresh-token"}}');
     const result = await f.login.getToken(session());
     expect(f.cache.deserialize).toHaveBeenCalledWith(session().cache);
-    expect(f.acquireTokenInteractive).not.toHaveBeenCalled();
+    expect(f.getAuthCodeUrl).not.toHaveBeenCalled();
+    expect(f.acquireTokenByCode).not.toHaveBeenCalled();
     expect(f.acquireTokenSilent).toHaveBeenCalledWith({ scopes: [AZURE_MANAGEMENT_SCOPE], account: ACCOUNT, authority: `https://login.microsoftonline.com/${TENANT}` });
     expect(result.session).toMatchObject({ homeAccountId: ACCOUNT.homeAccountId, localAccountId: ACCOUNT.localAccountId, tenantId: TENANT, cache: '{"RefreshToken":{"secret":"rotated-refresh-token"}}' });
     expect(result.token).toBe("private-access-token");

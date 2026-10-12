@@ -1,15 +1,14 @@
 import { isUtf8 } from "node:buffer";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import { createServer, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import {
-  AuthError,
+  CryptoProvider,
   PublicClientApplication,
   type AccountInfo,
   type AuthenticationResult,
   type AuthorizeResponse,
   type Configuration,
-  type ILoopbackClient,
   type INetworkModule,
   type NetworkRequestOptions,
   type NetworkResponse,
@@ -30,6 +29,7 @@ const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_JSON_BYTES = 1024 * 1024;
+const MAX_CALLBACK_BYTES = 32 * 1024;
 const MAX_SUBSCRIPTIONS = 512;
 const PUBLIC_ACCOUNT_ENVIRONMENTS = new Set(["login.microsoftonline.com", "login.windows.net", "login.microsoft.com", "sts.windows.net"]);
 
@@ -48,7 +48,7 @@ export class AzureBrowserLoginError extends Error {
   }
 }
 
-export type AzureMsalClient = Pick<PublicClientApplication, "acquireTokenInteractive" | "acquireTokenSilent"> & {
+export type AzureMsalClient = Pick<PublicClientApplication, "getAuthCodeUrl" | "acquireTokenByCode" | "acquireTokenSilent"> & {
   getTokenCache(): Pick<ReturnType<PublicClientApplication["getTokenCache"]>, "serialize" | "deserialize" | "getAllAccounts">;
 };
 
@@ -95,31 +95,42 @@ export class AzureBrowserLogin {
     const client = clientId === null ? AZURE_DEVELOPER_CLIENT_ID : checkedGuid(clientId);
     const scope = deadline(signal, this.#timeoutMs);
     const state = randomUUID();
+    const nonce = randomUUID();
     const loopback = new AzureLoopbackClient(state, scope.signal);
     try {
       throwIfAborted(scope.signal);
       const app = this.#createClient(client, tenant, scope.signal);
-      const result = await abortable(app.acquireTokenInteractive({
+      const { verifier, challenge } = await abortable(new CryptoProvider().generatePkceCodes(), scope.signal);
+      const { redirectUri, response } = await loopback.start();
+      const authority = `${AUTHORITY_ORIGIN}/${tenant}`;
+      // Use public authorization-code APIs so our callback remains bounded and
+      // cancellable. MSAL owns PKCE generation, token exchange and cache updates.
+      const url = await abortable(app.getAuthCodeUrl({
         scopes: [AZURE_MANAGEMENT_SCOPE],
-        authority: `${AUTHORITY_ORIGIN}/${tenant}`,
+        authority,
+        redirectUri,
         state,
+        nonce,
         prompt: "select_account",
-        responseMode: "query",
-        // Pinned MSAL 5.x supports this adapter. It gives the application a
-        // strict callback boundary and cancellation absent from the built-in
-        // server; revisit the deprecated extension when updating major MSAL.
-        loopbackClient: loopback,
-        openBrowser: async (url) => {
-          throwIfAborted(scope.signal);
-          validateAuthorizationUrl(url, tenant, client, state, loopback.getRedirectUri());
-          try {
-            await abortable(this.#openExternal(url), scope.signal);
-          } catch {
-            throwIfAborted(scope.signal);
-            throw new AzureBrowserLoginError("browser-open-failed", "Could not open the Azure sign-in page in your browser.");
-          }
-        },
+        responseMode: "form_post",
+        codeChallenge: challenge,
+        codeChallengeMethod: "S256",
       }), scope.signal);
+      throwIfAborted(scope.signal);
+      validateAuthorizationUrl(url, tenant, client, state, nonce, challenge, redirectUri);
+      try {
+        await abortable(this.#openExternal(url), scope.signal);
+      } catch {
+        throwIfAborted(scope.signal);
+        throw new AzureBrowserLoginError("browser-open-failed", "Could not open the Azure sign-in page in your browser.");
+      }
+      const authorization = await abortable(response, scope.signal);
+      throwIfAborted(scope.signal);
+      const result = await abortable(app.acquireTokenByCode({
+        scopes: [AZURE_MANAGEMENT_SCOPE], authority, redirectUri,
+        code: authorization.code, codeVerifier: verifier, state, nonce,
+        ...(authorization.client_info ? { clientInfo: authorization.client_info } : {}),
+      }, authorization), scope.signal);
       const account = checkedResult(result);
       if (tenant !== "common" && account.tenantId.toLowerCase() !== tenant) throw loginRequired();
       const session = sessionFromAccount(client, account, app);
@@ -257,82 +268,86 @@ export class AzureBrowserLogin {
   }
 }
 
-class AzureLoopbackClient implements ILoopbackClient {
+type AzureAuthorizationCode = AuthorizeResponse & { code: string; state: string };
+
+class AzureLoopbackClient {
   readonly #state: string;
   readonly #signal: AbortSignal;
   #server: Server | undefined;
   #redirectUri: string | undefined;
   #settled = false;
   #reject: ((error: Error) => void) | undefined;
-  readonly #onAbort = () => { this.#reject?.(abortedError(this.#signal)); this.closeServer(); };
+  #rejectReady: ((error: Error) => void) | undefined;
+  readonly #onAbort = () => {
+    this.#reject?.(abortedError(this.#signal));
+    this.#rejectReady?.(abortedError(this.#signal));
+    this.closeServer();
+  };
 
   constructor(state: string, signal: AbortSignal) { this.#state = state; this.#signal = signal; }
 
-  listenForAuthCode(): Promise<AuthorizeResponse> {
-    if (this.#server || this.#settled) return Promise.reject(callbackUnavailable());
-    const promise = new Promise<AuthorizeResponse>((resolve, reject) => {
+  async start(): Promise<{ redirectUri: string; response: Promise<AzureAuthorizationCode> }> {
+    if (this.#server || this.#settled) throw callbackUnavailable();
+    let resolveReady!: (redirectUri: string) => void;
+    const ready = new Promise<string>((resolve, reject) => { resolveReady = resolve; this.#rejectReady = reject; });
+    const promise = new Promise<AzureAuthorizationCode>((resolve, reject) => {
       this.#reject = reject;
-      const server = createServer({ maxHeaderSize: 32 * 1024, requestTimeout: 5000, headersTimeout: 5000 }, (request, response) => {
+      const server = createServer({ maxHeaderSize: MAX_CALLBACK_BYTES, requestTimeout: 5000, headersTimeout: 5000 }, (request, response) => {
         if (this.#settled) return reply(response, 410, "This Azure sign-in request has finished.");
-        if (request.method !== "GET") return reply(response, 405, "Invalid Azure sign-in callback.");
-        if (!this.#redirectUri || !request.url || request.url.length > 32 * 1024 || request.headers.host !== new URL(this.#redirectUri).host || !request.url.startsWith("/?")) {
+        if (request.method !== "POST") return reply(response, 405, "Invalid Azure sign-in callback.");
+        if (!this.#redirectUri || request.url !== "/" || request.headers.host !== new URL(this.#redirectUri).host) {
           return reply(response, 400, "Invalid Azure sign-in callback.");
         }
-        const url = new URL(request.url, this.#redirectUri);
-        if (url.pathname !== "/" || url.hash || url.origin !== this.#redirectUri) return reply(response, 400, "Invalid Azure sign-in callback.");
-        const states = url.searchParams.getAll("state");
-        if (states.length !== 1 || !sameState(states[0] ?? "", this.#state)) return reply(response, 400, "Invalid Azure sign-in callback.");
-        const codes = url.searchParams.getAll("code");
-        const errors = url.searchParams.getAll("error");
-        if (errors.length === 1 && !codes.length) {
+        readCallbackForm(request, response, (parameters) => {
+          if (this.#settled) return reply(response, 410, "This Azure sign-in request has finished.");
+          const states = parameters.getAll("state");
+          if (states.length !== 1 || !sameState(states[0] ?? "", this.#state)) return reply(response, 400, "Invalid Azure sign-in callback.");
+          const codes = parameters.getAll("code");
+          const errors = parameters.getAll("error");
+          if (errors.length === 1 && !codes.length) {
+            this.#settled = true;
+            reply(response, 400, "Azure sign-in was not completed. Return to the application and try again.");
+            reject(new AzureBrowserLoginError("authorization-failed", "Azure sign-in was not completed. Please try again."));
+            server.close();
+            return;
+          }
+          const code = codes[0];
+          const clientInfo = parameters.getAll("client_info");
+          if (errors.length || codes.length !== 1 || !boundedText(code, 16 * 1024) || clientInfo.length > 1 || (clientInfo.length && !boundedText(clientInfo[0], 8192))) {
+            return reply(response, 400, "Invalid Azure sign-in callback.");
+          }
           this.#settled = true;
-          reply(response, 400, "Azure sign-in was not completed. Return to the application and try again.");
-          reject(new AzureBrowserLoginError("authorization-failed", "Azure sign-in was not completed. Please try again."));
+          reply(response, 200, "Azure authorization received. Return to the application to finish signing in.");
+          resolve({ code, state: this.#state, ...(clientInfo[0] ? { client_info: clientInfo[0] } : {}) });
           server.close();
-          return;
-        }
-        const code = codes[0];
-        const clientInfo = url.searchParams.getAll("client_info");
-        if (errors.length || codes.length !== 1 || !boundedText(code, 16 * 1024) || clientInfo.length > 1 || (clientInfo.length && !boundedText(clientInfo[0], 8192))) {
-          return reply(response, 400, "Invalid Azure sign-in callback.");
-        }
-        this.#settled = true;
-        reply(response, 200, "Azure authorization received. Return to the application to finish signing in.");
-        resolve({ code, state: this.#state, ...(clientInfo[0] ? { client_info: clientInfo[0] } : {}) });
-        server.close();
+        });
       });
       this.#server = server;
       server.maxConnections = 8;
       server.on("clientError", (_error, socket) => socket.destroy());
-      server.once("error", () => { reject(callbackUnavailable()); this.closeServer(); });
+      server.once("error", () => { reject(callbackUnavailable()); this.#rejectReady?.(callbackUnavailable()); this.closeServer(); });
       this.#signal.addEventListener("abort", this.#onAbort, { once: true });
       if (this.#signal.aborted) { this.#onAbort(); return; }
       server.listen(0, "127.0.0.1", () => {
         if (this.#signal.aborted || this.#settled) { this.closeServer(); return; }
         const address = server.address();
-        if (!address || typeof address === "string") { reject(callbackUnavailable()); this.closeServer(); return; }
+        if (!address || typeof address === "string") {
+          reject(callbackUnavailable()); this.#rejectReady?.(callbackUnavailable()); this.closeServer(); return;
+        }
         // Entra's native application registration uses http://localhost;
         // MSAL and Entra ignore the ephemeral port for this registered URI.
         this.#redirectUri = `http://localhost:${address.port}`;
+        resolveReady(this.#redirectUri);
       });
     });
     // MSAL may still be acquiring metadata when a cancellation occurs.
     void promise.catch(() => undefined);
-    return promise;
-  }
-
-  getRedirectUri(): string {
-    throwIfAborted(this.#signal);
-    if (!this.#redirectUri) {
-      if (this.#settled) throw callbackUnavailable();
-      // MSAL's startup polling retries this documented loopback error code.
-      throw new AuthError("no_loopback_server_exists", "");
-    }
-    return this.#redirectUri;
+    return { redirectUri: await ready, response: promise };
   }
 
   closeServer(): void {
     if (!this.#settled) this.#reject?.(cancelled());
+    this.#rejectReady?.(cancelled());
     this.#settled = true;
     this.#signal.removeEventListener("abort", this.#onAbort);
     this.#server?.closeAllConnections();
@@ -341,13 +356,54 @@ class AzureLoopbackClient implements ILoopbackClient {
   }
 }
 
-function validateAuthorizationUrl(value: string, tenant: string, clientId: string, state: string, redirectUri: string): void {
+function readCallbackForm(request: IncomingMessage, response: ServerResponse, consume: (parameters: URLSearchParams) => void): void {
+  const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+  if (contentType !== "application/x-www-form-urlencoded" || request.headers["content-encoding"] !== undefined) {
+    return reply(response, 415, "Invalid Azure sign-in callback.");
+  }
+  const length = request.headers["content-length"];
+  if (length !== undefined && (!/^\d+$/u.test(length) || Number(length) > MAX_CALLBACK_BYTES)) {
+    return reply(response, 413, "Invalid Azure sign-in callback.");
+  }
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  let finished = false;
+  const clear = () => { for (const chunk of chunks) chunk.fill(0); chunks.length = 0; };
+  const fail = (status: number) => {
+    if (finished) return;
+    finished = true;
+    clear();
+    reply(response, status, "Invalid Azure sign-in callback.");
+  };
+  request.setTimeout(5000, () => { fail(408); request.destroy(); });
+  request.on("error", () => fail(400));
+  request.on("close", clear);
+  request.on("data", (chunk: Buffer) => {
+    if (finished) return;
+    bytes += chunk.byteLength;
+    if (bytes > MAX_CALLBACK_BYTES) { fail(413); return; }
+    chunks.push(Buffer.from(chunk));
+  });
+  request.on("end", () => {
+    if (finished) return;
+    const body = Buffer.concat(chunks, bytes);
+    clear();
+    try {
+      if (!isUtf8(body)) { fail(400); return; }
+      finished = true;
+      consume(new URLSearchParams(body.toString("utf8")));
+    } finally { body.fill(0); }
+  });
+}
+
+function validateAuthorizationUrl(value: string, tenant: string, clientId: string, state: string, nonce: string, challenge: string, redirectUri: string): void {
   assertUrlOrigin(value, AUTHORITY_ORIGIN);
   const url = new URL(value);
   if (url.pathname.toLowerCase() !== `/${tenant}/oauth2/v2.0/authorize`
     || url.searchParams.get("client_id") !== clientId || url.searchParams.get("state") !== state
     || url.searchParams.get("redirect_uri") !== redirectUri || url.searchParams.get("response_type") !== "code"
-    || url.searchParams.get("code_challenge_method") !== "S256") throw tokenRequestFailed();
+    || url.searchParams.get("code_challenge_method") !== "S256" || url.searchParams.get("code_challenge") !== challenge
+    || url.searchParams.get("nonce") !== nonce || url.searchParams.get("response_mode") !== "form_post") throw tokenRequestFailed();
 }
 
 function assertUrlOrigin(value: string, origin: string): void {

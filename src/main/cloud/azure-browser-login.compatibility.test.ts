@@ -17,12 +17,23 @@ const CLIENT_INFO = Buffer.from(JSON.stringify({ uid: ACCOUNT_ID, utid: TENANT_I
 type SerializedMsalCache = Record<string, Record<string, Record<string, unknown>>>;
 
 describe("Azure browser login with the installed MSAL public client", () => {
-  it.each([TENANT_ID, null])("completes loopback PKCE login and cache rotation with tenant %s", async (tenantId) => {
+  it.each([
+    { tenantId: TENANT_ID, scenario: "success" },
+    { tenantId: null, scenario: "success" },
+    { tenantId: TENANT_ID, scenario: "invalid callbacks" },
+    { tenantId: TENANT_ID, scenario: "cancelled" },
+    { tenantId: TENANT_ID, scenario: "timeout" },
+    { tenantId: TENANT_ID, scenario: "browser-open-failed" },
+    { tenantId: TENANT_ID, scenario: "wrong nonce" },
+    { tenantId: TENANT_ID, scenario: "missing nonce" },
+  ])("preserves the real MSAL boundary: $scenario, tenant $tenantId", async ({ tenantId, scenario }) => {
     const loginTenant = tenantId ?? "common";
     let authorizationUrl: URL | undefined;
     let callbackStatus: number | undefined;
     const tokenGrants: string[] = [];
     const unexpectedRequests: string[] = [];
+    let subscriptionRequests = 0;
+    const controller = new AbortController();
     const network = vi.fn<typeof fetch>(async (input, init) => {
       const url = new URL(String(input));
       expect(init).toMatchObject({ redirect: "error", credentials: "omit", cache: "no-store" });
@@ -60,7 +71,8 @@ describe("Azure browser login with the installed MSAL public client", () => {
           expect(verifier).toMatch(/^[A-Za-z0-9._~-]{43,128}$/u);
           expect(createHash("sha256").update(verifier).digest("base64url"))
             .toBe(authorizationUrl?.searchParams.get("code_challenge"));
-          return Response.json(tokenResponse("initial-arm-token", "initial-refresh-token", authorizationUrl));
+          return Response.json(tokenResponse("initial-arm-token", "initial-refresh-token", authorizationUrl,
+            scenario === "wrong nonce" ? "incorrect-nonce" : scenario === "missing nonce" ? null : undefined));
         }
         expect(grant).toBe("refresh_token");
         expect(url.pathname).toBe(`/${TENANT_ID}/oauth2/v2.0/token`);
@@ -69,6 +81,7 @@ describe("Azure browser login with the installed MSAL public client", () => {
         return Response.json(tokenResponse("rotated-arm-token", "rotated-refresh-token", authorizationUrl));
       }
       if (url.origin === "https://management.azure.com" && url.pathname === "/subscriptions") {
+        subscriptionRequests++;
         expect(init?.method).toBe("GET");
         expect(url.searchParams.get("api-version")).toBe("2022-12-01");
         expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer initial-arm-token");
@@ -84,9 +97,21 @@ describe("Azure browser login with the installed MSAL public client", () => {
       expect(authorizationUrl.searchParams.get("client_id")).toBe(AZURE_DEVELOPER_CLIENT_ID);
       expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
       expect(authorizationUrl.searchParams.get("response_type")).toBe("code");
+      expect(authorizationUrl.searchParams.get("response_mode")).toBe("form_post");
+      expect(authorizationUrl.searchParams.get("nonce")).toMatch(/^[0-9a-f-]{36}$/u);
       expectArmScopes(authorizationUrl.searchParams.get("scope"));
       const redirect = authorizationUrl.searchParams.get("redirect_uri") ?? "";
       expect(redirect).toMatch(/^http:\/\/localhost:\d+$/u);
+      if (scenario === "cancelled") { controller.abort(); return; }
+      if (scenario === "timeout") return;
+      if (scenario === "browser-open-failed") throw new Error("PRIVATE_BROWSER_FAILURE");
+      if (scenario === "invalid callbacks") {
+        expect(await sendLoopbackCallback(redirect, { code: "wrong-state-code", state: "wrong" })).toBe(400);
+        expect(await sendLoopbackCallback(redirect, {
+          code: "query-response-code", state: authorizationUrl.searchParams.get("state") ?? "",
+        }, { method: "GET" })).toBe(405);
+        expect(tokenGrants).toEqual([]);
+      }
       callbackStatus = await sendLoopbackCallback(redirect, {
         code: "compatibility-authorization-code",
         state: authorizationUrl.searchParams.get("state") ?? "",
@@ -94,9 +119,24 @@ describe("Azure browser login with the installed MSAL public client", () => {
       });
     });
     // No msalFactory override: this exercises the package's public client,
-    // interactive flow, callback adapter, token exchange and cache serializer.
-    const helper = new AzureBrowserLogin({ fetch: network, openExternal, timeoutMs: 5_000 });
-    const signedIn = await helper.login(tenantId, null);
+    // authorization-code flow, callback, token exchange and cache serializer.
+    const helper = new AzureBrowserLogin({ fetch: network, openExternal, timeoutMs: scenario === "timeout" ? 200 : 5_000 });
+    const operation = helper.login(tenantId, null, controller.signal);
+    if (["cancelled", "timeout", "browser-open-failed"].includes(scenario)) {
+      await expect(operation).rejects.toMatchObject({ code: scenario });
+      expect(openExternal).toHaveBeenCalledOnce();
+      expect(tokenGrants).toEqual([]);
+      expect(subscriptionRequests).toBe(0);
+      await expect(sendLoopbackCallback(authorizationUrl!.searchParams.get("redirect_uri")!, { state: "late", code: "late" })).rejects.toThrow();
+      return;
+    }
+    if (["wrong nonce", "missing nonce"].includes(scenario)) {
+      await expect(operation).rejects.toMatchObject({ code: "token-request-failed" });
+      expect(tokenGrants).toEqual(["authorization_code"]);
+      expect(subscriptionRequests).toBe(0);
+      return;
+    }
+    const signedIn = await operation;
 
     expect(callbackStatus).toBe(200);
     expect(openExternal).toHaveBeenCalledOnce();
@@ -152,29 +192,33 @@ function expectArmScopes(scopes: string | null): void {
   expect(values.filter((scope) => !["openid", "profile", "offline_access"].includes(scope))).toEqual([AZURE_MANAGEMENT_SCOPE]);
 }
 
-function tokenResponse(accessToken: string, refreshToken: string, authorization: URL | undefined): Record<string, unknown> {
+function tokenResponse(accessToken: string, refreshToken: string, authorization: URL | undefined, nonceOverride?: string | null): Record<string, unknown> {
   const now = Math.floor(Date.now() / 1_000);
   const claims = {
     aud: AZURE_DEVELOPER_CLIENT_ID, iss: `${AUTHORITY}/${TENANT_ID}/v2.0`,
     iat: now, nbf: now, exp: now + 3_600, tid: TENANT_ID,
     oid: ACCOUNT_ID, sub: ACCOUNT_ID, preferred_username: "operator@example.test",
-    ...(authorization?.searchParams.get("nonce") ? { nonce: authorization.searchParams.get("nonce") } : {}),
+    ...(nonceOverride === null ? {} : { nonce: nonceOverride ?? authorization?.searchParams.get("nonce") }),
   };
   const idToken = `${Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url")}.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture-signature`;
   return { token_type: "Bearer", scope: AZURE_MANAGEMENT_SCOPE, expires_in: 3_600, ext_expires_in: 3_600,
     access_token: accessToken, refresh_token: refreshToken, id_token: idToken, client_info: CLIENT_INFO };
 }
 
-function sendLoopbackCallback(redirect: string, parameters: Record<string, string>): Promise<number> {
+function sendLoopbackCallback(redirect: string, parameters: Record<string, string>, options: { method?: string } = {}): Promise<number> {
   const url = new URL(redirect);
-  url.search = new URLSearchParams(parameters).toString();
+  const form = new URLSearchParams(parameters).toString();
+  if (options.method === "GET") url.search = form;
   return new Promise((resolve, reject) => {
-    const callback = request(url, { hostname: "127.0.0.1", headers: { Host: url.host } }, (response) => {
+    const callback = request(url, {
+      hostname: "127.0.0.1", method: options.method ?? "POST",
+      headers: { Host: url.host, "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(form) },
+    }, (response) => {
       response.resume();
       response.once("end", () => resolve(response.statusCode ?? 0));
     });
     callback.setTimeout(2_000, () => callback.destroy(new Error("Compatibility callback timed out")));
     callback.once("error", reject);
-    callback.end();
+    callback.end(form);
   });
 }
