@@ -3428,12 +3428,15 @@ async function verifyM2SessionWorkspace(
   assert.equal((await readFakeState(electronApplication)).dialogCalls, nativeDialogCalls,
     "confirming the HeroUI overwrite review must not invoke a native dialog");
   await textEditor.close();
-  await page.keyboard.press("Escape");
+  // Closing the editor does not synchronously restore focus to the workspace.
+  // Re-activate it and focus the inspector before testing Escape dismissal.
+  await page.bringToFront();
+  await inspector.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
   await activateDataGridRow(notesRow, "notes.txt", inspector);
   await inspector.getByText(M2_EDITED_CONTENT, { exact: true }).waitFor();
-  await page.keyboard.press("Escape");
+  await inspector.press("Escape");
   await inspector.waitFor({ state: "hidden" });
 
   await page.getByRole("button", { name: "New folder", exact: true }).click();
