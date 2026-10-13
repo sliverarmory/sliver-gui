@@ -114,7 +114,7 @@ import type {
 } from "./operator-data-contracts.js";
 import type {
   ImportWebsiteFilesInput, ListWebsitesInput, OpenWebsiteTextEditorInput, SaveWebsiteTextInput, UpdateWebsiteContentTypeInput,
-  WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput, WebsiteRenderedPreview,
+  WebsiteCatalogPage, WebsiteContentDetail, WebsiteContentInput, WebsiteDetail, WebsiteExportResult, WebsiteNameInput, WebsiteRenderedPreview, WebsiteUploadProgress,
 } from "./website-contracts.js";
 
 export const IPC_INVOKE = {
@@ -1205,8 +1205,8 @@ export type SliverDesktopInvokeAPI = {
 };
 
 export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
-  /** Import native-backed drops without exposing local paths; null means overwrite was canceled. */
-  importDroppedWebsiteFiles: (files: File[], input: WebsiteNameInput) => Promise<OperationResult<WebsiteDetail | null>>;
+  /** Import native-backed drops without exposing local paths; null means canceled or all files skipped. */
+  importDroppedWebsiteFiles: (files: File[], input: WebsiteNameInput, onProgress?: (progress: WebsiteUploadProgress) => void) => Promise<OperationResult<WebsiteDetail | null>>;
   /** Add one native-backed dropped file to loot without exposing its local path to the renderer. */
   addDroppedLoot: (file: File) => Promise<OperationResult<LootSummary>>;
   /** Upload one native-backed dropped file without exposing its local path to the renderer. */

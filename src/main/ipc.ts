@@ -109,7 +109,7 @@ import {
   parseRenameLootInput,
 } from "../shared/operator-data-contracts.js";
 import {
-  WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, parseDroppedWebsiteFilesIpcRequest,
+  WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, parseDroppedWebsiteFilesIpcRequest,
   parseImportWebsiteFilesInput, parseListWebsitesInput, parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput,
   parseUpdateWebsiteContentTypeInput, parseWebsiteContentInput, parseWebsiteNameInput,
   type DroppedWebsiteFilesIpcRequest, type OpenWebsiteTextEditorInput, type WebsiteDetail,
@@ -670,7 +670,17 @@ export function registerIpcHandlers(
   handleTrusted(IPC.importWebsiteFiles, rendererUrl, (args) => parseWebsiteArguments(args, parseImportWebsiteFilesInput),
     ({ sender }, input) => registry.importWebsiteFiles(sender, input));
   handleTrusted(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, rendererUrl, (args) => parseWebsiteArguments(args, parseDroppedWebsiteFilesIpcRequest),
-    ({ sender }, request) => registry.importDroppedWebsiteFiles(sender, request));
+    (sender, request) => {
+      if (!request.requestId) return registry.importDroppedWebsiteFiles(sender.sender, request);
+      let active = true;
+      return registry.importDroppedWebsiteFiles(sender.sender, request, (progress) => {
+        if (!active) return;
+        try {
+          requireCurrentTrustedSender(sender, rendererUrl);
+          sender.sender.send(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, { requestId: request.requestId, progress });
+        } catch { /* The initiating document may close or navigate while uploading. */ }
+      }).finally(() => { active = false; });
+    });
   handleTrusted(IPC.updateWebsiteContentType, rendererUrl, (args) => parseWebsiteArguments(args, parseUpdateWebsiteContentTypeInput),
     ({ contentsId }, input) => registry.updateWebsiteContentType(contentsId, input));
   handleTrusted(IPC.deleteWebsiteContent, rendererUrl, (args) => parseWebsiteArguments(args, parseWebsiteContentInput),

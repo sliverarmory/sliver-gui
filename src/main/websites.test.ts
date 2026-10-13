@@ -205,7 +205,9 @@ describe("hosted website data boundary", () => {
     await writeFile(join(directory, ".well-known-file"), "included");
     const loose = join(root, "loose.bin");
     await writeFile(loose, Buffer.from([0, 255, 128, 7]));
-    const contents = await readDroppedWebsiteImport([loose, directory], { name: "landing" }, () => {});
+    const onDirectory = vi.fn();
+    const contents = await readDroppedWebsiteImport([loose, directory], { name: "landing" }, () => {}, onDirectory);
+    expect(onDirectory).toHaveBeenCalledOnce();
     expect(Object.keys(contents).sort()).toEqual([
       "/.well-known-file", "/assets/app.JS", "/assets/mark.SVG", "/assets/style.css", "/index.html", "/loose.bin",
     ]);

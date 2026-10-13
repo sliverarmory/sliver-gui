@@ -2,6 +2,7 @@ import type { OperatorDataPageSummary } from "./operator-data-contracts.js";
 
 /** Private preload-to-main transport; never expose a renderer path-based import API. */
 export const WEBSITE_DROPPED_IMPORT_IPC_CHANNEL = "sliver:websites:import-dropped";
+export const WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL = "sliver:websites:upload-progress";
 export const WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH = 32 * 1024;
 
 export const WEBSITE_LIMITS = Object.freeze({
@@ -33,7 +34,9 @@ export interface WebsiteCatalogPage { items: WebsiteSummary[]; page: OperatorDat
 export interface ListWebsitesInput { query?: string; cursor?: string; limit?: number; }
 export interface WebsiteNameInput { name: string; }
 /** Native paths are resolved exclusively by preload from OS-backed dropped File objects. */
-export interface DroppedWebsiteFilesIpcRequest { sourcePaths: string[]; input: WebsiteNameInput; }
+export interface DroppedWebsiteFilesIpcRequest { sourcePaths: string[]; input: WebsiteNameInput; requestId?: string; }
+export interface WebsiteUploadProgress { completedFiles: number; totalFiles: number; }
+export interface WebsiteUploadProgressEvent { requestId: string; progress: WebsiteUploadProgress; }
 export interface WebsiteContentInput extends WebsiteNameInput { path: string; }
 /** A main-owned loopback preview belonging to the current application window. */
 export interface WebsiteRenderedPreview extends WebsiteContentInput { origin: string; url: string; }
@@ -134,7 +137,7 @@ export function parseWebsiteNameInput(value: unknown): WebsiteNameInput {
   return { name: name(input["name"]) };
 }
 export function parseDroppedWebsiteFilesIpcRequest(value: unknown): DroppedWebsiteFilesIpcRequest {
-  const request = record(value, ["sourcePaths", "input"]);
+  const request = record(value, ["sourcePaths", "input"], ["requestId"]);
   const paths = request["sourcePaths"];
   if (!Array.isArray(paths) || paths.length === 0 || paths.length > WEBSITE_LIMITS.importFiles) {
     throw new TypeError(`Dropped website imports require 1 to ${WEBSITE_LIMITS.importFiles} files or directories`);
@@ -147,7 +150,29 @@ export function parseDroppedWebsiteFilesIpcRequest(value: unknown): DroppedWebsi
     }
     return sourcePath;
   });
-  return { sourcePaths, input: parseWebsiteNameInput(request["input"]) };
+  return { sourcePaths, input: parseWebsiteNameInput(request["input"]),
+    ...(Object.hasOwn(request, "requestId") ? { requestId: uploadRequestId(request["requestId"]) } : {}),
+  };
+}
+
+function uploadRequestId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) {
+    throw new TypeError("Invalid website upload request ID");
+  }
+  return value;
+}
+
+export function parseWebsiteUploadProgressEvent(value: unknown): WebsiteUploadProgressEvent {
+  const event = record(value, ["requestId", "progress"]);
+  const progress = record(event["progress"], ["completedFiles", "totalFiles"]);
+  const completedFiles = progress["completedFiles"];
+  const totalFiles = progress["totalFiles"];
+  if (typeof completedFiles !== "number" || !Number.isInteger(completedFiles) ||
+      typeof totalFiles !== "number" || !Number.isInteger(totalFiles) ||
+      totalFiles < 1 || totalFiles > WEBSITE_LIMITS.importFiles || completedFiles < 0 || completedFiles > totalFiles) {
+    throw new TypeError("Invalid website upload progress");
+  }
+  return { requestId: uploadRequestId(event["requestId"]), progress: { completedFiles, totalFiles } };
 }
 export function parseWebsiteContentInput(value: unknown): WebsiteContentInput {
   const input = record(value, ["name", "path"]);

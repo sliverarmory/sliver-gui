@@ -70,8 +70,10 @@ test("hosted websites support standalone editing, row actions, and fresh browser
   const droppedFile = join(root, "drop-note.txt");
   const droppedExtraFile = join(root, "drop-extra.txt");
   const droppedApprovedFile = join(root, "drop-approved.txt");
+  const droppedSkippedNewFile = join(root, "drop-skipped-new.txt");
   const droppedReplacementText = "A replacement approved in the overwrite prompt";
   const droppedApprovedText = "A new file uploaded with the approved replacement";
+  const droppedSkippedNewText = "A new file uploaded while existing files are skipped";
   await mkdir(join(droppedDirectory, "nested"), { recursive: true });
   await mkdir(join(droppedDirectory, ".private"));
   await Promise.all([
@@ -183,14 +185,36 @@ test("hosted websites support standalone editing, row actions, and fresh browser
       has: page.getByRole("button", { name: "Upload files or directories to preview-test", exact: true }),
     });
     await observeWebsiteUploadPending(websiteDropTarget);
-    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedExtraFile]);
+    const writesBeforeSingleDrop = await websiteWriteCount(application);
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.holdWebsiteAddContent());
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile]);
+    await waitForHeldWebsiteWrite(application);
+    await page.getByText("Uploading website content…", { exact: true }).waitFor();
+    await assertNoWebsiteUploadProgress(page);
+    assert.equal(await websiteWriteCount(application), writesBeforeSingleDrop,
+      "a single native drop remains pending before its write completes");
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseWebsiteAddContentHold());
     await page.getByRole("button", { name: "Inspect /drop-note.txt", exact: true }).waitFor();
+    await page.getByText("Uploading website content…", { exact: true }).waitFor({ state: "hidden" });
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedExtraFile]);
     await page.getByRole("button", { name: "Inspect /drop-extra.txt", exact: true }).waitFor();
+    await page.getByText("Uploading website content…", { exact: true }).waitFor({ state: "hidden" });
+    const writesBeforeDirectoryDrop = await websiteWriteCount(application);
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.holdWebsiteAddContent(1));
     await dropNativeWebsitePaths(page, websiteDropTarget, [droppedDirectory], join(artifacts, "website-directory-drop.png"));
+    await waitForHeldWebsiteWrite(application);
+    await assertWebsiteUploadProgress(page, 1, 6);
+    assert.equal(await websiteWriteCount(application), writesBeforeDirectoryDrop + 1,
+      "directory progress counts only the first acknowledged file while the second write is held");
+    await page.screenshot({ path: join(artifacts, "website-upload-progress.png"), animations: "disabled" });
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseWebsiteAddContentHold());
     for (const path of ["/dropped.html", "/dropped.css", "/dropped.js", "/dropped.png", "/nested/drop-data.txt", "/.drop-marker"]) {
       await page.getByRole("button", { name: `Inspect ${path}`, exact: true }).waitFor();
     }
     await page.getByText("Website content uploaded.", { exact: true }).waitFor();
+    assert.equal(await websiteWriteCount(application), writesBeforeDirectoryDrop + 6,
+      "each non-empty directory file is uploaded once");
+    await assertNoWebsiteUploadProgress(page);
     assert.equal(await websiteDropTarget.getAttribute("data-e2e-upload-pending"), "observed",
       "native drops display upload progress before completing");
     assert.equal(await page.getByRole("button", { name: "Inspect /drop-folder/dropped.html", exact: true }).count(), 0,
@@ -233,11 +257,14 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     const writesBeforeOverwrite = await websiteWriteCount(application);
     await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedApprovedFile]);
     const overwritePrompt = await waitForWebsiteDropOverwrite(application, 1);
+    await page.getByText("Uploading website content…", { exact: true }).waitFor();
+    await assertNoWebsiteUploadProgress(page);
+    await page.screenshot({ path: join(artifacts, "website-uploading.png"), animations: "disabled" });
     const ownerId = await (await application.browserWindow(page)).evaluate((window) => window.id);
     assert.equal(overwritePrompt.ownerId, ownerId, "overwrite confirmation belongs to the source window");
     assert.equal(overwritePrompt.title, "Overwrite website files?");
     assert.equal(overwritePrompt.type, "warning");
-    assert.deepEqual(overwritePrompt.buttons, ["Cancel", "Overwrite"]);
+    assert.deepEqual(overwritePrompt.buttons, ["Cancel", "Overwrite", "Skip existing"]);
     assert.equal(overwritePrompt.defaultId, 0, "the safe default is Cancel");
     assert.equal(overwritePrompt.cancelId, 0);
     assert.match(overwritePrompt.message, /preview-test/u);
@@ -252,23 +279,61 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     assert.equal(await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).count(), 0);
     await resolveWebsiteDropOverwrite(application, 0);
     await page.getByText("Uploading website content…", { exact: true }).waitFor({ state: "hidden" });
+    await assertNoWebsiteUploadProgress(page);
     assert.equal(await websiteWriteCount(application), writesBeforeOverwrite, "Cancel uploads none of the dropped batch");
     assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedText, "Cancel preserves the existing file bytes");
     assert.equal(await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).count(), 0);
     assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
       "canceling an overwrite does not display a website error");
 
-    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedApprovedFile]);
-    const approvedPrompt = await waitForWebsiteDropOverwrite(application, 2);
-    assert.deepEqual(approvedPrompt, overwritePrompt);
+    await writeFile(droppedSkippedNewFile, droppedSkippedNewText);
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedSkippedNewFile]);
+    const skipPrompt = await waitForWebsiteDropOverwrite(application, 2);
+    assert.deepEqual(skipPrompt.buttons, ["Cancel", "Overwrite", "Skip existing"]);
+    assert.match(skipPrompt.detail, /\/drop-note\.txt/u);
     assert.equal(await websiteWriteCount(application), writesBeforeOverwrite);
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.holdWebsiteAddContent());
+    await resolveWebsiteDropOverwrite(application, 2);
+    await waitForHeldWebsiteWrite(application);
+    await assertWebsiteUploadProgress(page, 0, 1);
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite,
+      "Skip existing excludes the conflicting file from the total and waits for the new file to finish");
+    await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_CONTROL__.releaseWebsiteAddContentHold());
+    await page.getByRole("button", { name: "Inspect /drop-skipped-new.txt", exact: true }).waitFor();
+    await page.getByRole("progressbar", { name: "Website upload progress", exact: true }).waitFor({ state: "hidden" });
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 1,
+      "Skip existing uploads the new part of the staged batch once");
+    assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedText,
+      "Skip existing preserves conflicting website bytes");
+    assert.equal(await readWebsiteText(page, "/drop-skipped-new.txt"), droppedSkippedNewText);
+    assert.equal(await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).count(), 0,
+      "Skip existing does not revive files from a canceled drop");
+    assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
+      "skipping existing files does not display a website error");
+
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile]);
+    await waitForWebsiteDropOverwrite(application, 3);
+    await assertNoWebsiteUploadProgress(page);
+    await resolveWebsiteDropOverwrite(application, 2);
+    await page.getByText("Uploading website content…", { exact: true }).waitFor({ state: "hidden" });
+    await assertNoWebsiteUploadProgress(page);
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 1,
+      "Skip existing performs no write when every dropped path already exists");
+    assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedText);
+    assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
+      "an all-existing skip finishes without a website error");
+
+    await dropNativeWebsitePaths(page, websiteDropTarget, [droppedFile, droppedApprovedFile]);
+    const approvedPrompt = await waitForWebsiteDropOverwrite(application, 4);
+    assert.deepEqual(approvedPrompt, overwritePrompt);
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 1);
     await writeFile(droppedFile, "Local edits after confirmation opened are not part of the staged drop");
     await writeFile(droppedApprovedFile, "Later local edits must not replace the staged new file");
     await resolveWebsiteDropOverwrite(application, 1);
     await page.getByRole("button", { name: "Inspect /drop-approved.txt", exact: true }).waitFor();
     await page.getByText("Website content uploaded.", { exact: true }).waitFor();
-    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 1,
-      "Overwrite continues the original staged batch exactly once without another drop");
+    assert.equal(await websiteWriteCount(application), writesBeforeOverwrite + 3,
+      "Overwrite uploads each file in the original staged batch once without another drop");
     assert.equal(await readWebsiteText(page, "/drop-note.txt"), droppedReplacementText);
     assert.equal(await readWebsiteText(page, "/drop-approved.txt"), droppedApprovedText);
     assert.deepEqual(await page.locator(".websites-page").getByRole("alert").allTextContents(), [],
@@ -324,6 +389,7 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     for (const [path, expected, mime] of [
       ["/drop-note.txt", droppedReplacementText, /^text\/plain(?:;|$)/u],
       ["/drop-approved.txt", droppedApprovedText, /^text\/plain(?:;|$)/u],
+      ["/drop-skipped-new.txt", droppedSkippedNewText, /^text\/plain(?:;|$)/u],
       ["/drop-extra.txt", "A second file in the same native drop", /^text\/plain(?:;|$)/u],
       ["/dropped.html", droppedHtml, /^text\/html(?:;|$)/u],
       ["/dropped.css", droppedCss, /^text\/css(?:;|$)/u],
@@ -733,6 +799,7 @@ test("hosted websites support standalone editing, row actions, and fresh browser
     await browser?.close();
     await application?.evaluate(({ dialog }) => {
       (globalThis as unknown as WebsiteDropOverwriteState).__websiteDropOverwriteResponse?.(0);
+      globalThis.__SLIVER_GUI_E2E_CONTROL__?.releaseWebsiteAddContentHold();
       dialog.showMessageBoxSync = (...args: unknown[]) => {
         const options = args[args.length - 1] as { buttons?: string[] };
         return Math.max(0, options.buttons?.indexOf("Discard Changes") ?? 0);
@@ -761,6 +828,25 @@ async function waitForExternalUrl(application: ElectronApplication, expectedCoun
 async function websiteWriteCount(application: ElectronApplication): Promise<number> {
   return application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.methods
     .filter((method) => method === "websiteAddContent" || method === "websiteUpdateContent").length);
+}
+
+async function waitForHeldWebsiteWrite(application: ElectronApplication): Promise<void> {
+  await waitUntil(async () => application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.websiteAddContentHeld));
+}
+
+async function assertWebsiteUploadProgress(page: Page, completed: number, total: number): Promise<void> {
+  await page.getByText(`Uploading ${Math.min(completed + 1, total)} of ${total} ${total === 1 ? "file" : "files"}`, { exact: true }).waitFor();
+  const progress = page.getByRole("progressbar", { name: "Website upload progress", exact: true });
+  await progress.waitFor();
+  assert.equal(await progress.getAttribute("aria-valuemin"), "0");
+  assert.equal(await progress.getAttribute("aria-valuemax"), String(total));
+  assert.equal(await progress.getAttribute("aria-valuenow"), String(completed));
+  assert.equal(await progress.getAttribute("aria-valuetext"), `${completed} of ${total} ${total === 1 ? "file" : "files"} uploaded`);
+}
+
+async function assertNoWebsiteUploadProgress(page: Page): Promise<void> {
+  assert.equal(await page.getByRole("progressbar", { name: "Website upload progress", exact: true }).count(), 0);
+  assert.equal(await page.getByText(/^Uploading \d+ of \d+ files?$/u).count(), 0);
 }
 
 async function readWebsiteText(page: Page, path: string): Promise<string> {

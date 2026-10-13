@@ -132,7 +132,7 @@ describe("WebsitesPage", () => {
     expect(screen.getByText("Drop to upload to public")).toBeInTheDocument();
     expect(screen.getByText(/File types detected automatically/)).toBeInTheDocument();
     fireEvent.drop(target, { dataTransfer });
-    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith(files, { name: "public" }));
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith(files, { name: "public" }, expect.any(Function)));
     await screen.findByText("Website content uploaded.");
     await waitFor(() => expect(api.listWebsites).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("button", { name: "Inspect /style.css" })).toBeInTheDocument();
@@ -154,7 +154,7 @@ describe("WebsitesPage", () => {
     });
     fireEvent.dragEnter(target, { dataTransfer });
     fireEvent.drop(target, { dataTransfer });
-    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith([folder], { name: "public" }));
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledExactlyOnceWith([folder], { name: "public" }, expect.any(Function)));
     expect(createReader).not.toHaveBeenCalled();
   });
 
@@ -174,7 +174,7 @@ describe("WebsitesPage", () => {
     expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
     const retry = [new File(["new"], "new.html")];
     dropFiles(target, retry);
-    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" }));
+    await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" }, expect.any(Function)));
     await screen.findByText("Website content uploaded.");
   });
 
@@ -199,7 +199,7 @@ describe("WebsitesPage", () => {
     const retry = [new File(["new"], "new.html")];
     dropFiles(target, retry);
     await waitFor(() => expect(api.importDroppedWebsiteFiles).toHaveBeenCalledTimes(2));
-    expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" });
+    expect(api.importDroppedWebsiteFiles).toHaveBeenLastCalledWith(retry, { name: "public" }, expect.any(Function));
     await screen.findByText("Website content uploaded.");
     await waitFor(() => expect(api.listWebsites).toHaveBeenCalledTimes(2));
     expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
@@ -209,22 +209,115 @@ describe("WebsitesPage", () => {
     const user = userEvent.setup();
     const first = deferred<OperationResult<WebsiteDetail>>();
     const second = deferred<OperationResult<WebsiteDetail>>();
-    const api = installWebsiteChoices({ importDroppedWebsiteFiles: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise) });
+    const importFiles = vi.fn<SliverDesktopAPI["importDroppedWebsiteFiles"]>().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const api = installWebsiteChoices({ importDroppedWebsiteFiles: importFiles });
     render(<WebsitesPage snapshot={connectedSnapshot()} />);
     await screen.findByRole("button", { name: "Inspect /index.html" });
     dropFiles(websiteDropTarget("public"), [new File(["first"], "first.txt")]);
+    act(() => { importFiles.mock.calls[0]![2]!({ completedFiles: 2, totalFiles: 20 }); });
+    expect(screen.getByText("Uploading 3 of 20 files")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /other/ }));
     await screen.findByRole("button", { name: "Inspect /other.html" });
     const target = websiteDropTarget("other");
     dropFiles(target, [new File(["second"], "second.txt")]);
     expect(api.importDroppedWebsiteFiles).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    act(() => { importFiles.mock.calls[1]![2]!({ completedFiles: 1, totalFiles: 4 }); });
+    act(() => { importFiles.mock.calls[0]![2]!({ completedFiles: 5, totalFiles: 20 }); });
+    expect(screen.getByText("Uploading 2 of 4 files")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Website upload progress" })).toHaveAttribute("aria-valuenow", "1");
     await act(async () => { first.resolve({ ok: false, error: "Stale upload failure" }); });
     expect(screen.queryByText("Stale upload failure")).not.toBeInTheDocument();
     expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "true");
-    expect(screen.getByText("Uploading website content…")).toBeInTheDocument();
+    expect(screen.getByText("Uploading 2 of 4 files")).toBeInTheDocument();
     await act(async () => { second.resolve({ ok: true, value: OTHER_SITE }); });
     expect(await screen.findByText("Website content uploaded.")).toBeInTheDocument();
     expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("shows directory upload counts and a bar based on confirmed file completions", async () => {
+    const upload = deferred<OperationResult<WebsiteDetail | null>>();
+    const importFiles = vi.fn<SliverDesktopAPI["importDroppedWebsiteFiles"]>().mockReturnValue(upload.promise);
+    installAPI({ importDroppedWebsiteFiles: importFiles });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    dropFiles(websiteDropTarget("public"), [new File([], "site-folder")]);
+    expect(screen.getByText("Uploading website content…")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    const onProgress = importFiles.mock.calls[0]![2]!;
+    act(() => { onProgress({ completedFiles: 0, totalFiles: 20 }); });
+    expect(screen.getByText("Uploading 1 of 20 files")).toBeInTheDocument();
+    const progress = screen.getByRole("progressbar", { name: "Website upload progress" });
+    expect(progress).toHaveAttribute("aria-valuemin", "0");
+    expect(progress).toHaveAttribute("aria-valuemax", "20");
+    expect(progress).toHaveAttribute("aria-valuenow", "0");
+    act(() => { onProgress({ completedFiles: 2, totalFiles: 20 }); });
+    expect(screen.getByText("Uploading 3 of 20 files")).toBeInTheDocument();
+    expect(progress).toHaveAttribute("aria-valuenow", "2");
+    expect(progress).toHaveAttribute("aria-valuetext", "2 of 20 files uploaded");
+    act(() => { onProgress({ completedFiles: 20, totalFiles: 20 }); });
+    expect(screen.getByText("Uploading 20 of 20 files")).toBeInTheDocument();
+    expect(progress).toHaveAttribute("aria-valuenow", "20");
+    await act(async () => { upload.resolve({ ok: true, value: SITE }); });
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("uses the selected upload total when skipping leaves one file", async () => {
+    const upload = deferred<OperationResult<WebsiteDetail | null>>();
+    const importFiles = vi.fn<SliverDesktopAPI["importDroppedWebsiteFiles"]>().mockReturnValue(upload.promise);
+    installAPI({ importDroppedWebsiteFiles: importFiles });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    dropFiles(websiteDropTarget("public"), [new File(["existing"], "index.html"), new File(["new"], "style.css")]);
+    act(() => { importFiles.mock.calls[0]![2]!({ completedFiles: 0, totalFiles: 1 }); });
+    expect(screen.getByText("Uploading 1 of 1 file")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Website upload progress" })).toHaveAttribute("aria-valuemax", "1");
+    await act(async () => { upload.resolve({ ok: true, value: SITE }); });
+  });
+
+  it("keeps single-file uploads on the original spinner without a count or bar", async () => {
+    const upload = deferred<OperationResult<WebsiteDetail | null>>();
+    installAPI({ importDroppedWebsiteFiles: vi.fn().mockReturnValue(upload.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    dropFiles(websiteDropTarget("public"), [new File(["one"], "one.txt")]);
+    const message = screen.getByText("Uploading website content…");
+    expect(message.querySelector(".spinner")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Uploading \d+ of/)).not.toBeInTheDocument();
+    await act(async () => { upload.resolve({ ok: true, value: SITE }); });
+  });
+
+  it.each(["success", "cancel", "error"] as const)("clears progress after %s and ignores late callbacks during the next upload", async (outcome) => {
+    const first = deferred<OperationResult<WebsiteDetail | null>>();
+    const second = deferred<OperationResult<WebsiteDetail | null>>();
+    const importFiles = vi.fn<SliverDesktopAPI["importDroppedWebsiteFiles"]>().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    installAPI({ importDroppedWebsiteFiles: importFiles });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await screen.findByRole("button", { name: "Inspect /index.html" });
+    const target = websiteDropTarget("public");
+    dropFiles(target, [new File([], "first-folder")]);
+    const oldProgress = importFiles.mock.calls[0]![2]!;
+    act(() => { oldProgress({ completedFiles: 1, totalFiles: 3 }); });
+    expect(screen.getByText("Uploading 2 of 3 files")).toBeInTheDocument();
+    await act(async () => {
+      first.resolve(outcome === "error" ? { ok: false, error: "Upload failed" } : { ok: true, value: outcome === "cancel" ? null : SITE });
+    });
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(target.closest(".drop-zone")).toHaveAttribute("aria-busy", "false");
+    act(() => { oldProgress({ completedFiles: 2, totalFiles: 3 }); });
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add local file" })).toBeEnabled());
+    dropFiles(target, [new File([], "next-folder")]);
+    const newProgress = importFiles.mock.calls[1]![2]!;
+    act(() => { newProgress({ completedFiles: 0, totalFiles: 5 }); });
+    act(() => { oldProgress({ completedFiles: 3, totalFiles: 3 }); });
+    expect(screen.getByText("Uploading 1 of 5 files")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Website upload progress" })).toHaveAttribute("aria-valuenow", "0");
+    await act(async () => { second.resolve({ ok: true, value: SITE }); });
   });
 
   it("rejects oversized drop counts and ignores text-only drops", async () => {

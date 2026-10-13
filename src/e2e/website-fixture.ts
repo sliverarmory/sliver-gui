@@ -3,7 +3,11 @@ import { posix } from "node:path";
 import { clientpb } from "sliver-script";
 
 /** A copy-owning fixture matching the pinned server's website RPC behavior. */
-export function createWebsiteFixture(record: (method: string) => void, changed: () => void) {
+export function createWebsiteFixture(
+  record: (method: string) => void,
+  changed: () => void,
+  beforeAddContent?: () => Promise<void>,
+) {
   const sites = new Map<string, clientpb.Website>();
   const clone = (site: clientpb.Website) => clientpb.Website.create({
     ...site,
@@ -39,6 +43,7 @@ export function createWebsiteFixture(record: (method: string) => void, changed: 
     async websites() { record("websites"); return [...sites.values()].map(clone); },
     async website(name: string) { record("website"); return clone(requireSite(name)); },
     async websiteAddContent(name: string, contents: Record<string, clientpb.WebContent>) {
+      await beforeAddContent?.();
       record("websiteAddContent");
       const site = ensureSite(name);
       for (const content of Object.values(contents)) store(site, content);

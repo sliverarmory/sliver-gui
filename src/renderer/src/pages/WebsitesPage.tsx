@@ -12,7 +12,7 @@ import {
 } from "@fortawesome/free-solid-svg-icons";
 
 import type { OperationResult, SliverSnapshot } from "../../../shared/contracts";
-import { WEBSITE_LIMITS, isWebsiteTextContentType, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail } from "../../../shared/website-contracts";
+import { WEBSITE_LIMITS, isWebsiteTextContentType, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail, type WebsiteUploadProgress } from "../../../shared/website-contracts";
 import { ApplicationContextMenuScope } from "../components/ApplicationContextMenu";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { WebsiteContentPreview } from "../components/WebsiteContentPreview";
@@ -68,7 +68,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
   const [previewError, setPreviewError] = useState<string>();
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [pending, setPending] = useState(false);
-  const [dropUpload, setDropUpload] = useState<{ context: string }>();
+  const [dropUpload, setDropUpload] = useState<{ context: string; token: object; progress?: WebsiteUploadProgress }>();
   const [serverPending, setServerPending] = useState<"open" | "stop">();
   const [serverDialogOpen, setServerDialogOpen] = useState(false);
   const serverStatusId = useId();
@@ -137,6 +137,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
     mutationSequence.current += 1;
     pendingRef.current = false;
     setPending(false);
+    setDropUpload(undefined);
   }, [closePreview, context]);
 
   useEffect(() => { closePreview(); }, [closePreview, websiteEventId]);
@@ -322,17 +323,20 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
       return;
     }
     if (!files.length) return;
-    const upload = { context };
+    const upload = { context, token: {} };
     setDropUpload(upload);
     try {
-      await runOperation(() => window.sliver.importDroppedWebsiteFiles(files, { name }), (value) => {
+      await runOperation(() => window.sliver.importDroppedWebsiteFiles(files, { name }, (progress) => {
+        if (!mounted.current || contextRef.current !== context) return;
+        setDropUpload((current) => current?.token === upload.token ? { ...current, progress } : current);
+      }), (value) => {
         if (!value) return;
         setDetail({ context, value });
         setRevision((current) => current + 1);
         setNotice("Website content uploaded.");
       });
     } finally {
-      if (mounted.current) setDropUpload((current) => current === upload ? undefined : current);
+      if (mounted.current) setDropUpload((current) => current?.token === upload.token ? undefined : current);
     }
   };
 
@@ -526,6 +530,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
               <WebsiteUploadDropZone key={context} name={name}
                 isDisabled={!name || pending || loadingDetail || Boolean(form || deleteTarget || previewTarget)}
                 isPending={dropUpload?.context === context && pending}
+                progress={dropUpload?.context === context ? dropUpload.progress : undefined}
                 onDropFiles={(files) => { void importDroppedFiles(files); }}>
                 <Card className="min-w-0" variant="secondary">
                   <Card.Header>

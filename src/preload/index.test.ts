@@ -17,7 +17,7 @@ import {
 } from "../shared/application-context-menu-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
 import { LOOT_DROPPED_ADD_IPC_CHANNEL } from "../shared/operator-data-contracts.js";
-import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_LIMITS } from "../shared/website-contracts.js";
+import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, WEBSITE_LIMITS } from "../shared/website-contracts.js";
 import type { ApplicationZoomAPI } from "../shared/application-zoom-contracts.js";
 
 type InvokeArgumentsByMethod = {
@@ -344,6 +344,53 @@ describe("sandboxed preload bridge", () => {
     });
     expect(Object.values(IPC_INVOKE)).not.toContain(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
     expect(Object.keys(exposed)).not.toContain("getPathForFile");
+  });
+
+  it("isolates concurrent upload progress and removes listeners after completion", async () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    const completions: Array<() => void> = [];
+    const pendingInvoke = (channel: string, ...args: unknown[]) => new Promise<{ channel: string; args: unknown[] }>((resolve) => {
+      completions.push(() => resolve({ channel, args }));
+    });
+    electronMocks.invoke.mockClear();
+    electronMocks.invoke.mockImplementationOnce(pendingInvoke).mockImplementationOnce(pendingInvoke);
+    electronMocks.getPathForFile.mockReturnValue("/site");
+    const first = vi.fn();
+    const second = vi.fn();
+    const firstUpload = api.importDroppedWebsiteFiles([new File([], "site")], { name: "first" }, first);
+    const secondUpload = api.importDroppedWebsiteFiles([new File([], "site")], { name: "second" }, second);
+    const firstRequest = electronMocks.invoke.mock.calls[0]![1] as { requestId: string };
+    const secondRequest = electronMocks.invoke.mock.calls[1]![1] as { requestId: string };
+    expect(firstRequest.requestId).not.toBe(secondRequest.requestId);
+    const handlers = electronMocks.on.mock.calls.filter(([channel]) => channel === WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL)
+      .slice(-2).map(([, handler]) => handler as (event: unknown, ...payload: unknown[]) => void);
+    const send = (requestId: string, progress: unknown) => handlers.forEach((handler) => handler({}, { requestId, progress }));
+    send(firstRequest.requestId, { completedFiles: 0, totalFiles: 20 });
+    send(secondRequest.requestId, { completedFiles: 1, totalFiles: 3 });
+    send(firstRequest.requestId, { completedFiles: 2, totalFiles: 20 });
+    send(firstRequest.requestId, { completedFiles: 1, totalFiles: 20 });
+    send(firstRequest.requestId, { completedFiles: 3, totalFiles: 21 });
+    send(firstRequest.requestId, { completedFiles: 21, totalFiles: 20 });
+    send(firstRequest.requestId, { completedFiles: 3, totalFiles: 20, sourcePath: "/private" });
+    expect(first.mock.calls).toEqual([[{ completedFiles: 0, totalFiles: 20 }], [{ completedFiles: 2, totalFiles: 20 }]]);
+    expect(second.mock.calls).toEqual([[{ completedFiles: 1, totalFiles: 3 }]]);
+    completions[0]!();
+    await firstUpload;
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, handlers[0]);
+    send(firstRequest.requestId, { completedFiles: 3, totalFiles: 20 });
+    expect(first).toHaveBeenCalledTimes(2);
+    completions[1]!();
+    await secondUpload;
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, handlers[1]);
+  });
+
+  it("removes upload progress listeners when IPC rejects", async () => {
+    const api = electronMocks.exposeInMainWorld.mock.calls[0]![1];
+    electronMocks.getPathForFile.mockReturnValue("/site");
+    electronMocks.invoke.mockRejectedValueOnce(new Error("Window closed"));
+    await expect(api.importDroppedWebsiteFiles([new File([], "site")], { name: "public" }, vi.fn())).rejects.toThrow("Window closed");
+    const registration = electronMocks.on.mock.calls.filter(([channel]) => channel === WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL).at(-1)!;
+    expect(electronMocks.removeListener).toHaveBeenCalledWith(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, registration[1]);
   });
 
   it.each(["missing path", "non-File object", "relative native path"])("rejects an entire dropped website batch with a %s", (failure) => {

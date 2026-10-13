@@ -1747,7 +1747,7 @@ describe("connection registry with an injected Sliver client", () => {
     expect(web.websiteAddContent).toHaveBeenCalledTimes(writes);
   });
 
-  it("imports a mixed website drop as one root-relative batch with main-derived MIME and wipes sent buffers", async () => {
+  it("imports a mixed website drop per file with main-derived MIME and wipes sent buffers", async () => {
     const client = new FakeSliverClient();
     const web = attachWebsiteBackend(client);
     const registry = createRegistry(() => client.adapter);
@@ -1767,9 +1767,9 @@ describe("connection registry with an injected Sliver client", () => {
       sourcePaths: [file, siteDirectory], input: { name: "landing" },
     });
     expect(result).toMatchObject({ ok: true, value: { site: { name: "landing", contentCount: 3 } } });
-    expect(web.websiteAddContent).toHaveBeenCalledOnce();
-    const [name, sent] = web.websiteAddContent.mock.calls[0]!;
-    expect(name).toBe("landing");
+    expect(web.websiteAddContent).toHaveBeenCalledTimes(3);
+    expect(web.websiteAddContent.mock.calls.every(([name, items]) => name === "landing" && Object.keys(items).length === 1)).toBe(true);
+    const sent = Object.assign({}, ...web.websiteAddContent.mock.calls.map(([, items]) => items)) as Record<string, clientpb.WebContent>;
     expect(Object.keys(sent).sort()).toEqual(["/assets/style.css", "/extra.json", "/index.html"]);
     expect(Object.values(sent).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
     const stored = web.sites.get("landing")!.Contents;
@@ -1799,7 +1799,7 @@ describe("connection registry with an injected Sliver client", () => {
     })).resolves.toEqual({ ok: true, value: null });
     expect(electronMocks.showMessageBox).toHaveBeenCalledOnce();
     const options = electronMocks.showMessageBox.mock.calls[0]![1];
-    expect(options).toMatchObject({ title: "Overwrite website files?", buttons: ["Cancel", "Overwrite"], cancelId: 0 });
+    expect(options).toMatchObject({ title: "Overwrite website files?", buttons: ["Cancel", "Overwrite", "Skip existing"], cancelId: 0 });
     expect(`${options.message} ${options.detail}`).toContain("landing");
     expect(`${options.message} ${options.detail}`).toContain("/existing.txt");
     expect(web.websiteAddContent).not.toHaveBeenCalled();
@@ -1835,7 +1835,7 @@ describe("connection registry with an injected Sliver client", () => {
       return { buffers, restore: () => read.mockRestore() };
     }
 
-    it("approves mixed new and existing direct and directory files in one upload", async () => {
+    it("approves mixed new and existing direct and directory files for individual uploads", async () => {
       const { registry, web, request } = await setup();
       await registry.saveWebsiteText(1, { name: "landing", path: "/assets/style.css", text: "old styles", contentType: "text/css", overwrite: false });
       const directory = join(root, "site");
@@ -1852,8 +1852,8 @@ describe("connection registry with an injected Sliver client", () => {
       expect(`${options.message} ${options.detail}`).toContain("/existing.txt");
       expect(`${options.message} ${options.detail}`).toContain("/assets/style.css");
       expect(`${options.message} ${options.detail}`).toMatch(/2/);
-      expect(web.websiteAddContent).toHaveBeenCalledOnce();
-      const sent = web.websiteAddContent.mock.calls[0]![1];
+      expect(web.websiteAddContent).toHaveBeenCalledTimes(4);
+      const sent = Object.assign({}, ...web.websiteAddContent.mock.calls.map(([, items]) => items)) as Record<string, clientpb.WebContent>;
       expect(Object.keys(sent).sort()).toEqual(["/assets/style.css", "/existing.txt", "/index.html", "/new.txt"]);
       expect(Object.values(sent).every((item) => item.Content.every((byte) => byte === 0))).toBe(true);
       const stored = web.sites.get("landing")!.Contents;
@@ -1861,6 +1861,103 @@ describe("connection registry with an injected Sliver client", () => {
       expect(Buffer.from(stored["/new.txt"]!.Content).toString()).toBe("local addition");
       expect(Buffer.from(stored["/assets/style.css"]!.Content).toString()).toBe("body { color: blue }");
       expect(stored["/assets/style.css"]!.ContentType).toBe("text/css; charset=utf-8");
+    });
+
+    it("skips existing direct and directory files while uploading new files individually", async () => {
+      const { registry, web, request } = await setup();
+      await registry.saveWebsiteText(1, { name: "landing", path: "/assets/style.css", text: "original server styles", contentType: "text/css", overwrite: false });
+      const stored = web.sites.get("landing")!.Contents;
+      const originals = ["/existing.txt", "/assets/style.css"].map((path) => ({
+        path, item: { ...stored[path]!, Content: Buffer.from(stored[path]!.Content) },
+      }));
+      const directory = join(root, "site");
+      await mkdir(join(directory, "assets"), { recursive: true });
+      await writeFile(join(directory, "assets", "style.css"), "local styles to skip");
+      await writeFile(join(directory, "index.html"), "<h1>New index</h1>");
+      request.sourcePaths.push(directory);
+      web.websiteAddContent.mockClear();
+      const observed = observeDropBuffers();
+      electronMocks.showMessageBox.mockResolvedValueOnce({ response: 2 });
+      try {
+        const result = await registry.importDroppedWebsiteFiles(sender(1), request);
+        expect(result).toMatchObject({ ok: true, value: { site: { name: "landing", contentCount: 4 } } });
+        expect(electronMocks.showMessageBox).toHaveBeenCalledOnce();
+        expect(web.websiteAddContent).toHaveBeenCalledTimes(2);
+        expect(web.websiteAddContent.mock.calls.flatMap(([, items]) => Object.keys(items)).sort()).toEqual(["/index.html", "/new.txt"]);
+        for (const { path, item } of originals) expect(stored[path]).toEqual(item);
+        expect(Buffer.from(stored["/index.html"]!.Content).toString()).toBe("<h1>New index</h1>");
+        expect(Buffer.from(stored["/new.txt"]!.Content).toString()).toBe("local addition");
+        expect(observed.buffers).toHaveLength(4);
+        expect(observed.buffers.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+      } finally { observed.restore(); }
+    });
+
+    it("returns a quiet no-op and wipes skipped bytes when every dropped path already exists", async () => {
+      const { registry, web, request, existing } = await setup();
+      request.sourcePaths = [existing];
+      const observed = observeDropBuffers();
+      electronMocks.showMessageBox.mockResolvedValueOnce({ response: 2 });
+      try {
+        await expect(registry.importDroppedWebsiteFiles(sender(1), request)).resolves.toEqual({ ok: true, value: null });
+        expect(electronMocks.showMessageBox).toHaveBeenCalledOnce();
+        expect(web.websiteAddContent).not.toHaveBeenCalled();
+        expect(Object.keys(web.sites.get("landing")!.Contents)).toEqual(["/existing.txt"]);
+        expect(Buffer.from(web.sites.get("landing")!.Contents["/existing.txt"]!.Content).toString()).toBe("server original");
+        expect(observed.buffers).toHaveLength(1);
+        expect(observed.buffers[0]!.every((byte) => byte === 0)).toBe(true);
+      } finally { observed.restore(); }
+    });
+
+    it.each(["replacement", "removal"])("uploads new paths after a skipped existing file's %s during the dialog", async (change) => {
+      const { registry, web, request } = await setup();
+      const updated = Buffer.from("another operator's retained bytes");
+      electronMocks.showMessageBox.mockImplementationOnce(async () => {
+        const site = web.sites.get("landing")!;
+        if (change === "removal") delete site.Contents["/existing.txt"];
+        else site.Contents["/existing.txt"] = clientpb.WebContent.create({
+          ID: randomUUID(), WebsiteID: site.ID, Path: "/existing.txt", Content: updated,
+          Size: String(updated.length), Sha256: createHash("sha256").update(updated).digest("hex"), ContentType: "application/x-preserved",
+        });
+        return { response: 2 };
+      });
+      const result = await registry.importDroppedWebsiteFiles(sender(1), request);
+      expect(result).toMatchObject({ ok: true, value: { site: { contentCount: change === "removal" ? 1 : 2 } } });
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(Object.keys(web.websiteAddContent.mock.calls[0]![1])).toEqual(["/new.txt"]);
+      const stored = web.sites.get("landing")!.Contents;
+      if (change === "removal") expect(stored["/existing.txt"]).toBeUndefined();
+      else {
+        expect(stored["/existing.txt"]!.Content).toEqual(updated);
+        expect(stored["/existing.txt"]!.ContentType).toBe("application/x-preserved");
+      }
+      expect(Buffer.from(stored["/new.txt"]!.Content).toString()).toBe("local addition");
+    });
+
+    it.each(["new conflict", "website replacement"])("rejects skip-existing uploads after %s during the dialog", async (change) => {
+      const { registry, web, request } = await setup();
+      const observed = observeDropBuffers();
+      electronMocks.showMessageBox.mockImplementationOnce(async () => {
+        const site = web.sites.get("landing")!;
+        if (change === "website replacement") site.ID = randomUUID();
+        else {
+          const bytes = Buffer.from("new content from another operator");
+          site.Contents["/new.txt"] = clientpb.WebContent.create({
+            ID: randomUUID(), WebsiteID: site.ID, Path: "/new.txt", Content: bytes,
+            Size: String(bytes.length), Sha256: createHash("sha256").update(bytes).digest("hex"), ContentType: "text/plain",
+          });
+        }
+        return { response: 2 };
+      });
+      try {
+        await expect(registry.importDroppedWebsiteFiles(sender(1), request))
+          .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/changed/) });
+        expect(web.websiteAddContent).not.toHaveBeenCalled();
+        expect(Buffer.from(web.sites.get("landing")!.Contents["/existing.txt"]!.Content).toString()).toBe("server original");
+        if (change === "new conflict") expect(Buffer.from(web.sites.get("landing")!.Contents["/new.txt"]!.Content).toString())
+          .toBe("new content from another operator");
+        expect(observed.buffers).toHaveLength(2);
+        expect(observed.buffers.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+      } finally { observed.restore(); }
     });
 
     it("waits for approval and uploads the originally read bytes if local files change during the dialog", async () => {
@@ -1875,7 +1972,7 @@ describe("connection registry with an injected Sliver client", () => {
       expect(web.websiteAddContent).not.toHaveBeenCalled();
       decision.resolve({ response: 1 });
       expect(await importing).toMatchObject({ ok: true, value: { site: { contentCount: 2 } } });
-      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(web.websiteAddContent).toHaveBeenCalledTimes(2);
       expect(Buffer.from(web.sites.get("landing")!.Contents["/existing.txt"]!.Content).toString()).toBe("local replacement");
       expect(Buffer.from(web.sites.get("landing")!.Contents["/new.txt"]!.Content).toString()).toBe("local addition");
     });
@@ -1933,7 +2030,7 @@ describe("connection registry with an injected Sliver client", () => {
         expect(web.websiteAddContent).toHaveBeenCalledOnce();
       } finally { decision.resolve({ response: 1 }); }
       expect(await importing).toMatchObject({ ok: true, value: { site: { contentCount: 3 } } });
-      expect(web.websiteAddContent).toHaveBeenCalledTimes(2);
+      expect(web.websiteAddContent).toHaveBeenCalledTimes(3);
       expect(Buffer.from(web.sites.get("landing")!.Contents["/unrelated.txt"]!.Content).toString()).toBe("another window");
     });
 
@@ -2019,6 +2116,179 @@ describe("connection registry with an injected Sliver client", () => {
       expect(web.websiteAddContent).not.toHaveBeenCalled();
       expect(web.sites.get("landing")!.Contents).toEqual({});
     } finally { retained.fill(0); }
+  });
+
+  describe("dropped website upload progress", () => {
+    async function setup(directory = true, count = 2) {
+      const client = new FakeSliverClient();
+      const web = attachWebsiteBackend(client);
+      const registry = createRegistry(() => client.adapter);
+      registry.registerWindow(1);
+      await connectSaved(registry, 1);
+      await registry.createWebsite(1, { name: "landing" });
+      const folder = join(root, "site");
+      await mkdir(folder);
+      const files = Array.from({ length: count }, (_, index) => join(folder, `${index}.txt`));
+      await Promise.all(files.map((file, index) => writeFile(file, `local file ${index}`)));
+      await writeFile(join(folder, "empty.txt"), "");
+      web.websiteAddContent.mockClear();
+      web.websites.mockClear();
+      return { registry, web, request: { sourcePaths: directory ? [folder] : files, input: { name: "landing" } } };
+    }
+
+    it("advances only after each file is acknowledged, with one catalog preflight for the whole batch", async () => {
+      const { registry, web, request } = await setup();
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const write = web.websiteAddContent.getMockImplementation()!;
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => { await first.promise; return write(name, contents); });
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => { await second.promise; return write(name, contents); });
+      const progress = vi.fn();
+      const uploading = registry.importDroppedWebsiteFiles(sender(1), request, progress);
+      try {
+        await vi.waitFor(() => expect(web.websiteAddContent).toHaveBeenCalledOnce());
+        expect(progress.mock.calls.map(([value]) => value)).toEqual([{ completedFiles: 0, totalFiles: 2 }]);
+        expect(web.sites.get("landing")!.Contents).toEqual({});
+        first.resolve();
+        await vi.waitFor(() => expect(web.websiteAddContent).toHaveBeenCalledTimes(2));
+        expect(progress.mock.calls.map(([value]) => value)).toEqual([
+          { completedFiles: 0, totalFiles: 2 }, { completedFiles: 1, totalFiles: 2 },
+        ]);
+        expect(Object.keys(web.sites.get("landing")!.Contents)).toEqual(["/0.txt"]);
+      } finally { first.resolve(); second.resolve(); }
+      expect(await uploading).toMatchObject({ ok: true, value: { site: { contentCount: 2 } } });
+      expect(progress).toHaveBeenLastCalledWith({ completedFiles: 2, totalFiles: 2 });
+      expect(web.websiteAddContent.mock.calls.map(([, contents]) => Object.keys(contents))).toEqual([["/0.txt"], ["/1.txt"]]);
+      expect(web.websites).toHaveBeenCalledOnce();
+    });
+
+    it.each([true, false])("reports a one-file directory but keeps direct-file uploads unchanged (directory=%s)", async (directory) => {
+      const { registry, web, request } = await setup(directory, 1);
+      const progress = vi.fn();
+      expect(await registry.importDroppedWebsiteFiles(sender(1), request, progress)).toMatchObject({ ok: true });
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(progress.mock.calls.map(([value]) => value)).toEqual(directory
+        ? [{ completedFiles: 0, totalFiles: 1 }, { completedFiles: 1, totalFiles: 1 }] : []);
+    });
+
+    it("excludes skipped paths and empty directory files from the upload total", async () => {
+      const { registry, web, request } = await setup();
+      await registry.saveWebsiteText(1, { name: "landing", path: "/0.txt", text: "keep existing", contentType: "text/plain", overwrite: false });
+      web.websiteAddContent.mockClear();
+      electronMocks.showMessageBox.mockResolvedValueOnce({ response: 2 });
+      const progress = vi.fn();
+      expect(await registry.importDroppedWebsiteFiles(sender(1), request, progress)).toMatchObject({ ok: true });
+      expect(progress.mock.calls.map(([value]) => value)).toEqual([
+        { completedFiles: 0, totalFiles: 1 }, { completedFiles: 1, totalFiles: 1 },
+      ]);
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(Object.keys(web.websiteAddContent.mock.calls[0]![1])).toEqual(["/1.txt"]);
+      expect(Buffer.from(web.sites.get("landing")!.Contents["/0.txt"]!.Content).toString()).toBe("keep existing");
+    });
+
+    it("uploads shrinking replacements before additions so intermediate catalogs stay within budget", async () => {
+      const { registry, web, request } = await setup(false, 2);
+      const retained = Buffer.alloc(30 * 1024 * 1024, 0x61);
+      const site = web.sites.get("landing")!;
+      site.Contents["/1.txt"] = clientpb.WebContent.create({
+        ID: randomUUID(), WebsiteID: site.ID, Path: "/1.txt", Content: retained, Size: String(retained.length),
+        Sha256: createHash("sha256").update(retained).digest("hex"), ContentType: "text/plain",
+      });
+      await writeFile(request.sourcePaths[0]!, "b".repeat(2 * 1024 * 1024));
+      const write = web.websiteAddContent.getMockImplementation()!;
+      web.websiteAddContent.mockImplementation(async (name, contents) => {
+        websiteFiles.assertWebsiteCatalogBudget([...web.sites.values()], name, contents, site.ID);
+        return write(name, contents);
+      });
+      electronMocks.showMessageBox.mockResolvedValueOnce({ response: 1 });
+      const progress = vi.fn();
+      try {
+        expect(await registry.importDroppedWebsiteFiles(sender(1), request, progress)).toMatchObject({ ok: true });
+        expect(web.websiteAddContent.mock.calls.map(([, contents]) => Object.keys(contents))).toEqual([["/1.txt"], ["/0.txt"]]);
+        expect(progress.mock.calls.map(([value]) => value)).toEqual([
+          { completedFiles: 0, totalFiles: 2 }, { completedFiles: 1, totalFiles: 2 }, { completedFiles: 2, totalFiles: 2 },
+        ]);
+      } finally { retained.fill(0); }
+    });
+
+    it.each(["RPC failure", "invalid MIME acknowledgement", "invalid bytes acknowledgement"])("does not report completion after a later %s", async (failure) => {
+      const { registry, web, request } = await setup(false, 3);
+      const write = web.websiteAddContent.getMockImplementation()!;
+      web.websiteAddContent.mockImplementationOnce(write);
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => {
+        if (failure === "RPC failure") throw new Error("File upload failed");
+        const response = await write(name, contents);
+        const uploaded = response.Contents["/1.txt"]!;
+        if (failure === "invalid MIME acknowledgement") uploaded.ContentType = "application/x-unconfirmed";
+        else {
+          uploaded.Content = Buffer.from("different bytes");
+          uploaded.Size = String(uploaded.Content.byteLength);
+          uploaded.Sha256 = createHash("sha256").update(uploaded.Content).digest("hex");
+        }
+        return response;
+      });
+      const progress = vi.fn();
+      const result = await registry.importDroppedWebsiteFiles(sender(1), request, progress);
+      expect(result).toMatchObject({ ok: false, error: expect.stringMatching(/failed|did not confirm/) });
+      expect(progress.mock.calls.map(([value]) => value)).toEqual([
+        { completedFiles: 0, totalFiles: 3 }, { completedFiles: 1, totalFiles: 3 },
+      ]);
+      expect(web.websiteAddContent).toHaveBeenCalledTimes(2);
+      expect(web.sites.get("landing")!.Contents["/2.txt"]).toBeUndefined();
+      expect(web.websiteAddContent.mock.calls.every(([, contents]) => Object.values(contents)
+        .every((item) => item.Content.every((byte) => byte === 0)))).toBe(true);
+    });
+
+    it.each(["remaining destination", "website identity", "disconnect"])("stops remaining uploads when %s changes after an acknowledgement", async (change) => {
+      const { registry, web, request } = await setup();
+      const write = web.websiteAddContent.getMockImplementation()!;
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => {
+        const response = await write(name, contents);
+        if (change === "disconnect") await registry.disconnect(1);
+        else if (change === "website identity") web.sites.get(name)!.ID = randomUUID();
+        else {
+          const site = web.sites.get(name)!;
+          const bytes = Buffer.from("another operator's destination");
+          site.Contents["/1.txt"] = clientpb.WebContent.create({
+            ID: randomUUID(), WebsiteID: site.ID, Path: "/1.txt", Content: bytes, Size: String(bytes.length),
+            Sha256: createHash("sha256").update(bytes).digest("hex"), ContentType: "text/plain",
+          });
+        }
+        return response;
+      });
+      const progress = vi.fn();
+      await expect(registry.importDroppedWebsiteFiles(sender(1), request, progress))
+        .resolves.toMatchObject({ ok: false, error: expect.stringMatching(/changed/) });
+      expect(web.websiteAddContent).toHaveBeenCalledOnce();
+      expect(progress.mock.calls.map(([value]) => value)).toEqual(change === "disconnect"
+        ? [{ completedFiles: 0, totalFiles: 2 }]
+        : [{ completedFiles: 0, totalFiles: 2 }, { completedFiles: 1, totalFiles: 2 }]);
+      if (change === "remaining destination") expect(Buffer.from(web.sites.get("landing")!.Contents["/1.txt"]!.Content).toString())
+        .toBe("another operator's destination");
+    });
+
+    it("holds the shared mutation queue until every file in the batch has finished", async () => {
+      const { registry, web, request } = await setup();
+      registry.registerWindow(2);
+      await connectSaved(registry, 2);
+      const first = deferred<void>();
+      const second = deferred<void>();
+      const write = web.websiteAddContent.getMockImplementation()!;
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => { await first.promise; return write(name, contents); });
+      web.websiteAddContent.mockImplementationOnce(async (name, contents) => { await second.promise; return write(name, contents); });
+      const uploading = registry.importDroppedWebsiteFiles(sender(1), request, vi.fn());
+      await vi.waitFor(() => expect(web.websiteAddContent).toHaveBeenCalledOnce());
+      const unrelated = registry.saveWebsiteText(2, { name: "landing", path: "/unrelated.txt", text: "queued", contentType: "text/plain", overwrite: false });
+      try {
+        first.resolve();
+        await vi.waitFor(() => expect(web.websiteAddContent).toHaveBeenCalledTimes(2));
+        expect(Object.keys(web.websiteAddContent.mock.calls[1]![1])).toEqual(["/1.txt"]);
+        expect(web.sites.get("landing")!.Contents["/unrelated.txt"]).toBeUndefined();
+      } finally { first.resolve(); second.resolve(); }
+      expect(await uploading).toMatchObject({ ok: true });
+      expect(await unrelated).toMatchObject({ ok: true });
+      expect(web.websiteAddContent.mock.calls.map(([, contents]) => Object.keys(contents))).toEqual([["/0.txt"], ["/1.txt"], ["/unrelated.txt"]]);
+    });
   });
 
   it("does not corrupt concurrently replaced bytes when changing a website content type", async () => {

@@ -22,7 +22,7 @@ import { LOOT_DROPPED_ADD_IPC_CHANNEL, type AddCredentialInput } from "../shared
 import { defaultGenerateInput } from "../shared/generate-defaults.js";
 import { APPLICATION_SETTINGS_VERSION, DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 import { SESSION_DROPPED_UPLOAD_IPC_CHANNEL } from "../shared/session-contracts.js";
-import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_LIMITS } from "../shared/website-contracts.js";
+import { WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, WEBSITE_LIMITS, type WebsiteUploadProgress } from "../shared/website-contracts.js";
 
 const electronMocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -1917,6 +1917,36 @@ describe("trusted Electron IPC boundary", () => {
     expect(importDroppedWebsiteFiles).toHaveBeenCalledOnce();
     unregisterIpcHandlers();
     expect(electronMocks.removeHandler).toHaveBeenCalledWith(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
+  });
+
+  it("sends upload progress only to the initiating document while its request is active", async () => {
+    let publish!: (progress: WebsiteUploadProgress) => void;
+    let finish!: () => void;
+    const importDroppedWebsiteFiles = vi.fn<IpcConnectionRegistry["importDroppedWebsiteFiles"]>((_sender, _request, onProgress) => {
+      publish = onProgress!;
+      return new Promise((resolve) => { finish = () => resolve({ ok: true, value: null }); });
+    });
+    registerIpcHandlers(registryMock({ importDroppedWebsiteFiles }), vi.fn(), RENDERER_URL);
+    const { event, sender, mainFrame } = invokeEvent("sliver://app/index.html#/websites", 77);
+    const send = vi.fn();
+    Object.assign(sender, { send });
+    const requestId = "55555555-5555-4555-8555-555555555555";
+    const request = { sourcePaths: ["/site"], input: { name: "public" }, requestId };
+    const pending = electronMocks.handlers.get(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL)!(event, request);
+    publish({ completedFiles: 0, totalFiles: 20 });
+    publish({ completedFiles: 2, totalFiles: 20 });
+    expect(send.mock.calls).toEqual([
+      [WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, { requestId, progress: { completedFiles: 0, totalFiles: 20 } }],
+      [WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, { requestId, progress: { completedFiles: 2, totalFiles: 20 } }],
+    ]);
+    Object.assign(mainFrame, { frameToken: "new-document" });
+    publish({ completedFiles: 3, totalFiles: 20 });
+    expect(send).toHaveBeenCalledTimes(2);
+    Object.assign(mainFrame, { frameToken: "main-frame" });
+    finish();
+    await expect(pending).resolves.toEqual({ ok: true, value: null });
+    publish({ completedFiles: 4, totalFiles: 20 });
+    expect(send).toHaveBeenCalledTimes(2);
   });
 
   it("opens website editors through a validated native controller without accepting source bytes", async () => {

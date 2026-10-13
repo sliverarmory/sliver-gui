@@ -1,11 +1,31 @@
 import { describe, expect, it } from "vitest";
 import {
   WEBSITE_DROPPED_MAX_LOCAL_PATH_LENGTH, WEBSITE_LIMITS, isWebsiteTextContentType,
-  parseDroppedWebsiteFilesIpcRequest, parseImportWebsiteFilesInput, parseListWebsitesInput,
+  parseDroppedWebsiteFilesIpcRequest, parseWebsiteUploadProgressEvent, parseImportWebsiteFilesInput, parseListWebsitesInput,
   parseOpenWebsiteTextEditorInput, parseSaveWebsiteTextInput, parseWebsiteContentInput, parseWebsiteNameInput, parseUpdateWebsiteContentTypeInput,
 } from "./website-contracts.js";
 
 describe("website IPC contracts", () => {
+  it("accepts correlated bounded upload counts without exposing source paths", () => {
+    const requestId = "55555555-5555-4555-8555-555555555555";
+    const request = { sourcePaths: ["/site"], input: { name: "public" }, requestId };
+    expect(parseDroppedWebsiteFilesIpcRequest(request)).toEqual(request);
+    for (const completedFiles of [0, 3, 20]) {
+      const event = { requestId, progress: { completedFiles, totalFiles: 20 } };
+      expect(parseWebsiteUploadProgressEvent(event)).toEqual(event);
+    }
+    expect(() => parseDroppedWebsiteFilesIpcRequest({ ...request, requestId: "bad" })).toThrow();
+  });
+
+  it.each([
+    { completedFiles: -1, totalFiles: 20 }, { completedFiles: 21, totalFiles: 20 },
+    { completedFiles: 1.5, totalFiles: 20 }, { completedFiles: 0, totalFiles: 0 },
+    { completedFiles: 0, totalFiles: 501 }, { completedFiles: 0, totalFiles: Infinity },
+    { completedFiles: "1", totalFiles: 20 }, { completedFiles: 0, totalFiles: 20, sourcePath: "/private" },
+  ])("rejects malformed upload progress %j", (progress) => {
+    expect(() => parseWebsiteUploadProgressEvent({ requestId: "55555555-5555-4555-8555-555555555555", progress })).toThrow();
+  });
+
   it("preserves exact website names and bounded native paths for dropped files and directories", () => {
     const request = { sourcePaths: ["/private/operator/index.html ", "C:\\operator\\assets", "D:/site/index.html", "\\\\server\\share\\site"], input: { name: " public " } };
     const parsed = parseDroppedWebsiteFilesIpcRequest(request);

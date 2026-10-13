@@ -212,7 +212,7 @@ import {
   WEBSITE_LIMITS, isWebsiteTextContentType, parseOpenWebsiteTextEditorInput,
   type DroppedWebsiteFilesIpcRequest, type OpenWebsiteTextEditorInput, type ImportWebsiteFilesInput, type ListWebsitesInput, type SaveWebsiteTextInput, type UpdateWebsiteContentTypeInput,
   type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentInput, type WebsiteDetail,
-  type WebsiteExportResult, type WebsiteNameInput,
+  type WebsiteExportResult, type WebsiteNameInput, type WebsiteUploadProgress,
 } from "../shared/website-contracts.js";
 import {
   assertWebsiteCatalogBudget, clearWebsiteContents, findWebsiteContent, readDroppedWebsiteImport, readWebsiteImport, websiteContentBytes,
@@ -7276,6 +7276,7 @@ export class ConnectionRegistry {
     expectedSiteId?: string,
     requireReplacement = false,
     beforeSelectionContents?: Record<string, clientpb.WebContent>,
+    onProgress?: (progress: WebsiteUploadProgress) => void,
   ): Promise<WebsiteDetail> {
     const current = await pool.client.website(input.name);
     try {
@@ -7306,13 +7307,62 @@ export class ConnectionRegistry {
       for (const item of Object.values(contents)) {
         const previous = Object.values(current.Contents).find((entry) => entry.Path === item.Path);
         const existing = latest && Object.values(latest.Contents).find((entry) => entry.Path === item.Path);
-        if (previous?.ID !== existing?.ID || previous?.Sha256 !== existing?.Sha256) {
+        if (previous?.ID !== existing?.ID || previous?.Sha256 !== existing?.Sha256 ||
+            previous?.Size !== existing?.Size || previous?.ContentType !== existing?.ContentType) {
           throw new Error("Website content changed before uploading; refresh and review the replacement");
         }
       }
       assertWebsiteCatalogBudget(catalog, input.name, contents, current.ID);
     } finally { for (const site of catalog) clearWebsiteContents(site); }
     assertBinding();
+    if (onProgress) {
+      const original = new Map(Object.values(current.Contents).map((item) => [item.Path, item]));
+      // Apply shrinking replacements first to free catalog space before additions.
+      const shrinks = (item: clientpb.WebContent): boolean => BigInt(item.Content.byteLength) < BigInt(original.get(item.Path)?.Size ?? "0");
+      const items = Object.values(contents).sort((left, right) => Number(shrinks(right)) - Number(shrinks(left)));
+      const report = (completedFiles: number): void => {
+        // Progress delivery is advisory and cannot turn an acknowledged write into a failed upload.
+        try { onProgress({ completedFiles, totalFiles: items.length }); } catch { /* A renderer may have closed. */ }
+      };
+      report(0);
+      let detail: WebsiteDetail | undefined;
+      for (let index = 0; index < items.length; index++) {
+        assertBinding();
+        if (index > 0) {
+          const latest = await pool.client.website(input.name);
+          try {
+            assertBinding();
+            if (latest.Name !== input.name || latest.ID !== current.ID) throw new Error("The website changed while content was uploading; refresh its state");
+            const latestContents = new Map(Object.values(latest.Contents).map((item) => [item.Path, item]));
+            for (const remaining of items.slice(index)) {
+              const previous = original.get(remaining.Path);
+              const existing = latestContents.get(remaining.Path);
+              if (previous?.ID !== existing?.ID || previous?.Sha256 !== existing?.Sha256 ||
+                  previous?.Size !== existing?.Size || previous?.ContentType !== existing?.ContentType) {
+                throw new Error("Website content changed during upload; refresh and review the remaining files");
+              }
+            }
+          } finally { clearWebsiteContents(latest); }
+        }
+        assertBinding();
+        const item = items[index]!;
+        const response = await pool.client.websiteAddContent(input.name, { [item.Path]: item });
+        try {
+          assertBinding();
+          if (response.ID !== current.ID) throw new Error("The website changed while content was uploading; refresh its state");
+          const uploaded = findWebsiteContent(response, input.name, item.Path);
+          const bytes = websiteContentBytes(uploaded);
+          if (uploaded.ContentType !== item.ContentType || !Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+            .equals(Buffer.from(item.Content.buffer, item.Content.byteOffset, item.Content.byteLength))) {
+            throw new Error("The server did not confirm the uploaded website file; refresh its state");
+          }
+          detail = websiteDetail(response, input.name);
+        } finally { clearWebsiteContents(response); }
+        report(index + 1);
+      }
+      if (!detail) throw new Error("No website files were selected for upload");
+      return detail;
+    }
     const response = await pool.client.websiteAddContent(input.name, contents);
     try {
       assertBinding();
@@ -7510,14 +7560,17 @@ export class ConnectionRegistry {
     });
   }
 
-  async importDroppedWebsiteFiles(sender: WebContents, request: DroppedWebsiteFilesIpcRequest): Promise<OperationResult<WebsiteDetail | null>> {
+  async importDroppedWebsiteFiles(
+    sender: WebContents, request: DroppedWebsiteFilesIpcRequest, onProgress?: (progress: WebsiteUploadProgress) => void,
+  ): Promise<OperationResult<WebsiteDetail | null>> {
     const owner = requireOwnerWindow(sender);
     const { input, sourcePaths } = request;
     return this.withPool(sender.id, async (pool, assertBinding) => {
       const before = await pool.client.website(input.name);
       try { assertBinding(); websiteDetail(before, input.name); }
       finally { clearWebsiteContents(before); }
-      const contents = await readDroppedWebsiteImport(sourcePaths, input, assertBinding);
+      let hasDirectory = false;
+      const contents = await readDroppedWebsiteImport(sourcePaths, input, assertBinding, () => { hasDirectory = true; });
       try {
         const reviewed = await pool.client.website(input.name);
         let conflicts: string[];
@@ -7528,8 +7581,9 @@ export class ConnectionRegistry {
           const existingPaths = new Set(Object.values(reviewed.Contents).map((item) => item.Path));
           conflicts = Object.keys(contents).filter((path) => existingPaths.has(path)).sort();
         } finally { clearWebsiteContents(reviewed); }
-        const overwrite = conflicts.length > 0;
-        if (overwrite) {
+        let uploadContents = contents;
+        let overwrite = false;
+        if (conflicts.length > 0) {
           const listedPaths = conflicts.slice(0, 20).join("\n");
           const remaining = conflicts.length > 20 ? `\n… and ${conflicts.length - 20} more` : "";
           // Retain the exact dropped bytes, but leave the mutation queue free
@@ -7538,17 +7592,26 @@ export class ConnectionRegistry {
             type: "warning",
             title: "Overwrite website files?",
             message: `Replace ${conflicts.length} existing ${conflicts.length === 1 ? "file" : "files"} on ${input.name}?`,
-            detail: `${listedPaths}${remaining}\n\nOverwrite replaces these files and uploads any new files in this drop. Cancel leaves the website unchanged.`,
-            buttons: ["Cancel", "Overwrite"],
+            detail: `${listedPaths}${remaining}\n\nOverwrite replaces these files and uploads any new files in this drop. Skip existing uploads only new files. Cancel leaves the website unchanged.`,
+            buttons: ["Cancel", "Overwrite", "Skip existing"],
             defaultId: 0,
             cancelId: 0,
             noLink: true,
           });
           assertBinding();
-          if (decision.response !== 1) return null;
+          if (decision.response === 1) {
+            overwrite = true;
+          } else if (decision.response === 2) {
+            const skippedPaths = new Set(conflicts);
+            uploadContents = Object.fromEntries(Object.entries(contents).filter(([path]) => !skippedPaths.has(path)));
+            if (Object.keys(uploadContents).length === 0) return null;
+          } else {
+            return null;
+          }
         }
         return await this.queueWebsiteMutation(pool, assertBinding, () => this.writeWebsiteContents(
-          pool, assertBinding, { ...input, overwrite }, contents, before.ID, false, reviewed.Contents,
+          pool, assertBinding, { ...input, overwrite }, uploadContents, before.ID, false, reviewed.Contents,
+          hasDirectory || sourcePaths.length > 1 || Object.keys(contents).length > 1 ? onProgress ?? (() => {}) : undefined,
         ));
       } finally { for (const item of Object.values(contents)) item.Content.fill(0); }
     });

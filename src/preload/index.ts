@@ -30,8 +30,10 @@ import {
 } from "../shared/operator-data-contracts.js";
 import {
   WEBSITE_DROPPED_IMPORT_IPC_CHANNEL,
+  WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL,
   WEBSITE_LIMITS,
   parseDroppedWebsiteFilesIpcRequest,
+  parseWebsiteUploadProgressEvent,
   parseWebsiteNameInput,
 } from "../shared/website-contracts.js";
 import { parseApplicationUpdateState } from "../shared/application-update-contracts.js";
@@ -166,7 +168,8 @@ function createInvokeApi(): SliverDesktopInvokeAPI {
 
 const api: SliverDesktopAPI = {
   ...createInvokeApi(),
-  importDroppedWebsiteFiles: (files, input) => {
+  importDroppedWebsiteFiles: (files, input, onProgress) => {
+    if (onProgress !== undefined && typeof onProgress !== "function") throw new TypeError("Invalid website upload progress callback");
     const parsedInput = parseWebsiteNameInput(input);
     if (!Array.isArray(files) || files.length === 0 || files.length > WEBSITE_LIMITS.importFiles) {
       throw new TypeError(`Dropped website imports require 1 to ${WEBSITE_LIMITS.importFiles} files or directories`);
@@ -182,8 +185,29 @@ const api: SliverDesktopAPI = {
       if (!sourcePath) throw new TypeError("Dropped website content must be backed by a local file or directory");
       return sourcePath;
     });
-    const request = parseDroppedWebsiteFilesIpcRequest({ sourcePaths, input: parsedInput });
-    return ipcRenderer.invoke(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, request);
+    const request = parseDroppedWebsiteFilesIpcRequest({ sourcePaths, input: parsedInput,
+      ...(onProgress ? { requestId: crypto.randomUUID() } : {}),
+    });
+    if (!onProgress) return ipcRenderer.invoke(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, request);
+    let active = true;
+    let lastCompleted = -1;
+    let expectedTotal: number | undefined;
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (!active || payload.length !== 1) return;
+      try {
+        const event = parseWebsiteUploadProgressEvent(payload[0]);
+        if (event.requestId !== request.requestId || event.progress.completedFiles <= lastCompleted ||
+            (expectedTotal !== undefined && event.progress.totalFiles !== expectedTotal)) return;
+        lastCompleted = event.progress.completedFiles;
+        expectedTotal = event.progress.totalFiles;
+        onProgress(event.progress);
+      } catch { /* Ignore malformed progress or a renderer callback that is no longer available. */ }
+    };
+    ipcRenderer.on(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, handler);
+    return ipcRenderer.invoke(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL, request).finally(() => {
+      active = false;
+      ipcRenderer.removeListener(WEBSITE_UPLOAD_PROGRESS_IPC_CHANNEL, handler);
+    });
   },
   addDroppedLoot: (file) => {
     let sourcePath: string;

@@ -152,6 +152,7 @@ interface FakeMainState {
     timeoutSeconds: number;
   }>;
   processResponseHeld: boolean;
+  websiteAddContentHeld: boolean;
   m4Audit: {
     callCounts: Record<string, number>;
     artifactInputs: number;
@@ -192,6 +193,8 @@ interface FakeMainControl {
   releaseConsoleExitHold(): void;
   holdNextProcessResponse(): void;
   releaseProcessResponseHold(): void;
+  holdWebsiteAddContent(afterWrites?: number): void;
+  releaseWebsiteAddContentHold(): void;
 }
 
 declare global {
@@ -238,6 +241,7 @@ const state: FakeMainState = {
   bofCalls: [],
   legacyBofCalls: [],
   processResponseHeld: false,
+  websiteAddContentHeld: false,
   m4Audit: {
     callCounts: {},
     artifactInputs: 0,
@@ -934,6 +938,8 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   const portForwards = new Map<string, PortForward>();
   const socks5Proxies = new Map<string, Socks5Proxy>();
   const reversePortForwards = new Map<number, ReversePortForwardInfo>();
+  let websiteWritesBeforeHold: number | undefined;
+  let heldWebsiteAddContent: (() => void) | undefined;
 
   globalThis.__SLIVER_GUI_E2E_CONTROL__ = {
     setEventStreamStatus(status) {
@@ -972,6 +978,18 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       advanceSessionCheckinOnNextRead = false;
       const release = heldProcessResponse;
       heldProcessResponse = undefined;
+      if (release) queueMicrotask(release);
+    },
+    holdWebsiteAddContent(afterWrites = 0) {
+      if (!Number.isSafeInteger(afterWrites) || afterWrites < 0) throw new Error("Invalid website write hold");
+      if (websiteWritesBeforeHold !== undefined || heldWebsiteAddContent) throw new Error("A website write is already held");
+      websiteWritesBeforeHold = afterWrites;
+    },
+    releaseWebsiteAddContentHold() {
+      websiteWritesBeforeHold = undefined;
+      const release = heldWebsiteAddContent;
+      heldWebsiteAddContent = undefined;
+      testState.websiteAddContentHeld = false;
       if (release) queueMicrotask(release);
     },
   };
@@ -1041,7 +1059,16 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   return {
     event$: eventSubject.asObservable(),
     eventStreamState$: eventStreamState.asObservable(),
-    ...createWebsiteFixture(record, () => eventSubject.next(fakeEvent("website"))),
+    ...createWebsiteFixture(record, () => eventSubject.next(fakeEvent("website")), async () => {
+      if (websiteWritesBeforeHold === undefined) return;
+      if (websiteWritesBeforeHold > 0) {
+        websiteWritesBeforeHold -= 1;
+        return;
+      }
+      websiteWritesBeforeHold = undefined;
+      testState.websiteAddContentHeld = true;
+      await new Promise<void>((resolve) => { heldWebsiteAddContent = resolve; });
+    }),
     async connect() {
       record("connect");
       if (config.token !== "FAKE_TOKEN_M0_DO_NOT_RENDER") {

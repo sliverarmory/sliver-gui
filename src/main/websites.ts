@@ -134,11 +134,12 @@ export async function readWebsiteImport(
 /** Read paths resolved from genuine dropped files by the isolated preload bridge. */
 export async function readDroppedWebsiteImport(
   sourcePaths: string[], input: WebsiteNameInput, assertBinding: () => void,
+  onDirectory?: () => void,
 ): Promise<Record<string, clientpb.WebContent>> {
   if (!sourcePaths.length || sourcePaths.length > WEBSITE_LIMITS.importFiles) {
     throw new Error("Website import requires between 1 and 500 files or directories");
   }
-  return readWebsiteImportBatch(sourcePaths.map((sourcePath) => ({ sourcePath })), input, assertBinding);
+  return readWebsiteImportBatch(sourcePaths.map((sourcePath) => ({ sourcePath })), input, assertBinding, onDirectory);
 }
 
 interface WebsiteImportSelection {
@@ -152,6 +153,7 @@ interface WebsiteImportSelection {
 
 async function readWebsiteImportBatch(
   selections: WebsiteImportSelection[], input: WebsiteNameInput, assertBinding: () => void,
+  onDirectory?: () => void,
 ): Promise<Record<string, clientpb.WebContent>> {
   const contents: Record<string, clientpb.WebContent> = Object.create(null) as Record<string, clientpb.WebContent>;
   let total = 0;
@@ -192,6 +194,7 @@ async function readWebsiteImportBatch(
       if (canonicalInfo.isSymbolicLink() || canonicalInfo.dev !== selectedInfo.dev || canonicalInfo.ino !== selectedInfo.ino) {
         throw new Error("Website import selection changed while being opened");
       }
+      if (directory) onDirectory?.();
       const basePath = selection.path ?? (directory ? "/" : `/${basename(selection.sourcePath)}`);
       const walk = async (currentDirectory: string, depth: number): Promise<void> => {
         if (depth > 32) throw new Error("Website import directory nesting exceeds the limit");
