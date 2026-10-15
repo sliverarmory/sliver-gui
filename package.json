@@ -80,7 +80,7 @@
     "@fortawesome/free-brands-svg-icons": "7.3.1",
     "@fortawesome/free-solid-svg-icons": "7.3.1",
     "@fortawesome/react-fontawesome": "3.5.0",
-    "@grpc/grpc-js": "1.14.5",
+    "@grpc/grpc-js": "1.14.6",
     "@heroui-pro/react": "1.0.0-beta.10",
     "@heroui/react": "3.2.6",
     "@heroui/styles": "3.2.6",
