@@ -586,14 +586,14 @@ jobs:
           node-version: 24.15.0
 
       - name: Download the complete N inventory
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: updater-e2e-release-*
           path: release-assets
           merge-multiple: true
 
       - name: Download a verified private provider configuration
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: updater-e2e-build-context-linux
           path: verification-context
@@ -794,13 +794,13 @@ jobs:
         run: npm ci --strict-allow-scripts
 
       - name: Download N-1 installer and public certificate
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: updater-e2e-base-${{ matrix.id }}
           path: ${{ runner.temp }}/sliver-gui-updater-e2e/base
 
       - name: Download verified private release context
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: updater-e2e-release-context
           path: ${{ runner.temp }}/sliver-gui-updater-e2e/release
