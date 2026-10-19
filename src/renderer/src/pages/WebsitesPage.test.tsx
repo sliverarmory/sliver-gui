@@ -117,6 +117,60 @@ function websiteDropTarget(name: string): HTMLElement {
 }
 
 describe("WebsitesPage", () => {
+  it("shows loading indicators until the website catalog and selected content arrive", async () => {
+    const websites = deferred<OperationResult<WebsiteCatalogPage>>();
+    const content = deferred<OperationResult<WebsiteDetail>>();
+    const api = installAPI({
+      listWebsites: vi.fn().mockReturnValue(websites.promise),
+      getWebsite: vi.fn().mockReturnValue(content.promise),
+    });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+
+    expect(screen.getByRole("status", { name: "Loading websites" })).toHaveTextContent("Loading websites…");
+    expect(screen.getByRole("status", { name: "Loading content" })).toHaveTextContent("Loading content…");
+    expect(screen.queryByText("Select a website")).not.toBeInTheDocument();
+    expect(screen.queryByText("No websites yet. Create one to add content.")).not.toBeInTheDocument();
+    expect(api.getWebsite).not.toHaveBeenCalled();
+
+    await act(async () => { websites.resolve({ ok: true, value: catalog() }); });
+    await waitFor(() => expect(api.getWebsite).toHaveBeenCalledExactlyOnceWith({ name: "public" }));
+    expect(screen.queryByRole("status", { name: "Loading websites" })).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Loading content" })).toBeInTheDocument();
+    expect(screen.queryByText("No content yet")).not.toBeInTheDocument();
+
+    await act(async () => { content.resolve({ ok: true, value: SITE }); });
+    expect(await screen.findByRole("button", { name: "Inspect /index.html" })).toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading content" })).not.toBeInTheDocument();
+  });
+
+  it.each(["empty", "error"] as const)("clears catalog loading indicators after an %s response", async (outcome) => {
+    const websites = deferred<OperationResult<WebsiteCatalogPage>>();
+    const api = installAPI({ listWebsites: vi.fn().mockReturnValue(websites.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    expect(screen.getByRole("status", { name: "Loading websites" })).toBeInTheDocument();
+
+    await act(async () => { websites.resolve(outcome === "empty" ? { ok: true, value: catalog([]) } : { ok: false, error: "Could not load websites" }); });
+    if (outcome === "empty") expect(await screen.findByText("No websites yet. Create one to add content.")).toBeInTheDocument();
+    else expect(await screen.findByRole("alert")).toHaveTextContent("Could not load websites");
+    expect(screen.queryByRole("status", { name: "Loading websites" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: "Loading content" })).not.toBeInTheDocument();
+    expect(screen.getByText("Select a website")).toBeInTheDocument();
+    expect(api.getWebsite).not.toHaveBeenCalled();
+  });
+
+  it.each(["empty", "error"] as const)("clears content loading indicators after an %s response", async (outcome) => {
+    const content = deferred<OperationResult<WebsiteDetail>>();
+    const api = installAPI({ getWebsite: vi.fn().mockReturnValue(content.promise) });
+    render(<WebsitesPage snapshot={connectedSnapshot()} />);
+    await waitFor(() => expect(api.getWebsite).toHaveBeenCalledExactlyOnceWith({ name: "public" }));
+    expect(screen.getByRole("status", { name: "Loading content" })).toBeInTheDocument();
+
+    await act(async () => { content.resolve(outcome === "empty" ? { ok: true, value: { ...SITE, contents: [] } } : { ok: false, error: "Could not load content" }); });
+    expect(await screen.findByText(outcome === "empty" ? "No content yet" : "Content unavailable")).toBeInTheDocument();
+    if (outcome === "error") expect(screen.getByRole("alert")).toHaveTextContent("Could not load content");
+    expect(screen.queryByRole("status", { name: "Loading content" })).not.toBeInTheDocument();
+  });
+
   it("uploads a dropped batch directly to the selected website and refreshes its content", async () => {
     const uploaded = { ...SITE, contents: [...SITE.contents, { ...ITEM, id: "style", path: "/style.css", contentType: "text/css" }] };
     const api = installAPI({
@@ -771,9 +825,12 @@ describe("WebsitesPage", () => {
     await user.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => expect(api.getWebsite).toHaveBeenCalledTimes(2));
     expect(screen.getByRole("button", { name: "Preview website" })).toBeDisabled();
+    expect(screen.getByRole("status", { name: "Loading content" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Inspect /index.html" })).toBeInTheDocument();
     expect(api.openWebsiteRenderedPreview).not.toHaveBeenCalled();
     await act(async () => { refresh.resolve({ ok: true, value: { ...SITE, contents: [{ ...ITEM, path: "/" }] } }); });
     await waitFor(() => expect(screen.getByRole("button", { name: "Preview website" })).toBeEnabled());
+    expect(screen.queryByRole("status", { name: "Loading content" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Preview website" }));
     await waitFor(() => expect(api.openWebsiteRenderedPreview).toHaveBeenCalledExactlyOnceWith({ name: "public", path: "/" }));
   });

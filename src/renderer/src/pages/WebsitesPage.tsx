@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import { Button, Card, Checkbox, Chip, Description, Dropdown, Input, Label, Modal, ScrollShadow, SearchField, TextField, Tooltip } from "@heroui/react";
+import { Button, Card, Checkbox, Chip, Description, Dropdown, Input, Label, Modal, ScrollShadow, SearchField, Spinner, TextField, Tooltip } from "@heroui/react";
 import { DataGrid } from "@heroui-pro/react/data-grid";
 import type { DataGridColumn } from "@heroui-pro/react/data-grid";
 import { EmptyState } from "@heroui-pro/react/empty-state";
@@ -486,7 +486,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
                     <SearchField.Group><SearchField.SearchIcon><FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} /></SearchField.SearchIcon><SearchField.Input maxLength={256} placeholder="Search websites" /><SearchField.ClearButton /></SearchField.Group>
                   </SearchField>
                   {catalogError ? <InlineError message={catalogError} /> : null}
-                  {loadingCatalog ? <p role="status" className="text-sm text-muted">Loading websites…</p> : null}
+                  {loadingCatalog ? <WebsiteLoading label="Loading websites" className="shrink-0" /> : null}
                   <ScrollShadow aria-label="Website selection" className="min-h-0 max-h-[520px] overflow-y-auto overscroll-contain" hideScrollBar={false} orientation="vertical" role="region" size={24} tabIndex={0}>
                     <div className="flex flex-col gap-1">
                       {visibleCatalog.items.map((site) => <ApplicationContextMenuScope key={site.name} actions={[
@@ -534,7 +534,7 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
                 onDropFiles={(files) => { void importDroppedFiles(files); }}>
                 <Card className="min-w-0" variant="secondary">
                   <Card.Header>
-                    <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title>{!name ? <Card.Description>Select a website to manage its content.</Card.Description> : null}</div>
+                    <div className="min-w-0"><Card.Title className="break-all">{name || "Website content"}</Card.Title>{!name && !loadingCatalog ? <Card.Description>Select a website to manage its content.</Card.Description> : null}</div>
                   </Card.Header>
                   <Card.Content className="min-w-0 p-0">
                     {name ? <div role="group" aria-label="Website actions" className="flex items-center gap-2 overflow-x-auto px-4 pt-1 pb-4">
@@ -551,8 +551,11 @@ export function WebsitesPage({ snapshot }: WebsitesPageProps): React.JSX.Element
                       </Tooltip>
                     </div> : null}
                     {detailError ? <div className="px-4 pb-4"><InlineError message={detailError} /></div> : null}
-                    {loadingDetail ? <p role="status" className="px-4 pb-3 text-sm text-muted">Loading content…</p> : null}
-                    {name ? <DataGrid aria-label="Website content" columns={columns} contentClassName="min-w-[620px]" data={visibleDetail?.contents ?? []} getRowId={(item) => item.path} variant="secondary" onRowAction={(key) => { const item = visibleDetail?.contents.find((entry) => entry.path === key); if (item) void openPreview(item); }} renderEmptyState={() => <WebsiteEmpty title={loadingDetail ? "Loading content" : detailError ? "Content unavailable" : "No content yet"} description={loadingDetail ? "Fetching website metadata…" : detailError ? "Refresh to try again." : "Add text, a local file, or a directory to this website."} />} /> : <WebsiteEmpty title="Select a website" description="Your website’s paths, content types, and sizes will appear here." />}
+                    {loadingDetail && Boolean(visibleDetail?.contents.length) ? <WebsiteLoading label="Loading content" className="px-4 pb-3" /> : null}
+                    {name ? <DataGrid aria-label="Website content" columns={columns} contentClassName="min-w-[620px]" data={visibleDetail?.contents ?? []} getRowId={(item) => item.path} variant="secondary" onRowAction={(key) => { const item = visibleDetail?.contents.find((entry) => entry.path === key); if (item) void openPreview(item); }} renderEmptyState={() => loadingDetail
+                      ? <WebsiteLoading label="Loading content" />
+                      : <WebsiteEmpty title={detailError ? "Content unavailable" : "No content yet"} description={detailError ? "Refresh to try again." : "Add text, a local file, or a directory to this website."} />}
+                    /> : loadingCatalog ? <WebsiteLoading label="Loading content" /> : <WebsiteEmpty title="Select a website" description="Your website’s paths, content types, and sizes will appear here." />}
                     {visibleDetail?.truncated ? <p role="status" className="px-4 py-3 text-sm text-warning">This website exceeds the content listing limit. Some paths are omitted.</p> : null}
                   </Card.Content>
                 </Card>
@@ -653,6 +656,10 @@ function EditorDialog({ form, error, pending, onChange, onClose, onSubmit }: { f
       </Modal.Dialog>
     </Modal.Container>
   </Modal.Backdrop>;
+}
+
+function WebsiteLoading({ label, className = "min-h-48 justify-center p-8" }: { label: string; className?: string }): React.JSX.Element {
+  return <div role="status" aria-label={label} className={`flex items-center gap-3 text-sm text-muted ${className}`}><Spinner aria-hidden size="sm" /><span>{label}…</span></div>;
 }
 
 function WebsiteEmpty({ title, description }: { title: string; description: string }): React.JSX.Element {
