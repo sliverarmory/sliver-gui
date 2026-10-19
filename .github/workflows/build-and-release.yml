@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.15.0
 
@@ -56,7 +56,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.15.0
           cache: npm
@@ -93,7 +93,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.15.0
           cache: npm
@@ -120,7 +120,7 @@ jobs:
 
       - name: Upload E2E diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sliver-gui-electron-e2e-diagnostics
           path: |
@@ -214,7 +214,7 @@ jobs:
           cache: false
 
       - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.15.0
           cache: npm
@@ -380,7 +380,7 @@ jobs:
 
       - name: Upload packaged-smoke diagnostics
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}-smoke-diagnostics
           path: artifacts/e2e/
@@ -388,7 +388,7 @@ jobs:
           retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
 
       - name: Upload native packages
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_paths }}
@@ -418,7 +418,7 @@ jobs:
 
       - name: Upload updater baseline installer
         if: env.RELEASE_TAG != ''
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: updater-baseline-${{ matrix.update_platform }}
           path: ${{ runner.temp }}/sliver-gui-update-baseline/${{ matrix.baseline_pattern }}
@@ -451,7 +451,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up exact Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24.15.0
 
