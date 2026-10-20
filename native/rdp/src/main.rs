@@ -172,7 +172,7 @@ async fn run(
                         if let Some(domain)=domain{builder=builder.with_domain(domain);}
                         let config=match builder.build(){Ok(config)=>config,Err(_)=>{emit(&output,json!({"type":"state","state":"failed","code":"invalid-config"})).await;break;}};
                         let (events,receiver)=output_channel(4);
-                        let mut client=RdpClient::new(config,events).with_desktop_updates().with_desktop_limits(8192,8192,protocol::MAX_PIXELS);
+                        let mut client=RdpClient::new(config,events).with_desktop_updates().with_desktop_limits(8192,8192,protocol::MAX_PIXELS).with_display_resize_reconnect(false);
                         let sender=client.input_sender();
                         if clipboard{client=client.with_cliprdr_backend_factory(Box::new(clipboard::Factory{state:clip.clone(),input:sender.clone(),output:output.clone()}));}
                         clipboard_enabled=clipboard;input=Some(sender.clone());

@@ -154,6 +154,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
           keyboardShortcuts: settings.keyboardShortcuts,
           terminal: settings.terminal,
           overview: settings.overview,
+          rdp: settings.rdp,
         },
       });
       const runtime = await sliver.getTerminalRuntime();

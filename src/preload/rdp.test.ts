@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RDP_IPC, RDP_PORT_MESSAGE, type RdpConnectInput, type RdpTab, type RdpWindowAPI, type RdpWindowState } from "../shared/rdp-contracts.js";
 import { APPLICATION_CONTEXT_MENU_IPC, type ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
-import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
+import { DEFAULT_APPLICATION_SETTINGS_STATE, DEFAULT_APPLICATION_SETTINGS_VALUES } from "../shared/application-settings-contracts.js";
 
 const mocks = vi.hoisted(() => ({
   expose: vi.fn(), invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>(), on: vi.fn(), removeListener: vi.fn(), postMessage: vi.fn(), send: vi.fn(),
@@ -58,6 +58,29 @@ describe("RDP sandbox preload", () => {
     expect(() => bridge().respondToCertificate({ token: "wrong", decision: "once" })).toThrow();
     expect(() => bridge().clipboard({ tabId: "tab", direction: "send", text: "hidden" } as never)).toThrow();
     expect(() => bridge().setInputCapture({ tabId: "tab", captured: "true" } as never)).toThrow();
+  });
+
+  it("validates application settings updates and their response before crossing the bridge", async () => {
+    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false } } };
+    const updated = { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: 1 };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: updated });
+    expect(await bridge().updateApplicationSettings(input)).toEqual({ ok: true, value: updated });
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(RDP_IPC.updateApplicationSettings, input);
+    expect(() => bridge().updateApplicationSettings({ ...input, expectedRevision: -1 })).toThrow();
+    expect(() => bridge().updateApplicationSettings({ ...input, settings: { ...input.settings, rdp: { clipboard: "false" } } } as never)).toThrow();
+    expect(() => bridge().updateApplicationSettings({ ...input, path: "/tmp/settings.json" } as never)).toThrow();
+    expect(mocks.invoke).toHaveBeenCalledOnce();
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...updated, rdp: { clipboard: "false" } } });
+    await expect(bridge().updateApplicationSettings(input)).rejects.toThrow("Invalid application settings state");
+  });
+
+  it("preserves settings update errors for renderer feedback", async () => {
+    const input = { expectedRevision: 0, settings: DEFAULT_APPLICATION_SETTINGS_VALUES };
+    const failure = { ok: false, error: "Application settings changed in another window" };
+    mocks.invoke.mockResolvedValueOnce(failure);
+    expect(await bridge().updateApplicationSettings(input)).toEqual(failure);
+    mocks.invoke.mockRejectedValueOnce(new Error("Settings service unavailable"));
+    await expect(bridge().updateApplicationSettings(input)).rejects.toThrow("Settings service unavailable");
   });
 
   it("validates snapshots and events without exposing Electron events or extra secret fields", async () => {

@@ -48,6 +48,8 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
 
   const resizeAllowedRef = useRef(false);
   resizeAllowedRef.current = attached && active && tab.state === "active";
+  const lastResizeRef = useRef<{ width: number; height: number; scaleFactor: number } | undefined>(undefined);
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const sendInputs = useCallback((events: readonly RdpInputEvent[]): void => {
     if (!allowedRef.current || !transportRef.current || events.length === 0) return;
@@ -105,8 +107,23 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
     const width = Math.min(8192, Math.max(200, Math.round(bounds.width)));
     const height = Math.min(8192, Math.max(200, Math.round(bounds.height)));
     if (width * height > 16_777_216) return;
-    transportRef.current?.send({ type: "resize", width, height, scaleFactor: Math.max(100, Math.min(500, Math.round(window.devicePixelRatio * 100))) });
+    const scaleFactor = Math.max(100, Math.min(500, Math.round(window.devicePixelRatio * 100)));
+    const previous = lastResizeRef.current;
+    if (!transportRef.current || previous?.width === width && previous.height === height && previous.scaleFactor === scaleFactor) return;
+    transportRef.current.send({ type: "resize", width, height, scaleFactor });
+    // Keep this across reattachment and server reactivation. ResizeObserver emits
+    // an initial notification whenever observation resumes, even at the same size.
+    lastResizeRef.current = { width, height, scaleFactor };
   }, []);
+
+  const cancelResize = useCallback((): void => {
+    clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = undefined;
+  }, []);
+  const scheduleResize = useCallback((): void => {
+    cancelResize();
+    resizeTimerRef.current = setTimeout(() => { resizeTimerRef.current = undefined; resize(); }, 350);
+  }, [cancelResize, resize]);
 
   useImperativeHandle(ref, () => ({ focus, release, resizeToWindow: resize, specialKey: (kind) => {
     focus();
@@ -216,11 +233,18 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
 
   useEffect(() => {
     if (!autoResize || !active || !attached || !hostRef.current || typeof ResizeObserver === "undefined") return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const observer = new ResizeObserver(() => { clearTimeout(timer); timer = setTimeout(resize, 350); });
+    const observer = new ResizeObserver(scheduleResize);
     observer.observe(hostRef.current);
-    return () => { clearTimeout(timer); observer.disconnect(); };
-  }, [active, attached, autoResize, resize, tab.state]);
+    return () => { cancelResize(); observer.disconnect(); };
+  }, [active, attached, autoResize, cancelResize, scheduleResize]);
+
+  useEffect(() => {
+    // A window may have changed size while the server was reconnecting. Apply
+    // that latest size once active without replacing the observer for each phase.
+    if (autoResize && active && attached && tab.state === "active") scheduleResize();
+    else cancelResize();
+    return cancelResize;
+  }, [active, attached, autoResize, cancelResize, scheduleResize, tab.state]);
 
   const point = useCallback((event: { clientX: number; clientY: number }): { x: number; y: number } | undefined => {
     const canvas = canvasRef.current;

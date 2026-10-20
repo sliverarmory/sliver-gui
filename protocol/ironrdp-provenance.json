@@ -4,13 +4,13 @@
   "protocolVersion": 1,
   "source": {
     "repository": "https://github.com/sliverarmory/IronRDP",
-    "commit": "1835457f27045d0098a4861b7b50204539539ec6",
-    "tree": "4e8a33e08ab5769109edd8dcd7e4b125bd9cd702",
+    "commit": "bfa5a8966fce80d659765c018895036ec775a012",
+    "tree": "731034fbe05905c1bc51bbe4c34867bebbe57661",
     "upstreamRepository": "https://github.com/Devolutions/IronRDP",
     "upstreamCommit": "1f69e124e6bf85608efce3495c12eaf5f6b5a95d",
     "license": "MIT OR Apache-2.0",
     "patchInventory": "SLIVER_GUI_EMBEDDING.md",
-    "patchInventorySha256": "dd689362516dbb19dcc3cb5b296725070ea31192b77e20250446f37f62d19bd6"
+    "patchInventorySha256": "5d86d893a8d0e8ea9d5a2e0da5ed537e5211b005abd4e5eb0c760b3fe6cd5bbc"
   },
   "toolchain": {
     "rust": "1.94.1"

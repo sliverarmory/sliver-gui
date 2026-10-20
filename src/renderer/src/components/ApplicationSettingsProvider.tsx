@@ -143,6 +143,7 @@ export function ApplicationSettingsProvider({
               keyboardShortcuts: current.keyboardShortcuts,
               terminal: legacyTerminal,
               overview: current.overview,
+              rdp: current.rdp,
             },
           });
           if (!active) return;
@@ -282,6 +283,7 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
     keyboardShortcuts: state.keyboardShortcuts,
     terminal: state.terminal,
     overview: state.overview,
+    rdp: state.rdp,
   });
 }
 
@@ -299,6 +301,7 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
     left.terminal.cursorBlink === right.terminal.cursorBlink &&
     left.terminal.smoothScrolling === right.terminal.smoothScrolling &&
     left.terminal.transparentWindows === right.terminal.transparentWindows &&
+    left.rdp.clipboard === right.rdp.clipboard &&
     sameOverviewSettings(left.overview, right.overview);
 }
 

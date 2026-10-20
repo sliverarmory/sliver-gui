@@ -15,9 +15,11 @@ renderer. See the [architecture and acceptance status](rdp-client-design.md).
    to enter width and height. Invalid fields show an inline explanation; correct
    them before connecting or saving a profile. Saving a profile does not require
    a password.
-3. Choose whether to remember the password. Enable **Text clipboard** if needed;
-   it is off by default. **Save profile** stores connection preferences separately
-   from the password. Remembering a password on a new connection creates a profile.
+3. Choose whether to remember the password. **Text clipboard** is enabled by
+   default. Changing it saves your preference immediately for new connections,
+   including when you cancel the dialog; saved profiles retain their own choice.
+   **Save profile** stores connection preferences separately from the password.
+   Remembering a password on a new connection creates a profile.
 4. Select **Connect**. If certificate review is required, compare the displayed
    SHA-256 fingerprint with the administrator's expected value. **Trust once**
    applies to this attempt; **Trust and remember** pins that hostname/port to the
@@ -35,9 +37,10 @@ Certificate review expires after 60 seconds; cancel or review again after reconn
 - **Fit** scales the remote image to the window; **Actual size** uses its natural
   pixel dimensions. These choices are local to the current tab.
 - **Display settings** requests a window-sized desktop, optionally on later window
-  resizes. If the server requires reconnect, disconnect and use **Reconnect** to
-  apply the remembered requested dimensions. The current picture stays at its
-  actual server geometry until it changes.
+  resizes. Repeated requests for the same size are ignored. If the server cannot
+  resize live, the connection stops with a size-specific explanation; use
+  **Reconnect** to apply the remembered dimensions. The client does not reconnect
+  automatically. The picture keeps its actual server geometry until it changes.
 - **Send clipboard text** copies local text into the remote clipboard. Paste it
   remotely with Ctrl+V. Copy text remotely with Ctrl+C, then select **Receive
   clipboard** to replace the local clipboard. These actions need the focused
@@ -67,6 +70,10 @@ secure-storage backend; it is disabled when encryption is unavailable, including
 Linux `basic_text`/unknown backends. Existing credentials are never filled back into
 the form. A blank password on an existing saved profile requests its stored
 credential; a locked/unavailable backend asks for fresh input.
+
+The default text clipboard preference uses the existing application settings store,
+`gui/application-settings.json`, under the configured Sliver GUI client root.
+Clipboard contents are never saved in this file.
 
 The RDP-specific private file is `gui/rdp.json` under the configured Sliver GUI
 client root. It contains profile metadata, endpoint pins and encrypted credential

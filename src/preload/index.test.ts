@@ -59,6 +59,7 @@ const invokeArguments = {
       reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+      rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
     },
   }],
   getApplicationUpdateState: [],

@@ -45,6 +45,7 @@ beforeEach(() => {
     attach: vi.fn(async () => ({ ok: true as const, value: { tabId: "first", attempt: 1, attachmentToken: "token" } })),
     openRdpStream: vi.fn(), clipboard: vi.fn(async () => ({ ok: true as const })), setInputCapture: vi.fn(async () => ({ ok: true as const })), toggleFullscreen: vi.fn(async () => ({ ok: true as const })),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
+    updateApplicationSettings: vi.fn(async (input) => ({ ok: true as const, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } })),
     onStateChanged: vi.fn((next) => { listener = next; return () => { listener = undefined; }; }),
     onApplicationSettingsChanged: vi.fn(() => () => undefined),
   };
@@ -62,7 +63,7 @@ describe("standalone remote desktop window", () => {
     await user.type(screen.getByLabelText("Password"), "test-password");
     await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
-    expect(connectedInput).toMatchObject({ host: "desktop.test", port: 3389, username: "operator", password: "test-password", persistence: "none", clipboard: false });
+    expect(connectedInput).toMatchObject({ host: "desktop.test", port: 3389, username: "operator", password: "test-password", persistence: "none", clipboard: true });
     expect(api.saveProfile).not.toHaveBeenCalled();
     expect(await screen.findByLabelText("Remote desktop for desktop.test")).toBeInTheDocument();
     expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();

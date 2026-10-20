@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IpcMainInvokeEvent } from "electron";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
+import { DEFAULT_APPLICATION_SETTINGS_STATE, DEFAULT_APPLICATION_SETTINGS_VALUES, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
+import type { OperationResult } from "../shared/contracts.js";
 import { RDP_IPC, type RdpTab } from "../shared/rdp-contracts.js";
 import { RdpStore } from "./rdp-store.js";
 import { RdpWindows } from "./rdp-windows.js";
@@ -55,6 +56,7 @@ vi.mock("./window-options.js", () => ({ rdpWindowOptions: () => ({}) }));
 
 let temporary: string, manager: RdpWindows, store: RdpStore;
 let resolveRuntime: ReturnType<typeof vi.fn<() => Promise<string>>>;
+let updateApplicationSettings: ReturnType<typeof vi.fn<(input: ApplicationSettingsUpdateInput) => Promise<OperationResult<ApplicationSettingsState>>>>;
 const certificate = new X509Certificate(await readFile(new URL("../e2e/fixtures/server.crt.fixture", import.meta.url)));
 const certificateEvent = (overrides: Partial<Extract<RdpRuntimeEvent, { type: "certificate" | "peerCertificate" }>> = {}): Extract<RdpRuntimeEvent, { type: "certificate" | "peerCertificate" }> => ({
   type: "certificate", requestId: "challenge-1", endpoint: "rdp.example.test:3389", fingerprint: certificate.fingerprint256.replaceAll(":", "").toLowerCase(),
@@ -84,14 +86,64 @@ beforeEach(async () => {
   mocks.windows.length = 0; mocks.runtimes.length = 0; vi.clearAllMocks();
   temporary = await mkdtemp(join(tmpdir(), "rdp-window-test-"));
   resolveRuntime = vi.fn(async () => "/trusted/sliver-rdp");
+  updateApplicationSettings = vi.fn(async (input) => ({ ok: true, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } }));
   store = new RdpStore(join(temporary, "rdp.json"), { isEncryptionAvailable: () => false, getSelectedStorageBackend: () => "basic_text", encryptString: () => { throw new Error("unavailable"); }, decryptString: () => { throw new Error("unavailable"); } });
   manager = new RdpWindows({ rendererUrl: "sliver://app/index.html?surface=rdp", preloadPath: "/trusted/rdp.cjs", store, resolveRuntime,
-    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE, prepareWindow: () => undefined });
+    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE, updateApplicationSettings, prepareWindow: () => undefined });
   await manager.open();
 });
 afterEach(async () => { manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  it("routes validated application settings updates to the shared persistence service", async () => {
+    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false } } };
+    expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual({
+      ok: true,
+      value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: 1 },
+    });
+    expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith(input);
+    expect(await invoke(RDP_IPC.getApplicationSettings)).toEqual(DEFAULT_APPLICATION_SETTINGS_STATE);
+  });
+
+  it("rejects malformed settings requests without calling the persistence service", async () => {
+    const input = { expectedRevision: 0, settings: DEFAULT_APPLICATION_SETTINGS_VALUES };
+    for (const args of [
+      [],
+      [input, "extra"],
+      [{ ...input, expectedRevision: -1 }],
+      [{ ...input, settings: { ...input.settings, rdp: { clipboard: "true" } } }],
+      [{ ...input, path: "/tmp/settings.json" }],
+    ]) {
+      expect(await invoke(RDP_IPC.updateApplicationSettings, ...args)).toMatchObject({ ok: false });
+    }
+    expect(updateApplicationSettings).not.toHaveBeenCalled();
+  });
+
+  it("requires the current RDP main frame for application settings updates", async () => {
+    const input = { expectedRevision: 0, settings: DEFAULT_APPLICATION_SETTINGS_VALUES };
+    const handler = mocks.handlers.get(RDP_IPC.updateApplicationSettings)!;
+    for (const event of [
+      { ...sender(), senderFrame: { ...sender().senderFrame, frameToken: "subframe" } },
+      { ...sender(), senderFrame: { ...sender().senderFrame, processId: 99 } },
+      { ...sender(), senderFrame: { ...sender().senderFrame, url: "sliver://app/index.html?surface=workspace" } },
+      { ...sender(), sender: { ...sender().sender, id: 99 } },
+    ]) {
+      expect(await handler(event as IpcMainInvokeEvent, input)).toEqual({ ok: false, error: "RDP request was rejected" });
+    }
+    mocks.windows[0]!.webContents.mainFrame.url = "sliver://app/index.html?surface=workspace";
+    expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual({ ok: false, error: "RDP request was rejected" });
+    expect(updateApplicationSettings).not.toHaveBeenCalled();
+  });
+
+  it("returns settings persistence and conflict failures without a success wrapper", async () => {
+    const input = { expectedRevision: 0, settings: DEFAULT_APPLICATION_SETTINGS_VALUES };
+    const failure = { ok: false as const, error: "Application settings changed in another window" };
+    updateApplicationSettings.mockResolvedValueOnce(failure);
+    expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual(failure);
+    updateApplicationSettings.mockRejectedValueOnce(new Error("Settings could not be written"));
+    expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual({ ok: false, error: "Settings could not be written" });
+  });
+
   it("restores only an existing hidden window without creating a new RDP window", () => {
     const window = mocks.windows[0]!;
     expect(manager.restoreRetainedWindow()).toBe(false);
@@ -543,20 +595,62 @@ describe("RDP main authority", () => {
     expect(runtime.send).toHaveBeenCalledWith({ type: "releaseAll" });
   });
 
-  it("retains a requested resize for explicit reconnect without changing the active canvas extent", async () => {
+  it("suppresses repeated resize requests across viewer reattachment while forwarding changed dimensions and scale", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!, port = await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" });
+    runtime.send.mockClear();
+    const resize = { type: "resize", width: 1600, height: 900, scaleFactor: 200 };
+    port.emit("message", { data: resize });
+    port.emit("message", { data: resize });
+    const reattached = await attach(tab.id);
+    reattached.emit("message", { data: resize });
+    expect(runtime.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([[resize]]);
+    const wider = { ...resize, width: 1920 }, taller = { ...wider, height: 1080 }, scaled = { ...taller, scaleFactor: 150 };
+    for (const message of [wider, taller, scaled, resize]) reattached.emit("message", { data: message });
+    expect(runtime.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([[resize], [wider], [taller], [scaled], [resize]]);
+    expect(reattached.close).not.toHaveBeenCalled();
+  });
+
+  it("resets resize deduplication for an explicitly reconnected session", async () => {
     const tab = await connect(), first = mocks.runtimes[0]!, port = await attach(tab.id);
     first.receive({ type: "state", state: "active" });
+    const resize = { type: "resize", width: 1600, height: 900, scaleFactor: 200 };
+    port.emit("message", { data: resize });
+    await invoke(RDP_IPC.disconnect, tab.id);
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id })).ok).toBe(true);
+    const second = mocks.runtimes[1]!, reattached = await attach(tab.id);
+    second.receive({ type: "state", state: "active" });
+    reattached.emit("message", { data: resize });
+    reattached.emit("message", { data: resize });
+    expect(second.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([[resize]]);
+  });
+
+  it("stops resize fallback and retains the latest requested size until explicit reconnect", async () => {
+    const tab = await connect(), first = mocks.runtimes[0]!, port = await attach(tab.id);
+    first.receive({ type: "state", state: "active" });
+    port.emit("message", { data: { type: "resize", width: 1280, height: 800, scaleFactor: 200 } });
     const resize = { type: "resize", width: 1600, height: 900, scaleFactor: 200 };
     port.emit("message", { data: resize });
     expect(first.send).toHaveBeenCalledWith(resize);
     expect(manager.state().tabs[0]).toMatchObject({ width: 800, height: 600, attempt: 1 });
     first.receive({ type: "resizeFallback" });
-    expect(manager.state().tabs[0]?.error).toBe("Disconnect, then reconnect to apply the requested 1600×900 desktop size.");
-    await invoke(RDP_IPC.disconnect, tab.id);
+    const failed = { state: "failed", width: 800, height: 600, attempt: 1,
+      error: "This server could not resize the desktop. Reconnect to apply the requested 1600×900 desktop size." };
+    expect(manager.state().tabs[0]).toMatchObject(failed);
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(port.close).toHaveBeenCalledOnce();
+    first.receive({ type: "state", state: "connecting" });
+    first.receive({ type: "state", state: "active" });
+    first.receive({ type: "terminated", code: "closed" });
+    first.exited("disconnected");
+    expect(manager.state().tabs[0]).toMatchObject(failed);
+    expect(mocks.runtimes).toHaveLength(1);
+    expect(resolveRuntime).toHaveBeenCalledOnce();
     expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id })).value).toMatchObject({ width: 1600, height: 900, attempt: 2 });
     const second = mocks.runtimes[1]!;
     second.receive({ type: "ready", protocol: 1 });
     expect(second.send).toHaveBeenCalledWith(expect.objectContaining({ type: "connect", width: 1600, height: 900 }));
+    expect(manager.state().tabs[0]?.error).toBeUndefined();
   });
 
   it("does not retain malformed resize dimensions for reconnect", async () => {

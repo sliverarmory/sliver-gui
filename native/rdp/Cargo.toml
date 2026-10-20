@@ -7,12 +7,12 @@ publish = false
 license = "GPL-3.0-or-later"
 
 [dependencies]
-ironrdp-client = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6", default-features = false, features = ["rustls", "clipboard-custom"] }
-ironrdp-pdu = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
-ironrdp-connector = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
-ironrdp-core = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
-ironrdp-tls = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6", features = ["rustls"] }
-ironrdp-cliprdr = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
+ironrdp-client = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012", default-features = false, features = ["rustls", "clipboard-custom"] }
+ironrdp-pdu = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
+ironrdp-connector = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
+ironrdp-core = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
+ironrdp-tls = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012", features = ["rustls"] }
+ironrdp-cliprdr = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

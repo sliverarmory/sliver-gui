@@ -1,7 +1,10 @@
 import { useId, useRef, useState } from "react";
-import { Button, FieldError, Input, Label, Modal, TextField } from "@heroui/react";
+import { Button, FieldError, Input, Label, Modal, ScrollShadow, TextField } from "@heroui/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faWindows } from "@fortawesome/free-brands-svg-icons";
 import type { RdpConnectInput, RdpCredentialPersistence, RdpProfile, RdpSaveProfileInput, RdpWindowAPI } from "../../../../shared/rdp-contracts";
+import { useApplicationSettings } from "../ApplicationSettingsProvider";
 import { SwitchRow } from "../FormControls";
 import { RDP_RESOLUTIONS, validateRdpConnectForm, type RdpConnectFormField } from "./rdp-connect-form";
 
@@ -15,6 +18,7 @@ interface Props {
 }
 
 export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onClose, onConnected, onProfileSaved }: Props): React.JSX.Element {
+  const applicationSettings = useApplicationSettings();
   const formId = useId();
   const formRef = useRef<HTMLFormElement>(null);
   const [label, setLabel] = useState(initial?.label ?? "");
@@ -29,7 +33,10 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   const initialResolution = `${initial?.width ?? 1280}x${initial?.height ?? 800}`;
   const [resolution, setResolution] = useState(RDP_RESOLUTIONS.some((size) => size.value === initialResolution) ? initialResolution : "custom");
   const [customSizeEdited, setCustomSizeEdited] = useState(resolution === "custom");
-  const [clipboard, setClipboard] = useState(initial?.clipboard ?? false);
+  const [clipboardDraft, setClipboardDraft] = useState<boolean>();
+  const [savingClipboard, setSavingClipboard] = useState(false);
+  const clipboard = clipboardDraft ?? initial?.clipboard ?? applicationSettings?.settings.rdp.clipboard ?? true;
+  const preferencesPending = savingClipboard || Boolean(applicationSettings && !applicationSettings.isReady);
   const [profileId, setProfileId] = useState(initial?.id);
   const [credentialProfile, setCredentialProfile] = useState(initial);
   const [pending, setPending] = useState<"connect" | "save">();
@@ -62,8 +69,26 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       scaleMode: initial?.scaleMode ?? "fit" };
   };
 
+  const updateClipboard = async (selected: boolean): Promise<void> => {
+    if (pending || preferencesPending) return;
+    const previous = clipboard;
+    setClipboardDraft(selected);
+    setError(undefined);
+    if (!applicationSettings) return;
+    setSavingClipboard(true);
+    try {
+      const saved = await applicationSettings.updateSettings((current) => ({
+        ...current, rdp: { ...current.rdp, clipboard: selected },
+      }));
+      if (!saved) throw new Error("The text clipboard preference could not be saved. Try again.");
+    } catch {
+      setClipboardDraft(previous);
+      setError("The text clipboard preference could not be saved. Try again.");
+    } finally { setSavingClipboard(false); }
+  };
+
   const submit = async (action: "connect" | "save"): Promise<void> => {
-    if (pending) return;
+    if (pending || preferencesPending) return;
     setError(undefined);
     setNotice(undefined);
     setSubmitted(action);
@@ -107,10 +132,13 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   return <Modal.Backdrop isOpen isDismissable={!pending} isKeyboardDismissDisabled={Boolean(pending)} variant="blur" onOpenChange={(open) => { if (!open) { setPassword(""); onClose(); } }}>
     <Modal.Container size="md" placement="center"><Modal.Dialog>
       <Modal.CloseTrigger isDisabled={Boolean(pending)} />
-      <Modal.Header><Modal.Heading>{initial ? "Connect to Remote Desktop" : "New Remote Desktop"}</Modal.Heading>
-        <p className="text-sm text-muted">Connect directly to a Windows computer using Network Level Authentication.</p>
+      <Modal.Header><Modal.Heading className="flex items-center gap-2 pr-8">
+        <FontAwesomeIcon aria-hidden icon={faWindows} />
+        {initial ? "Connect to Remote Desktop" : "New Remote Desktop"}
+      </Modal.Heading>
       </Modal.Header>
-      <Modal.Body className="max-h-[65vh] overflow-y-auto">
+      <Modal.Body className="max-h-[65vh] overflow-y-auto"
+        render={(props) => <ScrollShadow {...props} hideScrollBar={false} size={28} />}>
         <form ref={formRef} id={formId} noValidate className="grid gap-4" onSubmit={(event) => { event.preventDefault(); void submit("connect"); }}>
           <TextField {...fieldProps("label")} value={label} onChange={setLabel} isDisabled={Boolean(pending)}>
             <Label>Connection name</Label><Input variant="secondary" maxLength={120} placeholder="Optional display name" />
@@ -170,14 +198,15 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
               {fieldError("height") && <FieldError>{fieldError("height")}</FieldError>}
             </TextField>
           </div>}
-          <SwitchRow label="Text clipboard" description="Use the toolbar to send or receive clipboard text for this connection." selected={clipboard} onChange={setClipboard} disabled={Boolean(pending)} />
+          <SwitchRow label="Text clipboard" description="Use the toolbar to send or receive clipboard text for this connection." selected={clipboard}
+            onChange={(selected) => { void updateClipboard(selected); }} disabled={Boolean(pending) || preferencesPending} />
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
           {notice && <p role="status" className="text-sm text-muted">{notice}</p>}
         </form>
       </Modal.Body>
       <Modal.Footer className="flex-wrap"><Button variant="tertiary" isDisabled={Boolean(pending)} onPress={onClose}>Cancel</Button>
-        <Button variant="secondary" isDisabled={Boolean(pending)} isPending={pending === "save"} onPress={() => void submit("save")}>Save profile</Button>
-        <Button type="submit" form={formId} isPending={pending === "connect"} isDisabled={Boolean(pending)}>Connect</Button>
+        <Button variant="secondary" isDisabled={Boolean(pending) || preferencesPending} isPending={pending === "save"} onPress={() => void submit("save")}>Save profile</Button>
+        <Button type="submit" form={formId} isPending={pending === "connect"} isDisabled={Boolean(pending) || preferencesPending}>Connect</Button>
       </Modal.Footer>
     </Modal.Dialog></Modal.Container>
   </Modal.Backdrop>;

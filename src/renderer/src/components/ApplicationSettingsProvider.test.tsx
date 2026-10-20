@@ -209,6 +209,7 @@ describe("ApplicationSettingsProvider", () => {
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
       },
     });
     expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
@@ -267,6 +268,7 @@ describe("ApplicationSettingsProvider", () => {
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
       },
     });
     expect(document.documentElement).toHaveClass("dark");
@@ -290,7 +292,7 @@ describe("ApplicationSettingsProvider", () => {
       },
     }));
     installSettingsAPI({
-      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency })),
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency, rdp: { clipboard: false } })),
       updateApplicationSettings,
     });
     renderProvider();
@@ -315,6 +317,7 @@ describe("ApplicationSettingsProvider", () => {
           transparentWindows: true,
         },
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: { clipboard: false },
       },
     });
     expect(screen.getByTestId("revision")).toHaveTextContent("1");
@@ -364,6 +367,39 @@ describe("ApplicationSettingsProvider", () => {
     await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
     expect(updateApplicationSettings.mock.calls[1]?.[0].settings.disableWindowTransparency).toBe(true);
   });
+
+  it("persists an RDP clipboard-only change and preserves it across other preference updates", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+    }));
+    installSettingsAPI({ updateApplicationSettings });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    expect(screen.getByTestId("rdp-clipboard")).toHaveTextContent("true");
+
+    await user.click(screen.getByRole("button", { name: "Disable RDP clipboard" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("1"));
+    expect(screen.getByTestId("rdp-clipboard")).toHaveTextContent("false");
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.rdp).toEqual({ clipboard: false });
+
+    await user.click(screen.getByRole("button", { name: "Disable RDP clipboard" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
+    expect(updateApplicationSettings.mock.calls[1]?.[0].settings).toMatchObject({
+      theme: "light", rdp: { clipboard: false },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Enable RDP clipboard" }));
+    await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("3"));
+    expect(screen.getByTestId("rdp-clipboard")).toHaveTextContent("true");
+    expect(updateApplicationSettings.mock.calls[2]?.[0].settings).toMatchObject({
+      theme: "light", rdp: { clipboard: true },
+    });
+  });
 });
 
 function renderProvider(api?: ApplicationSettingsAPI): void {
@@ -384,6 +420,7 @@ function SettingsProbe(): React.JSX.Element {
       <span data-testid="theme">{context.settings.theme}</span>
       <span data-testid="app-icon">{context.settings.appIcon}</span>
       <span data-testid="disable-transparency">{String(context.settings.disableWindowTransparency)}</span>
+      <span data-testid="rdp-clipboard">{String(context.settings.rdp.clipboard)}</span>
       <span data-testid="report-directory">{context.settings.reportScreenshotDirectory ?? "Desktop"}</span>
       <span data-testid="resolved-app-icon">{context.resolvedAppIcon}</span>
       <button
@@ -397,6 +434,18 @@ function SettingsProbe(): React.JSX.Element {
         onClick={() => void context.updateSettings((current) => ({ ...current, disableWindowTransparency: true }))}
       >
         Disable transparency
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: false } }))}
+      >
+        Disable RDP clipboard
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: true } }))}
+      >
+        Enable RDP clipboard
       </button>
       <button
         type="button"
@@ -450,7 +499,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory">>,
+  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory" | "rdp">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

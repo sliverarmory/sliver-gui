@@ -11,6 +11,7 @@ import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
   DEFAULT_APPLICATION_SETTINGS_VALUES,
   DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+  DEFAULT_APPLICATION_RDP_SETTINGS,
   type ApplicationIcon,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
@@ -41,7 +42,7 @@ describe("ApplicationSettingsStore", () => {
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
   });
 
-  it("loads an exact private version-eight file", async () => {
+  it("loads an exact private version-nine file", async () => {
     const persisted = {
       v: APPLICATION_SETTINGS_VERSION,
       revision: 9,
@@ -62,6 +63,7 @@ describe("ApplicationSettingsStore", () => {
       },
       overview: { kinds: ["future-kind", "operator"], statuses: ["healthy"], lightning: true,
         sidebarDisabled: true, presentation: "list" },
+      rdp: { clipboard: false },
     };
     await writeFile(settingsPath, JSON.stringify(persisted), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
@@ -75,13 +77,13 @@ describe("ApplicationSettingsStore", () => {
   });
 
   it("migrates a version-five file and retains its existing settings", async () => {
-    const { overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     const previous = { ...previousSettings, v: 5, revision: 12, theme: "dark", appIcon: "passion" };
     await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
     const { v: _version, revision, ...settings } = store.getState();
     await expect(store.update({ expectedRevision: revision, settings: {
@@ -95,7 +97,7 @@ describe("ApplicationSettingsStore", () => {
   });
 
   it("migrates version-seven settings with native transparency enabled without changing disk on load", async () => {
-    const { disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     const previous = {
       ...previousSettings,
       v: 7,
@@ -111,12 +113,45 @@ describe("ApplicationSettingsStore", () => {
 
     const store = await ApplicationSettingsStore.load(settingsPath);
 
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
   });
 
+  it("migrates version-eight settings and persists a disabled RDP clipboard preference across reloads", async () => {
+    const { rdp: _rdp, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const previous = {
+      ...previousSettings,
+      v: 8,
+      revision: 42,
+      theme: "dark",
+      disableWindowTransparency: true,
+      terminal: { ...previousSettings.terminal, fontSize: 22 },
+    };
+    await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
+    if (process.platform !== "win32") await chmod(settingsPath, 0o600);
+
+    let store = await ApplicationSettingsStore.load(settingsPath);
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true } });
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
+
+    for (const clipboard of [false, true]) {
+      const { v: _version, revision, ...settings } = store.getState();
+      const result = await store.update({
+        expectedRevision: revision,
+        settings: { ...settings, rdp: { clipboard } },
+      });
+      expect(result).toEqual({
+        ok: true,
+        value: { ...previous, v: APPLICATION_SETTINGS_VERSION, revision: revision + 1, rdp: { clipboard } },
+      });
+      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+      store = await ApplicationSettingsStore.load(settingsPath);
+      expect(store.getState()).toEqual(result.value);
+    }
+  });
+
   it("migrates version-four settings and persists a custom screenshot directory", async () => {
-    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
     await writeFile(settingsPath, JSON.stringify({ ...previousSettings, v: 4 }), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
@@ -145,7 +180,7 @@ describe("ApplicationSettingsStore", () => {
     await expect(lstat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("migrates version-two preferences and saves version eight on the next update", async () => {
+  it("migrates version-two preferences and saves version nine on the next update", async () => {
     const previous = {
       v: 2,
       revision: 9,
@@ -164,14 +199,14 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     const { v: _version, revision, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS },
+      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
@@ -207,6 +242,7 @@ describe("ApplicationSettingsStore", () => {
       commandPaletteShortcut: "mod+k",
       keyboardShortcuts: {},
       overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+      rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
       terminal: {
         fontId: "source-code-pro",
         fontSize: 18,
@@ -397,6 +433,7 @@ function updateInput(
       keyboardShortcuts: {},
       terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
       overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+      rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
     },
   };
 }

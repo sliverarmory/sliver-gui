@@ -969,6 +969,7 @@ async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
         overview: current.overview,
+        rdp: current.rdp,
       },
     });
   }, theme);

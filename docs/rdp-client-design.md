@@ -1,6 +1,6 @@
 # Standalone RDP client: implementation and remaining roadmap
 
-Status: **Implemented on `feat/rdp`; final Apple Silicon live-GUI acceptance passed. Installed cross-platform certification remains pending.** Updated: 2026-10-19.
+Status: **Implemented on `feat/rdp`; Apple Silicon live-GUI acceptance is recorded below. The current resize fix awaits a fresh live-server check. Installed cross-platform certification remains pending.** Updated: 2026-10-19.
 
 For operation and developer setup, see [Remote Desktop usage](rdp-client.md).
 The exact maintained IronRDP fork, revision, patch inventory, features and Rust
@@ -192,11 +192,18 @@ workflow.
   operator disconnect/reconnect does not affect direct RDP sessions.
 - Fit/Actual size scale the local presentation. These toolbar choices and the
   automatic-resize toggle are session/window preferences, not persisted profile
-  edits. Dynamic resize requests are validated/debounced. If the server cannot
-  resize live, the requested dimensions are retained for explicit reconnect;
+  edits. Dynamic resize requests are validated, debounced and deduplicated across
+  viewer reattachment and server reactivation. EGFX framebuffer changes complete
+  a resize without requiring classic Deactivate All. If the server cannot resize
+  live, automatic resize reconnection is disabled in the embedded engine; the
+  connection stops and the requested dimensions are retained for explicit reconnect;
   the active canvas retains its existing geometry until actual frames change.
-- Text clipboard is opt-in per connection and transferred only through explicit
-  Send/Receive actions in the focused active RDP window. Receiving waits for the
+- Text clipboard is enabled by default for new connections. Changing its switch
+  persists the new-connection preference immediately through the existing
+  revisioned application settings store (`gui/application-settings.json`), even
+  when the dialog is canceled. Saved profiles retain their explicit choice.
+  Text transfers only through explicit Send/Receive actions in the focused active
+  RDP window. Receiving waits for the
   actual server reply and local clipboard write. A ready channel permits sending
   before remote text exists; receiving additionally needs an advertised text
   format. Blur/tab/attempt changes cancel a pending receive.
@@ -249,6 +256,12 @@ Evidence at this checkpoint:
   and build identity `ef95464090dc47197b57557b141270e2fae7d2abddf715b405e394a5947b7abd`.
   The helper includes the clipboard ownership/late-reply fix; the renderer uses
   bounded cursor acknowledgments as well as frame credits.
+- The resize-loop fix pins fork `bfa5a8966fce80d659765c018895036ec775a012`.
+  Its 22 selected-feature client tests passed, alongside 89 focused GUI tests,
+  14 helper tests, 15 build/provenance tests and two offline Electron scenarios.
+  The Apple Silicon helper rebuild, provenance/ABI/self-test and GUI
+  typecheck/build passed. No live RDP configuration was available for this
+  checkpoint, so these results do not establish live resize interoperability.
 - The full unit checkpoint passed 5,203 tests with three skips. Subsequent
   runtime, store, loader and packaging changes passed 73 focused tests.
   Native helper tests passed 14; packaging/signing checks passed 65 with one

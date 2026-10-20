@@ -1,7 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RdpConnectInput, RdpProfile, RdpSaveProfileInput, RdpTab, RdpWindowAPI } from "../../../../shared/rdp-contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../../../../shared/application-settings-contracts";
+import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../ApplicationSettingsProvider";
 import { RdpConnectDialog } from "./RdpConnectDialog";
 
 const profile: RdpProfile = {
@@ -56,6 +58,64 @@ function expectFieldError(label: string, text: RegExp): void {
 }
 
 describe("Remote Desktop connection form", () => {
+  it("enables clipboard for a new connection and retains a saved profile's explicit choice", () => {
+    mount();
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeChecked();
+    cleanup();
+    mount(profile);
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+  });
+
+  it("remembers the clipboard default immediately without saving a profile or connecting", async () => {
+    const user = userEvent.setup();
+    const settingsApi = installSettings();
+    const view = renderWithSettings(settingsApi);
+    const clipboard = screen.getByRole("switch", { name: "Text clipboard" });
+    await waitFor(() => expect(clipboard).toBeEnabled());
+    await user.click(clipboard);
+    await waitFor(() => expect(settingsApi.updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({ rdp: { clipboard: false } }),
+    })));
+    await waitFor(() => expect(clipboard).toBeEnabled());
+    expect(api.saveProfile).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
+    view.unmount();
+    renderWithSettings(settingsApi);
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeEnabled());
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+  });
+
+  it("loads the remembered choice before enabling submissions", async () => {
+    let resolveSettings!: (settings: ApplicationSettingsState) => void;
+    const settingsApi = installSettings();
+    settingsApi.getApplicationSettings = vi.fn(() => new Promise<ApplicationSettingsState>((resolve) => { resolveSettings = resolve; }));
+    renderWithSettings(settingsApi);
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+    await act(async () => { resolveSettings({ ...DEFAULT_APPLICATION_SETTINGS_STATE, rdp: { clipboard: false } }); });
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
+  });
+
+  it("keeps a profile's clipboard choice when the remembered default differs", async () => {
+    renderWithSettings(installSettings(), profile);
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeEnabled());
+    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+  });
+
+  it("restores the clipboard choice and shows feedback if saving the preference fails", async () => {
+    const user = userEvent.setup();
+    const settingsApi = installSettings();
+    settingsApi.updateApplicationSettings = vi.fn(async () => ({ ok: false as const, error: "Disk is unavailable." }));
+    renderWithSettings(settingsApi);
+    const clipboard = screen.getByRole("switch", { name: "Text clipboard" });
+    await waitFor(() => expect(clipboard).toBeEnabled());
+    await user.click(clipboard);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The text clipboard preference could not be saved.");
+    expect(clipboard).toBeChecked();
+    expect(clipboard).toBeEnabled();
+  });
+
   it("defaults to 1280x800, offers common resolutions, and submits the selected preset", async () => {
     const user = userEvent.setup();
     mount();
@@ -221,3 +281,22 @@ describe("Remote Desktop connection form", () => {
     expect(api.connect).not.toHaveBeenCalled();
   });
 });
+
+function installSettings(): ApplicationSettingsAPI {
+  let settings = DEFAULT_APPLICATION_SETTINGS_STATE;
+  return {
+    getApplicationSettings: vi.fn(async () => settings),
+    onApplicationSettingsChanged: vi.fn(() => () => undefined),
+    updateApplicationSettings: vi.fn(async (input: ApplicationSettingsUpdateInput) => {
+      settings = { ...settings, ...input.settings, revision: input.expectedRevision + 1 };
+      return { ok: true as const, value: settings };
+    }),
+  };
+}
+
+function renderWithSettings(settingsApi: ApplicationSettingsAPI, initial?: RdpProfile): ReturnType<typeof render> {
+  return render(<ApplicationSettingsProvider api={settingsApi}>
+    <RdpConnectDialog api={api} initial={initial} securePersistenceAvailable
+      onClose={vi.fn()} onConnected={onConnected} onProfileSaved={onProfileSaved} />
+  </ApplicationSettingsProvider>);
+}

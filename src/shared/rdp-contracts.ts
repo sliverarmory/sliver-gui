@@ -1,4 +1,4 @@
-import type { ApplicationSettingsState } from "./application-settings-contracts.js";
+import type { ApplicationSettingsState, ApplicationSettingsUpdateInput } from "./application-settings-contracts.js";
 import type { OperationResult } from "./contracts.js";
 
 export const RDP_PROTOCOL_VERSION = 1 as const;
@@ -27,6 +27,7 @@ export const RDP_IPC = Object.freeze({
   setInputCapture: "sliver:rdp:input:capture",
   toggleFullscreen: "sliver:rdp:fullscreen",
   getApplicationSettings: "sliver:rdp:application-settings:get",
+  updateApplicationSettings: "sliver:rdp:application-settings:update",
   applicationSettingsChanged: "sliver:application-settings:changed",
 });
 
@@ -175,6 +176,7 @@ export interface RdpWindowAPI {
   setInputCapture(input: { readonly tabId: string; readonly captured: boolean }): Promise<OperationResult>;
   toggleFullscreen(): Promise<OperationResult>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
+  updateApplicationSettings(input: ApplicationSettingsUpdateInput): Promise<OperationResult<ApplicationSettingsState>>;
   onStateChanged(listener: (state: RdpWindowState) => void): () => void;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
 }

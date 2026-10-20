@@ -591,6 +591,7 @@ export function App() {
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
         overview: current.overview,
+        rdp: current.rdp,
       }),
     }));
   }, [applicationSettings]);

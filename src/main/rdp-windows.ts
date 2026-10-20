@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, X509Certificate } from "node:crypto";
 import { BrowserWindow, clipboard, ipcMain, nativeTheme, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
-import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
+import { parseApplicationSettingsUpdateInput, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
+import type { OperationResult } from "../shared/contracts.js";
 import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
 import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import { RdpRuntime, type RdpRuntimeEvent } from "./rdp-runtime.js";
@@ -15,6 +16,7 @@ interface RdpWindowsOptions {
   store: RdpStore;
   resolveRuntime: () => Promise<string>;
   getApplicationSettings: () => ApplicationSettingsState;
+  updateApplicationSettings: (input: ApplicationSettingsUpdateInput) => Promise<OperationResult<ApplicationSettingsState>>;
   prepareWindow: (window: BrowserWindow) => void;
   isQuitting?: () => boolean;
 }
@@ -29,6 +31,7 @@ interface Session {
   cursor: { shape?: RdpCursor; position?: RdpCursor; shapeDirty: boolean; positionDirty: boolean; sequence: number;
     outstanding?: number; lastKind?: "shape" | "position" };
   reconnectSize?: { width: number; height: number };
+  lastResize?: { width: number; height: number; scaleFactor: number };
   pendingClipboard?: { attempt: number; expires: number; timer: ReturnType<typeof setTimeout>; resolve: () => void; reject: (error: Error) => void };
   certificate?: { requestId: string; fingerprint: string; timer: ReturnType<typeof setTimeout> };
   connectTimer?: ReturnType<typeof setTimeout>;
@@ -71,6 +74,10 @@ export class RdpWindows {
         if (channel === RDP_IPC.getApplicationSettings) {
           if (args.length) throw new Error("Invalid RDP request");
           return options.getApplicationSettings();
+        }
+        if (channel === RDP_IPC.updateApplicationSettings) {
+          if (args.length !== 1) throw new Error("Invalid RDP request");
+          return await options.updateApplicationSettings(parseApplicationSettingsUpdateInput(args[0]));
         }
         const value = await this.#invoke(channel, event, args);
         return value === undefined ? { ok: true } : { ok: true, value };
@@ -234,6 +241,7 @@ export class RdpWindows {
     if (password === undefined) throw new Error("Enter the password to connect");
     this.#detach(session);
     session.lastSeq = 0;
+    delete session.lastResize;
     session.cursor = { shapeDirty: false, positionDirty: false, sequence: 0 };
     const { review: _review, error: _error, ...previous } = session.tab;
     session.tab = { ...previous, ...session.reconnectSize, attempt: previous.attempt + 1, state: "connecting", clipboardReady: false, clipboardAvailable: false };
@@ -318,10 +326,10 @@ export class RdpWindows {
         session.tab = { ...session.tab, clipboardReady: true }; this.#publish(); return;
       case "resizeFallback": {
         const size = session.reconnectSize;
-        session.tab = { ...session.tab, error: size
-          ? `Disconnect, then reconnect to apply the requested ${size.width}×${size.height} desktop size.`
-          : "This server requires reconnecting to change the desktop resolution." };
-        this.#publish(); return;
+        this.#disconnect(session, size
+          ? `This server could not resize the desktop. Reconnect to apply the requested ${size.width}×${size.height} desktop size.`
+          : "This server could not resize the desktop. Reconnect to try again.");
+        return;
       }
       case "clipboardAvailable":
         if (session.tab.clipboardAvailable === message.available) return;
@@ -402,6 +410,11 @@ export class RdpWindows {
         if (message.type === "resize") {
           this.#requireActive(session);
           session.reconnectSize = { width: message.width, height: message.height };
+          const previous = session.lastResize;
+          if (previous?.width === message.width && previous.height === message.height && previous.scaleFactor === message.scaleFactor) return;
+          // Viewer reattachment and session state updates must not replay a resize.
+          // A new explicit connection attempt resets this request history.
+          session.lastResize = { width: message.width, height: message.height, scaleFactor: message.scaleFactor };
         }
         session.runtime?.send(message);
       } catch { this.#detach(session); }

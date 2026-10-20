@@ -222,6 +222,7 @@ describe("SSH preload bridge", () => {
         keyboardShortcuts: DEFAULT_APPLICATION_SETTINGS_STATE.keyboardShortcuts,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
       },
     };
 
@@ -426,12 +427,14 @@ describe("SSH preload bridge", () => {
     expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0].terminal)).toBe(true);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0].keyboardShortcuts)).toBe(true);
+    expect(Object.isFrozen(listener.mock.calls[0]?.[0].rdp)).toBe(true);
 
     const windowsRedo = {
       ...valid,
       revision: 5,
       disableWindowTransparency: false,
       keyboardShortcuts: { ...valid.keyboardShortcuts, textEditorRedo: "mod+y" },
+      rdp: { clipboard: false },
     };
     handler({}, windowsRedo);
     handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });
@@ -443,6 +446,13 @@ describe("SSH preload bridge", () => {
     handler({}, { ...valid, disableWindowTransparency: 1 });
     handler({}, { ...valid, disableWindowTransparency: null });
     handler({}, { ...valid, disableWindowTransparency: undefined });
+    const { rdp: _rdp, ...missingRdp } = valid;
+    handler({}, missingRdp);
+    handler({}, { ...missingRdp, v: 8 });
+    handler({}, { ...valid, v: 8 });
+    for (const rdp of [null, undefined, [], {}, { clipboard: "true" }, { clipboard: 1 }, { clipboard: null }, { clipboard: true, extra: false }]) {
+      handler({}, { ...valid, rdp });
+    }
     expect(listener).toHaveBeenCalledTimes(2);
     expect(listener).toHaveBeenLastCalledWith(windowsRedo);
     unsubscribe();

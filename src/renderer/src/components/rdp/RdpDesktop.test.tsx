@@ -11,27 +11,108 @@ const tab: RdpTab = { id: "tab", label: "Office", attempt: 1, host: "office.test
   clipboard: false, clipboardReady: false, clipboardAvailable: false, scaleMode: "fit", state: "active" };
 let message: (value: RdpHostMessage) => void;
 let api: RdpWindowAPI;
+let viewport: { width: number; height: number };
+let resizeObservers: { notify(): void; disconnect: ReturnType<typeof vi.fn> }[];
 
 beforeEach(() => {
   Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
   mocks.send.mockReset(); mocks.close.mockReset(); mocks.open.mockReset();
   mocks.open.mockImplementation(async (_api, _tabId, _attempt, _signal, onMessage) => { message = onMessage; return { send: mocks.send, close: mocks.close }; });
   api = { setInputCapture: vi.fn(async () => ({ ok: true })), reconnect: vi.fn(), disconnect: vi.fn() } as unknown as RdpWindowAPI;
+  viewport = { width: 1280, height: 800 };
+  resizeObservers = [];
+  vi.stubGlobal("ResizeObserver", class {
+    readonly disconnect = vi.fn();
+    constructor(callback: ResizeObserverCallback) { resizeObservers.push({ notify: () => callback([], this), disconnect: this.disconnect }); }
+    observe(): void {}
+    unobserve(): void {}
+  });
   vi.stubGlobal("ImageData", class { constructor(public data: Uint8ClampedArray, public width: number, public height: number) {} });
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ putImageData: vi.fn(), drawImage: vi.fn(), clearRect: vi.fn() } as unknown as CanvasRenderingContext2D);
-  vi.spyOn(HTMLCanvasElement.prototype, "getBoundingClientRect").mockReturnValue({ x: 0, y: 0, top: 0, left: 0, right: 800, bottom: 600, width: 800, height: 600, toJSON: () => ({}) });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const dimensions = this instanceof HTMLCanvasElement ? { width: 800, height: 600 } : viewport;
+    return { x: 0, y: 0, top: 0, left: 0, right: dimensions.width, bottom: dimensions.height, ...dimensions, toJSON: () => ({}) };
+  });
 });
-afterEach(() => { cleanup(); Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-async function mount(): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
+async function mount(autoResize = false): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
   const handle = createRef<RdpDesktopHandle>();
-  const result = render(<RdpDesktop ref={handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize={false} />);
+  const result = render(<RdpDesktop ref={handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize={autoResize} />);
   await act(async () => {});
   act(() => message({ type: "ready", protocol: 1 }));
   return { ...result, handle };
 }
 
 describe("remote desktop viewer lifecycle", () => {
+  it("coalesces automatic resize notifications and does not repeat a size across server reactivation", async () => {
+    vi.useFakeTimers();
+    const view = await mount(true);
+    const observer = resizeObservers.at(-1)!;
+    const requests = (): unknown[] => mocks.send.mock.calls.map(([value]) => value).filter((value) => value.type === "resize");
+    act(() => { observer.notify(); observer.notify(); vi.advanceTimersByTime(350); });
+    expect(requests()).toEqual([{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }]);
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={{ ...tab, state: "authenticating" }} active inputEnabled scaleMode="fit" autoResize />);
+    act(() => { observer.notify(); vi.advanceTimersByTime(350); });
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize />);
+    act(() => { observer.notify(); vi.advanceTimersByTime(350); });
+    expect(resizeObservers).toHaveLength(1);
+    expect(requests()).toHaveLength(1);
+    viewport = { width: 1440, height: 900 };
+    act(() => { observer.notify(); vi.advanceTimersByTime(349); });
+    expect(requests()).toHaveLength(1);
+    act(() => { vi.advanceTimersByTime(1); });
+    expect(requests()).toHaveLength(2);
+    expect(requests().at(-1)).toEqual({ type: "resize", width: 1440, height: 900, scaleFactor: 100 });
+  });
+
+  it("applies the latest window size once when the session becomes active again", async () => {
+    vi.useFakeTimers();
+    const view = await mount(true);
+    const observer = resizeObservers.at(-1)!;
+    act(() => { vi.advanceTimersByTime(350); });
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={{ ...tab, state: "connecting" }} active inputEnabled scaleMode="fit" autoResize />);
+    viewport = { width: 1600, height: 900 };
+    act(() => { observer.notify(); vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toHaveLength(1);
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize />);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([
+      [{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }],
+      [{ type: "resize", width: 1600, height: 900, scaleFactor: 100 }],
+    ]);
+  });
+
+  it.each(["disabled", "inactive"] as const)("cancels a queued automatic resize when %s", async (reason) => {
+    vi.useFakeTimers();
+    const view = await mount(true);
+    const observer = resizeObservers.at(-1)!;
+    act(() => { observer.notify(); vi.advanceTimersByTime(100); });
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active={reason !== "inactive"} inputEnabled scaleMode="fit" autoResize={reason !== "disabled"} />);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(observer.disconnect).toHaveBeenCalledOnce();
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toHaveLength(0);
+  });
+
+  it("retains resize deduplication after viewer reattachment and permits a changed scale factor", async () => {
+    vi.useFakeTimers();
+    await mount(true);
+    act(() => { vi.advanceTimersByTime(350); });
+    act(() => message({ type: "closed", reason: "Window hidden" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reattach viewer" }));
+    await act(async () => {});
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+    act(() => message({ type: "ready", protocol: 1 }));
+    act(() => { resizeObservers.at(-1)!.notify(); vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toHaveLength(1);
+    vi.stubGlobal("devicePixelRatio", 2);
+    act(() => { resizeObservers.at(-1)!.notify(); vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([
+      [{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }],
+      [{ type: "resize", width: 1280, height: 800, scaleFactor: 200 }],
+    ]);
+  });
+
   it("acknowledges cursors only after drawing and preserves the bitmap across position updates", async () => {
     const view = await mount();
     const context = document.createElement("canvas").getContext("2d")!;

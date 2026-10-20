@@ -3038,6 +3038,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       store: rdpStore,
       resolveRuntime: () => resolveVerifiedRdpRuntime({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, developmentRoot: options.rdpRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../..") }),
       getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+      updateApplicationSettings,
       prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "rdp", false),
       isQuitting: () => isQuitRequested || shutdown.isStopping,
       icon: applicationIcons.getIconPath(),

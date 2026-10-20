@@ -1329,6 +1329,7 @@ async function setApplicationTheme(
         keyboardShortcuts: current.keyboardShortcuts,
         terminal: current.terminal,
         overview: current.overview,
+        rdp: current.rdp,
       },
     });
   }, theme);

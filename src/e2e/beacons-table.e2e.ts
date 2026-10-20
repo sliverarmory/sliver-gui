@@ -1422,7 +1422,7 @@ async function assertBeaconExecutionCommands(
           disableWindowTransparency: current.disableWindowTransparency,
           reportScreenshotDirectory: current.reportScreenshotDirectory,
           commandPaletteShortcut: current.commandPaletteShortcut, keyboardShortcuts: current.keyboardShortcuts,
-          terminal: { ...current.terminal, fontSize: 18 }, overview: current.overview,
+          terminal: { ...current.terminal, fontSize: 18 }, overview: current.overview, rdp: current.rdp,
         } });
       }, theme);
       assert.equal(saved.ok, true, saved.error ?? "application appearance settings must save");
@@ -1470,7 +1470,7 @@ async function assertBeaconExecutionCommands(
       disableWindowTransparency: originalSettings.disableWindowTransparency,
       reportScreenshotDirectory: originalSettings.reportScreenshotDirectory,
       commandPaletteShortcut: originalSettings.commandPaletteShortcut, keyboardShortcuts: originalSettings.keyboardShortcuts,
-      terminal: originalSettings.terminal, overview: originalSettings.overview });
+      terminal: originalSettings.terminal, overview: originalSettings.overview, rdp: originalSettings.rdp });
     await nativeWindow.evaluate((window, size) => window.setSize(size[0], size[1]), originalSize);
     await page.waitForFunction((width) => (globalThis as unknown as { innerWidth: number }).innerWidth === width, originalSize[0]);
     if (await page.getByRole("heading", { name: "m1-beacon", exact: true }).count() === 0) {

@@ -11,6 +11,10 @@ validation errors, a custom clipboard feature without native OS clipboard
 libraries, and framebuffer allocation limits. No audio, native windows, drive
 redirection or arbitrary dynamic plugins are enabled.
 
+Resize completion follows both classic reactivation and EGFX framebuffer size
+changes. The helper opts out of IronRDP's automatic resize fallback reconnection;
+unsupported or timed-out resize requests require an explicit GUI reconnect.
+
 The fork caps inbound static/dynamic channel message reassembly at 64 MiB,
 including compressed static fragments, before completed messages reach backend
 validation. Clipboard content has the tighter 1 MiB limit. Graphics caches and

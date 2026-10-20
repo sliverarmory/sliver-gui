@@ -385,6 +385,7 @@ async function useDarkTheme(page: Page): Promise<void> {
         commandPaletteShortcut: settings.commandPaletteShortcut, keyboardShortcuts: settings.keyboardShortcuts,
         terminal: settings.terminal,
         overview: settings.overview,
+        rdp: settings.rdp,
       },
     });
   });

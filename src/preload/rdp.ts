@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { parseApplicationSettingsState } from "../shared/application-settings-contracts.js";
+import { parseApplicationSettingsState, parseApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
 import {
   APPLICATION_CONTEXT_MENU_IPC,
   parseApplicationContextMenuActionRequest,
@@ -69,6 +69,7 @@ const api: RdpWindowAPI = {
   },
   toggleFullscreen: () => invokeEmpty(RDP_IPC.toggleFullscreen),
   getApplicationSettings: async () => parseApplicationSettingsState(await ipcRenderer.invoke(RDP_IPC.getApplicationSettings)),
+  updateApplicationSettings: (input) => invokeValue(RDP_IPC.updateApplicationSettings, parseApplicationSettingsState, parseApplicationSettingsUpdateInput(input)),
   onStateChanged: (listener) => subscribe(RDP_IPC.stateChanged, parseState, listener),
   onApplicationSettingsChanged: (listener) => subscribe(RDP_IPC.applicationSettingsChanged, parseApplicationSettingsState, listener),
 };
