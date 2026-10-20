@@ -30,6 +30,12 @@ Font Awesome.
   available. See [website limits and preview security](docs/website-preview-security.md).
 - Dedicated Sliver console and managed SSH windows with tabbed Ghostty
   terminals.
+- A standalone **File → Remote Desktop** client powered by IronRDP, with direct
+  TLS/NLA connections, saved profiles, certificate review, tabbed desktops,
+  explicit text clipboard, and a sandboxed canvas viewer. It works without an
+  operator configuration or a Sliver server connection. See
+  [RDP usage](docs/rdp-client.md) and
+  [architecture and verification](docs/rdp-client-design.md).
 - Separate Armory, Network, and Cloud Deployment windows, including AWS and
   Azure account integration.
 - A Cloud Deployment DNS manager for Route 53 and Azure DNS, with zone and
@@ -47,6 +53,8 @@ tracked coverage and the feature documents below for specific boundaries.
 
 - Node.js 24.15 or newer on the 24.x line, or Node.js 26 or newer.
 - npm 11.19 or newer.
+- rustup for the bundled RDP helper; `npm run setup:rdp` installs the pinned
+  Rust 1.94.1 toolchain and platform targets.
 - A HeroUI Pro license and authentication for its package artifact, you only need this license if you want to build the code from scratch. You can download [prebuilt binaries from the Github releases](https://github.com/sliverarmory/sliver-gui/releases).
 
 The supported versions and locked dependencies are recorded in
@@ -59,6 +67,7 @@ Application code uses strict TypeScript; build helpers use Node.js ES modules.
 npm ci --strict-allow-scripts
 npx heroui-pro login
 npx heroui-pro install --yes
+npm run setup:rdp
 npm run dev
 ```
 
@@ -68,6 +77,8 @@ Keep credentials out of tracked files.
 
 `npm run dev` builds and launches the static application at
 `sliver://app/index.html`, using the production content security policy.
+It also builds the host RDP helper from the pinned IronRDP fork. Ordinary
+TypeScript builds and unit tests do not require compiling Rust.
 Restart the command after source changes; this workflow does not use HMR.
 
 The TypeScript client is installed from the pinned `sliver-script` npm package.
@@ -85,6 +96,13 @@ operator configs in `configs/` and updates the
 open selector when a valid config is saved there. It saves configs selected
 through Import as private file references in `gui/operator-configs.json`.
 Import and Forget do not copy or delete the source configs.
+
+Remote Desktop profiles and endpoint certificate pins live in `gui/rdp.json`.
+Passwords are omitted by default, can be retained until app exit, or can be
+encrypted with the operating system's secure storage. Persistent passwords are
+unavailable when Linux selects an unencrypted key store. Clipboard transfer is
+explicit and limited to text; closing an RDP tab disconnects without logging
+off the remote Windows account.
 
 **Settings → General → Appearance → Disable window transparency** turns off
 native window glass immediately across the app. The switch is off by default,
@@ -108,6 +126,9 @@ sharing, the Monaco editor, platform transparency support, and runtime limits.
 | `npm run protocol:check` | Verify the pinned client, upstream baseline, and parity artifacts. |
 | `npm run build` | Typecheck and build application output in `dist/`. |
 | `npm run build:console` | Build the pinned native Sliver console. |
+| `npm run build:rdp:host` | Build and verify the RDP helper for this machine. |
+| `npm run build:rdp` | Build the RDP packaging target, including both macOS slices. |
+| `npm run test:rdp:native` | Run the Rust runtime tests. |
 | `npm run package` | Create an unpacked application under `release/`. |
 | `npm run dist` | Create platform installers under `release/`. |
 | `npm run test:e2e:packaged` | Verify and test an existing unpacked application against a local fixture. |
@@ -136,6 +157,8 @@ builds require macOS and `/usr/bin/lipo`.
 `npm run package` and `npm run dist` prepare the native runtime, console, and
 license inventory before packaging. Generated output under `dist/`, `release/`,
 `native/sliver-console/`, and `.e2e-dist/` is ignored by Git.
+The generated RDP executables, provenance, and Cargo license inventory under
+`native/rdp/bin/` are also ignored. The helper source and lockfile are tracked.
 
 ## Packages and updates
 

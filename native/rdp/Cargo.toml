@@ -1,0 +1,30 @@
+[package]
+name = "sliver-rdp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+license = "GPL-3.0-or-later"
+
+[dependencies]
+ironrdp-client = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6", default-features = false, features = ["rustls", "clipboard-custom"] }
+ironrdp-pdu = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
+ironrdp-connector = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
+ironrdp-core = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
+ironrdp-tls = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6", features = ["rustls"] }
+ironrdp-cliprdr = { git = "https://github.com/sliverarmory/IronRDP", rev = "1835457f27045d0098a4861b7b50204539539ec6" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+base64 = "0.22"
+zeroize = "1"
+
+[profile.release]
+lto = "thin"
+# Rust 1.94.1's Mach-O strip can misalign LINKEDIT on macOS 27 (rust-lang/rust#157750).
+strip = "none"
+panic = "abort"
+
+[profile.release.build-override]
+strip = "none"

@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-08-09
-- Applies to: Electron 43.x packaged Sliver GUI releases
+- Applies to: Electron 44.5.1 packaged Sliver GUI releases
 
 ## Context
 
@@ -11,11 +11,12 @@ and Linux x64 packages. A moving CI label such as `macos-latest` proves only
 that a build ran on whichever image the provider selected that day; it does
 not define a product minimum or certify that an installed package works.
 
-Electron 43 provides macOS, Windows, and Linux binaries; Electron's published
+Electron 44.5.1 provides macOS, Windows, and Linux binaries; its published
 platform policy identifies macOS Ventura and later, Windows 10 and later, and
-Ubuntu 22.04 as the Linux build baseline. This ADR deliberately chooses a
-narrower Windows product minimum because ordinary Windows 10 editions are out
-of standard support.
+Linux distributions supported by Chromium and their distribution maintainers.
+This project uses Ubuntu 22.04 as its Linux build baseline and deliberately
+chooses a narrower Windows product minimum because ordinary Windows 10
+editions are out of standard support.
 
 ## Decision
 
@@ -34,7 +35,8 @@ The exact M0 release matrix is:
 | Windows x64 | NSIS and portable EXE | Windows 11 24H2, build 26100, x64 | Windows 11 24H2 x64, build 26100 with the latest security update available on the certification date | Pending |
 | Linux x64 | AppImage and Debian package | Ubuntu 22.04.5 LTS, glibc 2.35, x86_64 | Ubuntu 22.04.5 LTS x86_64 with glibc 2.35, X11 session | Pending |
 
-The current developer-host observation is macOS 26.5.2 build 25F84 on arm64.
+The current developer-host observation is macOS 27.0.1 build 26A434 on arm64,
+running Electron 44.5.1.
 It is useful local evidence but is not a replacement for any pending packaged
 minimum-runtime lane above. The tested column may change only when evidence
 records the exact OS version/build, architecture, package SHA-256, Electron
@@ -50,10 +52,42 @@ baseline until the Wayland package smoke passes.
 ## Transport scope
 
 mTLS is the packaged operator transport required by the M0 application smoke.
-Packaged WireGuard operator configurations, prebuilt helper binaries, and their
-cross-platform process certification are deferred beyond M0. This deferral is
+Packaged WireGuard operator configurations, their supporting transport helpers,
+and their cross-platform process certification are deferred beyond M0. This deferral is
 not a waiver for implant-side WireGuard commands, which remain independently
 classified in the operator parity inventory.
+
+## Standalone Remote Desktop
+
+The IronRDP client uses the same four execution targets as the GUI. It adds no
+Windows ARM or Linux ARM package. A private Rust helper owns the connection,
+credentials and protocol processing; the isolated renderer displays bounded
+RGBA tiles through the same Canvas viewer on every target. It does not depend
+on an operator configuration or Sliver connection. The source, feature set,
+Rust 1.94.1 toolchain and native targets are pinned in
+`protocol/ironrdp-provenance.json`.
+
+The macOS package contains a universal helper with native Intel and Apple
+Silicon slices and a 13.0 deployment target. Windows uses an x64 MSVC helper
+with the static CRT. Linux uses an x64 GNU helper built on Ubuntu 22.04.
+Build provenance, executable hashes, ABI and dependency notices are verified
+before packaging. The ASAR contains the expected build record; signed macOS
+and Windows helpers must also match the application's code-signing identity.
+
+The CI package lanes are `macos-15` (arm64, universal output), `windows-2022`
+(x64), and `ubuntu-22.04` (x64). A separate `macos-15-intel` lane compiles and
+executes the universal helper on Intel hardware. Every package lane exercises
+the actual Electron ASAR runtime loader; the default application E2E suite
+also exercises offline RDP profiles and the sandboxed window. Live Windows
+login and desktop interaction require the explicit `test:e2e:rdp-live` opt-in.
+These checks do not mark any minimum-runtime installation lane above complete.
+
+Adding this helper and updating Electron require fresh installed-package
+certification on all four minimum-runtime targets. That certification must
+include helper loading and identity verification, NLA login to a disposable
+Windows host, desktop/input/clipboard behavior, and complete disconnect and
+process cleanup. The current developer-host universal build and self-tests
+are local evidence only; Rosetta execution does not certify native Intel.
 
 ## Required evidence and CI policy
 
@@ -131,7 +165,7 @@ manual bootstrap installation.
 
 ## References
 
-- [Electron platform support](https://github.com/electron/electron#platform-support)
+- [Electron 44.5.1 platform support](https://github.com/electron/electron/blob/v44.5.1/README.md#platform-support)
 - [Electron breaking changes](https://www.electronjs.org/docs/latest/breaking-changes)
 - [Windows 10 lifecycle notice](https://learn.microsoft.com/en-us/lifecycle/announcements/windows-10-22h2-end-of-support-update)
 - [macOS Ventura 13.7.8 security release](https://support.apple.com/en-us/124929)

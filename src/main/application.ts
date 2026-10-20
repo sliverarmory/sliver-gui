@@ -94,6 +94,10 @@ import { ApplicationSettingsStore } from "./application-settings.js";
 import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
 import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
+import { RdpWindows } from "./rdp-windows.js";
+import { RdpStore } from "./rdp-store.js";
+import { resolveVerifiedRdpRuntime } from "./rdp-runtime-loader.js";
+import { RDP_SESSION_PARTITION } from "./window-options.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
 import {
@@ -195,6 +199,7 @@ type NativeWindowSurface =
   | "console"
   | "network"
   | "text-editor"
+  | "rdp"
   | "ssh";
 
 export interface StartApplicationOptions {
@@ -206,6 +211,8 @@ export interface StartApplicationOptions {
   armoryPreloadPath?: string;
   sshPreloadPath?: string;
   textEditorPreloadPath?: string;
+  rdpPreloadPath?: string;
+  rdpRuntimeRootDirectory?: string;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
@@ -373,6 +380,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const networkRendererUrl = rendererUrlForSurface(rendererUrl, "network");
   const sshRendererUrl = rendererUrlForSurface(rendererUrl, "ssh");
   const textEditorRendererUrl = rendererUrlForSurface(rendererUrl, "text-editor");
+  const rdpRendererUrl = rendererUrlForSurface(rendererUrl, "rdp");
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
@@ -399,6 +407,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let ghosttyConfigStore: GhosttyConfigStore | undefined;
   let ghosttySettingsIpc: ReturnType<typeof registerGhosttySettingsIpc> | undefined;
   let textEditorWindows: TextEditorWindows | undefined;
+  let rdpWindows: RdpWindows | undefined;
   const websitePreviewServer = new WebsitePreviewServer();
   registry.setWebsitePreviewController(websitePreviewServer);
   let isQuitRequested = false;
@@ -524,6 +533,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           ? networkRendererUrl
         : surface === "text-editor"
           ? textEditorRendererUrl
+        : surface === "rdp"
+          ? rdpRendererUrl
         : surface === "ssh"
           ? sshRendererUrl
           : undefined,
@@ -2298,6 +2309,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
             dialog.showErrorBox("Text Editor unavailable", "The text editor window could not be opened.");
           });
         },
+        openRdp: () => {
+          if (shutdown.isStopping) return;
+          if (!rdpWindows) {
+            dialog.showErrorBox("Remote Desktop unavailable", "Remote Desktop settings could not be loaded safely. Repair or restore gui/rdp.json in the client directory, then restart the application.");
+            return;
+          }
+          void rdpWindows?.open().catch(() => dialog.showErrorBox("Remote Desktop unavailable", "The RDP window could not be opened."));
+        },
         duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
         reportScreenshot: () => {
           void reportScreenshot().then((result) => {
@@ -2426,6 +2445,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ghosttySettingsIpc?.dispose();
     systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
+      rdpWindows?.dispose();
       armoryService.dispose();
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
@@ -2810,6 +2830,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     const retainedConsole = [...consoleWindowsByContentsId.values()].reverse().find((record) =>
       record.hiddenByUser && !record.finalizing && !record.window.isDestroyed());
     if (retainedConsole) showConsoleWindow(retainedConsole);
+    else rdpWindows?.restoreRetainedWindow();
   };
   const onAppearanceWindowFocus = (): void => { void ghosttySettingsIpc?.reload().catch(() => undefined); };
   const onWindowAllClosed = (): void => {
@@ -2978,12 +2999,31 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   configureSessionSecurity(armorySession);
   const textEditorSession = session.fromPartition(TEXT_EDITOR_SESSION_PARTITION);
   configureSessionSecurity(textEditorSession, undefined, textEditorRendererUrl);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, textEditorSession]);
+  const rdpSession = session.fromPartition(RDP_SESSION_PARTITION);
+  configureSessionSecurity(rdpSession, undefined, rdpRendererUrl);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, textEditorSession, rdpSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
       createAppProtocolHandler(dirname(rendererEntryPath), (url) => net.fetch(url)),
     );
+  }
+  const rdpStore = new RdpStore(join(consoleClientRootDirectory, "gui", "rdp.json"), safeStorage);
+  try {
+    await rdpStore.load();
+    rdpWindows = new RdpWindows({
+      rendererUrl: rdpRendererUrl,
+      preloadPath: options.rdpPreloadPath ?? join(mainBundleDirectory, "../preload/rdp.cjs"),
+      store: rdpStore,
+      resolveRuntime: () => resolveVerifiedRdpRuntime({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, developmentRoot: options.rdpRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../..") }),
+      getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+      prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "rdp", false),
+      isQuitting: () => isQuitRequested || shutdown.isStopping,
+      icon: applicationIcons.getIconPath(),
+    });
+  } catch {
+    // Preserve unreadable settings and certificate pins without blocking the operator workspace.
+    rdpStore.dispose();
   }
   textEditorWindows = new TextEditorWindows({
     rendererUrl: textEditorRendererUrl,
@@ -3242,6 +3282,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
+      rdpWindows?.dispose();
       websitePreviewServer.dispose();
       unregisterIpcHandlers();
       for (const window of [...windows]) {
@@ -3292,7 +3333,7 @@ function readLinuxPackageType(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor",
+  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor" | "rdp",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "component": "sliver-rdp",
+  "protocolVersion": 1,
+  "source": {
+    "repository": "https://github.com/sliverarmory/IronRDP",
+    "commit": "1835457f27045d0098a4861b7b50204539539ec6",
+    "tree": "4e8a33e08ab5769109edd8dcd7e4b125bd9cd702",
+    "upstreamRepository": "https://github.com/Devolutions/IronRDP",
+    "upstreamCommit": "1f69e124e6bf85608efce3495c12eaf5f6b5a95d",
+    "license": "MIT OR Apache-2.0",
+    "patchInventory": "SLIVER_GUI_EMBEDDING.md",
+    "patchInventorySha256": "dd689362516dbb19dcc3cb5b296725070ea31192b77e20250446f37f62d19bd6"
+  },
+  "toolchain": {
+    "rust": "1.94.1"
+  },
+  "build": {
+    "macosDeploymentTarget": "13.0",
+    "linuxGlibcBaseline": "2.35",
+    "windowsCrt": "static",
+    "ironrdpClientFeatures": [
+      "rustls",
+      "clipboard-custom"
+    ],
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "packaging": {
+    "generatedDirectory": "native/rdp/bin",
+    "resourceDirectory": "rdp",
+    "executableBaseName": "sliver-rdp",
+    "buildRecord": "provenance.json",
+    "viewer": "native-framebuffer-react-canvas"
+  }
+}

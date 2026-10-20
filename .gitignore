@@ -9,6 +9,8 @@
 /native/sliver-console/
 /native/updater-trust/bin/
 /native/updater-trust/build/
+/native/rdp/bin/
+/native/rdp/target/
 /.release-signing/
 *.tsbuildinfo
 *.log

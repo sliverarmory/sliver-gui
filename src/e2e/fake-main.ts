@@ -639,6 +639,8 @@ void startApplication({
   cloudDeploymentPreloadPath: `${repositoryRoot}/dist/preload/cloud-deployment.cjs`,
   networkPreloadPath: `${repositoryRoot}/dist/preload/network.cjs`,
   textEditorPreloadPath: `${repositoryRoot}/dist/preload/text-editor.cjs`,
+  rdpPreloadPath: `${repositoryRoot}/dist/preload/rdp.cjs`,
+  rdpRuntimeRootDirectory: repositoryRoot,
   armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {

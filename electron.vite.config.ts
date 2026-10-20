@@ -44,6 +44,7 @@ export default defineConfig({
           network: resolve("src/preload/network.ts"),
           armory: resolve("src/preload/armory.ts"),
           ssh: resolve("src/preload/ssh.ts"),
+          rdp: resolve("src/preload/rdp.ts"),
           "text-editor": resolve("src/preload/text-editor.ts"),
         },
         output: {

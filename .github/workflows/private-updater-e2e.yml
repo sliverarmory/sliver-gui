@@ -280,6 +280,9 @@ jobs:
             throw "certutil failed to add the ephemeral certificate to LocalMachine TrustedPublisher"
           }
 
+      - name: Install pinned Rust and native RDP targets
+        run: npm run setup:rdp
+
       - name: Build every production target at N-1 and N
         shell: bash
         env:

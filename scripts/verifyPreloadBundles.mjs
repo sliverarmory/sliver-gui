@@ -11,6 +11,7 @@ const PRELOAD_BRIDGES = Object.freeze({
   "network.cjs": ["network", "applicationContextMenu"],
   "armory.cjs": ["armory", "applicationContextMenu"],
   "ssh.cjs": ["ssh", "applicationContextMenu", "ghosttySettings"],
+  "rdp.cjs": ["rdp", "applicationContextMenu"],
   "text-editor.cjs": ["textEditor", "applicationContextMenu"],
 });
 
@@ -129,7 +130,7 @@ export async function verifyPreloadBundles(directory = resolve(import.meta.dirna
   const actual = entries.filter((entry) => entry.isFile() && /\.(?:cjs|mjs|js)$/u.test(entry.name))
     .map((entry) => join(entry.parentPath, entry.name));
   assert.deepEqual(actual.sort(), expected.map((filename) => join(directory, filename)).sort(),
-    "Preload output must contain exactly seven standalone CommonJS bundles; shared chunks are unsupported");
+    "Preload output must contain exactly the expected standalone CommonJS bundles; shared chunks are unsupported");
   const results = [];
   for (const filename of expected) {
     results.push(verifyPreloadBundle(filename, await readFile(join(directory, filename), "utf8")));

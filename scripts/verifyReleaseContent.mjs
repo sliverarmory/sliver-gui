@@ -19,6 +19,7 @@ import {
 } from "./buildSliverConsole.mjs";
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
+import { verifyPreparedRdpRuntime, verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
@@ -62,6 +63,8 @@ const requiredBuilderPaths = [
   "protocol/sliver-script-provenance.json",
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
+  "protocol/ironrdp-provenance.json",
+  "native/rdp/bin/provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -103,6 +106,7 @@ const requiredPackagedFiles = [
   "dist/preload/network.cjs",
   "dist/preload/armory.cjs",
   "dist/preload/ssh.cjs",
+  "dist/preload/rdp.cjs",
   "dist/preload/text-editor.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",
@@ -115,6 +119,8 @@ const requiredPackagedFiles = [
   "protocol/sliver-script-provenance.json",
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
+  "protocol/ironrdp-provenance.json",
+  "native/rdp/bin/provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -311,6 +317,8 @@ for (const requiredText of [
   "Source Code Pro@2.042R-u/1.062R-i/1.026R-vf (embedded terminal font)",
   "Embedded terminal font entries: 4",
   "Inventory entries:",
+  "SLIVER RDP RUST DEPENDENCY LICENSES",
+  "Cargo inventory entries:",
 ]) {
   if (!licenseInventory.includes(requiredText)) {
     throw new Error(`Third-party license inventory is missing: ${requiredText}`);
@@ -400,6 +408,9 @@ for (const requiredSetting of [
   "to: licenses/THIRD_PARTY_NOTICES.md",
   "from: dist/THIRD_PARTY_LICENSES.txt",
   "to: licenses/THIRD_PARTY_LICENSES.txt",
+  "from: native/rdp/bin",
+  "to: rdp",
+  "- source-provenance.json",
 ]) {
   if (!builderConfiguration.includes(requiredSetting)) {
     throw new Error(`Production package branding is missing: ${requiredSetting}`);
@@ -417,6 +428,7 @@ for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/
 
 const sliverClientEvidence = await verifyInstalledSliverClient();
 const sliverConsoleEvidence = await verifyPreparedSliverConsole();
+const rdpEvidence = await verifyPreparedRdpRuntime();
 const updateSigningEvidence = await readUpdateSigningAssets(rootDir);
 await verifyNodePtyDirectory(join(rootDir, "node_modules/node-pty"), process.platform);
 
@@ -431,6 +443,10 @@ if (verifyPackaged) {
     await verifyExternalLegalAssets(archive);
     await verifyExternalUpdateSigning(archive, updateSigningEvidence);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
+    if (!extractFile(archive, "native/rdp/bin/provenance.json").equals(rdpEvidence.recordBytes)) {
+      throw new Error("ASAR RDP build provenance does not match the prepared helper");
+    }
+    await verifyPackagedRdpRuntime({ resourcesDirectory: dirname(archive), evidence: rdpEvidence });
     await verifyExternalNodePtyRuntime(archive);
   }
   console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);

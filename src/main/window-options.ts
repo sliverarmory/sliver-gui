@@ -3,6 +3,17 @@ import type { BrowserWindowConstructorOptions } from "electron";
 
 import { secureWebPreferences } from "./security.js";
 
+export const RDP_SESSION_PARTITION = "sliver-rdp";
+
+/** A standalone desktop viewer with no operator bridge or network authority. */
+export function rdpWindowOptions(preload: string, platform: NodeJS.Platform = process.platform, icon?: string, dark = true): BrowserWindowConstructorOptions {
+  return { width: 1380, height: 900, minWidth: 800, minHeight: 600, show: false, title: "Remote Desktop",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: { ...secureWebPreferences(preload), partition: RDP_SESSION_PARTITION } };
+}
+
 const TRANSPARENT_WINDOW_COLOR = "#00000000";
 export const CLOUD_DEPLOYMENT_SESSION_PARTITION = "sliver-cloud-deployment";
 export const NETWORK_SESSION_PARTITION = "sliver-network";

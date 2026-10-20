@@ -14,6 +14,7 @@ import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
 import { SshWindowApp } from "./SshWindowApp";
 import { NetworkWindowApp } from "./NetworkWindowApp";
 import { TextEditorWindowApp } from "./TextEditorWindowApp";
+import { RdpWindowApp } from "./RdpWindowApp";
 import { ReleaseDownloadToasts } from "./components/ReleaseDownloadToasts";
 import { ApplicationUpdateStatus } from "./components/ApplicationUpdateStatus";
 import { ApplicationContextMenu } from "./components/ApplicationContextMenu";
@@ -40,6 +41,11 @@ function RendererSurface(): React.JSX.Element {
 }
 
 function ApplicationRoot(): React.JSX.Element {
+  if (surface === "rdp") {
+    return window.rdp ? <ApplicationSettingsProvider api={window.rdp}>
+      <RdpWindowApp />
+    </ApplicationSettingsProvider> : <RdpWindowApp />;
+  }
   if (surface === "text-editor") {
     return window.textEditor ? <ApplicationSettingsProvider api={window.textEditor}>
       <TextEditorWindowApp />

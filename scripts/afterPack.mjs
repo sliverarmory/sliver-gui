@@ -10,6 +10,7 @@ import { prepareNodePtyRuntime } from "./prepareNodePtyRuntime.mjs";
 import { buildUpdaterTrust } from "./buildUpdaterTrust.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 import { verifyWindowsSigningChanges } from "./verifyWindowsSigningChanges.mjs";
+import { verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -17,6 +18,7 @@ export default async function afterPack(context, dependencies = {}) {
   const prepareRuntime = dependencies.prepareNodePtyRuntime ?? prepareNodePtyRuntime;
   const verifySliverConsole = dependencies.verifySliverConsoleBeforeSigning ?? verifySliverConsoleBeforeSigning;
   const prepareTrust = dependencies.prepareUpdaterTrustBeforeSigning ?? prepareUpdaterTrustBeforeSigning;
+  const verifyRdp = dependencies.verifyRdpBeforeSigning ?? verifyPackagedRdpRuntime;
   const platform = context.electronPlatformName;
   let resourcesDirectory;
   if (platform === "darwin") {
@@ -43,6 +45,12 @@ export default async function afterPack(context, dependencies = {}) {
     platform,
     projectDirectory: context.packager?.projectDir ?? rootDirectory,
     resourcesDirectory,
+  });
+  await verifyRdp({
+    platform,
+    projectDirectory: context.packager?.projectDir ?? rootDirectory,
+    resourcesDirectory,
+    stage: "before-sign",
   });
 }
 

@@ -7,6 +7,7 @@ import type { SliverDesktopAPI } from "../../shared/contracts";
 import type { SshWindowAPI } from "../../shared/ssh-contracts";
 import type { NetworkForwardingAPI } from "../../shared/network-forwarding-contracts";
 import type { TextEditorAPI } from "../../shared/text-editor-contracts";
+import type { RdpWindowAPI } from "../../shared/rdp-contracts";
 
 declare global {
   interface Window {
@@ -16,6 +17,7 @@ declare global {
     cloudDeployment?: CloudDeploymentAPI;
     network?: NetworkForwardingAPI;
     textEditor?: TextEditorAPI;
+    rdp?: RdpWindowAPI;
     armory?: ArmoryAPI;
     sliver: SliverDesktopAPI;
     ssh?: SshWindowAPI;

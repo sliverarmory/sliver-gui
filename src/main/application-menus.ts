@@ -30,6 +30,7 @@ export type ReleaseMenuCatalog =
 export interface ApplicationMenuActions {
   readonly newWindow: () => void;
   readonly openTextEditor?: () => void;
+  readonly openRdp?: () => void;
   readonly duplicateConnectedWindow: () => void;
   readonly reportScreenshot?: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
@@ -203,6 +204,7 @@ export function buildApplicationMenuTemplate(
           label: "New Text Editor",
           click: actions.openTextEditor,
         }] : []),
+        ...(actions.openRdp ? [{ id: "rdp.open", label: "Remote Desktop", click: actions.openRdp }] : []),
         { type: "separator" },
         platform === "darwin"
           ? consoleActions

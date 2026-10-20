@@ -1,0 +1,18 @@
+.rdp-window { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.rdp-tabs { display: flex; flex-direction: column; min-height: 0; flex: 1; gap: 0; }
+.rdp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .625rem 1rem; border-bottom: 1px solid var(--color-border); }
+.rdp-tab-panels { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.rdp-viewer { height: 100%; min-height: 0; }
+.rdp-viewer[data-active="false"] { display: none; }
+.rdp-screen { position: relative; display: grid; width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; background: #111; isolation: isolate; }
+.rdp-screen__canvas, .rdp-screen__cursor { grid-area: 1 / 1; width: 100%; height: 100%; min-width: 0; min-height: 0; object-fit: contain; }
+.rdp-screen[data-scale="actual"] .rdp-screen__canvas,
+.rdp-screen[data-scale="actual"] .rdp-screen__cursor { width: auto; height: auto; max-width: none; max-height: none; }
+.rdp-screen__cursor { pointer-events: none; z-index: 1; }
+.rdp-screen[data-cursor="bitmap"], .rdp-screen[data-cursor="hidden"] { cursor: none; }
+.rdp-screen__input { position: absolute; width: 1px; height: 1px; opacity: 0; top: 0; left: 0; resize: none; overflow: hidden; }
+.rdp-screen:focus-within { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.rdp-screen__message { grid-area: 1 / 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1rem; min-width: 0; padding: 2rem; color: #e4e4e7; background: #111d; z-index: 2; cursor: default; }
+.rdp-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .375rem 1rem; border-top: 1px solid var(--color-border); font-size: .75rem; color: var(--color-muted); }
+.rdp-profiles { width: min(100%, 36rem); margin: 0 auto; padding: 2rem 1.5rem; }
+.rdp-profile-row { display: flex; align-items: center; gap: .75rem; padding: .75rem 0; border-bottom: 1px solid var(--color-border); }

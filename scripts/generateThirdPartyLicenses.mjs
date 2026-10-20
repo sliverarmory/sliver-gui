@@ -143,5 +143,12 @@ output.push(
   `Embedded terminal font entries: ${terminalFonts.fonts.length}`,
   "",
 );
+// Cargo's selected feature/target dependency graph is independent of npm's lock.
+// build:rdp runs first for package/release builds and produces the exact inventory.
+const rustLicenses = await readFile(join(rootDir, "native/rdp/bin/THIRD_PARTY_LICENSES.txt"), "utf8");
+if (!rustLicenses.startsWith("SLIVER RDP RUST DEPENDENCY LICENSES\n") || !rustLicenses.includes("Cargo inventory entries:")) {
+  throw new Error("The RDP Cargo license inventory is missing; run npm run build:rdp");
+}
+output.push(divider, rustLicenses, "");
 await mkdir(join(rootDir, "dist"), { recursive: true });
 await writeFile(join(rootDir, "dist", "THIRD_PARTY_LICENSES.txt"), output.join("\n"), "utf8");

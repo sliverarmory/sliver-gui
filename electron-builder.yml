@@ -53,6 +53,8 @@ files:
   - docs/operator-parity.md
   - docs/adr/0001-platform-support.md
   - docs/rpc-message-budgets.md
+  - protocol/ironrdp-provenance.json
+  - native/rdp/bin/provenance.json
 asarUnpack:
   - node_modules/node-pty/build/Release/**
 extraResources:
@@ -89,6 +91,15 @@ extraResources:
     to: sliver-console/source-overlay
     filter:
       - "**/*.go"
+  - from: native/rdp/bin
+    to: rdp
+    filter:
+      - sliver-rdp
+      - sliver-rdp.exe
+      - provenance.json
+      - source-provenance.json
+      - LICENSE
+      - THIRD_PARTY_LICENSES.txt
 extraMetadata:
   main: dist/main/index.js
 mac:

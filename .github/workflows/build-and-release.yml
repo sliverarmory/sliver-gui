@@ -76,7 +76,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyPreloadBundles.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/buildRdpRuntime.test.mjs scripts/verifyRdpRuntime.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyPreloadBundles.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
@@ -131,11 +131,41 @@ jobs:
           if-no-files-found: warn
           retention-days: ${{ github.event_name == 'pull_request' && 14 || 30 }}
 
+  rdp-intel:
+    name: RDP native Intel macOS
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up exact Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.15.0
+
+      - name: Assert native Intel execution
+        run: node -e 'if (process.platform !== "darwin" || process.arch !== "x64") process.exit(1)'
+
+      - name: Install pinned Rust and both macOS targets
+        run: node scripts/setupRdpToolchain.mjs
+
+      - name: Exercise native adapter on Intel hardware
+        run: cargo +1.94.1 test --locked --manifest-path native/rdp/Cargo.toml
+
+      - name: Build and execute the universal helper on Intel hardware
+        run: |
+          node scripts/buildRdpRuntime.mjs
+          node scripts/verifyRdpRuntime.mjs
+
   build:
     name: Build (${{ matrix.platform }})
     needs:
       - protocol-parity
       - release-request
+      - rdp-intel
     runs-on: ${{ matrix.runner }}
     environment: ${{ needs.release-request.outputs.release_tag != '' && 'release' || 'ci' }}
     env:
@@ -150,6 +180,7 @@ jobs:
             runner: macos-15
             build_args: --mac --universal
             packaged_smoke: npm run test:e2e:packaged
+            rdp_loader: npm run test:rdp:loader
             update_platform: macos
             app_update_path: release/mac-universal/Sliver GUI.app/Contents/Resources/app-update.yml
             artifact_name: sliver-gui-macos-universal
@@ -164,6 +195,7 @@ jobs:
             runner: windows-2022
             build_args: --win --x64
             packaged_smoke: npm run test:e2e:packaged
+            rdp_loader: npm run test:rdp:loader
             update_platform: windows
             app_update_path: release/win-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-windows-x64
@@ -176,6 +208,7 @@ jobs:
             runner: ubuntu-22.04
             build_args: --linux --x64
             packaged_smoke: xvfb-run --auto-servernum npm run test:e2e:packaged
+            rdp_loader: xvfb-run --auto-servernum npm run test:rdp:loader
             update_platform: linux
             app_update_path: release/linux-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-linux-x64
@@ -285,10 +318,19 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Install pinned Rust and native RDP targets
+        run: npm run setup:rdp
+
+      - name: Test RDP adapter and packaging boundaries
+        run: npm run test:rdp:build && npm run test:rdp:native
+
       - name: Prepare native packages
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
         run: npm run predist
+
+      - name: Verify RDP loader with actual Electron ASAR and native helper
+        run: ${{ matrix.rdp_loader }}
 
       - name: Import pinned release signing identity on the isolated runner
         if: env.RELEASE_TAG != '' && runner.os != 'Linux'
