@@ -3,15 +3,17 @@ import { Button, Chip, Input, Label, Modal, Tabs, TextField, Tooltip } from "@he
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faArrowsRotate, faClipboard, faDesktop, faExpand, faFolderOpen, faGear, faKey, faPlus, faPowerOff, faShieldHalved, faTrash, faXmark } from "@fortawesome/free-solid-svg-icons";
+import { faArrowsRotate, faClipboard, faDesktop, faExpand, faFolderOpen, faGear, faKey, faPlus, faPowerOff, faShieldHalved, faXmark } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
-import type { RdpProfile, RdpScaleMode, RdpWindowState } from "../../shared/rdp-contracts";
+import type { RdpConnectInput, RdpCredentialPersistence, RdpProfile, RdpScaleMode, RdpWindowState } from "../../shared/rdp-contracts";
 import type { OperationResult } from "../../shared/contracts";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { RenamableTab } from "./components/RenamableTab";
 import { RenameTabDialog } from "./components/RenameTabDialog";
 import { SwitchRow } from "./components/FormControls";
 import { RdpConnectDialog } from "./components/rdp/RdpConnectDialog";
+import { RdpProfileGrid } from "./components/rdp/RdpProfileGrid";
+import { RdpProfilePasswordDialog } from "./components/rdp/RdpProfilePasswordDialog";
 import { phaseLabel, RdpDesktop, type RdpDesktopHandle } from "./components/rdp/RdpDesktop";
 import "./components/rdp/rdp.css";
 
@@ -25,6 +27,7 @@ export function RdpWindowApp(): React.JSX.Element {
   const [notice, setNotice] = useState<string>();
   const [connectOpen, setConnectOpen] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<RdpProfile>();
+  const [passwordProfile, setPasswordProfile] = useState<RdpProfile>();
   const [profilesOpen, setProfilesOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [renameId, setRenameId] = useState<string>();
@@ -41,7 +44,7 @@ export function RdpWindowApp(): React.JSX.Element {
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
   const reviewTab = state.tabs.find((tab) => tab.review !== undefined);
   const review = reviewTab?.review;
-  const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(renameId || reconnectId || review || deleteProfile);
+  const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(renameId || reconnectId || review || deleteProfile || passwordProfile);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!api) return;
@@ -91,6 +94,29 @@ export function RdpWindowApp(): React.JSX.Element {
     activeTab && refs.current.get(activeTab.id)?.current?.release();
     setSelectedProfile(profile); setProfilesOpen(false); setConnectOpen(true); setError(undefined);
   };
+  const connectProfile = async (profile: RdpProfile, password?: string, persistence: RdpCredentialPersistence = profile.credentialPersistence): Promise<void> => {
+    if (!api || pendingRef.current || state.tabs.length >= state.maxSessions) return;
+    if (activeTab) refs.current.get(activeTab.id)?.current?.release();
+    setProfilesOpen(false);
+    await act("connect-profile", () => {
+      const input: RdpConnectInput = {
+        profileId: profile.id, label: profile.label, host: profile.host, port: profile.port,
+        username: profile.username, domain: profile.domain, width: profile.width, height: profile.height,
+        clipboard: profile.clipboard, scaleMode: profile.scaleMode, persistence,
+        ...(password === undefined ? {} : { password }),
+      };
+      try { return api.connect(input); }
+      finally { delete (input as { password?: string }).password; }
+    }, () => setPasswordProfile(undefined));
+  };
+  const openProfile = (profile: RdpProfile): void => {
+    if (!api || pendingRef.current || state.tabs.length >= state.maxSessions) return;
+    if (profile.hasCredential && (profile.credentialPersistence !== "secure" || state.securePersistenceAvailable)) {
+      void connectProfile(profile); return;
+    }
+    if (activeTab) refs.current.get(activeTab.id)?.current?.release();
+    setProfilesOpen(false); setError(undefined); setPasswordProfile(profile);
+  };
   const selectTab = (id: string): void => {
     if (!api || id === activeTab?.id) return;
     if (activeTab) refs.current.get(activeTab.id)?.current?.release();
@@ -102,14 +128,8 @@ export function RdpWindowApp(): React.JSX.Element {
   const activeConnected = activeTab?.state === "active";
   const scaleMode = activeTab ? scaleModes[activeTab.id] ?? activeTab.scaleMode : "fit";
 
-  const profiles = <div className="grid gap-1">
-    {state.profiles.length === 0 ? <p className="py-4 text-sm text-muted">Save a connection profile to find it here. Passwords are managed separately.</p> : state.profiles.map((profile) => <div className="rdp-profile-row" key={profile.id}>
-      <FontAwesomeIcon aria-hidden icon={faDesktop} className="text-muted" />
-      <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{profile.label}</p><p className="truncate text-xs text-muted">{profile.username}@{profile.host}:{profile.port}</p></div>
-      <Button size="sm" variant="secondary" isDisabled={state.tabs.length >= state.maxSessions} onPress={() => newConnection(profile)}>Connect</Button>
-      <IconButton label={`Delete ${profile.label}`} icon={faTrash} onPress={() => setDeleteProfile(profile)} />
-    </div>)}
-  </div>;
+  const profiles = <RdpProfileGrid profiles={state.profiles} tabs={state.tabs}
+    disabled={Boolean(pending) || state.tabs.length >= state.maxSessions} onConnect={openProfile} onEdit={newConnection} onDelete={setDeleteProfile} />;
 
   return <AuxiliaryWindowFrame ariaLabel="Remote Desktop" className="rdp-window">
     <header className="rdp-toolbar">
@@ -122,10 +142,13 @@ export function RdpWindowApp(): React.JSX.Element {
     {activeConnected && activeTab.error && <p role="status" className="border-b border-border px-4 py-2 text-sm text-warning">{activeTab.error}</p>}
     {notice && <p role="status" className="border-b border-border px-4 py-2 text-sm text-muted">{notice}</p>}
     {loading ? <div className="grid flex-1 place-items-center text-sm text-muted" role="status">Opening Remote Desktop…</div> : state.tabs.length === 0 ? <div className="min-h-0 flex-1 overflow-y-auto">
-      <EmptyState className="mx-auto max-w-lg py-12"><EmptyState.Header><EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faDesktop} /></EmptyState.Media><EmptyState.Title>Your Windows desktops</EmptyState.Title><EmptyState.Description>Connect directly to a Windows computer. Remote Desktop works independently of your Sliver connections.</EmptyState.Description></EmptyState.Header>
+      {state.profiles.length === 0 ? <EmptyState className="mx-auto max-w-lg py-12"><EmptyState.Header><EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faDesktop} /></EmptyState.Media><EmptyState.Title>Your Windows desktops</EmptyState.Title><EmptyState.Description>Connect directly to a Windows computer. Remote Desktop works independently of your Sliver connections.</EmptyState.Description></EmptyState.Header>
         <EmptyState.Content><Button isDisabled={!api} onPress={() => newConnection()}>Connect to a computer</Button></EmptyState.Content>
-      </EmptyState>
-      {state.profiles.length > 0 && <section className="rdp-profiles" aria-label="Saved profiles"><h2 className="mb-2 text-sm font-semibold">Saved Profiles</h2>{profiles}</section>}
+      </EmptyState> : <section className="rdp-profiles" aria-label="Saved profiles">
+        <div className="rdp-profiles__heading"><h2 className="text-xl font-semibold">Saved Connections</h2><span className="text-sm tabular-nums text-muted">{state.profiles.length}</span></div>
+        <p className="mb-6 text-sm text-muted">The last saved view of each desktop.</p>
+        {profiles}
+      </section>}
     </div> : <>
       <Tabs className="rdp-tabs" selectedKey={activeTab?.id ?? ""} onSelectionChange={(id) => selectTab(String(id))}>
         <Tabs.ListContainer><Tabs.List aria-label="Remote desktop sessions" className="px-3">
@@ -144,8 +167,8 @@ export function RdpWindowApp(): React.JSX.Element {
           <IconButton label="Send clipboard text" icon={faClipboard} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-send", () => api!.clipboard({ tabId: activeTab.id, direction: "send" }), () => setNotice("Clipboard text sent to the remote desktop.")); }} />
           <Button size="sm" variant="ghost" isDisabled={!activeConnected || !activeTab.clipboardAvailable || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-receive", () => api!.clipboard({ tabId: activeTab.id, direction: "receive" }), () => setNotice("Remote text copied to the clipboard.")); }}>Receive clipboard</Button>
           <IconButton label="Toggle fullscreen" icon={faExpand} disabled={!api} onPress={() => { void act("fullscreen", () => api!.toggleFullscreen()); }} />
-          {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", () => api!.disconnect(activeTab.id)); }} />}
-          <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", () => api!.closeTab(activeTab.id)); }} />
+          {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
+          <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
         </div>}
         <div className="rdp-tab-panels">
           {api && state.tabs.map((tab) => {
@@ -159,7 +182,10 @@ export function RdpWindowApp(): React.JSX.Element {
       <footer className="rdp-footer"><span>Click the desktop to control it. Ctrl+Alt+Escape releases keyboard input.</span><span>{liveCount}/{state.maxSessions} connected</span></footer>
     </>}
     {api && connectOpen && <RdpConnectDialog api={api} initial={selectedProfile} securePersistenceAvailable={state.securePersistenceAvailable} onClose={() => setConnectOpen(false)} onProfileSaved={() => { void refresh(); }} onConnected={(id) => { setConnectOpen(false); void refresh(); void api.selectTab(id); }} />}
-    <Modal.Backdrop isOpen={profilesOpen && !deleteProfile} variant="blur" onOpenChange={setProfilesOpen}><Modal.Container size="md"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Saved Profiles</Modal.Heading></Modal.Header><Modal.Body className="max-h-[60vh] overflow-y-auto">{profiles}</Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setProfilesOpen(false)}>Close</Button><Button isDisabled={state.tabs.length >= state.maxSessions} onPress={() => newConnection()}>New connection</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
+    {passwordProfile && <RdpProfilePasswordDialog key={passwordProfile.id} profile={passwordProfile}
+      securePersistenceAvailable={state.securePersistenceAvailable} pending={Boolean(pending)} error={error}
+      onClose={() => setPasswordProfile(undefined)} onConnect={(password, persistence) => { void connectProfile(passwordProfile, password, persistence); }} />}
+    <Modal.Backdrop isOpen={profilesOpen && !deleteProfile} variant="blur" onOpenChange={setProfilesOpen}><Modal.Container size="lg"><Modal.Dialog className="rdp-profiles-dialog"><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Saved Connections</Modal.Heading></Modal.Header><Modal.Body className="max-h-[65vh] overflow-y-auto">{profiles}</Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setProfilesOpen(false)}>Close</Button><Button isDisabled={state.tabs.length >= state.maxSessions} onPress={() => newConnection()}>New connection</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
     <Modal.Backdrop isOpen={settingsOpen} variant="blur" onOpenChange={setSettingsOpen}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Display Settings</Modal.Heading></Modal.Header><Modal.Body className="grid gap-4">
       <SwitchRow label="Resize desktop with window" description="Request a desktop size matching this window. Some servers require reconnecting to change their size." selected={autoResize} onChange={setAutoResize} />
       <Button variant="secondary" isDisabled={!activeConnected} onPress={() => { activeHandle()?.resizeToWindow(); setSettingsOpen(false); }}>Resize to this window</Button>
@@ -178,7 +204,7 @@ export function RdpWindowApp(): React.JSX.Element {
       setReconnectPassword("");
       void act("reconnect", () => api.reconnect(input), () => setReconnectId(undefined)).finally(() => { delete input.password; });
     }}>Reconnect</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
-    <Modal.Backdrop isOpen={Boolean(deleteProfile)} variant="blur" onOpenChange={(open) => { if (!open) setDeleteProfile(undefined); }}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Delete Profile</Modal.Heading></Modal.Header><Modal.Body><p className="text-sm">Delete {deleteProfile?.label} and its saved credential? Existing desktop sessions remain open.</p></Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setDeleteProfile(undefined)}>Cancel</Button><Button variant="danger-soft" isDisabled={Boolean(pending)} onPress={() => { if (api && deleteProfile) void act("delete-profile", () => api.deleteProfile(deleteProfile.id), () => setDeleteProfile(undefined)); }}>Delete profile</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
+    <Modal.Backdrop isOpen={Boolean(deleteProfile)} variant="blur" onOpenChange={(open) => { if (!open) setDeleteProfile(undefined); }}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Delete Profile</Modal.Heading></Modal.Header><Modal.Body><p className="text-sm">Delete {deleteProfile?.label}, its saved preview, and its saved credential? Existing desktop sessions remain open.</p></Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setDeleteProfile(undefined)}>Cancel</Button><Button variant="danger-soft" isDisabled={Boolean(pending)} onPress={() => { if (api && deleteProfile) void act("delete-profile", () => api.deleteProfile(deleteProfile.id), () => setDeleteProfile(undefined)); }}>Delete profile</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
   </AuxiliaryWindowFrame>;
 }
 

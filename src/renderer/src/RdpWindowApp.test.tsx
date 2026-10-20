@@ -9,7 +9,7 @@ vi.mock("./components/rdp/RdpDesktop", async () => {
   const React = await import("react");
   return {
     RdpDesktop: React.forwardRef((props: { tab: RdpTab; active: boolean; inputEnabled: boolean }, ref) => {
-      React.useImperativeHandle(ref, () => ({ release: vi.fn(), focus: vi.fn(), specialKey: vi.fn(), resizeToWindow: vi.fn() }));
+      React.useImperativeHandle(ref, () => ({ release: vi.fn(), focus: vi.fn(), specialKey: vi.fn(), resizeToWindow: vi.fn(), savePreview: vi.fn(async () => undefined) }));
       return <section aria-label={`Remote desktop for ${props.tab.label}`} data-active={props.active} data-input-enabled={props.inputEnabled} />;
     }),
     phaseLabel: (state: string) => state,
@@ -42,6 +42,7 @@ beforeEach(() => {
     renameTab: vi.fn(async () => ({ ok: true as const })),
     saveProfile: vi.fn(async (input) => { const saved = { ...profile, ...input }; state = { ...state, profiles: [saved] }; listener?.(state); return { ok: true as const, value: saved }; }),
     deleteProfile: vi.fn(async () => ({ ok: true as const })), respondToCertificate: vi.fn(async () => ({ ok: true as const })),
+    savePreview: vi.fn(async () => ({ ok: true as const })),
     attach: vi.fn(async () => ({ ok: true as const, value: { tabId: "first", attempt: 1, attachmentToken: "token" } })),
     openRdpStream: vi.fn(), clipboard: vi.fn(async () => ({ ok: true as const })), setInputCapture: vi.fn(async () => ({ ok: true as const })), toggleFullscreen: vi.fn(async () => ({ ok: true as const })),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
@@ -84,17 +85,144 @@ describe("standalone remote desktop window", () => {
     expect(connectedInput).toMatchObject({ profileId: "saved", persistence: "secure", password: "private-input" });
   });
 
-  it("reuses a saved credential without returning it to the form", async () => {
+  it("connects a saved card immediately using its credential without opening a form", async () => {
     state = { ...state, profiles: [profile] };
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);
-    await user.click(await screen.findByRole("button", { name: "Connect" }));
-    expect(screen.getByLabelText("Password")).toHaveValue("");
-    expect(screen.getByLabelText("Computer")).toHaveValue("saved.test");
-    await user.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }));
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
     await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
-    expect(connectedInput).not.toHaveProperty("password");
-    expect(connectedInput?.profileId).toBe("saved");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(connectedInput).toEqual({ profileId: "saved", label: "Saved desktop", host: "saved.test", port: 3390,
+      username: "admin", domain: "", width: 1920, height: 1080, clipboard: false, scaleMode: "fit", persistence: "secure" });
+    expect(api.saveProfile).not.toHaveBeenCalled();
+    expect(await screen.findByLabelText("Remote desktop for Saved desktop")).toBeInTheDocument();
+  });
+
+  it("shows saved frames beside first-session placeholders and opens cards with the keyboard", async () => {
+    const preview = { dataUrl: "data:image/jpeg;base64,/9j/2Q==", width: 480, height: 270, capturedAt: "2026-10-19T12:00:00Z" };
+    state = { ...state, profiles: [{ ...profile, domain: "LAB", preview }, { ...profile, id: "new", label: "New desktop" }] };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const saved = await screen.findByRole("region", { name: "Saved profiles" });
+    expect(within(saved).getByRole("img", { name: "Last saved desktop for Saved desktop" })).toHaveAttribute("src", preview.dataUrl);
+    expect(within(saved).getByText("LAB\\admin")).toBeInTheDocument();
+    expect(within(saved).getByText("No preview yet")).toBeInTheDocument();
+    expect(screen.queryByText("Your Windows desktops")).not.toBeInTheDocument();
+    const card = within(saved).getByRole("button", { name: "Connect to Saved desktop" });
+    card.focus();
+    await user.keyboard("{Enter}");
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(connectedInput).toMatchObject({ profileId: "saved", host: "saved.test", domain: "LAB" });
+    expect(connectedInput).not.toHaveProperty("preview");
+    expect(connectedInput).not.toHaveProperty("hasCredential");
+  });
+
+  it("opens the full editor only from Edit and keeps context-menu Connect direct", async () => {
+    state = { ...state, profiles: [profile] };
+    const user = userEvent.setup();
+    const { contextMenu } = renderWithApplicationContextMenu(<RdpWindowApp />);
+    const card = await screen.findByRole("button", { name: "Connect to Saved desktop" });
+    fireEvent.contextMenu(card);
+    contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Edit" }));
+    expect(await screen.findByRole("dialog", { name: "Edit Remote Desktop" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Computer")).toHaveValue("saved.test");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    expect(api.connect).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.contextMenu(card);
+    contextMenu.emit();
+    await user.click(await screen.findByRole("menuitem", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("asks only for a missing password and clears it after an unsuccessful connection", async () => {
+    state = { ...state, profiles: [{ ...profile, hasCredential: false, credentialPersistence: "none" }] };
+    vi.mocked(api.connect).mockImplementationOnce(async (input) => {
+      connectedInput = { ...input };
+      return { ok: false, error: "The remote desktop could not be reached." };
+    });
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    const prompt = screen.getByRole("dialog", { name: "Connect to Saved desktop" });
+    expect(within(prompt).queryByLabelText("Computer")).not.toBeInTheDocument();
+    expect(within(prompt).getByRole("button", { name: "Connect" })).toBeDisabled();
+    expect(api.connect).not.toHaveBeenCalled();
+    await user.type(within(prompt).getByLabelText("Password"), "temporary-password");
+    fireEvent.change(within(prompt).getByLabelText("Remember password"), { target: { value: "session" } });
+    await user.click(within(prompt).getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+    expect(connectedInput).toMatchObject({ profileId: "saved", password: "temporary-password", persistence: "session" });
+    expect(vi.mocked(api.connect).mock.calls[0]?.[0]).not.toHaveProperty("password");
+    expect(within(prompt).getByLabelText("Password")).toHaveValue("");
+    expect(await within(prompt).findByRole("alert")).toHaveTextContent("could not be reached");
+    await user.type(within(prompt).getByLabelText("Password"), "retry-password");
+    await user.click(within(prompt).getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(connectedInput).toMatchObject({ password: "retry-password", profileId: "saved" });
+  });
+
+  it("allows canceling password entry and avoids unavailable secure storage", async () => {
+    state = { ...state, profiles: [profile], securePersistenceAvailable: false };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    const prompt = screen.getByRole("dialog", { name: "Connect to Saved desktop" });
+    expect(within(prompt).getByLabelText("Remember password")).toHaveValue("none");
+    expect(within(prompt).getByRole("option", { name: "Save securely on this device" })).toBeDisabled();
+    await user.type(within(prompt).getByLabelText("Password"), "discarded-password");
+    await user.click(within(prompt).getByRole("button", { name: "Cancel" }));
+    expect(api.connect).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Connect to Saved desktop" }));
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+
+  it("submits only one direct connection while the first click is pending", async () => {
+    state = { ...state, profiles: [profile] };
+    let finish!: (result: Awaited<ReturnType<RdpWindowAPI["connect"]>>) => void;
+    vi.mocked(api.connect).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const card = await screen.findByRole("button", { name: "Connect to Saved desktop" });
+    await user.dblClick(card);
+    expect(api.connect).toHaveBeenCalledOnce();
+    expect(card).toHaveAttribute("aria-disabled", "true");
+    await act(async () => finish({ ok: false, error: "Connection canceled" }));
+    expect(card).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("alert")).toHaveTextContent("Connection canceled");
+  });
+
+  it("deletes a preview card only after confirmation without opening a connection", async () => {
+    state = { ...state, profiles: [profile] };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Delete Saved desktop" }));
+    expect(screen.getByRole("dialog", { name: "Delete Profile" })).toHaveTextContent("saved preview");
+    expect(api.deleteProfile).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Edit Remote Desktop" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete profile" }));
+    await waitFor(() => expect(api.deleteProfile).toHaveBeenCalledWith("saved"));
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("shows connection status in the gallery and respects the session limit", async () => {
+    state = { ...state, profiles: [profile], tabs: [{ ...firstTab, ...profile, id: firstTab.id, profileId: profile.id }], activeTabId: firstTab.id, maxSessions: 1 };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Saved profiles" }));
+    const gallery = screen.getByRole("dialog", { name: "Saved Connections" });
+    expect(within(gallery).getByText("Connected")).toBeInTheDocument();
+    const card = within(gallery).getByRole("button", { name: "Connect to Saved desktop" });
+    expect(card).toHaveAttribute("aria-disabled", "true");
+    await user.click(card);
+    expect(api.connect).not.toHaveBeenCalled();
+    expect(within(gallery).getByRole("button", { name: "Delete Saved desktop" })).toBeEnabled();
+    expect(screen.getByLabelText("Remote desktop for Saved desktop")).toHaveAttribute("data-input-enabled", "false");
+    await act(async () => { listener?.({ ...state, profiles: [{ ...profile, host: "replacement.test" }] }); });
+    expect(within(gallery).queryByText("Connected")).not.toBeInTheDocument();
   });
 
   it("keeps secure persistence unavailable when the host cannot encrypt secrets", async () => {

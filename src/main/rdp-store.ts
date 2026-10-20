@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
-import type { RdpConnectionOptions, RdpCredentialPersistence, RdpProfile, RdpSaveProfileInput } from "../shared/rdp-contracts.js";
-import { parseRdpProfile, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { createHash, randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
+import { RDP_PREVIEW_MAX_DATA_URL_LENGTH, type RdpConnectionOptions, type RdpCredentialPersistence, type RdpPreview, type RdpProfile, type RdpSaveProfileInput } from "../shared/rdp-contracts.js";
+import { parseRdpPreview, parseRdpProfile, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js";
 
@@ -15,6 +16,7 @@ export class RdpStore {
   readonly #profiles = new Map<string, SavedProfile>();
   readonly #pins = new Map<string, string>();
   readonly #secrets = new Map<string, SessionSecret>();
+  readonly #previews = new Map<string, RdpPreview>();
   #writeChain: Promise<unknown> = Promise.resolve();
   #disposed = false;
   constructor(readonly path: string, readonly storage: CloudSafeStorageAdapter, readonly platform: NodeJS.Platform = process.platform) {}
@@ -42,6 +44,16 @@ export class RdpStore {
       this.#profiles.clear(); this.#pins.clear();
       for (const [key, value] of profiles) this.#profiles.set(key, value);
       for (const [key, value] of pins) this.#pins.set(key, value);
+      this.#previews.clear();
+      for (const [id, profile] of profiles) {
+        let previewData: Buffer | undefined;
+        try {
+          previewData = (await readBoundedRegularFile(this.#previewPath(id), { label: "RDP preview", maxBytes: RDP_PREVIEW_MAX_DATA_URL_LENGTH + 4096, requirePrivateMode: true })).data;
+          const savedPreview = rdpRecord(JSON.parse(previewData.toString("utf8")));
+          if (savedPreview["version"] === 1 && savedPreview["identity"] === credentialIdentity(profile)) this.#previews.set(id, parseRdpPreview(savedPreview["preview"]));
+        } catch { /* Previews are a cache; missing or invalid files must not hide saved connections. */ }
+        finally { previewData?.fill(0); }
+      }
     } finally { data.fill(0); }
   }
 
@@ -55,6 +67,7 @@ export class RdpStore {
   }
   profiles(): RdpProfile[] {
     return [...this.#profiles.values()].map(({ encryptedCredential, ...profile }) => ({ ...profile,
+      ...(this.#previews.has(profile.id) ? { preview: this.#previews.get(profile.id)! } : {}),
       hasCredential: this.#secrets.has(profile.id) || Boolean(encryptedCredential),
       credentialPersistence: encryptedCredential ? "secure" : this.#secrets.has(profile.id) ? "session" : "none" }));
   }
@@ -68,9 +81,15 @@ export class RdpStore {
       const sameIdentity = previous && credentialIdentity(previous) === credentialIdentity(parsed);
       const profile = { ...parsed, id, ...(sameIdentity && previous.encryptedCredential ? { encryptedCredential: previous.encryptedCredential } : {}) };
       const profiles = new Map(this.#profiles); profiles.set(id, profile);
+      // Cache removal precedes the metadata commit so cleanup failure cannot
+      // report an unsuccessful edit after the saved connection has changed.
+      if (previous && !sameIdentity) await this.#deletePreviewFile(id);
       await this.#write(profiles, this.#pins);
       this.#profiles.set(id, profile);
-      if (!sameIdentity) this.forgetSessionCredential(id);
+      if (!sameIdentity) {
+        this.forgetSessionCredential(id);
+        this.#previews.delete(id);
+      }
       return this.profile(id)!;
     });
   }
@@ -78,9 +97,23 @@ export class RdpStore {
     await this.#enqueue(async () => {
       const profiles = new Map(this.#profiles);
       if (!profiles.delete(id)) throw new Error("RDP profile no longer exists");
+      await this.#deletePreviewFile(id);
       await this.#write(profiles, this.#pins);
       this.#profiles.delete(id);
       this.forgetSessionCredential(id);
+      this.#previews.delete(id);
+    });
+  }
+  async savePreview(id: string, options: RdpConnectionOptions, input: RdpPreview, beforeCommit: () => void = () => undefined): Promise<void> {
+    const preview = parseRdpPreview(input), identity = credentialIdentity(options);
+    await this.#enqueue(async () => {
+      const profile = this.#profiles.get(id);
+      if (!profile || credentialIdentity(profile) !== identity) throw new Error("RDP saved connection changed");
+      beforeCommit();
+      const data = Buffer.from(JSON.stringify({ version: 1, identity, preview }), "utf8");
+      try { await writePrivateFileAtomic(this.#previewPath(id), data, beforeCommit); }
+      finally { data.fill(0); }
+      if (!this.#disposed) this.#previews.set(id, preview);
     });
   }
   async saveCredential(key: string, options: RdpConnectionOptions, password: string, persistence: RdpCredentialPersistence): Promise<void> {
@@ -146,5 +179,10 @@ export class RdpStore {
     try { await writePrivateFileAtomic(this.path, data); }
     finally { data.fill(0); }
   }
-  dispose(): void { this.#disposed = true; for (const key of this.#secrets.keys()) this.forgetSessionCredential(key); }
+  #previewPath(id: string): string { return `${this.path}.preview-${createHash("sha256").update(id).digest("hex")}.json`; }
+  async #deletePreviewFile(id: string): Promise<void> {
+    try { await unlink(this.#previewPath(id)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("The saved RDP preview could not be removed"); }
+  }
+  dispose(): void { this.#disposed = true; this.#previews.clear(); for (const key of this.#secrets.keys()) this.forgetSessionCredential(key); }
 }

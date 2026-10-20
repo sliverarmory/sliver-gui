@@ -56,11 +56,25 @@ Certificate review expires after 60 seconds; cancel or review again after reconn
   Renderer reload normally reattaches automatically. Pending certificate review
   is canceled when its viewer closes. App quit ends every connection.
 
-Saved profiles are available from the folder button and the empty window. Open a
-profile, edit it and select Save profile to update its connection settings. Deleting
-it also removes its remembered credential. Endpoint certificate pins are independent
-of profiles; deleting a profile does not erase its pin. A pin-management UI is not
-yet available. There is no automatic reconnect or automatic clipboard synchronization.
+Saved connections appear as desktop preview cards in the empty window and the
+folder button's **Saved Connections** picker. Each card shows the connection name
+and account, with the last saved desktop frame behind it. Connections without a
+saved frame show **No preview yet**. Select a card to connect using its saved
+settings and remembered password. If no password is remembered, a compact prompt
+asks for the password and whether to remember it.
+
+Right-click a card for **Connect**, **Edit**, or **Delete**. Choose **Edit**, change
+the connection settings, then select **Save profile** to save them. The card's
+trash button also deletes the connection after confirmation.
+
+For saved connections, the viewer saves the first complete frame, refreshes the
+preview every 15 seconds when the desktop changes, and saves the latest complete
+frame when disconnecting or closing its tab. Previews survive closing the app.
+Changing the computer, port, username or domain clears
+the old preview; deleting a profile removes its preview and remembered credential.
+Endpoint certificate pins are independent of profiles; deleting a profile does
+not erase its pin. A pin-management UI is not yet available. There is no automatic
+reconnect or automatic clipboard synchronization.
 
 ## Password storage
 
@@ -79,7 +93,10 @@ The RDP-specific private file is `gui/rdp.json` under the configured Sliver GUI
 client root. It contains profile metadata, endpoint pins and encrypted credential
 envelopes, never plaintext passwords. Failed persistence does not replace/delete
 previously stored credentials. Clipboard text and desktop contents are not saved
-there. If Remote Desktop reports that its settings cannot be loaded safely, stop
+in that settings file. Preview images are stored separately in private
+`gui/rdp.json.preview-*.json` files alongside it. These local thumbnails may contain
+visible desktop information and are not encrypted with the password vault.
+If Remote Desktop reports that its settings cannot be loaded safely, stop
 the app and repair the file permissions or restore a known valid private backup.
 The core GUI remains available; RDP does not silently reset its trust store. Do
 not edit this file while the application is running.

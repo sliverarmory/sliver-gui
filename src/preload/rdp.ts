@@ -18,7 +18,7 @@ import {
   type RdpWindowAPI,
   type RdpWindowState,
 } from "../shared/rdp-contracts.js";
-import { parseRdpConnect, parseRdpOptions, parseRdpProfile, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { parseRdpConnect, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { OperationResult } from "../shared/contracts.js";
 
 const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard"];
@@ -41,6 +41,7 @@ const api: RdpWindowAPI = {
   selectTab: (id) => invokeEmpty(RDP_IPC.selectTab, identity(id)),
   renameTab: (input) => { const item = keys(input, ["tabId", "label"]); return invokeEmpty(RDP_IPC.renameTab, { tabId: identity(item["tabId"]), label: rdpString(item["label"], 120) }); },
   saveProfile: (input) => { keys(input, PROFILE); return invokeValue(RDP_IPC.saveProfile, parseProfile, parseRdpProfile(input)); },
+  savePreview: (input) => invokeEmpty(RDP_IPC.savePreview, parseRdpSavePreview(input)),
   deleteProfile: (id) => invokeEmpty(RDP_IPC.deleteProfile, identity(id)),
   respondToCertificate: (input) => {
     const item = keys(input, ["token", "decision"]);
@@ -132,11 +133,12 @@ function parseTab(raw: unknown): RdpTab {
 }
 
 function parseProfile(raw: unknown): RdpProfile {
-  const value = keys(raw, [...PROFILE, "hasCredential", "credentialPersistence"]);
+  const value = keys(raw, [...PROFILE, "hasCredential", "credentialPersistence", "preview"]);
   const persistence = value["credentialPersistence"];
   if (persistence !== "none" && persistence !== "session" && persistence !== "secure") throw new TypeError("Invalid RDP credential state");
   return Object.freeze({ ...parseRdpOptions(value), id: identity(value["id"]), label: rdpString(value["label"], 120), scaleMode: scale(value["scaleMode"]),
-    hasCredential: rdpBoolean(value["hasCredential"]), credentialPersistence: persistence });
+    hasCredential: rdpBoolean(value["hasCredential"]), credentialPersistence: persistence,
+    ...(value["preview"] === undefined ? {} : { preview: parseRdpPreview(value["preview"]) }) });
 }
 
 function parseCertificate(raw: unknown): RdpCertificateReview {

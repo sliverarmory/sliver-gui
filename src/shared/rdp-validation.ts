@@ -1,4 +1,46 @@
-import { RDP_MAX_PIXELS, type RdpConnectInput, type RdpConnectionOptions, type RdpSaveProfileInput, type RdpViewerMessage } from "./rdp-contracts.js";
+import { RDP_MAX_PIXELS, RDP_PREVIEW_MAX_DATA_URL_LENGTH, RDP_PREVIEW_MAX_HEIGHT, RDP_PREVIEW_MAX_WIDTH, type RdpConnectInput, type RdpConnectionOptions, type RdpPreview, type RdpSavePreviewInput, type RdpSaveProfileInput, type RdpViewerMessage } from "./rdp-contracts.js";
+
+/** Bound JPEG dimensions before the native decoder or renderer sees the image. */
+export function rdpPreviewDimensions(value: unknown): { dataUrl: string; width: number; height: number } {
+  if (typeof value !== "string" || value.length > RDP_PREVIEW_MAX_DATA_URL_LENGTH || !value.startsWith("data:image/jpeg;base64,")) throw new Error("Invalid RDP preview image");
+  const encoded = value.slice("data:image/jpeg;base64,".length);
+  if (!encoded.length || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/u.test(encoded)) throw new Error("Invalid RDP preview image");
+  const bytes = atob(encoded);
+  const byte = (index: number): number => bytes.charCodeAt(index);
+  if (byte(0) !== 0xff || byte(1) !== 0xd8 || byte(bytes.length - 2) !== 0xff || byte(bytes.length - 1) !== 0xd9) throw new Error("Invalid RDP preview image");
+  for (let offset = 2; offset + 3 < bytes.length;) {
+    if (byte(offset++) !== 0xff) break;
+    while (byte(offset) === 0xff) offset += 1;
+    const marker = byte(offset++);
+    if (marker === 0xda || marker === 0xd9) break;
+    const length = byte(offset) * 256 + byte(offset + 1);
+    if (length < 2 || offset + length > bytes.length) break;
+    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
+      if (length < 8 || byte(offset + 2) !== 8) break;
+      return { dataUrl: value, width: rdpInteger(byte(offset + 5) * 256 + byte(offset + 6), 1, RDP_PREVIEW_MAX_WIDTH),
+        height: rdpInteger(byte(offset + 3) * 256 + byte(offset + 4), 1, RDP_PREVIEW_MAX_HEIGHT) };
+    }
+    offset += length;
+  }
+  throw new Error("Invalid RDP preview image");
+}
+
+export function parseRdpPreview(value: unknown): RdpPreview {
+  const input = rdpRecord(value);
+  if (Object.keys(input).some((key) => !["dataUrl", "capturedAt", "width", "height"].includes(key))) throw new Error("Unexpected RDP preview field");
+  const image = rdpPreviewDimensions(input["dataUrl"]);
+  if (input["width"] !== image.width || input["height"] !== image.height) throw new Error("Invalid RDP preview dimensions");
+  const capturedAt = rdpString(input["capturedAt"], 32);
+  if (!Number.isFinite(Date.parse(capturedAt)) || new Date(capturedAt).toISOString() !== capturedAt) throw new Error("Invalid RDP preview date");
+  return Object.freeze({ ...image, capturedAt });
+}
+
+export function parseRdpSavePreview(value: unknown): RdpSavePreviewInput {
+  const input = rdpRecord(value);
+  if (Object.keys(input).some((key) => !["tabId", "attempt", "dataUrl"].includes(key))) throw new Error("Unexpected RDP preview field");
+  return { tabId: rdpString(input["tabId"], 80), attempt: rdpInteger(input["attempt"], 1, Number.MAX_SAFE_INTEGER),
+    dataUrl: rdpPreviewDimensions(input["dataUrl"]).dataUrl };
+}
 
 export function rdpRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid RDP request");

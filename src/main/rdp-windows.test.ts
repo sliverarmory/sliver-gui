@@ -12,12 +12,15 @@ import { RDP_IPC, type RdpTab } from "../shared/rdp-contracts.js";
 import { RdpStore } from "./rdp-store.js";
 import { RdpWindows } from "./rdp-windows.js";
 import type { RdpRuntimeEvent } from "./rdp-runtime.js";
+import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
+import * as secureFile from "./secure-file.js";
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>>(),
   listeners: new Map<string, (event: unknown, raw: unknown) => void>(),
   windows: [] as MockWindow[], runtimes: [] as MockRuntime[],
   clipboard: { readText: vi.fn(async () => "local text"), writeText: vi.fn(async (_value: string) => undefined) },
+  image: { createFromDataURL: vi.fn() },
 }));
 interface MockWindow extends EventEmitter {
   focused: boolean; visible: boolean;
@@ -43,7 +46,7 @@ vi.mock("electron", async () => {
       async loadURL(url: string): Promise<void> { this.webContents.mainFrame.url = url; }
       destroy(): void { this.destroyed = true; this.emit("closed"); }
     },
-    clipboard: mocks.clipboard, nativeTheme: { shouldUseDarkColors: true },
+    clipboard: mocks.clipboard, nativeImage: mocks.image, nativeTheme: { shouldUseDarkColors: true },
     ipcMain: { handle: (channel: string, handler: never) => mocks.handlers.set(channel, handler), removeHandler: (channel: string) => mocks.handlers.delete(channel),
       on: (channel: string, handler: never) => mocks.listeners.set(channel, handler), removeListener: (channel: string) => mocks.listeners.delete(channel) },
   };
@@ -84,6 +87,10 @@ async function connect(): Promise<RdpTab> {
 }
 beforeEach(async () => {
   mocks.windows.length = 0; mocks.runtimes.length = 0; vi.clearAllMocks();
+  mocks.image.createFromDataURL.mockImplementation(() => ({
+    getSize: () => ({ width: 1, height: 1 }), isEmpty: () => false,
+    toJPEG: () => Buffer.from(RDP_PREVIEW_FIXTURE.dataUrl.split(",")[1]!, "base64"),
+  }));
   temporary = await mkdtemp(join(tmpdir(), "rdp-window-test-"));
   resolveRuntime = vi.fn(async () => "/trusted/sliver-rdp");
   updateApplicationSettings = vi.fn(async (input) => ({ ok: true, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } }));
@@ -95,6 +102,64 @@ beforeEach(async () => {
 afterEach(async () => { manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  it("saves a frame only to its owning profile and accepts the final frame after disconnect", async () => {
+    const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
+    const tab = (await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id })).value as RdpTab;
+    const input = { tabId: tab.id, attempt: tab.attempt, dataUrl: RDP_PREVIEW_FIXTURE.dataUrl };
+    expect(await invoke(RDP_IPC.savePreview, input)).toMatchObject({ ok: false });
+    mocks.runtimes[0]!.receive({ type: "state", state: "active" });
+    mocks.runtimes[0]!.receive(frame(1));
+    expect(await invoke(RDP_IPC.savePreview, input)).toEqual({ ok: true });
+    expect(store.profile(profile.id)?.preview).toMatchObject({ dataUrl: input.dataUrl, width: 1, height: 1 });
+    await invoke(RDP_IPC.disconnect, tab.id);
+    expect(await invoke(RDP_IPC.savePreview, input)).toEqual({ ok: true });
+    await invoke(RDP_IPC.reconnect, { tabId: tab.id });
+    expect(await invoke(RDP_IPC.savePreview, input)).toMatchObject({ ok: false, error: "RDP preview connection changed" });
+  });
+
+  it("rejects preview writes from other frames and for unknown, changed, or deleted connections", async () => {
+    const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
+    const tab = (await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id })).value as RdpTab;
+    mocks.runtimes[0]!.receive({ type: "state", state: "active" }); mocks.runtimes[0]!.receive(frame(1));
+    const input = { tabId: tab.id, attempt: tab.attempt, dataUrl: RDP_PREVIEW_FIXTURE.dataUrl };
+    expect(await invoke(RDP_IPC.savePreview, { ...input, tabId: "missing" })).toMatchObject({ ok: false });
+    const event = { ...sender(), senderFrame: { ...sender().senderFrame, frameToken: "subframe" } } as IpcMainInvokeEvent;
+    expect(await mocks.handlers.get(RDP_IPC.savePreview)!(event, input)).toMatchObject({ ok: false, error: "RDP request was rejected" });
+    await store.saveProfile({ ...connection, id: profile.id, scaleMode: "fit", host: "replacement.test" });
+    expect(await invoke(RDP_IPC.savePreview, input)).toMatchObject({ ok: false, error: "RDP saved connection changed" });
+    await store.deleteProfile(profile.id);
+    expect(await invoke(RDP_IPC.savePreview, input)).toMatchObject({ ok: false });
+    expect(store.profiles()).toEqual([]);
+  });
+
+  it("rejects malformed preview requests before native decoding or persistence", async () => {
+    const tab = await connect();
+    const input = { tabId: tab.id, attempt: tab.attempt, dataUrl: RDP_PREVIEW_FIXTURE.dataUrl };
+    for (const invalid of [{ ...input, attempt: 0 }, { ...input, profileId: "other" }, { ...input, dataUrl: "data:image/svg+xml;base64,PHN2Zz4=" }, { ...input, dataUrl: `${input.dataUrl}junk` }]) {
+      expect(await invoke(RDP_IPC.savePreview, invalid)).toMatchObject({ ok: false });
+    }
+    expect(mocks.image.createFromDataURL).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending preview commit if its tab reconnects during the filesystem write", async () => {
+    const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
+    const tab = (await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id })).value as RdpTab;
+    mocks.runtimes[0]!.receive({ type: "state", state: "active" }); mocks.runtimes[0]!.receive(frame(1));
+    const write = secureFile.writePrivateFileAtomic;
+    let resume: (() => void) | undefined;
+    vi.spyOn(secureFile, "writePrivateFileAtomic").mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => { resume = resolve; });
+      await write(...args);
+    });
+    const saving = invoke(RDP_IPC.savePreview, { tabId: tab.id, attempt: tab.attempt, dataUrl: RDP_PREVIEW_FIXTURE.dataUrl });
+    await vi.waitFor(() => expect(resume).toBeDefined());
+    await invoke(RDP_IPC.disconnect, tab.id);
+    await invoke(RDP_IPC.reconnect, { tabId: tab.id });
+    resume?.();
+    expect(await saving).toMatchObject({ ok: false, error: "RDP preview connection changed" });
+    expect(store.profile(profile.id)?.preview).toBeUndefined();
+  });
+
   it("routes validated application settings updates to the shared persistence service", async () => {
     const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false } } };
     expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual({
@@ -580,6 +645,39 @@ describe("RDP main authority", () => {
     expect((await invoke(RDP_IPC.connect, connection)).ok).toBe(false);
     expect(manager.state().tabs).toHaveLength(0);
     expect(manager.state().activeTabId).toBeUndefined();
+  });
+
+  it("removes credentialless initial tabs so repeated failures and a password retry do not leak session slots", async () => {
+    const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
+    const { password: _password, ...withoutPassword } = connection;
+    for (let index = 0; index < 5; index += 1) {
+      expect(await invoke(RDP_IPC.connect, { ...withoutPassword, profileId: profile.id })).toMatchObject({ ok: false, error: "Enter the password to connect" });
+      expect(manager.state().tabs).toEqual([]);
+      expect(manager.state().activeTabId).toBeUndefined();
+    }
+    expect(resolveRuntime).not.toHaveBeenCalled();
+    expect(mocks.runtimes).toHaveLength(0);
+    const retry = await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id });
+    expect(retry).toMatchObject({ ok: true, value: { attempt: 1, profileId: profile.id, state: "connecting" } });
+    expect(manager.state().tabs).toHaveLength(1);
+    expect(mocks.runtimes).toHaveLength(1);
+  });
+
+  it.each([
+    "System secure storage is unavailable; enter the password again",
+    "Saved RDP password could not be unlocked; enter it again",
+  ])("keeps existing tabs reachable after an initial credential lookup failure: %s", async (message) => {
+    const first = await connect();
+    const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
+    const { password: _password, ...withoutPassword } = connection;
+    vi.spyOn(store, "credential").mockImplementationOnce(() => { throw new Error(message); });
+    expect(await invoke(RDP_IPC.connect, { ...withoutPassword, profileId: profile.id })).toMatchObject({ ok: false, error: message });
+    expect(manager.state().tabs).toEqual([first]);
+    expect(manager.state().activeTabId).toBe(first.id);
+    const retry = await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id });
+    expect(retry).toMatchObject({ ok: true, value: { attempt: 1, profileId: profile.id } });
+    expect(manager.state().tabs).toHaveLength(2);
+    expect(mocks.runtimes).toHaveLength(2);
   });
 
   it("does not send pre-authentication input cleanup to a helper that is still connecting", async () => {

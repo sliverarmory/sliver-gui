@@ -134,7 +134,7 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       <Modal.CloseTrigger isDisabled={Boolean(pending)} />
       <Modal.Header><Modal.Heading className="flex items-center gap-2 pr-8">
         <FontAwesomeIcon aria-hidden icon={faWindows} />
-        {initial ? "Connect to Remote Desktop" : "New Remote Desktop"}
+        {initial ? "Edit Remote Desktop" : "New Remote Desktop"}
       </Modal.Heading>
       </Modal.Header>
       <Modal.Body className="max-h-[65vh] overflow-y-auto"

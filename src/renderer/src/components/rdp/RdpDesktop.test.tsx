@@ -18,7 +18,7 @@ beforeEach(() => {
   Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
   mocks.send.mockReset(); mocks.close.mockReset(); mocks.open.mockReset();
   mocks.open.mockImplementation(async (_api, _tabId, _attempt, _signal, onMessage) => { message = onMessage; return { send: mocks.send, close: mocks.close }; });
-  api = { setInputCapture: vi.fn(async () => ({ ok: true })), reconnect: vi.fn(), disconnect: vi.fn() } as unknown as RdpWindowAPI;
+  api = { setInputCapture: vi.fn(async () => ({ ok: true })), savePreview: vi.fn(async () => ({ ok: true })), reconnect: vi.fn(), disconnect: vi.fn() } as unknown as RdpWindowAPI;
   viewport = { width: 1280, height: 800 };
   resizeObservers = [];
   vi.stubGlobal("ResizeObserver", class {
@@ -36,9 +36,9 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-async function mount(autoResize = false): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
+async function mount(autoResize = false, connection = tab): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
   const handle = createRef<RdpDesktopHandle>();
-  const result = render(<RdpDesktop ref={handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize={autoResize} />);
+  const result = render(<RdpDesktop ref={handle} api={api} tab={connection} active inputEnabled scaleMode="fit" autoResize={autoResize} />);
   await act(async () => {});
   act(() => message({ type: "ready", protocol: 1 }));
   return { ...result, handle };
@@ -162,6 +162,52 @@ describe("remote desktop viewer lifecycle", () => {
     expect(mocks.send).toHaveBeenCalledWith({ type: "ack", seq: 2 });
     expect(view.container.querySelector("[data-frame-count]" )).toHaveAttribute("data-frame-count", "1");
     expect(screen.getByLabelText("Remote desktop for Office")).toHaveAttribute("width", "2");
+    expect(api.savePreview).not.toHaveBeenCalled();
+  });
+
+  it("saves a profile preview only after the final tile is painted and acknowledged", async () => {
+    const dataUrl = "data:image/jpeg;base64,cHJldmlldw==";
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(() => {
+      expect(mocks.send).toHaveBeenLastCalledWith({ type: "ack", seq: 2 });
+      return dataUrl;
+    });
+    const view = await mount(false, { ...tab, profileId: "office" });
+    const frame = { type: "frame" as const, seq: 1, frameId: 1, geometry: 1, width: 2, height: 2, tileWidth: 2, tileHeight: 1, x: 0, y: 0,
+      full: true, first: true, last: false, data: new Uint8Array(8).buffer };
+    act(() => message(frame));
+    expect(encode).not.toHaveBeenCalled();
+    expect(api.savePreview).not.toHaveBeenCalled();
+    act(() => message({ ...frame, seq: 2, first: false, last: true, y: 1 }));
+    expect(api.savePreview).toHaveBeenCalledExactlyOnceWith({ tabId: tab.id, attempt: tab.attempt, dataUrl });
+    view.unmount();
+    await act(async () => {});
+    expect(api.savePreview).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares pending preview saves across viewer reattachment so an older frame cannot overwrite the latest", async () => {
+    const finishes: ((result: OperationResult) => void)[] = [];
+    vi.mocked(api.savePreview).mockImplementation(() => new Promise((resolve) => { finishes.push(resolve); }));
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockImplementation(function (this: HTMLCanvasElement) {
+      return `data:image/jpeg;base64,${btoa(`${this.width}x${this.height}`)}`;
+    });
+    const view = await mount(false, { ...tab, profileId: "office" });
+    const frame = { type: "frame" as const, seq: 1, frameId: 1, geometry: 1, width: 2, height: 2, tileWidth: 2, tileHeight: 2, x: 0, y: 0,
+      full: true, first: true, last: true, data: new Uint8Array(16).buffer };
+    act(() => message(frame));
+    act(() => message({ ...frame, seq: 2, frameId: 2, geometry: 2, width: 3, tileWidth: 3, data: new Uint8Array(24).buffer }));
+    act(() => message({ type: "closed", reason: "Window hidden" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reattach viewer" }));
+    await act(async () => {});
+    expect(mocks.open).toHaveBeenCalledTimes(2);
+    act(() => message({ type: "ready", protocol: 1 }));
+    act(() => message({ ...frame, seq: 3, frameId: 3, geometry: 3, width: 4, tileWidth: 4, data: new Uint8Array(32).buffer }));
+    expect(api.savePreview).toHaveBeenCalledTimes(1);
+    await act(async () => { finishes[0]!({ ok: true }); });
+    expect(api.savePreview).toHaveBeenCalledTimes(2);
+    expect(api.savePreview).toHaveBeenLastCalledWith({ tabId: tab.id, attempt: tab.attempt, dataUrl: `data:image/jpeg;base64,${btoa("4x2")}` });
+    await act(async () => { finishes[1]!({ ok: true }); });
+    view.unmount();
+    expect(api.savePreview).toHaveBeenCalledTimes(2);
   });
 
   it("allows reattaching after a hidden window detaches its port without reconnecting the session", async () => {

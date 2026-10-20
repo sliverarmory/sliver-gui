@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RDP_IPC, RDP_PORT_MESSAGE, type RdpConnectInput, type RdpTab, type RdpWindowAPI, type RdpWindowState } from "../shared/rdp-contracts.js";
 import { APPLICATION_CONTEXT_MENU_IPC, type ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE, DEFAULT_APPLICATION_SETTINGS_VALUES } from "../shared/application-settings-contracts.js";
+import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 
 const mocks = vi.hoisted(() => ({
   expose: vi.fn(), invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>(), on: vi.fn(), removeListener: vi.fn(), postMessage: vi.fn(), send: vi.fn(),
@@ -46,6 +47,29 @@ describe("RDP sandbox preload", () => {
     expect(() => bridge().connect({ ...input, width: 8192, height: 8192 })).toThrow();
     expect(() => bridge().connect({ ...input, password: "bad\0value" })).toThrow();
     expect(mocks.invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts bounded JPEG previews only through the current tab and attempt request", async () => {
+    const input = { tabId: "tab", attempt: 1, dataUrl: RDP_PREVIEW_FIXTURE.dataUrl };
+    expect(await bridge().savePreview(input)).toEqual({ ok: true });
+    expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(RDP_IPC.savePreview, input);
+    for (const invalid of [{ ...input, profileId: "other" }, { ...input, attempt: -1 }, { ...input, dataUrl: "data:image/svg+xml;base64,PHN2Zz4=" }]) {
+      expect(() => bridge().savePreview(invalid as never)).toThrow();
+    }
+    expect(mocks.invoke).toHaveBeenCalledOnce();
+  });
+
+  it("exposes validated immutable saved frames while accepting legacy profiles without previews", async () => {
+    const profile = { id: "profile", host: tab.host, port: tab.port, username: tab.username, domain: tab.domain, width: tab.width, height: tab.height,
+      clipboard: false, label: tab.label, scaleMode: "fit", hasCredential: false, credentialPersistence: "none" };
+    for (const raw of [profile, { ...profile, preview: RDP_PREVIEW_FIXTURE }]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, profiles: [raw] } });
+      const result = await bridge().getState();
+      expect(result).toEqual({ ok: true, value: { ...state, profiles: [raw] } });
+      if (result.ok && result.value.profiles[0]?.preview) expect(Object.isFrozen(result.value.profiles[0].preview)).toBe(true);
+    }
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, profiles: [{ ...profile, preview: { ...RDP_PREVIEW_FIXTURE, width: 9999 } }] } });
+    await expect(bridge().getState()).rejects.toThrow();
   });
 
   it("narrowly maps control calls and rejects mixed clipboard, capture and certificate requests", async () => {

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import type { RdpSaveProfileInput } from "../shared/rdp-contracts.js";
 import type { CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { RdpStore } from "./rdp-store.js";
 import * as secureFile from "./secure-file.js";
+import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 
 const PASSWORD = "test-only RDP password 7h83\"\\";
 const options: RdpSaveProfileInput = { host: "rdp.example.test", port: 3389, username: "alice", domain: "LAB",
@@ -276,5 +277,94 @@ describe("RdpStore persistence and trust", () => {
     await expect(instance.load()).rejects.toThrow(/Duplicate/u);
     expect(instance.profiles()).toEqual([]);
     expect(instance.pin(options)).toBeUndefined();
+  });
+});
+
+describe("RdpStore frame previews", () => {
+  it("persists private bounded sidecars independently from credentials and reloads them", async () => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.saveCredential(profile.id, options, PASSWORD, "secure");
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    const files = await readdir(directory), previewPath = join(directory, files.find((file) => file.includes(".preview-"))!);
+    expect(await readFile(path, "utf8")).not.toContain("data:image");
+    expect(await readFile(previewPath, "utf8")).not.toContain("encryptedCredential");
+    expect(await readFile(previewPath, "utf8")).not.toContain(PASSWORD);
+    if (process.platform !== "win32") expect((await stat(previewPath)).mode & 0o777).toBe(0o600);
+    const reopened = store(); await reopened.load();
+    expect(reopened.profile(profile.id)?.preview).toEqual(RDP_PREVIEW_FIXTURE);
+    expect(reopened.credential(profile.id, options)).toBe(PASSWORD);
+  });
+
+  it.each([{ host: "other.example.test" }, { port: 3390 }, { username: "bob" }, { domain: "OTHER" }])("removes previews when connection identity changes (%j)", async (change) => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    await instance.saveProfile({ ...options, id: profile.id, label: "Renamed", width: 1280 });
+    expect(instance.profile(profile.id)?.preview).toEqual(RDP_PREVIEW_FIXTURE);
+    await instance.saveProfile({ ...options, ...change, id: profile.id });
+    expect(instance.profile(profile.id)?.preview).toBeUndefined();
+    expect(await readdir(directory)).toEqual(["rdp.json"]);
+    await expect(instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE)).rejects.toThrow("changed");
+    const reopened = store(); await reopened.load();
+    expect(reopened.profile(profile.id)?.preview).toBeUndefined();
+  });
+
+  it("deletes saved frames with their profile and rejects late saves", async () => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    await instance.deleteProfile(profile.id);
+    expect(await readdir(directory)).toEqual(["rdp.json"]);
+    await expect(instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE)).rejects.toThrow("changed");
+  });
+
+  it("keeps the previous preview after write failure or a stale attempt detected before commit", async () => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    const replacement = { ...RDP_PREVIEW_FIXTURE, capturedAt: "2026-10-20T12:00:00.000Z" };
+    vi.spyOn(secureFile, "writePrivateFileAtomic").mockRejectedValueOnce(new Error("disk failure"));
+    await expect(instance.savePreview(profile.id, options, replacement)).rejects.toThrow("disk failure");
+    const current = vi.fn().mockImplementationOnce(() => undefined).mockImplementation(() => { throw new Error("stale attempt"); });
+    await expect(instance.savePreview(profile.id, options, replacement, current)).rejects.toThrow("stale attempt");
+    expect(instance.profile(profile.id)?.preview).toEqual(RDP_PREVIEW_FIXTURE);
+    const reopened = store(); await reopened.load();
+    expect(reopened.profile(profile.id)?.preview).toEqual(RDP_PREVIEW_FIXTURE);
+  });
+
+  it("keeps saved connections unchanged when preview cleanup fails", async () => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    const previewPath = join(directory, (await readdir(directory)).find((file) => file.includes(".preview-"))!);
+    await rm(previewPath); await mkdir(previewPath);
+    await expect(instance.deleteProfile(profile.id)).rejects.toThrow("preview could not be removed");
+    await expect(instance.saveProfile({ ...options, id: profile.id, host: "other.test" })).rejects.toThrow("preview could not be removed");
+    expect(instance.profile(profile.id)?.host).toBe(options.host);
+    expect(instance.profile(profile.id)?.preview).toEqual(RDP_PREVIEW_FIXTURE);
+    const reopened = store(); await reopened.load();
+    expect(reopened.profile(profile.id)?.host).toBe(options.host);
+  });
+
+  it("loads legacy profiles and ignores corrupt, unsafe, or identity-mismatched preview caches", async () => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    const legacy = store(); await legacy.load();
+    expect(legacy.profile(profile.id)?.preview).toBeUndefined();
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    const previewPath = join(directory, (await readdir(directory)).find((file) => file.includes(".preview-"))!);
+    const original = await readFile(previewPath, "utf8");
+    for (const data of ["{broken", JSON.stringify({ ...JSON.parse(original), identity: "another account" })]) {
+      await writeFile(previewPath, data);
+      const reopened = store(); await reopened.load();
+      expect(reopened.profile(profile.id)?.label).toBe(options.label);
+      expect(reopened.profile(profile.id)?.preview).toBeUndefined();
+    }
+    await rm(previewPath);
+    await symlink(path, previewPath);
+    const linked = store(); await linked.load();
+    expect(linked.profile(profile.id)?.preview).toBeUndefined();
+    await rm(previewPath);
+    await writeFile(previewPath, original, { mode: 0o600 });
+    if (process.platform !== "win32") {
+      await chmod(previewPath, 0o644);
+      const unsafe = store(); await unsafe.load();
+      expect(unsafe.profile(profile.id)?.preview).toBeUndefined();
+    }
   });
 });

@@ -3,7 +3,8 @@ import { BrowserWindow, clipboard, ipcMain, nativeTheme, type IpcMainEvent, type
 import { parseApplicationSettingsUpdateInput, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
 import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
-import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpSavePreview, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { normalizeRdpPreview } from "./rdp-preview.js";
 import { RdpRuntime, type RdpRuntimeEvent } from "./rdp-runtime.js";
 import { RdpStore } from "./rdp-store.js";
 import { isSameRendererDocument } from "./security.js";
@@ -156,6 +157,18 @@ export class RdpWindows {
         session.tab = { ...session.tab, label: rdpString(input["label"], 120) }; this.#publish(); return undefined;
       }
       case RDP_IPC.saveProfile: { const profile = await this.#options.store.saveProfile(parseRdpProfile(raw)); this.#publish(); return profile; }
+      case RDP_IPC.savePreview: {
+        const input = parseRdpSavePreview(raw), session = this.#session(input.tabId), profileId = session.tab.profileId;
+        const requireCurrent = (): void => {
+          this.#requireSender(event);
+          if (this.#sessions.get(input.tabId) !== session || session.tab.attempt !== input.attempt || session.lastSeq === 0 ||
+            !["active", "disconnected", "failed"].includes(session.tab.state)) throw new Error("RDP preview connection changed");
+        };
+        requireCurrent();
+        if (!profileId) throw new Error("Save the RDP connection before its preview");
+        await this.#options.store.savePreview(profileId, session.tab, normalizeRdpPreview(input.dataUrl), requireCurrent);
+        this.#publish(); return undefined;
+      }
       case RDP_IPC.deleteProfile: await this.#options.store.deleteProfile(rdpString(raw, 80)); this.#publish(); return undefined;
       case RDP_IPC.respondToCertificate: return this.#certificateDecision(raw);
       case RDP_IPC.attach: {
@@ -226,7 +239,9 @@ export class RdpWindows {
       const initialAttempt = session.tab.attempt + 1;
       try { return await this.#start(session, input.password, event); }
       catch (error) {
-        if (session.tab.attempt === initialAttempt) {
+        // Credential lookup may fail before the first attempt increments.
+        // Preserve a newer reconnect if its earlier startup completes later.
+        if (this.#sessions.get(id) === session && session.tab.attempt <= initialAttempt) {
           this.#sessions.delete(id); this.#options.store.forgetSessionCredential(id);
           if (this.#activeTabId === id) this.#activeTabId = this.#sessions.keys().next().value;
         }

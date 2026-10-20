@@ -3,6 +3,7 @@ import { Button } from "@heroui/react";
 import type { RdpCursor, RdpInputEvent, RdpScaleMode, RdpTab, RdpWindowAPI } from "../../../../shared/rdp-contracts";
 import { RdpDisplay } from "./rdp-display";
 import { DesktopKeyboard, desktopPoint, specialKeyInputs, unicodeInputs } from "./rdp-input";
+import { RdpPreview } from "./rdp-preview";
 import { isRdpReady, RdpTransport } from "./rdp-transport";
 
 export interface RdpDesktopHandle {
@@ -10,6 +11,7 @@ export interface RdpDesktopHandle {
   release(): void;
   specialKey(kind: "ctrl-alt-delete" | "windows"): void;
   resizeToWindow(): void;
+  savePreview(): Promise<void>;
 }
 
 interface Props {
@@ -27,6 +29,7 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
   const hostRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const transportRef = useRef<RdpTransport | undefined>(undefined);
+  const previewRef = useRef<RdpPreview | undefined>(undefined);
   const initialSize = useRef({ width: tab.width, height: tab.height });
   const captureRef = useRef({ generation: 0, captured: false, pending: false });
   const queuedInput = useRef<RdpInputEvent[]>([]);
@@ -125,7 +128,7 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
     resizeTimerRef.current = setTimeout(() => { resizeTimerRef.current = undefined; resize(); }, 350);
   }, [cancelResize, resize]);
 
-  useImperativeHandle(ref, () => ({ focus, release, resizeToWindow: resize, specialKey: (kind) => {
+  useImperativeHandle(ref, () => ({ focus, release, resizeToWindow: resize, savePreview: () => previewRef.current?.flush() ?? Promise.resolve(), specialKey: (kind) => {
     focus();
     sendInputs(specialKeyInputs(kind));
   } }), [focus, release, resize, sendInputs]);
@@ -165,6 +168,17 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
     drawCursor();
   }, [drawCursor]);
 
+  useEffect(() => {
+    // Reattaching the viewer keeps the connection attempt. Share its save queue
+    // so an older viewer's pending final image cannot overwrite a newer frame.
+    const preview = tab.profileId ? new RdpPreview((dataUrl) => api.savePreview({ tabId: tab.id, attempt: tab.attempt, dataUrl })) : undefined;
+    previewRef.current = preview;
+    return () => {
+      preview?.stop();
+      if (previewRef.current === preview) previewRef.current = undefined;
+    };
+  }, [api, tab.attempt, tab.id, tab.profileId]);
+
   const live = tab.state !== "disconnected" && tab.state !== "failed";
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -179,6 +193,7 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
     let display: RdpDisplay;
     try { display = new RdpDisplay(canvas); }
     catch { setError("This device could not initialize the remote desktop canvas."); return; }
+    const preview = previewRef.current;
     void RdpTransport.open(api, tab.id, tab.attempt, controller.signal, (message) => {
       if (controller.signal.aborted) return;
       if (message.type === "ready") {
@@ -189,6 +204,7 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
         const committed = display.apply(message);
         transportRef.current?.send({ type: "ack", seq: message.seq });
         if (committed) {
+          preview?.completedFrame(canvas);
           if (cursorRef.current && (cursorRef.current.width !== canvas.width || cursorRef.current.height !== canvas.height)) {
             cursorRef.current.width = canvas.width;
             cursorRef.current.height = canvas.height;
@@ -203,9 +219,9 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
         lastCursorSequence = message.seq;
         transportRef.current?.send({ type: "cursorAck", seq: message.seq });
       }
-      else if (message.type === "closed") { setError("Viewer detached. Reattach to resume this remote desktop."); setAttached(false); release(); }
+      else if (message.type === "closed") { void preview?.flush(); setError("Viewer detached. Reattach to resume this remote desktop."); setAttached(false); release(); }
       else throw new Error("Unsupported remote desktop message");
-    }, (message) => { if (!controller.signal.aborted) { setError(message); setAttached(false); release(); } }).then((connected) => {
+    }, (message) => { if (!controller.signal.aborted) { void preview?.flush(); setError(message); setAttached(false); release(); } }).then((connected) => {
       if (controller.signal.aborted) { connected.close(); return; }
       transport = connected;
       transportRef.current = connected;
@@ -213,12 +229,13 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "The remote desktop viewer could not attach.");
     });
     return () => {
+      void preview?.flush();
       controller.abort();
       release();
       transport?.close();
       if (transportRef.current === transport) transportRef.current = undefined;
     };
-  }, [acceptCursor, api, drawCursor, live, release, retry, tab.attempt, tab.id]);
+  }, [acceptCursor, api, drawCursor, live, release, retry, tab.attempt, tab.id, tab.profileId]);
 
   useEffect(() => {
     if (!active || !inputEnabled) { release(); inputRef.current?.blur(); }

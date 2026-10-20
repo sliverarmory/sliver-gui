@@ -7,6 +7,9 @@ export const RDP_MAX_PAYLOAD_BYTES = 256 * 1024;
 export const RDP_MAX_DISPLAY_CREDIT_BYTES = 8 * 1024 * 1024;
 export const RDP_MAX_PIXELS = 16_777_216;
 export const RDP_MAX_CLIPBOARD_BYTES = 1024 * 1024;
+export const RDP_PREVIEW_MAX_WIDTH = 480;
+export const RDP_PREVIEW_MAX_HEIGHT = 300;
+export const RDP_PREVIEW_MAX_DATA_URL_LENGTH = 128 * 1024;
 export const RDP_PORT_MESSAGE = "sliver:rdp:stream";
 
 export const RDP_IPC = Object.freeze({
@@ -19,6 +22,7 @@ export const RDP_IPC = Object.freeze({
   selectTab: "sliver:rdp:tab:select",
   renameTab: "sliver:rdp:tab:rename",
   saveProfile: "sliver:rdp:profile:save",
+  savePreview: "sliver:rdp:preview:save",
   deleteProfile: "sliver:rdp:profile:delete",
   respondToCertificate: "sliver:rdp:certificate:respond",
   attach: "sliver:rdp:attach",
@@ -51,6 +55,20 @@ export interface RdpProfile extends RdpConnectionOptions {
   readonly scaleMode: RdpScaleMode;
   readonly hasCredential: boolean;
   readonly credentialPersistence: RdpCredentialPersistence;
+  readonly preview?: RdpPreview;
+}
+
+export interface RdpPreview {
+  readonly dataUrl: string;
+  readonly capturedAt: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface RdpSavePreviewInput {
+  readonly tabId: string;
+  readonly attempt: number;
+  readonly dataUrl: string;
 }
 
 export interface RdpConnectInput extends RdpConnectionOptions {
@@ -168,6 +186,7 @@ export interface RdpWindowAPI {
   selectTab(tabId: string): Promise<OperationResult>;
   renameTab(input: { readonly tabId: string; readonly label: string }): Promise<OperationResult>;
   saveProfile(input: RdpSaveProfileInput): Promise<OperationResult<RdpProfile>>;
+  savePreview(input: RdpSavePreviewInput): Promise<OperationResult>;
   deleteProfile(profileId: string): Promise<OperationResult>;
   respondToCertificate(input: { readonly token: string; readonly decision: "reject" | "once" | "pin" }): Promise<OperationResult>;
   attach(tabId: string): Promise<OperationResult<RdpAttachment>>;
