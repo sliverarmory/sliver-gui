@@ -7,6 +7,8 @@ publish = false
 license = "GPL-3.0-or-later"
 
 [dependencies]
+# Pin the reviewed commit on the fork's default branch (master).
+# Keep the exact revision and protocol/ironrdp-provenance.json in sync.
 ironrdp-client = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012", default-features = false, features = ["rustls", "clipboard-custom"] }
 ironrdp-pdu = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
 ironrdp-connector = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }

@@ -5,10 +5,12 @@ Status: **Implemented on `feat/rdp`; Apple Silicon live-GUI acceptance is record
 For operation and developer setup, see [Remote Desktop usage](rdp-client.md).
 The exact maintained IronRDP fork, revision, patch inventory, features and Rust
 version are pinned in [provenance](../protocol/ironrdp-provenance.json).
-The maintained fork is `sliverarmory/IronRDP`, based on upstream
+The maintained fork is `sliverarmory/IronRDP`, with the embedding patches merged
+into its default branch, `master`, based on upstream
 `1f69e124e6bf85608efce3495c12eaf5f6b5a95d`. The provenance manifest is the
-authority for the current fork commit; experiment/live results retain the
-revision they actually exercised.
+authority for the current fork commit. Cargo pins that exact revision from
+`master` for reproducible builds; experiment/live results retain the revision
+they actually exercised.
 
 ## Backend decision after R0
 
@@ -306,5 +308,5 @@ results. A failed/unexecuted target prevents claiming full GUI-matrix acceptance
 - [Pinned upstream browser client](https://github.com/Devolutions/IronRDP/blob/1f69e124e6bf85608efce3495c12eaf5f6b5a95d/crates/ironrdp-web/README.md)
   and its [session/authentication implementation](https://github.com/Devolutions/IronRDP/blob/1f69e124e6bf85608efce3495c12eaf5f6b5a95d/crates/ironrdp-web/src/session.rs).
 - [Pinned native client implementation](https://github.com/Devolutions/IronRDP/blob/1f69e124e6bf85608efce3495c12eaf5f6b5a95d/crates/ironrdp-client/src/rdp.rs).
-- [Maintained embedding patch inventory](https://github.com/sliverarmory/IronRDP/blob/feat/sliver-gui-rdp/SLIVER_GUI_EMBEDDING.md);
+- [Maintained embedding patch inventory](https://github.com/sliverarmory/IronRDP/blob/master/SLIVER_GUI_EMBEDDING.md);
   the local provenance manifest pins its exact commit and content hash.

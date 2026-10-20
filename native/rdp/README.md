@@ -5,7 +5,9 @@ communicates over private pipes using [protocol version 1](protocol.md). The
 helper contains the credentials and protocol/graphics state; the renderer
 receives bounded RGBA frames, cursor updates and explicit clipboard results.
 
-The Cargo lockfile and source manifest pin the Sliver Armory IronRDP fork. Its
+The Cargo lockfile and source manifest pin an exact commit on the Sliver Armory
+IronRDP fork's default branch, `master`. Builds use that immutable revision; the
+branch name in provenance records where reviewed updates are taken from. Its
 embedding changes supply an all-certificate policy hook, typed overridable
 validation errors, a custom clipboard feature without native OS clipboard
 libraries, and framebuffer allocation limits. No audio, native windows, drive

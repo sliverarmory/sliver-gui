@@ -4,6 +4,7 @@
   "protocolVersion": 1,
   "source": {
     "repository": "https://github.com/sliverarmory/IronRDP",
+    "branch": "master",
     "commit": "bfa5a8966fce80d659765c018895036ec775a012",
     "tree": "731034fbe05905c1bc51bbe4c34867bebbe57661",
     "upstreamRepository": "https://github.com/Devolutions/IronRDP",
