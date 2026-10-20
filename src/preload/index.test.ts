@@ -36,6 +36,7 @@ const invokeArguments = {
   listLocalNetworkInterfaces: [],
   openWindow: [{ inheritConnection: true }],
   openCloudDeploymentWindow: [],
+  openRdpWindow: [],
   copyManagedServerSshCommand: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   copyManagedServerPublicIp: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   openInteractionWindow: [],

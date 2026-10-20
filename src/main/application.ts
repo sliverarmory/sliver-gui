@@ -2271,6 +2271,29 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return closePromise;
   }
 
+  async function openRdpWindow(): Promise<OperationResult> {
+    if (shutdown.isStopping) return { ok: false, error: "Remote Desktop is unavailable while the application is closing." };
+    if (!rdpWindows) {
+      return { ok: false, error: "Remote Desktop settings could not be loaded safely. Repair or restore gui/rdp.json in the client directory, then restart the application." };
+    }
+    try {
+      await rdpWindows.open();
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "The RDP window could not be opened." };
+    }
+  }
+
+  function openRdpWindowFromRenderer(source: TrustedWindowIdentity): Promise<OperationResult> | OperationResult {
+    const sourceWindow = windowsByContentsId.get(source.contentsId);
+    if (!sourceWindow || sourceWindow.isDestroyed() ||
+        !sameWindowIdentity(source, identityForWindow(sourceWindow)) ||
+        nativeWindowSurfaces.get(sourceWindow) !== "workspace") {
+      return { ok: false, error: "Remote Desktop can only be opened from a workspace window" };
+    }
+    return openRdpWindow();
+  }
+
   function installMenu(): void {
     if (shutdown.isStopping) return;
     const focusedConsole = focusedConsoleWindow();
@@ -2311,11 +2334,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         },
         openRdp: () => {
           if (shutdown.isStopping) return;
-          if (!rdpWindows) {
-            dialog.showErrorBox("Remote Desktop unavailable", "Remote Desktop settings could not be loaded safely. Repair or restore gui/rdp.json in the client directory, then restart the application.");
-            return;
-          }
-          void rdpWindows?.open().catch(() => dialog.showErrorBox("Remote Desktop unavailable", "The RDP window could not be opened."));
+          void openRdpWindow().then((result) => {
+            if (!result.ok && !shutdown.isStopping) dialog.showErrorBox("Remote Desktop unavailable", result.error);
+          });
         },
         duplicateConnectedWindow: () => createWindow(BrowserWindow.getFocusedWindow()?.webContents.id),
         reportScreenshot: () => {
@@ -3166,6 +3187,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       open: openSessionPanelWindow,
       claim: claimSessionPanelWindow,
     },
+    { open: openRdpWindowFromRenderer },
   );
   registerCloudDeploymentIpcHandlers(
     cloudDeploymentController,

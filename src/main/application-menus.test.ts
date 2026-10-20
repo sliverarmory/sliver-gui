@@ -303,10 +303,12 @@ describe("application menu templates", () => {
     expect(actions.openDocumentation).toHaveBeenCalledOnce();
   });
 
-  it("routes each native Network command to its standalone-window tab", () => {
+  it.each(["darwin", "win32", "linux"] as const)("routes Network commands and keeps Remote Desktop available offline on %s", (platform) => {
     const openNetwork = vi.fn();
+    const openRdp = vi.fn();
     const actions = {
       newWindow: vi.fn(),
+      openRdp,
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork,
@@ -318,7 +320,7 @@ describe("application menu templates", () => {
       restartToApplyApplicationUpdate: vi.fn(),
     };
     const template = buildApplicationMenuTemplate(
-      "darwin",
+      platform,
       "Sliver GUI",
       actions,
       { status: "loading" },
@@ -332,9 +334,12 @@ describe("application menu templates", () => {
       { id: "network.port-forward", label: "Port Forward", enabled: true },
       { id: "network.reverse-port-forward", label: "Reverse Port Forward", enabled: true },
       { id: "network.socks5", label: "SOCKS5 Proxy", enabled: true },
+      { type: "separator" },
+      { id: "network.rdp", label: "Remote Desktop" },
     ]);
     const sourceWindow = {} as BrowserWindow;
     for (const item of items) {
+      if (item.type === "separator") continue;
       if (!item.click) throw new Error("Expected a clickable Network menu item");
       item.click({} as MenuItem, sourceWindow, {} as Electron.KeyboardEvent);
     }
@@ -343,6 +348,15 @@ describe("application menu templates", () => {
       ["reverse-port-forward", sourceWindow],
       ["socks5", sourceWindow],
     ]);
+    expect(openRdp).toHaveBeenCalledOnce();
+    const offline = menuItems(buildApplicationMenuTemplate(
+      platform, "Sliver GUI", actions, { status: "loading" }, undefined, undefined, [], false,
+    ), "Network");
+    expect(offline.slice(0, 3).every((item) => item.enabled === false)).toBe(true);
+    const rdp = offline.find((item) => item.id === "network.rdp");
+    expect(rdp?.enabled).not.toBe(false);
+    clickItem(rdp);
+    expect(openRdp).toHaveBeenCalledTimes(2);
   });
 
   it("builds state-aware AWS deployment actions and routes exact navigation requests", () => {

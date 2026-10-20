@@ -105,7 +105,8 @@ describe("standalone remote desktop window", () => {
     await user.type(screen.getByLabelText("Computer"), "https://not-a-host");
     await user.type(screen.getByLabelText("Username"), "operator");
     await user.click(screen.getByRole("button", { name: "Connect" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("without a scheme or path");
+    expect(screen.getByLabelText("Computer")).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Computer")).toHaveAccessibleDescription(/without a scheme, path, or port/u);
     expect(api.connect).not.toHaveBeenCalled();
   });
 

@@ -41,11 +41,32 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     assert.equal(initial.securePersistenceAvailable, false);
     await rdp.getByText("Your Windows desktops", { exact: true }).waitFor();
     const windowCount = application.windows().length;
-    await invokeRdpMenu(application);
+    await invokeRdpMenu(application, "rdp.open");
     assert.equal(application.windows().length, windowCount, "File > Remote Desktop reuses the standalone window");
 
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     const connection = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
+    const resolution = connection.getByLabel("Desktop resolution", { exact: true });
+    assert.equal(await resolution.inputValue(), "1280x800");
+    assert.equal(await connection.getByLabel("Desktop width", { exact: true }).count(), 0);
+    await rdp.screenshot({ path: join(artifacts, "rdp-connect-form.png"), animations: "disabled" });
+    await resolution.selectOption("custom");
+    await connection.getByLabel("Desktop width", { exact: true }).fill("199");
+    await connection.getByLabel("Computer", { exact: true }).fill("https://rdp.invalid");
+    await connection.getByLabel("Port", { exact: true }).fill("70000");
+    await connection.getByRole("button", { name: "Save profile", exact: true }).click();
+    for (const label of ["Computer", "Port", "Username", "Desktop width"]) {
+      assert.equal(await connection.getByLabel(label, { exact: true }).getAttribute("aria-invalid"), "true");
+      assert.ok(await connection.getByLabel(label, { exact: true }).getAttribute("aria-describedby"));
+    }
+    assert.deepEqual((await readState(rdp)).profiles, [], "Invalid fields must not save a profile");
+    assert.deepEqual((await readState(rdp)).tabs, [], "Invalid fields must not start a connection");
+    await rdp.screenshot({ path: join(artifacts, "rdp-form-validation.png"), animations: "disabled" });
+    await connection.getByLabel("Desktop width", { exact: true }).scrollIntoViewIfNeeded();
+    await rdp.screenshot({ path: join(artifacts, "rdp-custom-validation.png"), animations: "disabled" });
+    await connection.getByLabel("Port", { exact: true }).fill("3389");
+    await resolution.selectOption("1920x1080");
+    assert.equal(await connection.getByLabel("Desktop width", { exact: true }).count(), 0);
     assert.equal(await connection.getByLabel("Password", { exact: true }).inputValue(), "");
     const remember = connection.getByLabel("Remember password", { exact: true });
     assert.equal(await remember.inputValue(), "none");
@@ -61,6 +82,8 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     assert.equal(await connection.getByLabel("Password", { exact: true }).inputValue(), "");
     const saved = await readState(rdp);
     assert.equal(saved.profiles.length, 1);
+    assert.equal(saved.profiles[0]?.width, 1920);
+    assert.equal(saved.profiles[0]?.height, 1080);
     assert.equal(saved.profiles[0]?.hasCredential, false);
     assert.equal(saved.profiles[0]?.credentialPersistence, "none", "Saving a profile never creates a credential");
     assert.deepEqual(saved.tabs, [], "Saving a profile never starts a remote session");
@@ -77,6 +100,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await profiles.getByRole("button", { name: "Connect", exact: true }).click();
     const editor = rdp.getByRole("dialog", { name: "Connect to Remote Desktop", exact: true });
     assert.equal(await editor.getByLabel("Computer", { exact: true }).inputValue(), "rdp.invalid");
+    assert.equal(await editor.getByLabel("Desktop resolution", { exact: true }).inputValue(), "1920x1080");
     assert.equal(await editor.getByLabel("Password", { exact: true }).inputValue(), "");
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await editor.waitFor({ state: "hidden" });
@@ -96,7 +120,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
 
     // Expose the available choice deterministically without using a real OS keychain.
     await setSecureStorageAvailable(application, true);
-    rdp = await openRdpWindow(application, errors);
+    rdp = await openRdpWindow(application, errors, workspace);
     assert.equal((await readState(rdp)).securePersistenceAvailable, true);
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     const secureDialog = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
@@ -143,14 +167,12 @@ test("malformed private RDP settings preserve the file and leave the operator wo
     workspace.setDefaultTimeout(15_000);
     await workspace.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Cancel", exact: true }).click();
     const count = application.windows().length;
-    const messages = await application.evaluate(({ dialog, Menu }) => {
-      const errors: { title: string; message: string }[] = [];
-      dialog.showErrorBox = (title, message) => { errors.push({ title, message }); };
+    const messages = await application.evaluate(({ dialog, Menu }) => new Promise<{ title: string; message: string }[]>((resolveMessage) => {
+      dialog.showErrorBox = (title, message) => { resolveMessage([{ title, message }]); };
       const item = Menu.getApplicationMenu()?.getMenuItemById("rdp.open");
       if (!item?.click || !item.enabled) throw new Error("RDP menu must remain available to explain the load failure");
       item.click();
-      return errors;
-    });
+    }));
     assert.deepEqual(messages, [{ title: "Remote Desktop unavailable", message: "Remote Desktop settings could not be loaded safely. Repair or restore gui/rdp.json in the client directory, then restart the application." }]);
     assert.equal(application.windows().length, count);
     assert.equal(application.windows().some((page) => page.url().includes("surface=rdp")), false);
@@ -172,17 +194,31 @@ async function setSecureStorageAvailable(application: ElectronApplication, avail
   }, available);
 }
 
-async function invokeRdpMenu(application: ElectronApplication): Promise<void> {
-  await application.evaluate(({ Menu }) => {
-    const item = Menu.getApplicationMenu()?.getMenuItemById("rdp.open");
+async function invokeRdpMenu(application: ElectronApplication, id = "network.rdp"): Promise<void> {
+  await application.evaluate(({ Menu }, menuId) => {
+    const item = Menu.getApplicationMenu()?.getMenuItemById(menuId);
     if (!item?.click || !item.enabled) throw new Error("Standalone Remote Desktop menu is unavailable");
     item.click();
-  });
+  }, id);
 }
 
-async function openRdpWindow(application: ElectronApplication, errors: string[]): Promise<Page> {
+async function openRdpWindow(application: ElectronApplication, errors: string[], workspace?: Page): Promise<Page> {
   const opened = application.waitForEvent("window");
-  await invokeRdpMenu(application);
+  // Keep cleanup from masking a failed palette/menu action with an unhandled
+  // window-event rejection. The awaited promise still propagates open failures.
+  void opened.catch(() => undefined);
+  if (workspace) {
+    await workspace.bringToFront();
+    await workspace.getByLabel("Open command palette", { exact: true }).click();
+    await workspace.getByRole("searchbox", { name: "Search commands" }).fill("rdp");
+    await workspace.screenshot({
+      path: resolve(import.meta.dirname, "../../../artifacts/e2e/rdp-command-palette.png"),
+      animations: "disabled",
+    });
+    await workspace.getByRole("menuitem", { name: /^Remote Desktop/u }).click();
+  } else {
+    await invokeRdpMenu(application);
+  }
   const page = await opened;
   page.setDefaultTimeout(15_000);
   page.on("pageerror", (error) => errors.push(error.message));

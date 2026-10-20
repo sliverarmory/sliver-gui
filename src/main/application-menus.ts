@@ -310,6 +310,10 @@ export function buildApplicationMenuTemplate(
           enabled: networkEnabled,
           click: (_item, sourceWindow) => actions.openNetwork("socks5", sourceWindow),
         },
+        ...(actions.openRdp ? [
+          { type: "separator" as const },
+          { id: "network.rdp", label: "Remote Desktop", click: actions.openRdp },
+        ] : []),
       ],
     },
     ...(consoleActions

@@ -8,9 +8,13 @@ renderer. See the [architecture and acceptance status](rdp-client-design.md).
 
 ## Connect
 
-1. Open **File → Remote Desktop**, then **New connection**.
+1. Open **Network → Remote Desktop** (also available under **File** or by searching
+   **RDP** in the command palette), then **New connection**.
 2. Enter a bare hostname/IP, port (normally 3389), Windows username and optional
-   domain. Enter the password and requested desktop dimensions.
+   domain. Enter the password and choose a desktop resolution, or select **Custom**
+   to enter width and height. Invalid fields show an inline explanation; correct
+   them before connecting or saving a profile. Saving a profile does not require
+   a password.
 3. Choose whether to remember the password. Enable **Text clipboard** if needed;
    it is off by default. **Save profile** stores connection preferences separately
    from the password. Remembering a password on a new connection creates a profile.

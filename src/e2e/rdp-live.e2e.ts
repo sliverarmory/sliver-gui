@@ -69,6 +69,7 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await dialog.getByLabel("Port", { exact: true }).fill(String(config.port));
     await dialog.getByLabel("Username", { exact: true }).fill(config.username);
     await dialog.getByLabel("Domain", { exact: true }).fill(config.domain);
+    await dialog.getByLabel("Desktop resolution", { exact: true }).selectOption("custom");
     await dialog.getByLabel("Desktop width", { exact: true }).fill(String(config.width));
     await dialog.getByLabel("Desktop height", { exact: true }).fill(String(config.height));
     const clipboardSwitch = dialog.getByRole("switch", { name: "Text clipboard", exact: true });

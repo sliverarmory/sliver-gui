@@ -192,6 +192,7 @@ function installSliverAPI(
     }),
     openInteractionWindow: vi.fn(failedOperation),
     openCloudDeploymentWindow: vi.fn(failedOperation),
+    openRdpWindow: vi.fn(failedOperation),
     copyManagedServerSshCommand: vi.fn(async () => ({ ok: true as const })),
     copyManagedServerPublicIp: vi.fn(async () => ({ ok: true as const })),
     claimInteractionWindow: vi.fn(failedOperation),
@@ -515,6 +516,52 @@ describe("App startup", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
     });
+  });
+
+  it("finds Remote Desktop by RDP and opens its standalone window while disconnected", async () => {
+    const user = userEvent.setup();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.openRdpWindow).mockResolvedValue({ ok: true });
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const command = await screen.findByRole("menuitem", { name: /^Remote Desktop/u });
+    expect(command).not.toHaveAttribute("aria-disabled", "true");
+    await user.type(screen.getByRole("searchbox", { name: "Search commands" }), "rdp");
+    const matchingCommand = await screen.findByRole("menuitem", { name: /^Remote Desktop/u });
+    expect(matchingCommand).not.toHaveAttribute("aria-disabled", "true");
+    expect(screen.queryByRole("menuitem", { name: /Cloud Deployment/u })).not.toBeInTheDocument();
+    await user.click(matchingCommand);
+
+    await waitFor(() => expect(api.openRdpWindow).toHaveBeenCalledExactlyOnceWith());
+    expect(api.chooseConfig).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+  });
+
+  it("reports Remote Desktop launch failures without exposing rejected IPC details", async () => {
+    const user = userEvent.setup();
+    const danger = vi.spyOn(toast, "danger");
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.openRdpWindow)
+      .mockResolvedValueOnce({ ok: false, error: "Remote Desktop settings could not be loaded safely." })
+      .mockRejectedValueOnce(new Error("private runtime path /Users/operator/.sliver-client/gui/rdp.json"));
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.click(await screen.findByRole("menuitem", { name: /^Remote Desktop/u }));
+    await waitFor(() => expect(danger).toHaveBeenCalledWith("Could not open Remote Desktop", {
+      description: "Remote Desktop settings could not be loaded safely.",
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.click(await screen.findByRole("menuitem", { name: /^Remote Desktop/u }));
+    await waitFor(() => expect(danger).toHaveBeenLastCalledWith("Could not open Remote Desktop", {
+      description: "The Remote Desktop window could not be opened. Try again.",
+    }));
+    expect(api.openRdpWindow).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(danger.mock.calls)).not.toContain("/Users/operator");
   });
 
   it("captures all open windows from the command palette while disconnected", async () => {

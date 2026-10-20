@@ -137,6 +137,32 @@ describe("trusted Electron IPC boundary", () => {
     expect(exitApplication).toHaveBeenCalledOnce();
   });
 
+  it("opens Remote Desktop offline with the exact trusted renderer identity", async () => {
+    const open = vi.fn(async () => ({ ok: true as const }));
+    const registry = registryMock();
+    registerIpcHandlers(
+      registry, vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
+      { open },
+    );
+    const { event } = invokeEvent(RENDERER_URL, 77);
+
+    await expect(electronMocks.handlers.get(IPC.openRdpWindow)?.(event)).resolves.toEqual({ ok: true });
+    expect(open).toHaveBeenCalledExactlyOnceWith({
+      contentsId: 77,
+      rendererProcessId: 100,
+      rendererFrameToken: "main-frame",
+    });
+    expect(registry.snapshot).not.toHaveBeenCalled();
+
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
+    expect(electronMocks.handlers.get(IPC.openRdpWindow)?.(event)).toEqual({
+      ok: false,
+      error: "Remote Desktop is unavailable",
+    });
+  });
+
   it("opens Cloud Deployment with the exact trusted renderer identity", async () => {
     const open = vi.fn(async () => ({ ok: true as const }));
     const registry = registryMock();
@@ -757,6 +783,7 @@ describe("trusted Electron IPC boundary", () => {
     IPC.refresh,
     IPC.listLocalNetworkInterfaces,
     IPC.openCloudDeploymentWindow,
+    IPC.openRdpWindow,
     IPC.openInteractionWindow,
     IPC.claimInteractionWindow,
     IPC.exitApp,

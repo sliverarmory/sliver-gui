@@ -12,6 +12,7 @@ import {
   faCamera,
   faCloudArrowUp,
   faComputer,
+  faDesktop,
   faEllipsisVertical,
   faGear,
   faGlobe,
@@ -485,6 +486,19 @@ export function App() {
     }
   }
 
+  async function openRdp() {
+    try {
+      const result = await window.sliver.openRdpWindow();
+      if (!result.ok) {
+        toast.danger("Could not open Remote Desktop", { description: result.error });
+      }
+    } catch {
+      toast.danger("Could not open Remote Desktop", {
+        description: "The Remote Desktop window could not be opened. Try again.",
+      });
+    }
+  }
+
   const openConsole = useCallback(async () => {
     try {
       const result = await window.sliver.openConsoleWindow();
@@ -754,6 +768,15 @@ export function App() {
       description: "Open or focus the Cloud Deployment window.",
       keywords: ["aws", "cloud infrastructure"],
       onAction: () => void openCloudDeployment(),
+    },
+    {
+      id: "window-rdp",
+      group: "Windows",
+      icon: faDesktop,
+      label: "Remote Desktop",
+      description: "Open or focus the standalone RDP client.",
+      keywords: ["rdp", "remote desktop", "windows", "network"],
+      onAction: () => void openRdp(),
     },
     {
       id: "report-screenshot",
