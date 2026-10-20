@@ -86,6 +86,13 @@ describe("verified RDP runtime loading", () => {
     expect(entry.execute).not.toHaveBeenCalled();
   });
 
+  it.skipIf(process.platform === "win32")("refuses a helper without POSIX execute permissions before running it", async () => {
+    const entry = await fixture();
+    await chmod(entry.executable, 0o644);
+    await expect(resolveVerifiedRdpRuntime(entry.options)).rejects.toThrow(/could not be verified/u);
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
   it("accepts unchanged packaged Linux bytes but never substitutes signature checks for changed Linux content", async () => {
     const entry = await fixture("linux", true);
     await expect(resolveVerifiedRdpRuntime(entry.options)).resolves.toBe(entry.executable);

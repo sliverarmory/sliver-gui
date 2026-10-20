@@ -105,7 +105,8 @@ export async function resolveVerifiedRdpRuntime(options: ResolveVerifiedRdpRunti
     const executablePath = join(directory, filename);
     const bytes = await bundledFile(root, executablePath, 256 * 1024 * 1024);
     const metadata = await lstat(executablePath);
-    if (platform !== "win32" && !(metadata.mode & 0o111)) throw new Error(FAILURE);
+    // Execute permission bits describe the host filesystem, not the artifact target.
+    if (process.platform !== "win32" && !(metadata.mode & 0o111)) throw new Error(FAILURE);
     const run = options.execute ?? execute;
     const commandOptions: CommandOptions = { timeout: 15_000, maxBuffer: 16 * 1024, env: rdpRuntimeEnvironment() };
     if (digest(bytes) !== artifact["sha256"] || bytes.length !== artifact["size"]) {
