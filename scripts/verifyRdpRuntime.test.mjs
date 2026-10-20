@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
+import { asarEntryPaths } from "./asarEntryPaths.mjs";
 import { buildRdpRuntime, RDP_PACKAGED_RECORD } from "./buildRdpRuntime.mjs";
 import { nativeBinary, universalBinary, rdpFixture } from "./rdpTestFixtures.mjs";
-import { rdpBinaryArchitectures, verifyPreparedRdpRuntime, verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
+import { rdpBinaryArchitectures, verifyPreparedRdpRuntime, verifyPackagedRdpRuntime, verifyRdpArchiveRecord } from "./verifyRdpRuntime.mjs";
 
 test("native parser identifies all supported architectures and rejects malformed or repeated slices", () => {
   for (const target of ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]) {
@@ -48,6 +49,32 @@ test("prepared verification rejects a stale ASAR trust anchor before executing t
   await assert.rejects(verifyPreparedRdpRuntime({ ...fixture.options,
     run: async () => { throw new Error("Unexpected helper execution"); },
   }), /ASAR trust anchor/u);
+});
+
+test("ASAR provenance lookup preserves POSIX and Windows entry separators", () => {
+  const recordBytes = Buffer.from('{"schemaVersion":1}\n');
+  for (const listedPath of ["/native/rdp/packaged-provenance.json", "\\native\\rdp\\packaged-provenance.json"]) {
+    const entries = [asarEntryPaths(listedPath)];
+    let extractions = 0;
+    verifyRdpArchiveRecord("app.asar", entries, recordBytes, (archivePath, lookupPath, followLinks) => {
+      extractions += 1;
+      assert.equal(archivePath, "app.asar");
+      assert.equal(lookupPath, listedPath.slice(1));
+      assert.equal(followLinks, false);
+      return Buffer.from(recordBytes);
+    });
+    assert.equal(extractions, 1);
+  }
+});
+
+test("ASAR provenance rejects missing entries and byte changes even when JSON is equivalent", () => {
+  const recordBytes = Buffer.from('{"schemaVersion":1}\n');
+  assert.throws(() => verifyRdpArchiveRecord("app.asar", [], recordBytes, () => {
+    throw new Error("Unexpected archive extraction");
+  }), /provenance is missing/u);
+  const entries = [asarEntryPaths("\\native\\rdp\\packaged-provenance.json")];
+  assert.throws(() => verifyRdpArchiveRecord("app.asar", entries, recordBytes,
+    () => Buffer.from('{ "schemaVersion": 1 }\n')), /does not match the prepared helper/u);
 });
 
 test("packaging rejects changed native bytes and altered notices without running a changed binary", async (context) => {

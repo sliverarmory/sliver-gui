@@ -126,6 +126,14 @@ export async function verifyPreparedRdpRuntime({ projectDirectory = ROOT_DIRECTO
   return { sourceBytes, recordBytes, record, executable, inventory, license };
 }
 
+export function verifyRdpArchiveRecord(archivePath, entries, expectedRecordBytes, extractFile) {
+  const entry = entries.find(({ normalizedPath }) => normalizedPath === RDP_PACKAGED_RECORD);
+  if (!entry) throw new Error("ASAR RDP build provenance is missing");
+  if (!extractFile(archivePath, entry.lookupPath, false).equals(expectedRecordBytes)) {
+    throw new Error("ASAR RDP build provenance does not match the prepared helper");
+  }
+}
+
 function assertArchitecture(bytes, target) {
   if (JSON.stringify(rdpBinaryArchitectures(bytes).sort()) !== JSON.stringify([...RDP_TARGETS[target]].sort())) {
     throw new Error("RDP executable architectures do not match the package target");

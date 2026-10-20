@@ -19,7 +19,7 @@ import {
 } from "./buildSliverConsole.mjs";
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
-import { verifyPreparedRdpRuntime, verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
+import { verifyPreparedRdpRuntime, verifyPackagedRdpRuntime, verifyRdpArchiveRecord } from "./verifyRdpRuntime.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
@@ -438,14 +438,11 @@ if (verifyPackaged) {
     : [await newestPackagedArchive()];
 
   for (const archive of archives) {
-    verifyArchive(archive, terminalFontEvidence, sliverClientEvidence);
+    verifyArchive(archive, terminalFontEvidence, sliverClientEvidence, rdpEvidence.recordBytes);
     await verifyExternalBrandAsset(archive);
     await verifyExternalLegalAssets(archive);
     await verifyExternalUpdateSigning(archive, updateSigningEvidence);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
-    if (!extractFile(archive, "native/rdp/packaged-provenance.json").equals(rdpEvidence.recordBytes)) {
-      throw new Error("ASAR RDP build provenance does not match the prepared helper");
-    }
     await verifyPackagedRdpRuntime({ resourcesDirectory: dirname(archive), evidence: rdpEvidence });
     await verifyExternalNodePtyRuntime(archive);
   }
@@ -844,7 +841,7 @@ async function newestFile(paths) {
   return dated[0].path;
 }
 
-function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) {
+function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence, rdpRecordBytes) {
   const entries = listPackage(archivePath, { isPack: false }).map(asarEntryPaths);
   const normalizedEntries = entries.map(({ normalizedPath }) => normalizedPath);
   const forbiddenEntries = normalizedEntries.filter((entry) =>
@@ -862,6 +859,7 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence) 
       throw new Error(`Packaged archive is missing required application/source evidence: ${requiredPath}`);
     }
   }
+  verifyRdpArchiveRecord(archivePath, entries, rdpRecordBytes, extractFile);
   const packagedFontEntries = entries.filter(({ normalizedPath }) =>
     normalizedPath.startsWith("dist/renderer/assets/") && normalizedPath.endsWith(".woff2"),
   );
