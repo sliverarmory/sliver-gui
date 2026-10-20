@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import {
-  buildRdpRuntime, cargoLicenseInventory, rdpBuildEnvironment, rdpSourceInputs, rdpTargetForHost, selectedCargoPackages, sha256, verifyIronRdpPatchInventory, verifyIronRdpCheckout,
+  buildRdpRuntime, cargoLicenseInventory, RDP_PACKAGED_RECORD, rdpBuildEnvironment, rdpSourceInputs, rdpTargetForHost, selectedCargoPackages, sha256, verifyIronRdpPatchInventory, verifyIronRdpCheckout,
 } from "./buildRdpRuntime.mjs";
 import { fixtureManifest, rdpFixture } from "./rdpTestFixtures.mjs";
 
@@ -40,6 +40,7 @@ test("source identity covers source and lockfile while ignoring generated output
   const first = await rdpSourceInputs(root);
   await mkdir(join(root, "native/rdp/bin"));
   await writeFile(join(root, "native/rdp/bin/sliver-rdp"), "generated");
+  await writeFile(join(root, RDP_PACKAGED_RECORD), "generated archive trust anchor");
   assert.deepEqual(await rdpSourceInputs(root), first);
   await writeFile(join(root, "native/rdp/Cargo.lock"), "changed dependency graph");
   assert.notDeepEqual(await rdpSourceInputs(root), first);
@@ -86,7 +87,10 @@ test("universal build records both slices, locked graph, notices and an atomic s
   assert.match(inventory, /GPL source license/u);
   assert.match(inventory, /Cargo inventory entries: 2/u);
   assert.doesNotMatch(inventory, /test-only/u);
+  assert.deepEqual(await readFile(join(fixture.root, RDP_PACKAGED_RECORD)),
+    await readFile(join(fixture.root, "native/rdp/bin/provenance.json")));
   fixture.metadata.packages[1].source = "git+https://example.com/unreviewed#abc";
   await assert.rejects(buildRdpRuntime({ projectDirectory: fixture.root, platform: "darwin", architecture: "arm64", run: fixture.run, environment: {} }), /Unpinned IronRDP/u);
   await assert.rejects(readFile(join(fixture.root, "native/rdp/bin/provenance.json")), { code: "ENOENT" });
+  await assert.rejects(readFile(join(fixture.root, RDP_PACKAGED_RECORD)), { code: "ENOENT" });
 });

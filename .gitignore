@@ -10,6 +10,7 @@
 /native/updater-trust/bin/
 /native/updater-trust/build/
 /native/rdp/bin/
+/native/rdp/packaged-provenance.json*
 /native/rdp/target/
 /.release-signing/
 *.tsbuildinfo

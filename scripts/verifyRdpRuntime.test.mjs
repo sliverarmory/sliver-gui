@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { buildRdpRuntime } from "./buildRdpRuntime.mjs";
+import { buildRdpRuntime, RDP_PACKAGED_RECORD } from "./buildRdpRuntime.mjs";
 import { nativeBinary, universalBinary, rdpFixture } from "./rdpTestFixtures.mjs";
 import { rdpBinaryArchitectures, verifyPreparedRdpRuntime, verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
 
@@ -40,6 +40,14 @@ test("prepared verification binds native ABI to source, lockfile, binary and lic
   fixture.info.protocol = 1;
   await writeFile(join(fixture.root, "native/rdp/src/main.rs"), "changed source");
   await assert.rejects(verifyPreparedRdpRuntime(fixture.options), /provenance/u);
+});
+
+test("prepared verification rejects a stale ASAR trust anchor before executing the helper", async (context) => {
+  const fixture = await builtFixture(context);
+  await writeFile(join(fixture.root, RDP_PACKAGED_RECORD), "stale archive anchor");
+  await assert.rejects(verifyPreparedRdpRuntime({ ...fixture.options,
+    run: async () => { throw new Error("Unexpected helper execution"); },
+  }), /ASAR trust anchor/u);
 });
 
 test("packaging rejects changed native bytes and altered notices without running a changed binary", async (context) => {

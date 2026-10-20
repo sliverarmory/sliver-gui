@@ -35,8 +35,8 @@ async function fixture(platform: NodeJS.Platform = "linux", packaged = false) {
   await writeFile(join(directory, "source-provenance.json"), sourceBytes);
   await writeFile(join(directory, "provenance.json"), JSON.stringify(record));
   if (packaged) {
-    await mkdir(join(resourcesPath, "app.asar/native/rdp/bin"), { recursive: true });
-    await writeFile(join(resourcesPath, "app.asar/native/rdp/bin/provenance.json"), JSON.stringify(record));
+    await mkdir(join(resourcesPath, "app.asar/native/rdp"), { recursive: true });
+    await writeFile(join(resourcesPath, "app.asar/native/rdp/packaged-provenance.json"), JSON.stringify(record));
   }
   await writeFile(executable, bytes, { mode: 0o755 });
   await chmod(executable, 0o755);

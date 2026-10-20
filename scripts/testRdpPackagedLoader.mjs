@@ -18,8 +18,8 @@ try {
   const source = join(directory, "asar-source");
   await mkdir(join(source, "protocol"), { recursive: true });
   await copyFile(join(ROOT_DIRECTORY, "protocol/ironrdp-provenance.json"), join(source, "protocol/ironrdp-provenance.json"));
-  await mkdir(join(source, "native/rdp/bin"), { recursive: true });
-  await copyFile(join(ROOT_DIRECTORY, "native/rdp/bin/provenance.json"), join(source, "native/rdp/bin/provenance.json"));
+  await mkdir(join(source, "native/rdp"), { recursive: true });
+  await copyFile(join(ROOT_DIRECTORY, "native/rdp/packaged-provenance.json"), join(source, "native/rdp/packaged-provenance.json"));
   await mkdir(resources, { recursive: true });
   await createPackage(source, join(resources, "app.asar"));
   await cp(join(ROOT_DIRECTORY, "native/rdp/bin"), join(resources, "rdp"), { recursive: true });

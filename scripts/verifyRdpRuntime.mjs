@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { windowsPowerShellEnvironment } from "../src/shared/windows-powershell-environment.ts";
 import {
-  ROOT_DIRECTORY, RDP_OUTPUT_DIRECTORY, RDP_SOURCE_MANIFEST, RDP_TARGETS,
+  ROOT_DIRECTORY, RDP_OUTPUT_DIRECTORY, RDP_PACKAGED_RECORD, RDP_SOURCE_MANIFEST, RDP_TARGETS,
   rdpExecutableName, rdpSourceInputs, rdpTargetForHost, runRdpCommand, sha256, validateRdpSourceManifest,
 } from "./buildRdpRuntime.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
@@ -103,6 +103,9 @@ export async function verifyPreparedRdpRuntime({ projectDirectory = ROOT_DIRECTO
   const manifest = validateRdpSourceManifest(JSON.parse(sourceBytes));
   const directory = join(projectDirectory, RDP_OUTPUT_DIRECTORY);
   const recordBytes = await readFile(join(directory, "provenance.json"));
+  if (!recordBytes.equals(await readFile(join(projectDirectory, RDP_PACKAGED_RECORD)))) {
+    throw new Error("RDP ASAR trust anchor differs from the prepared runtime provenance");
+  }
   const record = JSON.parse(recordBytes);
   const inputs = await rdpSourceInputs(projectDirectory);
   const target = rdpTargetForHost(platform, architecture, hostOnly);
@@ -118,7 +121,7 @@ export async function verifyPreparedRdpRuntime({ projectDirectory = ROOT_DIRECTO
     throw new Error("Prepared RDP executable/provenance/licenses failed integrity verification");
   }
   assertArchitecture(executable, target);
-  if (platform !== "win32" && !(metadata.mode & 0o111)) throw new Error("RDP helper is not executable");
+  if (process.platform !== "win32" && !(metadata.mode & 0o111)) throw new Error("RDP helper is not executable");
   await verifyRdpBuildInfo(executablePath, record, { run, architecture });
   return { sourceBytes, recordBytes, record, executable, inventory, license };
 }
@@ -141,7 +144,7 @@ export async function verifyPackagedRdpRuntime({ projectDirectory = ROOT_DIRECTO
   const executablePath = join(directory, evidence.record.artifact.fileName);
   const executable = await readFile(executablePath);
   assertArchitecture(executable, evidence.record.build.target);
-  if (platform !== "win32" && !((await stat(executablePath)).mode & 0o111)) throw new Error("Packaged RDP helper is not executable");
+  if (process.platform !== "win32" && !((await stat(executablePath)).mode & 0o111)) throw new Error("Packaged RDP helper is not executable");
   const unchanged = executable.equals(evidence.executable);
   const required = platform !== "linux" && stage === "packaged" && (["true", "1"].includes(environment.SLIVER_GUI_REQUIRE_SIGNED_CHILD) ||
     releaseSigningProfile(environment) === "self-signed");

@@ -163,7 +163,7 @@ private test evidence rather than committing them. The result file must come fro
 a terminal successful run and be paired with GUI/helper revisions and exact
 client/server versions; its existence from an older run is not current evidence.
 
-Recorded final live-GUI result: **PASS, 2026-10-20T01:32:41.050Z**, macOS 27.0.1
+Recorded final live-GUI result: **PASS, 2026-10-20T02:08:43.278Z**, macOS 27.0.1
 arm64, Electron 44.5.1, Windows Server 2019, fork
 `1835457f27045d0098a4861b7b50204539539ec6`. NLA, rendering, keyboard text readback,
 Unicode clipboard round-trip, renderer reattachment and disconnect passed with

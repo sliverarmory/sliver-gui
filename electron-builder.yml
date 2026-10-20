@@ -54,7 +54,7 @@ files:
   - docs/adr/0001-platform-support.md
   - docs/rpc-message-budgets.md
   - protocol/ironrdp-provenance.json
-  - native/rdp/bin/provenance.json
+  - native/rdp/packaged-provenance.json
 asarUnpack:
   - node_modules/node-pty/build/Release/**
 extraResources:

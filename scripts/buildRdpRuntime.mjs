@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 export const ROOT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const RDP_SOURCE_MANIFEST = "protocol/ironrdp-provenance.json";
+export const RDP_PACKAGED_RECORD = "native/rdp/packaged-provenance.json";
 export const RDP_OUTPUT_DIRECTORY = "native/rdp/bin";
 export const RDP_TARGETS = Object.freeze({
   "darwin-universal": ["x86_64-apple-darwin", "aarch64-apple-darwin"],
@@ -250,6 +251,7 @@ export async function buildRdpRuntime({ projectDirectory = ROOT_DIRECTORY, platf
   await mkdir(outputDirectory, { recursive: true });
   // Remove the success marker first so a failed rebuild cannot package stale output.
   await rm(join(outputDirectory, "provenance.json"), { force: true });
+  await rm(join(projectDirectory, RDP_PACKAGED_RECORD), { force: true });
   const dependencies = new Map();
   const sliceRecords = [];
   for (const slice of slices) {
@@ -289,7 +291,12 @@ export async function buildRdpRuntime({ projectDirectory = ROOT_DIRECTORY, platf
     artifact: { fileName: executableName, sha256: sha256(executable), size: executable.length },
     licenseInventorySha256: sha256(licenseInventory), projectLicenseSha256: sha256(await readFile(join(projectDirectory, "LICENSE"))),
   };
-  await writeFile(join(outputDirectory, "provenance.json.tmp"), `${JSON.stringify(record, null, 2)}\n`);
+  const recordBytes = `${JSON.stringify(record, null, 2)}\n`;
+  // electron-builder excludes extraResources sources from ASAR. Keep its trust
+  // anchor outside bin/ so the archive and external helper each retain a copy.
+  await writeFile(join(projectDirectory, `${RDP_PACKAGED_RECORD}.tmp`), recordBytes);
+  await rename(join(projectDirectory, `${RDP_PACKAGED_RECORD}.tmp`), join(projectDirectory, RDP_PACKAGED_RECORD));
+  await writeFile(join(outputDirectory, "provenance.json.tmp"), recordBytes);
   await rename(join(outputDirectory, "provenance.json.tmp"), join(outputDirectory, "provenance.json"));
   return { executablePath, record };
 }

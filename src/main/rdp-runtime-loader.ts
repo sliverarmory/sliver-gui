@@ -81,7 +81,7 @@ export async function resolveVerifiedRdpRuntime(options: ResolveVerifiedRdpRunti
     ]);
     if (!sourceBytes.equals(copiedSource)) throw new Error(FAILURE);
     if (options.isPackaged && !recordBytes.equals(await bundledFile(root,
-      join(root, "app.asar/native/rdp/bin/provenance.json"), 2 * 1024 * 1024, true))) throw new Error(FAILURE);
+      join(root, "app.asar/native/rdp/packaged-provenance.json"), 2 * 1024 * 1024, true))) throw new Error(FAILURE);
     const manifest = rdpRecord(JSON.parse(sourceBytes.toString("utf8")));
     const source = rdpRecord(manifest["source"]);
     const record = rdpRecord(JSON.parse(recordBytes.toString("utf8")));

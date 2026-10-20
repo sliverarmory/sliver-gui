@@ -64,7 +64,7 @@ const requiredBuilderPaths = [
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "protocol/ironrdp-provenance.json",
-  "native/rdp/bin/provenance.json",
+  "native/rdp/packaged-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -120,7 +120,7 @@ const requiredPackagedFiles = [
   "protocol/ghostty-web-provenance.json",
   "protocol/terminal-fonts-provenance.json",
   "protocol/ironrdp-provenance.json",
-  "native/rdp/bin/provenance.json",
+  "native/rdp/packaged-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -443,7 +443,7 @@ if (verifyPackaged) {
     await verifyExternalLegalAssets(archive);
     await verifyExternalUpdateSigning(archive, updateSigningEvidence);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
-    if (!extractFile(archive, "native/rdp/bin/provenance.json").equals(rdpEvidence.recordBytes)) {
+    if (!extractFile(archive, "native/rdp/packaged-provenance.json").equals(rdpEvidence.recordBytes)) {
       throw new Error("ASAR RDP build provenance does not match the prepared helper");
     }
     await verifyPackagedRdpRuntime({ resourcesDirectory: dirname(archive), evidence: rdpEvidence });

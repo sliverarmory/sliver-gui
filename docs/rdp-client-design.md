@@ -217,6 +217,9 @@ workflow.
 The pinned build uses Rust 1.94.1, `rustls` and `clipboard-custom`, macOS deployment
 target 13.0, Linux glibc baseline 2.35 and static MSVC CRT. Packaging places the
 helper, provenance and license inventory outside ASAR under `resources/rdp/`.
+The internal build record lives at `native/rdp/packaged-provenance.json` inside
+ASAR, outside the source directory copied by Electron Builder's `extraResources`.
+Its bytes must match the external helper provenance before runtime verification.
 Runtime loading checks the expected architecture, protocol and artifact identity;
 release signing/content verification includes nested helper code. App/helper
 updates are delivered together. There is no independent helper download channel.
@@ -234,7 +237,7 @@ Evidence at this checkpoint:
   real Electron ASAR-loader probe have passed on the developer host.
 - Helper-level Windows Server 2019 NLA, desktop, scan-code/Unicode input and
   clipboard negotiation have been exercised from Apple Silicon.
-- **Final live GUI PASS at 2026-10-20T01:32:41.050Z:** macOS 27.0.1 arm64,
+- **Final live GUI PASS at 2026-10-20T02:08:43.278Z:** macOS 27.0.1 arm64,
   Electron 44.5.1, Windows Server 2019 (CASTLEBLACK), 1280×800. The scenario
   verified NLA, rendering, Windows-R → Notepad, keyboard text copied back from
   Windows, Unicode clipboard local → remote → local, renderer reload retaining
@@ -246,8 +249,8 @@ Evidence at this checkpoint:
   and build identity `ef95464090dc47197b57557b141270e2fae7d2abddf715b405e394a5947b7abd`.
   The helper includes the clipboard ownership/late-reply fix; the renderer uses
   bounded cursor acknowledgments as well as frame credits.
-- The full unit checkpoint passed 5,168 tests with three skips. Subsequent cursor
-  changes passed 59 focused tests; final clipboard/service changes passed 49.
+- The full unit checkpoint passed 5,203 tests with three skips. Subsequent
+  runtime, store, loader and packaging changes passed 73 focused tests.
   Native helper tests passed 14; packaging/signing checks passed 65 with one
   platform skip. Fresh typechecks/build and all eight preload checks passed.
 - Offline RDP Electron tests passed 2/2, including malformed settings recovery.
