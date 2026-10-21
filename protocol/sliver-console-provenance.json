@@ -58,8 +58,8 @@
           "sourcePath": "client/console/console.go",
           "replacementPath": "protocol/sliver-console-overlay/client/console/console.go",
           "baseSha256": "3d7dddfddf5717d2665bf64f14a6313ec274fdb18934de2f110a88122f669bd7",
-          "sha256": "45b94482121779b61179f69c10c72c3f581e328ab6fbabc2de54ce715bb9567b",
-          "review": "Let the GUI force in-memory console logging off and place command history in its private workspace while the rest of the client root remains shared."
+          "sha256": "b4883d49900ea3858ff55c3000d029dd73e9fa745e043b072362e1e6f79385bc",
+          "review": "Let the GUI force in-memory console logging off and place command history in its private workspace while the rest of the client root remains shared. Print the startup update reminder directly before readline enables raw input to avoid blocking on a cursor-position query."
         }
       ]
     },

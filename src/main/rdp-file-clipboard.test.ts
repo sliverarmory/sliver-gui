@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtemp, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -134,8 +134,14 @@ describe("RDP local file serving", () => {
 
   it("refuses replacement between clipboard sampling and the first file read", async () => {
     const file = await fixture(); mocks.read.mockResolvedValue([item({ "text/uri-list": pathToFileURL(file).href })]);
-    const files = await source(); await rm(file); await writeFile(file, "hello world");
+    const files = await source();
+    // Keep the original inode allocated: unlink/recreate can immediately reuse
+    // its inode and timestamps on Linux, making identical bytes indistinguishable.
+    await rename(file, `${file}.original`);
+    await writeFile(file, "hello world");
+    expect((await stat(file)).ino).not.toBe((await stat(`${file}.original`)).ino);
     await expect(files.read(0, 0, 5)).rejects.toThrow(/changed/u);
+    expect(fs.open).not.toHaveBeenCalled();
   });
 
   it("bounds all file reads before allocating memory or opening a file", async () => {
