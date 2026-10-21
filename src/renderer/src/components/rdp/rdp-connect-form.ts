@@ -1,4 +1,4 @@
-import { RDP_MAX_PIXELS } from "../../../../shared/rdp-contracts";
+import { RDP_MAX_PIXELS, type RdpConnectionOptions } from "../../../../shared/rdp-contracts";
 import { rdpPassword, rdpString } from "../../../../shared/rdp-validation";
 
 export const RDP_RESOLUTIONS = ([
@@ -15,9 +15,10 @@ export interface RdpConnectFormValues {
   password: string;
   width: string;
   height: string;
+  signInMode?: RdpConnectionOptions["signInMode"];
 }
 
-export type RdpConnectFormField = keyof RdpConnectFormValues;
+export type RdpConnectFormField = Exclude<keyof RdpConnectFormValues, "signInMode">;
 export type RdpConnectFormErrors = Partial<Record<RdpConnectFormField, string>>;
 
 export function validateRdpConnectForm(values: RdpConnectFormValues, requirePassword: boolean): RdpConnectFormErrors {
@@ -26,13 +27,15 @@ export function validateRdpConnectForm(values: RdpConnectFormValues, requirePass
   if (!values.host.trim()) errors.host = "Enter a hostname or IP address.";
   else if (!validHost(values.host.trim())) errors.host = "Enter a valid hostname or IP address without a scheme, path, or port.";
   if (!decimalInRange(values.port, 1, 65535)) errors.port = "Enter a whole number from 1 to 65535.";
-  if (!values.username.trim()) errors.username = "Enter the Windows username.";
-  else if (!validText(values.username, 256)) errors.username = "Use at most 256 characters without control characters.";
-  if (!validText(values.domain, 256, true)) errors.domain = "Use at most 256 characters without control characters.";
-  if (requirePassword && values.password.length === 0) errors.password = "Enter the Windows account password.";
-  else {
-    try { rdpPassword(values.password); }
-    catch { errors.password = "Use at most 4096 characters without NUL characters."; }
+  if (values.signInMode !== "remote-screen") {
+    if (!values.username.trim()) errors.username = "Enter the Windows username.";
+    else if (!validText(values.username, 256)) errors.username = "Use at most 256 characters without control characters.";
+    if (!validText(values.domain, 256, true)) errors.domain = "Use at most 256 characters without control characters.";
+    if (requirePassword && values.password.length === 0) errors.password = "Enter the Windows account password.";
+    else {
+      try { rdpPassword(values.password); }
+      catch { errors.password = "Use at most 4096 characters without NUL characters."; }
+    }
   }
   if (!decimalInRange(values.width, 200, 8192)) errors.width = "Enter a whole number from 200 to 8192 pixels.";
   if (!decimalInRange(values.height, 200, 8192)) errors.height = "Enter a whole number from 200 to 8192 pixels.";

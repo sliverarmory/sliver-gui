@@ -81,7 +81,7 @@ interface FakeMainState {
   methods: string[];
   portForwards: Array<{ id: string; sessionId: string; requestedBind: { host: string; port: number }; bind: { host: string; port: number };
     target: { host: string; port: number }; closed: boolean }>;
-  rdpConnections: Array<{ host: string; port: number; username: string; domain?: string; passwordSupplied: boolean }>;
+  rdpConnections: Array<{ host: string; port: number; username: string; domain?: string; signInMode?: string; passwordSupplied: boolean }>;
   rdpRuntimeStops: number;
   uploads: Array<{
     path: string;
@@ -668,6 +668,7 @@ function createFakeRdpRuntime(_executable: string, receive: (event: RdpRuntimeEv
       const input = command as Record<string, unknown>;
       if (stopped || input["type"] !== "connect") return;
       state.rdpConnections.push({ host: String(input["host"]), port: Number(input["port"]), username: String(input["username"]),
+        ...(input["signInMode"] === undefined ? {} : { signInMode: String(input["signInMode"]) }),
         ...(input["domain"] === undefined ? {} : { domain: String(input["domain"]) }), passwordSupplied: typeof input["password"] === "string" && input["password"].length > 0 });
       receive({ type: "state", state: "active" });
     },

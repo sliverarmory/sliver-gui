@@ -175,11 +175,12 @@ export function RdpWindowApp(): React.JSX.Element {
     if (activeTab) refs.current.get(activeTab.id)?.current?.release();
     setProfilesOpen(false);
     await act("connect-profile", () => {
+      const remoteScreen = profile.signInMode === "remote-screen";
       const input: RdpConnectInput = {
         profileId: profile.id, label: profile.label, host: profile.host, port: profile.port,
-        username: profile.username, domain: profile.domain, width: profile.width, height: profile.height,
-        clipboard: profile.clipboard, scaleMode: profile.scaleMode, persistence,
-        ...(password === undefined ? {} : { password }),
+        username: remoteScreen ? "" : profile.username, domain: remoteScreen ? "" : profile.domain, width: profile.width, height: profile.height,
+        clipboard: profile.clipboard, scaleMode: profile.scaleMode, persistence: remoteScreen ? "none" : persistence,
+        ...(remoteScreen ? { signInMode: "remote-screen" as const } : password === undefined ? {} : { password }),
       };
       try { return api.connect(input); }
       finally { delete (input as { password?: string }).password; }
@@ -187,7 +188,7 @@ export function RdpWindowApp(): React.JSX.Element {
   };
   const openProfile = (profile: RdpProfile): void => {
     if (!api || pendingRef.current || state.tabs.length >= state.maxSessions) return;
-    if (profile.hasCredential && (profile.credentialPersistence !== "secure" || state.securePersistenceAvailable)) {
+    if (profile.signInMode === "remote-screen" || (profile.hasCredential && (profile.credentialPersistence !== "secure" || state.securePersistenceAvailable))) {
       void connectProfile(profile); return;
     }
     if (activeTab) refs.current.get(activeTab.id)?.current?.release();
@@ -203,6 +204,12 @@ export function RdpWindowApp(): React.JSX.Element {
   const activeHandle = (): RdpDesktopHandle | null | undefined => activeTab ? refs.current.get(activeTab.id)?.current : undefined;
   const activeConnected = activeTab?.state === "active";
   const scaleMode = activeTab ? scaleModes[activeTab.id] ?? activeTab.scaleMode : "fit";
+  const reconnect = (): void => {
+    if (!activeTab || !api || activeTab.temporary) return;
+    setError(undefined); setReconnectPassword("");
+    if (activeTab.signInMode === "remote-screen") void act("reconnect", () => api.reconnect({ tabId: activeTab.id }));
+    else setReconnectId(activeTab.id);
+  };
 
   const profiles = <RdpProfileGrid profiles={state.profiles} tabs={state.tabs}
     disabled={Boolean(pending) || state.tabs.length >= state.maxSessions} onConnect={openProfile} onEdit={newConnection} onDelete={setDeleteProfile} />;
@@ -241,7 +248,7 @@ export function RdpWindowApp(): React.JSX.Element {
           <IconButton label="Send clipboard" icon={faUpload} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("send")} />
           <IconButton label="Receive clipboard" icon={faDownload} disabled={!activeConnected || !(activeTab.clipboardAvailable || activeTab.clipboardFilesAvailable) || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("receive")} />
           <IconButton label="Toggle fullscreen" icon={faExpand} disabled={!api} onPress={() => { void act("fullscreen", () => api!.toggleFullscreen()); }} />
-          {activeTab.state === "disconnected" || activeTab.state === "failed" ? !activeTab.temporary && <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setError(undefined); setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { if (!activeTab.temporary) await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
+          {activeTab.state === "disconnected" || activeTab.state === "failed" ? !activeTab.temporary && <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={reconnect} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { if (!activeTab.temporary) await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
           <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { if (!activeTab.temporary) await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
         </div>}
         <div className="rdp-tab-panels">

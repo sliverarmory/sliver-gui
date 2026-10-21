@@ -11,6 +11,30 @@ pub const MAX_CLIPBOARD_FILES: usize = 64;
 pub const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIXELS: usize = 16_000_000;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignInMode {
+    #[default]
+    Nla,
+    RemoteScreen,
+}
+
+impl SignInMode {
+    pub fn valid_credentials(self, username: &str, password: &str, domain: Option<&str>) -> bool {
+        match self {
+            Self::Nla => {
+                !username.is_empty()
+                    && username.len() <= 256
+                    && password.len() <= 4096
+                    && domain.is_none_or(|domain| domain.len() <= 256)
+            }
+            Self::RemoteScreen => {
+                username.is_empty() && password.is_empty() && domain.is_none_or(str::is_empty)
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Command {
@@ -21,6 +45,8 @@ pub enum Command {
         username: String,
         password: String,
         domain: Option<String>,
+        #[serde(default)]
+        sign_in_mode: SignInMode,
         width: u16,
         height: u16,
         clipboard: bool,
@@ -190,6 +216,65 @@ pub fn valid_dimensions(width: u16, height: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_sign_in_mode_defaults_to_nla_and_rejects_unknown_modes() {
+        let mut connect = serde_json::json!({
+            "type": "connect", "host": "host.example", "port": 3389,
+            "username": "", "password": "", "width": 1280, "height": 720,
+            "clipboard": false
+        });
+        let parse = |value: &Value| {
+            let line = format!("{value}\n");
+            read_command(&mut line.as_bytes())
+        };
+        assert!(matches!(
+            parse(&connect).unwrap(),
+            Some(Command::Connect {
+                sign_in_mode: SignInMode::Nla,
+                ..
+            })
+        ));
+        for (value, expected) in [
+            ("nla", SignInMode::Nla),
+            ("remote-screen", SignInMode::RemoteScreen),
+        ] {
+            connect["signInMode"] = serde_json::json!(value);
+            assert!(
+                matches!(parse(&connect).unwrap(), Some(Command::Connect { sign_in_mode, .. }) if sign_in_mode == expected)
+            );
+        }
+        for value in [
+            serde_json::json!("remoteScreen"),
+            serde_json::json!("auto"),
+            Value::Null,
+            serde_json::json!(true),
+        ] {
+            connect["signInMode"] = value;
+            assert!(parse(&connect).is_err());
+        }
+    }
+
+    #[test]
+    fn sign_in_modes_enforce_their_credential_boundaries() {
+        assert!(SignInMode::RemoteScreen.valid_credentials("", "", None));
+        assert!(SignInMode::RemoteScreen.valid_credentials("", "", Some("")));
+        assert!(!SignInMode::RemoteScreen.valid_credentials("operator", "", None));
+        assert!(!SignInMode::RemoteScreen.valid_credentials("", "password", None));
+        assert!(!SignInMode::RemoteScreen.valid_credentials("", "", Some("DOMAIN")));
+        assert!(!SignInMode::RemoteScreen.valid_credentials(" ", "", None));
+        assert!(!SignInMode::Nla.valid_credentials("", "", None));
+        assert!(SignInMode::Nla.valid_credentials("operator", "", None));
+        assert!(SignInMode::Nla.valid_credentials(
+            &"a".repeat(256),
+            &"p".repeat(4096),
+            Some(&"d".repeat(256))
+        ));
+        assert!(!SignInMode::Nla.valid_credentials(&"a".repeat(257), "", None));
+        assert!(!SignInMode::Nla.valid_credentials("operator", &"p".repeat(4097), None));
+        assert!(!SignInMode::Nla.valid_credentials("operator", "", Some(&"d".repeat(257))));
+    }
+
     #[test]
     fn framed_packet_has_exact_lengths() {
         let packet = Packet {

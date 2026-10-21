@@ -207,6 +207,7 @@ export class RdpWindows {
         if (session.tab.temporary) throw new Error("Open RDP from Overview to start a new temporary connection");
         if (session.runtime) throw new Error("Disconnect this RDP session before reconnecting");
         const password = input["password"] === undefined ? undefined : rdpPassword(input["password"]);
+        if (session.tab.signInMode === "remote-screen" && password !== undefined && password !== "") throw new Error("Enter the password on the remote screen");
         return this.#start(session, password, event);
       }
       case RDP_IPC.disconnect: {
@@ -319,7 +320,7 @@ export class RdpWindows {
         this.#stagedBytes += bytes; this.#stagedCount += files.length;
         return () => { this.#stagedBytes -= bytes; this.#stagedCount -= files.length; };
       }, (progress) => this.#publishFileTransfer(session, progress));
-      if (input.password !== undefined) await this.#options.store.saveCredential(profileId ?? id, session.tab, input.password, input.persistence);
+      if (input.password !== undefined && input.signInMode !== "remote-screen") await this.#options.store.saveCredential(profileId ?? id, session.tab, input.password, input.persistence);
       this.#requireSender(event);
       if (pending) {
         if (this.#pendingConnection !== pending || !pending.route.isActive()) throw new Error("The temporary RDP connection has expired");
@@ -343,7 +344,7 @@ export class RdpWindows {
 
   async #start(session: Session, suppliedPassword: string | undefined, event: IpcMainInvokeEvent): Promise<RdpTab> {
     if (session.runtime || session.tab.state === "connecting") throw new Error("RDP connection is already starting");
-    let password = suppliedPassword ?? this.#options.store.credential(session.tab.profileId ?? session.tab.id, session.tab);
+    let password = session.tab.signInMode === "remote-screen" ? "" : suppliedPassword ?? this.#options.store.credential(session.tab.profileId ?? session.tab.id, session.tab);
     if (password === undefined) throw new Error("Enter the password to connect");
     this.#detach(session);
     session.lastSeq = 0;
@@ -886,7 +887,7 @@ function runtimeError(code: string): string {
     "authentication-failed": "Authentication failed. Check the account and password before trying again.",
     "authentication-error": "Network Level Authentication could not complete. Check the account, domain, and server authentication policy.",
     "access-denied": "The server denied this account Remote Desktop access.",
-    "nla-required": "This server did not negotiate required Network Level Authentication.",
+    "nla-required": "This server requires Network Level Authentication (NLA). Turn off Sign in on the remote screen and enter credentials before connecting.",
     "security-negotiation-failed": "The server and client could not negotiate compatible RDP security settings.",
     "connection-failed": "RDP connection failed. Check the destination, certificate, and credentials.",
     "connection-refused": "The destination refused the RDP connection. Check the hostname, port, and Remote Desktop service.",

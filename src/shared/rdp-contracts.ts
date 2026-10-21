@@ -60,8 +60,11 @@ export const RDP_IPC = Object.freeze({
 export type RdpCredentialPersistence = "none" | "session" | "secure";
 export type RdpSessionPhase = "connecting" | "certificate-review" | "authenticating" | "active" | "disconnected" | "failed";
 export type RdpScaleMode = "fit" | "actual";
+export type RdpSignInMode = "nla" | "remote-screen";
 
 export interface RdpConnectionOptions {
+  /** Omitted on existing profiles/connections: use NLA. Never downgrade automatically. */
+  readonly signInMode?: RdpSignInMode;
   readonly host: string;
   readonly port: number;
   readonly username: string;

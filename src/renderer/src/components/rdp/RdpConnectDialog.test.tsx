@@ -60,6 +60,107 @@ function expectFieldError(label: string, text: RegExp): void {
 }
 
 describe("Remote Desktop connection form", () => {
+  it("defaults to NLA and clears all account values when switching to remote-screen sign-in", async () => {
+    const user = userEvent.setup();
+    mount({ ...profile, hasCredential: true, credentialPersistence: "secure" });
+    const mode = screen.getByRole("switch", { name: "Sign in on the remote screen" });
+    expect(mode).not.toBeChecked();
+    expect(screen.getByText("Requires a server that allows connections without NLA.")).toBeInTheDocument();
+    change("Password", "private-input");
+    await user.click(mode);
+    for (const label of ["Username", "Domain", "Password", "Remember password"]) expect(screen.queryByLabelText(label)).not.toBeInTheDocument();
+    await user.click(mode);
+    for (const label of ["Username", "Domain", "Password"]) expect(screen.getByLabelText(label)).toHaveValue("");
+    expect(screen.getByLabelText("Remember password")).toHaveValue("none");
+    change("Username", profile.username); change("Domain", profile.domain);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expectFieldError("Password", /Enter the Windows account password/u);
+    expect(api.connect).not.toHaveBeenCalled();
+    change("Password", "replacement-input");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ password: "replacement-input", persistence: "none" }));
+    expect(connectedInput).not.toHaveProperty("signInMode");
+  });
+
+  it("sends no credentials or persistence when connecting with remote-screen sign-in", async () => {
+    const user = userEvent.setup();
+    mount();
+    change("Computer", "desktop.test"); change("Username", "operator"); change("Domain", "LAB"); change("Password", "private-input");
+    await user.selectOptions(screen.getByLabelText("Remember password"), "secure");
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ signInMode: "remote-screen", username: "", domain: "", persistence: "none" }));
+    expect(connectedInput).not.toHaveProperty("password");
+    expect(connectedInput).not.toHaveProperty("profileId");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it("saves and restores the remote-screen mode without account fields", async () => {
+    const user = userEvent.setup();
+    mount(); change("Computer", "desktop.test");
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(api.saveProfile).toHaveBeenCalledWith(expect.objectContaining({ signInMode: "remote-screen", username: "", domain: "" })));
+    expect(vi.mocked(api.saveProfile).mock.calls[0]![0]).not.toHaveProperty("password");
+    cleanup();
+    mount({ ...profile, signInMode: "remote-screen", username: "", domain: "", hasCredential: false, credentialPersistence: "none" });
+    expect(screen.getByRole("switch", { name: "Sign in on the remote screen" })).toBeChecked();
+    expect(screen.queryByLabelText("Password")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ profileId: profile.id, signInMode: "remote-screen", username: "", domain: "", persistence: "none" }));
+    expect(connectedInput).not.toHaveProperty("password");
+  });
+
+  it("supports remote-screen sign-in through a temporary Overview connection", async () => {
+    const user = userEvent.setup();
+    render(<RdpConnectDialog api={api} temporary={{ id: "temporary-one", label: "Windows host", host: "127.0.0.1", port: 42001 }}
+      securePersistenceAvailable onClose={vi.fn()} onConnected={onConnected} onProfileSaved={onProfileSaved} />);
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ temporaryId: "temporary-one", signInMode: "remote-screen", username: "", domain: "", persistence: "none" }));
+    expect(connectedInput).not.toHaveProperty("password");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it.each(["nla", "remote-screen"] as const)("detaches an unsaved sign-in mode change from an existing %s profile", async (signInMode) => {
+    const user = userEvent.setup();
+    mount({ ...profile, signInMode, ...(signInMode === "remote-screen" ? { username: "", domain: "" } : {}) });
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    if (signInMode === "remote-screen") { change("Username", "operator"); change("Password", "private-input"); }
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+    expect(connectedInput).not.toHaveProperty("profileId");
+    expect(connectedInput).toMatchObject({ persistence: "none" });
+    if (signInMode === "remote-screen") expect(connectedInput).not.toHaveProperty("signInMode");
+    else expect(connectedInput).toHaveProperty("signInMode", "remote-screen");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it("creates a new NLA profile when remembering credentials after an unsaved remote-screen mode change", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.saveProfile).mockImplementation(async (input) => ({ ok: true, value: { ...profile, ...input, id: "new-nla-profile" } }));
+    mount({ ...profile, signInMode: "remote-screen", username: "", domain: "" });
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    change("Username", "operator"); change("Password", "private-input");
+    await user.selectOptions(screen.getByLabelText("Remember password"), "session");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(api.saveProfile).toHaveBeenCalledOnce());
+    expect(vi.mocked(api.saveProfile).mock.calls[0]![0]).not.toHaveProperty("id");
+    expect(vi.mocked(api.saveProfile).mock.calls[0]![0]).not.toHaveProperty("signInMode");
+    expect(connectedInput).toMatchObject({ profileId: "new-nla-profile", username: "operator", password: "private-input", persistence: "session" });
+  });
+
+  it("reuses the original profile after its changed sign-in mode is explicitly saved", async () => {
+    const user = userEvent.setup();
+    mount(profile);
+    await user.click(screen.getByRole("switch", { name: "Sign in on the remote screen" }));
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(api.saveProfile).toHaveBeenCalledWith(expect.objectContaining({ id: profile.id, signInMode: "remote-screen" })));
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ profileId: profile.id, signInMode: "remote-screen" }));
+    expect(api.saveProfile).toHaveBeenCalledOnce();
+  });
+
   it("ignores saved credentials and persistence when connecting through a temporary endpoint", async () => {
     const user = userEvent.setup();
     const temporary: RdpPendingConnection = { id: "temporary-one", label: "Windows host", host: "127.0.0.1", port: 42001 };

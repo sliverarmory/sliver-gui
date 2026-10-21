@@ -14,7 +14,7 @@ use ironrdp_cliprdr::backend::ClipboardMessage;
 use ironrdp_cliprdr::pdu::ClipboardFormatId;
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp_tls::{CertificateValidation, PeerCertificateStatus};
-use protocol::{Command, MAX_CLIPBOARD, Packet};
+use protocol::{Command, MAX_CLIPBOARD, Packet, SignInMode};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{self, BufReader};
@@ -150,21 +150,20 @@ async fn run(
                 let Some(command)=command else{break;};
                 let command=match command{Ok(command)=>command,Err(code)=>{emit(&output,json!({"type":"error","code":code})).await;break;}};
                 match command {
-                    Command::Connect{host,port,username,mut password,domain,width,height,clipboard,pinned_fingerprint,keyboard_layout}=>{
-                        if input.is_some()||!valid_endpoint(&host,port)||username.is_empty()||username.len()>256||password.len()>4096
-                            ||domain.as_ref().is_some_and(|s|s.len()>256)||!protocol::valid_dimensions(width,height)
+                    Command::Connect{host,port,username,mut password,domain,sign_in_mode,width,height,clipboard,pinned_fingerprint,keyboard_layout}=>{
+                        if input.is_some()||!valid_endpoint(&host,port)||!sign_in_mode.valid_credentials(&username,&password,domain.as_deref())
+                            ||!protocol::valid_dimensions(width,height)
                             ||pinned_fingerprint.as_ref().is_some_and(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_hexdigit())) {
                             password.zeroize();emit(&output,json!({"type":"error","code":"invalid-connect"})).await;break;
                         }
                         let destination=if host.contains(':'){format!("[{host}]:{port}")}else{format!("{host}:{port}")};
                         let peer_policy=certificate_policy(pinned_fingerprint.map(|pin|pin.to_ascii_lowercase()),pending.clone(),output.clone(),stopped.clone());
-                        let mut builder=ConfigBuilder::new()
+                        let mut builder=with_sign_in_security(ConfigBuilder::new(),sign_in_mode)
                             .with_destination(match Destination::new(destination){Ok(value)=>value,Err(_)=>{password.zeroize();break;}})
                             .with_username(username).with_password(std::mem::take(&mut password))
                             .with_client_build(1).with_client_name("Sliver GUI").with_client_dir("C:\\Windows\\System32\\mstscax.dll")
                             .with_platform(MajorPlatformType::UNSPECIFIED)
-                            .with_tls(false).with_credssp(true)
-                            .with_certificate_validation(CertificateValidation::Strict).with_peer_certificate_policy(peer_policy)
+                            .with_peer_certificate_policy(peer_policy)
                             .with_negotiation_cookie("SliverGUI".to_owned())
                             .with_desktop_width(width).with_desktop_height(height).with_keyboard_layout(keyboard_layout.unwrap_or(0))
                             .with_color_depth(32).with_lossy_compression(false).with_server_pointer(true).with_pointer_software_rendering(false)
@@ -253,6 +252,15 @@ async fn run(
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
+fn with_sign_in_security(builder: ConfigBuilder, mode: SignInMode) -> ConfigBuilder {
+    // Advertise exactly one sign-in path. A server refusal must never change the mode.
+    builder
+        .with_tls(mode == SignInMode::RemoteScreen)
+        .with_credssp(mode == SignInMode::Nla)
+        .with_autologon(false)
+        .with_certificate_validation(CertificateValidation::Strict)
+}
+
 fn connection_error_code(error: &ironrdp_connector::ConnectorError) -> &'static str {
     use ironrdp_connector::ConnectorErrorKind;
     use std::error::Error as _;
@@ -264,6 +272,11 @@ fn connection_error_code(error: &ironrdp_connector::ConnectorError) -> &'static 
             | ironrdp_connector::sspi::ErrorKind::NoCredentials => "authentication-failed",
             _ => "authentication-error",
         },
+        ConnectorErrorKind::Negotiation(failure)
+            if failure.code() == ironrdp_pdu::nego::FailureCode::HYBRID_REQUIRED_BY_SERVER =>
+        {
+            "nla-required"
+        }
         ConnectorErrorKind::Negotiation(_) => "security-negotiation-failed",
         _ => {
             let mut source = error.source();
@@ -546,6 +559,145 @@ async fn present(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironrdp_connector::{ClientConnector, Sequence};
+    use ironrdp_core::{WriteBuf, decode, encode_vec};
+    use ironrdp_pdu::nego::{
+        ConnectionConfirm, ConnectionRequest, FailureCode, ResponseFlags, SecurityProtocol,
+    };
+    use ironrdp_pdu::x224::X224;
+
+    fn sign_in_config(mode: SignInMode) -> ironrdp_client::config::Config {
+        let (username, password) = if mode == SignInMode::Nla {
+            ("operator", "test-password")
+        } else {
+            ("", "")
+        };
+        with_sign_in_security(ConfigBuilder::new(), mode)
+            .with_destination(Destination::new("host.example:3389").unwrap())
+            .with_username(username)
+            .with_password(password)
+            .with_client_build(1)
+            .with_client_name("Sliver GUI")
+            .with_client_dir("C:\\Windows\\System32\\mstscax.dll")
+            .with_platform(MajorPlatformType::UNSPECIFIED)
+            .build()
+            .unwrap()
+    }
+
+    fn begin_negotiation(mode: SignInMode) -> (ClientConnector, ConnectionRequest) {
+        let config = sign_in_config(mode);
+        let mut connector = ClientConnector::new(
+            config.connector().clone(),
+            "127.0.0.1:40000".parse().unwrap(),
+        );
+        let mut output = WriteBuf::new();
+        connector.step_no_input(&mut output).unwrap();
+        let request = decode::<X224<ConnectionRequest>>(output.filled())
+            .unwrap()
+            .0;
+        (connector, request)
+    }
+
+    fn confirm_protocol(
+        connector: &mut ClientConnector,
+        protocol: SecurityProtocol,
+    ) -> ironrdp_connector::ConnectorResult<ironrdp_connector::Written> {
+        let response = encode_vec(&X224(ConnectionConfirm::Response {
+            flags: ResponseFlags::empty(),
+            protocol,
+        }))
+        .unwrap();
+        connector.step(&response, None, &mut WriteBuf::new())
+    }
+
+    #[test]
+    fn sign_in_configuration_preserves_tls_validation_and_disables_autologon() {
+        for mode in [SignInMode::Nla, SignInMode::RemoteScreen] {
+            let config = sign_in_config(mode);
+            assert!(matches!(
+                config.certificate_validation(),
+                CertificateValidation::Strict
+            ));
+            let connector = config.connector();
+            assert!(!connector.enable_standard_rdp_security);
+            assert!(!connector.autologon);
+            assert_eq!(connector.enable_tls, mode == SignInMode::RemoteScreen);
+            assert_eq!(connector.enable_credssp, mode == SignInMode::Nla);
+            if mode == SignInMode::RemoteScreen {
+                assert!(
+                    matches!(&connector.credentials, ironrdp_connector::Credentials::UsernamePassword { username, password } if username.is_empty() && password.is_empty())
+                );
+                assert!(
+                    connector
+                        .domain
+                        .as_ref()
+                        .is_none_or(|domain| domain.is_empty())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn negotiation_advertises_exact_mode_and_only_nla_enters_credssp() {
+        for (mode, advertised, selected) in [
+            (
+                SignInMode::Nla,
+                SecurityProtocol::HYBRID | SecurityProtocol::HYBRID_EX,
+                SecurityProtocol::HYBRID_EX,
+            ),
+            (
+                SignInMode::RemoteScreen,
+                SecurityProtocol::SSL,
+                SecurityProtocol::SSL,
+            ),
+        ] {
+            let (mut connector, request) = begin_negotiation(mode);
+            assert_eq!(request.protocol, advertised);
+            confirm_protocol(&mut connector, selected).unwrap();
+            assert!(connector.should_perform_security_upgrade());
+            connector.mark_security_upgrade_as_done();
+            assert_eq!(connector.should_perform_credssp(), mode == SignInMode::Nla);
+        }
+    }
+
+    #[test]
+    fn negotiation_rejects_server_switching_sign_in_mode_or_unencrypted_rdp() {
+        for (mode, selected) in [
+            (SignInMode::Nla, SecurityProtocol::SSL),
+            (SignInMode::RemoteScreen, SecurityProtocol::HYBRID),
+            (SignInMode::RemoteScreen, SecurityProtocol::HYBRID_EX),
+            (SignInMode::Nla, SecurityProtocol::empty()),
+            (SignInMode::RemoteScreen, SecurityProtocol::empty()),
+        ] {
+            let (mut connector, _) = begin_negotiation(mode);
+            assert!(confirm_protocol(&mut connector, selected).is_err());
+            assert!(!connector.should_perform_security_upgrade());
+            assert!(!connector.should_perform_credssp());
+        }
+    }
+
+    #[test]
+    fn nla_required_server_failure_has_an_explicit_error_code() {
+        for (code, expected) in [
+            (FailureCode::HYBRID_REQUIRED_BY_SERVER, "nla-required"),
+            (
+                FailureCode::SSL_NOT_ALLOWED_BY_SERVER,
+                "security-negotiation-failed",
+            ),
+            (
+                FailureCode::SSL_WITH_USER_AUTH_REQUIRED_BY_SERVER,
+                "security-negotiation-failed",
+            ),
+        ] {
+            let (mut connector, _) = begin_negotiation(SignInMode::RemoteScreen);
+            let response = encode_vec(&X224(ConnectionConfirm::Failure { code })).unwrap();
+            let error = connector
+                .step(&response, None, &mut WriteBuf::new())
+                .unwrap_err();
+            assert_eq!(connection_error_code(&error), expected);
+        }
+    }
+
     #[test]
     fn endpoint_validation_rejects_url_and_injection_syntax() {
         assert!(valid_endpoint("::1", 3389));

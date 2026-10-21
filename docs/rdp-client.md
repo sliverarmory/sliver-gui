@@ -1,8 +1,8 @@
 # Remote Desktop
 
 Remote Desktop is a standalone RDP client inside Sliver GUI. It connects directly
-from this machine to a Windows RDP server over TCP with TLS and Network Level
-Authentication (NLA). No Sliver server, operator configuration or implant is needed.
+from this machine to a Windows RDP server over TCP with TLS. Network Level
+Authentication (NLA) is the default. No Sliver server, operator configuration or implant is needed.
 The bundled native IronRDP engine presents the desktop in the sandboxed React
 renderer. See the [architecture and acceptance status](rdp-client-design.md).
 
@@ -27,9 +27,20 @@ renderer. See the [architecture and acceptance status](rdp-client-design.md).
 5. Click the desktop to control it. **Ctrl+Alt+Escape** releases keyboard capture.
    Toolbar buttons send the Windows key or Ctrl+Alt+Delete explicitly.
 
+To enter credentials in Windows instead, enable **Sign in on the remote screen**
+before connecting. The username, domain, password and password-storage controls
+are hidden, and the client opens the Windows sign-in screen without sending
+account credentials during connection setup. Enter your account details there;
+use the toolbar's **Send Ctrl+Alt+Delete** button if Windows requests it.
+The server must allow connections without NLA. If it requires NLA, the attempt
+fails with an explanation; the client never changes server policy or automatically
+downgrades an NLA connection. TLS encryption and certificate review apply in both
+modes. Saved profiles remember the selected sign-in mode, and remote-screen
+profiles reconnect without a local password prompt.
+
 Hostnames, IPv4 and bare IPv6 addresses are supported; put the port in its separate
-field. Authentication requires a compatible password-based NLA account and server
-policy. Legacy non-NLA security, Kerberos/SSO and RD Gateway are not offered.
+field. The default mode requires a compatible password-based NLA account and server
+policy. Legacy Standard RDP Security, Kerberos/SSO and RD Gateway are not offered.
 Certificate review expires after 60 seconds; cancel or review again after reconnect.
 
 ## Connect from Overview
@@ -38,7 +49,8 @@ Right-click a live Windows session in **Overview** and select **RDP**. The app
 opens a temporary forward on `127.0.0.1` using an OS-assigned local port, through
 that exact Sliver session to `127.0.0.1:3389` on the remote machine. The RDP
 credentials dialog opens with that local endpoint filled in. Enter a Windows
-account and password, then select **Connect**. Windows beacons show the action
+account and password, or enable **Sign in on the remote screen**, then select
+**Connect**. Windows beacons show the action
 disabled until an interactive session is available; non-Windows machines omit it.
 
 The endpoint is read-only. Temporary connections do not save profiles, passwords,
@@ -115,7 +127,7 @@ trash button also deletes the connection after confirmation.
 For saved connections, the viewer saves the first complete frame, refreshes the
 preview every 15 seconds when the desktop changes, and saves the latest complete
 frame when disconnecting or closing its tab. Previews survive closing the app.
-Changing the computer, port, username or domain clears
+Changing the computer, port, username, domain or sign-in mode clears
 the old preview; deleting a profile removes its preview and remembered credential.
 Endpoint certificate pins are independent of profiles; deleting a profile does
 not erase its pin. A pin-management UI is not yet available. There is no automatic
@@ -129,6 +141,10 @@ secure-storage backend; it is disabled when encryption is unavailable, including
 Linux `basic_text`/unknown backends. Existing credentials are never filled back into
 the form. A blank password on an existing saved profile requests its stored
 credential; a locked/unavailable backend asks for fresh input.
+
+Remote-screen sign-in does not use or remember an RDP password. Saving an existing
+profile in this mode removes its remembered credential. Credentials typed into
+Windows travel as keyboard input inside the encrypted RDP connection.
 
 The default clipboard and transparent clipboard preferences use the existing
 application settings store, `gui/application-settings.json`, under the configured
@@ -149,7 +165,7 @@ not edit this file while the application is running.
 
 ## Current limits
 
-The client implements one monitor, password NLA, cursor/mouse/keyboard/Unicode,
+The client implements one monitor, password NLA or explicit TLS remote-screen sign-in, cursor/mouse/keyboard/Unicode,
 local scaling, fullscreen, server resize, manual text/file clipboard transfer and
 optional automatic clipboard synchronization. Display
 requests are 200–8192 pixels per axis with at most 16,777,216 pixels total.
@@ -243,6 +259,30 @@ These ignored screenshots may contain remote desktop information. Keep them with
 private test evidence rather than committing them. The result file must come from
 a terminal successful run and be paired with GUI/helper revisions and exact
 client/server versions; its existence from an older run is not current evidence.
+
+For remote-screen sign-in, use the same private account configuration with
+`"scenario": "login"` and a server that explicitly allows non-NLA connections:
+
+```sh
+SLIVER_RDP_REMOTE_SCREEN_E2E_CONFIG_FILE=/absolute/private/rdp-test.json \
+SLIVER_RDP_REMOTE_SCREEN_E2E_ARTIFACT_PREFIX=rdp-remote-screen-disposable \
+npm run test:e2e:rdp-remote-screen-live
+```
+
+The test enables the option through the connection dialog, verifies that initial
+account fields are absent, reviews the certificate, captures the Windows login
+screen before entering credentials, then verifies desktop keyboard input and a
+Unicode clipboard round-trip. Credentials in the private test configuration are
+used only by the test driver to type into Windows. The default login sequence is
+Ctrl+Alt+Delete, username, Tab, password, Enter. The private configuration may set
+`loginUsername` or bounded `loginSteps` for a different Windows login layout; see
+the [test source](../src/e2e/rdp-remote-screen-live.e2e.ts).
+
+Use `"scenario": "nla-required"` against a server that requires NLA to check the
+explicit rejection without sending credentials. The harness does not change
+server policy. Restore any authorized temporary lab-policy changes separately.
+The existing NLA test accepts `SLIVER_RDP_E2E_ARTIFACT_PREFIX` for separate evidence
+per host. See [GOAD sign-in acceptance](rdp-sign-in-acceptance.md) for measured results.
 
 For file interoperability, the SSH alias must reach the same disposable Windows
 host, with public-key access and permission to create a temporary test directory

@@ -115,6 +115,31 @@ beforeEach(async () => {
 afterEach(async () => { await manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  it("connects and reconnects remote-screen sessions without looking up or saving passwords", async () => {
+    const lookup = vi.spyOn(store, "credential"), save = vi.spyOn(store, "saveCredential");
+    const { password: _password, ...base } = connection;
+    const result = await invoke(RDP_IPC.connect, { ...base, username: "", domain: "", signInMode: "remote-screen", persistence: "none" });
+    expect(result.ok).toBe(true);
+    const tab = result.value as RdpTab;
+    mocks.runtimes[0]!.receive({ type: "ready", protocol: 1 });
+    expect(mocks.runtimes[0]!.send).toHaveBeenCalledWith(expect.objectContaining({ type: "connect", signInMode: "remote-screen", username: "", domain: "", password: "" }));
+    await invoke(RDP_IPC.disconnect, tab.id);
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id, password: "private" })).ok).toBe(false);
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id })).ok).toBe(true);
+    expect(lookup).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+  });
+
+  it("rejects unrecognized sign-in modes and never silently changes NLA after failure", async () => {
+    expect((await invoke(RDP_IPC.connect, { ...connection, signInMode: "auto" })).ok).toBe(false);
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "ready", protocol: 1 });
+    expect(runtime.send.mock.calls[0]![0]).not.toHaveProperty("signInMode");
+    runtime.receive({ type: "error", code: "authentication-failed" });
+    expect(manager.state().tabs[0]?.state).toBe("failed");
+    expect(manager.state().tabs[0]?.signInMode).toBeUndefined();
+    expect(mocks.runtimes).toHaveLength(1);
+    expect(tab.signInMode).toBeUndefined();
+  });
   async function temporaryConnection() {
     const route = { host: "127.0.0.1", port: 49152, close: vi.fn(async () => undefined), isActive: vi.fn(() => true) };
     await manager.openTemporary(async () => ({ label: "Windows lab", route }));
@@ -872,6 +897,7 @@ describe("RDP main authority", () => {
   it.each([
     ["connection-refused", "The destination refused the RDP connection. Check the hostname, port, and Remote Desktop service."],
     ["authentication-error", "Network Level Authentication could not complete. Check the account, domain, and server authentication policy."],
+    ["nla-required", "This server requires Network Level Authentication (NLA). Turn off Sign in on the remote screen and enter credentials before connecting."],
     ["display-limit", "The remote desktop exceeds the supported display dimensions or pixel limit."],
   ])("preserves the sanitized %s diagnostic from a failed native state", async (code, error) => {
     await connect(); const runtime = mocks.runtimes[0]!;

@@ -33,6 +33,32 @@ beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), "sliver-rdp-st
 afterEach(async () => { for (const instance of stores.splice(0)) instance.dispose(); vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
 
 describe("RdpStore credentials", () => {
+  it.each(["session", "secure"] as const)("clears %s credentials and previews when switching to remote-screen sign-in", async (persistence) => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    await instance.saveCredential(profile.id, options, PASSWORD, persistence);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    const remote = { ...options, id: profile.id, signInMode: "remote-screen" as const, username: "", domain: "" };
+    const saved = await instance.saveProfile(remote);
+    expect(saved).toMatchObject({ signInMode: "remote-screen", username: "", domain: "", hasCredential: false, credentialPersistence: "none" });
+    expect(saved.preview).toBeUndefined();
+    expect(instance.credential(profile.id, options)).toBeUndefined();
+    expect(instance.credential(profile.id, remote)).toBeUndefined();
+    await expect(instance.saveCredential(profile.id, remote, PASSWORD, "secure")).rejects.toThrow();
+    await expect(instance.saveCredential(profile.id, options, PASSWORD, "secure")).rejects.toThrow();
+    const reopened = store(); await reopened.load();
+    expect(reopened.profile(profile.id)).toMatchObject({ signInMode: "remote-screen", hasCredential: false });
+    expect((await reopened.saveProfile({ ...options, id: profile.id })).signInMode).toBeUndefined();
+  });
+
+  it("loads legacy NLA profiles and encrypted credentials without a mode migration", async () => {
+    const adapter = storage(), instance = store(adapter);
+    const profile = await instance.saveProfile(options);
+    await instance.saveCredential(profile.id, options, PASSWORD, "secure");
+    expect(await readFile(path, "utf8")).not.toContain("signInMode");
+    const reopened = store(adapter); await reopened.load();
+    expect(reopened.credential(profile.id, { ...options, signInMode: "nla" })).toBe(PASSWORD);
+  });
+
   it.each(["session", "secure"] as const)("preserves %s credentials when profile edits or deletion cannot be persisted", async (persistence) => {
     const instance = store(), profile = await instance.saveProfile(options);
     await instance.saveCredential(profile.id, options, PASSWORD, persistence);

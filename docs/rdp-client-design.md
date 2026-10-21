@@ -161,9 +161,16 @@ Pre-authentication cleanup does not send active-session input to the helper.
 
 ## Authentication, trust and persistence
 
-The pinned fork uses rustls, strict certificate checks, required TLS/NLA and
-pre-CredSSP certificate authorization. There is no silent standard-RDP/non-NLA
-fallback. The reviewed fork additions include typed certificate-failure reasons,
+The pinned fork uses rustls and strict certificate checks. NLA is the default,
+including when `signInMode` is absent in existing profiles. An explicit
+`remote-screen` mode advertises TLS-only RDP, disables CredSSP and autologon, and
+sends empty username, domain and password values. It requires a server that
+allows non-NLA connections. Both modes use the same certificate authorization
+path; there is no silent fallback or Standard RDP Security support. Main rejects
+credentials and password persistence in remote-screen requests and skips stored
+credential lookup. Saving a profile with a changed sign-in mode clears its
+credential and preview while retaining compatibility with existing NLA credential
+envelopes. The reviewed fork additions include typed certificate-failure reasons,
 checks of all certificates (including PKI-valid changed pins), bounded desktop
 output and a custom clipboard feature without platform clipboard backends.
 

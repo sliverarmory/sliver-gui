@@ -31,7 +31,7 @@ Font Awesome.
 - Dedicated Sliver console and managed SSH windows with tabbed Ghostty
   terminals.
 - A standalone **File → Remote Desktop** client powered by IronRDP, with direct
-  TLS/NLA connections, saved profiles, certificate review, tabbed desktops,
+  TLS connections with default NLA or remote-screen sign-in, saved profiles, certificate review, tabbed desktops,
   explicit text clipboard, and a sandboxed canvas viewer. It works without an
   operator configuration or a Sliver server connection. See
   [RDP usage](docs/rdp-client.md) and

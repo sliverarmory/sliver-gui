@@ -9,7 +9,11 @@ interface SavedProfile extends RdpSaveProfileInput { id: string; encryptedCreden
 interface SessionSecret { identity: string; bytes: Buffer }
 const MAX_PROFILES = 100;
 export function rdpEndpoint(options: Pick<RdpConnectionOptions, "host" | "port">): string { return `${options.host.toLowerCase()}:${options.port}`; }
-function credentialIdentity(options: RdpConnectionOptions): string { return JSON.stringify([rdpEndpoint(options), options.username, options.domain]); }
+function credentialIdentity(options: RdpConnectionOptions): string {
+  // Keep existing NLA credential envelopes/previews readable without migration.
+  return JSON.stringify([rdpEndpoint(options), options.username, options.domain,
+    ...(options.signInMode === "remote-screen" ? ["remote-screen"] : [])]);
+}
 
 /** Independent from operator configs, with secret material confined to main. */
 export class RdpStore {
@@ -32,6 +36,7 @@ export class RdpStore {
       if (saved["version"] !== 1 || !Array.isArray(saved["profiles"]) || saved["profiles"].length > MAX_PROFILES || !Array.isArray(saved["pins"]) || saved["pins"].length > MAX_PROFILES) throw new Error("Invalid RDP settings");
       for (const raw of saved["profiles"]) {
         const record = rdpRecord(raw), profile = parseRdpProfile(raw), id = rdpString(profile.id, 80);
+        if (profile.signInMode === "remote-screen" && record["encryptedCredential"] !== undefined) throw new Error("Remote-screen profiles cannot contain credentials");
         if (profiles.has(id)) throw new Error("Duplicate RDP profile");
         profiles.set(id, { ...profile, id, ...(record["encryptedCredential"] === undefined ? {} : { encryptedCredential: rdpString(record["encryptedCredential"], 32768) }) });
       }
@@ -117,9 +122,11 @@ export class RdpStore {
     });
   }
   async saveCredential(key: string, options: RdpConnectionOptions, password: string, persistence: RdpCredentialPersistence): Promise<void> {
+    if (options.signInMode === "remote-screen") throw new Error("Remote-screen sign-in cannot remember credentials");
     const secret = rdpPassword(password), identity = credentialIdentity(options);
     await this.#enqueue(async () => {
       const current = this.#profiles.get(key);
+      if (current?.signInMode === "remote-screen") throw new Error("Remote-screen profiles cannot remember credentials");
       if (persistence === "secure" && (!current || !this.securePersistenceAvailable())) throw new Error("Save a profile and enable system secure storage before remembering this password");
       const profile = current ? { ...current } : undefined;
       if (profile) delete profile.encryptedCredential;
@@ -137,6 +144,7 @@ export class RdpStore {
     });
   }
   credential(key: string, options: RdpConnectionOptions): string | undefined {
+    if (options.signInMode === "remote-screen") return undefined;
     const identity = credentialIdentity(options), memory = this.#secrets.get(key);
     if (memory) return memory.identity === identity ? memory.bytes.toString("utf8") : undefined;
     const encrypted = this.#profiles.get(key)?.encryptedCredential;

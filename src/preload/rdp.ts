@@ -22,7 +22,7 @@ import {
 import { parseRdpConnect, parseRdpFileTransferProgress, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { OperationResult } from "../shared/contracts.js";
 
-const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard"];
+const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard", "signInMode"];
 const PROFILE = [...OPTIONS, "id", "label", "scaleMode"];
 const ID = /^[A-Za-z0-9_-]{43}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

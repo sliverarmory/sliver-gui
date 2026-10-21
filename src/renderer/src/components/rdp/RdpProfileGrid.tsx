@@ -22,7 +22,8 @@ export function RdpProfileGrid({ profiles, tabs, disabled, onConnect, onEdit, on
     {profiles.map((profile) => {
       const connected = tabs.some((tab) => tab.profileId === profile.id && tab.state === "active" &&
         tab.host.toLowerCase() === profile.host.toLowerCase() && tab.port === profile.port &&
-        tab.username === profile.username && tab.domain === profile.domain);
+        tab.username === profile.username && tab.domain === profile.domain &&
+        (tab.signInMode ?? "nla") === (profile.signInMode ?? "nla"));
       return <RdpProfileCard key={profile.id} profile={profile} connected={connected} disabled={disabled} onConnect={onConnect} onEdit={onEdit} onDelete={onDelete} />;
     })}
   </div>;
@@ -41,7 +42,7 @@ function RdpProfileCard({ profile, connected, disabled, onConnect, onEdit, onDel
       { id: "rdp-profile.delete", label: "Delete", icon: faTrash, variant: "danger", separatorBefore: true, onAction: () => onDelete(profile) },
     ],
   });
-  const account = profile.domain ? `${profile.domain}\\${profile.username}` : profile.username;
+  const account = profile.signInMode === "remote-screen" ? "Sign in on the remote screen" : profile.domain ? `${profile.domain}\\${profile.username}` : profile.username;
   return <Card {...scope} className="rdp-profile-card" data-connected={connected} data-has-preview={Boolean(profile.preview)}>
     {profile.preview ? <img
       className="rdp-profile-card__image"

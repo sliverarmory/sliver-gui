@@ -87,10 +87,16 @@ export function rdpDimensions(width: unknown, height: unknown): { width: number;
 
 export function parseRdpOptions(value: unknown): RdpConnectionOptions {
   const item = rdpRecord(value);
+  const mode = item["signInMode"] === undefined ? "nla" : item["signInMode"];
+  if (mode !== "nla" && mode !== "remote-screen") throw new Error("Invalid RDP sign-in mode");
+  const remoteScreen = mode === "remote-screen";
+  const username = rdpString(item["username"], 256, remoteScreen), domain = rdpString(item["domain"], 256, true);
+  if (remoteScreen && (username !== "" || domain !== "")) throw new Error("Enter credentials on the remote screen for this sign-in mode");
   const host = rdpString(item["host"], 253).trim().toLowerCase();
   if (!/^[a-z0-9.:%_-]+$/iu.test(host) || host.startsWith("-") || host.includes("%")) throw new Error("Enter a hostname or IP address without a URL or port");
-  return { host, port: rdpInteger(item["port"], 1, 65535), username: rdpString(item["username"], 256),
-    domain: rdpString(item["domain"], 256, true), ...rdpDimensions(item["width"], item["height"]), clipboard: rdpBoolean(item["clipboard"]) };
+  return { host, port: rdpInteger(item["port"], 1, 65535), username, domain,
+    ...(remoteScreen ? { signInMode: "remote-screen" as const } : {}),
+    ...rdpDimensions(item["width"], item["height"]), clipboard: rdpBoolean(item["clipboard"]) };
 }
 
 export function parseRdpProfile(value: unknown): RdpSaveProfileInput {
@@ -109,6 +115,7 @@ export function parseRdpConnect(value: unknown): RdpConnectInput {
   const item = rdpRecord(value);
   const { id: _id, ...profile } = parseRdpProfile(value);
   if (item["persistence"] !== "none" && item["persistence"] !== "session" && item["persistence"] !== "secure") throw new Error("Invalid RDP credential preference");
+  if (profile.signInMode === "remote-screen" && (item["persistence"] !== "none" || (item["password"] !== undefined && item["password"] !== ""))) throw new Error("Remote-screen sign-in does not accept or remember a password");
   return { ...profile, persistence: item["persistence"],
     ...(item["temporaryId"] === undefined ? {} : { temporaryId: rdpString(item["temporaryId"], 80) }),
     ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }),

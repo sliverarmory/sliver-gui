@@ -7,6 +7,15 @@ const valid: RdpConnectFormValues = {
 };
 
 describe("RDP form field validation", () => {
+  it("requires credentials by default but validates only the endpoint and display for remote-screen sign-in", () => {
+    const emptyAccount = { ...valid, username: "", domain: "", password: "" };
+    expect(validateRdpConnectForm(emptyAccount, true)).toMatchObject({ username: expect.any(String), password: expect.any(String) });
+    expect(validateRdpConnectForm({ ...emptyAccount, signInMode: "nla" }, true)).toHaveProperty("username");
+    expect(validateRdpConnectForm({ ...emptyAccount, signInMode: "remote-screen" }, true)).toEqual({});
+    expect(validateRdpConnectForm({ ...emptyAccount, signInMode: "remote-screen", host: "https://invalid", height: "0" }, true))
+      .toMatchObject({ host: expect.any(String), height: expect.any(String) });
+  });
+
   it.each(["CASTLEBLACK", "desktop.test.", "lab_pc.test", "10.13.37.22", "::1", "2001:db8::2", "::ffff:192.0.2.1"])(
     "accepts a hostname or bare IP address: %s", (host) => {
       expect(validateRdpConnectForm({ ...valid, host }, true)).toEqual({});

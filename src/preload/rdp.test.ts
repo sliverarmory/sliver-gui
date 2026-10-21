@@ -30,6 +30,18 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("RDP sandbox preload", () => {
+  it("validates remote-screen options across requests and snapshots", async () => {
+    const remoteTab = { ...tab, signInMode: "remote-screen" as const, username: "", domain: "" };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, tabs: [remoteTab] } });
+    expect(await bridge().getState()).toEqual({ ok: true, value: { ...state, tabs: [remoteTab] } });
+    const input = { host: tab.host, port: tab.port, label: tab.label, width: tab.width, height: tab.height, clipboard: false, scaleMode: "fit" as const,
+      signInMode: "remote-screen" as const, username: "", domain: "", persistence: "none" as const };
+    await bridge().connect(input);
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.connect, input);
+    expect(() => bridge().connect({ ...input, password: "unexpected-secret" })).toThrow();
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, tabs: [{ ...tab, signInMode: "auto" }] } });
+    await expect(bridge().getState()).rejects.toThrow();
+  });
   it("carries temporary route intent without exposing forwarding authority", async () => {
     const pendingConnection = { id: "temporary", label: "Windows host", host: "127.0.0.1", port: 49152 };
     const snapshot = { ...state, pendingConnection, tabs: [{ ...tab, temporary: true }] };

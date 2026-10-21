@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RdpProfile } from "../../../../shared/rdp-contracts";
+import type { RdpProfile, RdpTab } from "../../../../shared/rdp-contracts";
 import { renderWithApplicationContextMenu } from "../../application-context-menu-test-utils";
 import { RdpProfileGrid } from "./RdpProfileGrid";
 
@@ -28,6 +28,18 @@ function mount(disabled = false) {
 }
 
 describe("saved RDP connection card actions", () => {
+  it("labels remote-screen profiles and matches connected status to their sign-in mode", () => {
+    const remote: RdpProfile = { ...profile, signInMode: "remote-screen", username: "", domain: "", hasCredential: false, credentialPersistence: "none" };
+    const connection: RdpTab = { ...remote, signInMode: "nla", id: "tab-one", profileId: remote.id, attempt: 1, state: "active", clipboardReady: false, clipboardAvailable: false };
+    const callbacks = { onConnect: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn() };
+    const view = renderWithApplicationContextMenu(<RdpProfileGrid profiles={[remote]} tabs={[connection]} disabled={false} {...callbacks} />);
+    expect(screen.getByText("Sign in on the remote screen")).toBeInTheDocument();
+    expect(screen.queryByText("No credentials")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
+    view.rerender(<RdpProfileGrid profiles={[remote]} tabs={[{ ...connection, signInMode: "remote-screen" }]} disabled={false} {...callbacks} />);
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+  });
+
   it("connects on click and keyboard activation while keeping the delete button separate", async () => {
     const user = userEvent.setup();
     const view = mount();

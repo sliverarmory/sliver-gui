@@ -26,10 +26,11 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
   const [label, setLabel] = useState(temporary?.label ?? initial?.label ?? "");
   const [host, setHost] = useState(temporary?.host ?? initial?.host ?? "");
   const [port, setPort] = useState(String(temporary?.port ?? initial?.port ?? 3389));
-  const [username, setUsername] = useState(initial?.username ?? "");
-  const [domain, setDomain] = useState(initial?.domain ?? "");
+  const [remoteScreen, setRemoteScreen] = useState(initial?.signInMode === "remote-screen");
+  const [username, setUsername] = useState(remoteScreen ? "" : initial?.username ?? "");
+  const [domain, setDomain] = useState(remoteScreen ? "" : initial?.domain ?? "");
   const [password, setPassword] = useState("");
-  const [persistence, setPersistence] = useState<RdpCredentialPersistence>(initial?.credentialPersistence === "secure" && !securePersistenceAvailable ? "none" : initial?.credentialPersistence ?? "none");
+  const [persistence, setPersistence] = useState<RdpCredentialPersistence>(remoteScreen || (initial?.credentialPersistence === "secure" && !securePersistenceAvailable) ? "none" : initial?.credentialPersistence ?? "none");
   const [width, setWidth] = useState(String(initial?.width ?? 1280));
   const [height, setHeight] = useState(String(initial?.height ?? 800));
   const initialResolution = `${initial?.width ?? 1280}x${initial?.height ?? 800}`;
@@ -40,6 +41,7 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
   const clipboard = clipboardDraft ?? initial?.clipboard ?? applicationSettings?.settings.rdp.clipboard ?? true;
   const preferencesPending = savingClipboard || Boolean(applicationSettings && !applicationSettings.isReady);
   const [profileId, setProfileId] = useState(initial?.id);
+  const [savedSignInMode, setSavedSignInMode] = useState(initial?.signInMode ?? "nla");
   const [credentialProfile, setCredentialProfile] = useState(initial);
   const [pending, setPending] = useState<"connect" | "save" | "cancel">();
   const operationPending = useRef(false);
@@ -47,9 +49,9 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
   const [touched, setTouched] = useState<Partial<Record<RdpConnectFormField, boolean>>>({});
   const [submitted, setSubmitted] = useState<"connect" | "save">();
   const preset = RDP_RESOLUTIONS.find((size) => size.value === resolution);
-  const formValues = { label, host, port, username, domain, password,
+  const formValues = { label, host, port, username, domain, password, ...(remoteScreen ? { signInMode: "remote-screen" as const } : {}),
     width: preset ? String(preset.width) : width, height: preset ? String(preset.height) : height };
-  const canUseSavedCredential = Boolean(credentialProfile?.hasCredential &&
+  const canUseSavedCredential = Boolean(!remoteScreen && credentialProfile?.signInMode !== "remote-screen" && credentialProfile?.hasCredential &&
     credentialProfile.host.toLowerCase() === host.trim().toLowerCase() && credentialProfile.port === Number(port) &&
     credentialProfile.username === username.trim() && credentialProfile.domain === domain.trim());
   const validationErrors = validateRdpConnectForm(formValues, submitted !== "save" && !canUseSavedCredential);
@@ -67,7 +69,8 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
     const desktopWidth = Number(formValues.width);
     const desktopHeight = Number(formValues.height);
     return { ...(profileId ? { id: profileId } : {}), label: label.trim() || host.trim().slice(0, 120), host: host.trim(), port: portNumber,
-      username: username.trim(), domain: domain.trim(), width: desktopWidth, height: desktopHeight, clipboard,
+      username: remoteScreen ? "" : username.trim(), domain: remoteScreen ? "" : domain.trim(), width: desktopWidth, height: desktopHeight, clipboard,
+      ...(remoteScreen ? { signInMode: "remote-screen" as const } : {}),
       scaleMode: initial?.scaleMode ?? "fit" };
   };
 
@@ -103,24 +106,30 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
     operationPending.current = true;
     setPending(action);
     try {
-      let selectedProfileId = profileId;
-      if (!temporary && (action === "save" || (persistence !== "none" && !selectedProfileId))) {
-        const saved = await api.saveProfile(input);
+      const sameSignInMode = savedSignInMode === (remoteScreen ? "remote-screen" : "nla");
+      let selectedProfileId = sameSignInMode ? profileId : undefined;
+      if (!temporary && (action === "save" || (!remoteScreen && persistence !== "none" && !selectedProfileId))) {
+        // Connect does not rewrite an existing profile when its sign-in mode
+        // was changed only in this form. Remembering the new mode gets a new profile.
+        const { id: _previousId, ...newProfile } = input;
+        const saved = await api.saveProfile(action === "save" || sameSignInMode ? input : newProfile);
         if (!saved.ok) throw new Error(saved.error);
         selectedProfileId = saved.value.id;
         setProfileId(selectedProfileId);
+        setSavedSignInMode(saved.value.signInMode ?? "nla");
         setCredentialProfile(saved.value);
         onProfileSaved();
         if (action === "save") {
-          toast.success("Profile saved", { description: "Passwords are stored only when you connect with a remember option." });
+          toast.success("Profile saved", { description: remoteScreen ? "Sign in after the remote screen opens." : "Passwords are stored only when you connect with a remember option." });
           return;
         }
       }
       const connection: RdpConnectInput = {
         host: input.host, port: input.port, username: input.username, domain: input.domain, width: input.width, height: input.height,
-        clipboard: input.clipboard, label: input.label, scaleMode: input.scaleMode, persistence: temporary ? "none" : persistence,
+        clipboard: input.clipboard, label: input.label, scaleMode: input.scaleMode, persistence: temporary || remoteScreen ? "none" : persistence,
+        ...(remoteScreen ? { signInMode: "remote-screen" as const } : {}),
         ...(temporary ? { temporaryId: temporary.id } : selectedProfileId ? { profileId: selectedProfileId } : {}),
-        ...((canUseSavedCredential && password === "") ? {} : { password }),
+        ...((remoteScreen || (canUseSavedCredential && password === "")) ? {} : { password }),
       };
       setPassword("");
       const submitted = api.connect(connection);
@@ -166,7 +175,6 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
       <Modal.Body className="max-h-[65vh] overflow-y-auto"
         render={(props) => <ScrollShadow {...props} hideScrollBar={false} size={28} />}>
         <form ref={formRef} id={formId} noValidate className="grid gap-4" onSubmit={(event) => { event.preventDefault(); void submit("connect"); }}>
-          {temporary && <p className="text-sm text-muted">Connect through the selected Sliver session using a Windows account. This temporary connection closes when the session or desktop disconnects.</p>}
           <TextField {...fieldProps("label")} value={label} onChange={setLabel} isDisabled={Boolean(pending)}>
             <Label>Connection name</Label><Input variant="secondary" maxLength={120} placeholder="Optional display name" />
             {fieldError("label") && <FieldError>{fieldError("label")}</FieldError>}
@@ -181,7 +189,12 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
               {fieldError("port") && <FieldError className="text-balance">{fieldError("port")}</FieldError>}
             </TextField>
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <SwitchRow label="Sign in on the remote screen" description="Requires a server that allows connections without NLA."
+            selected={remoteScreen} disabled={Boolean(pending)} onChange={(selected) => {
+              setRemoteScreen(selected); setUsername(""); setDomain(""); setPassword(""); setPersistence("none");
+              setCredentialProfile(undefined); setError(undefined); setSubmitted(undefined); setTouched({});
+            }} />
+          {!remoteScreen && <><div className="grid grid-cols-2 gap-4">
             <TextField {...fieldProps("username")} value={username} onChange={setUsername} isRequired isDisabled={Boolean(pending)}>
               <Label>Username</Label><Input variant="secondary" autoFocus={Boolean(temporary)} maxLength={256} autoComplete="off" placeholder="Administrator" />
               {fieldError("username") && <FieldError>{fieldError("username")}</FieldError>}
@@ -201,7 +214,7 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial: sel
               <NativeSelect.Option value="secure" disabled={!securePersistenceAvailable}>Save securely on this device</NativeSelect.Option>
             </NativeSelect.Trigger>
           </NativeSelect>}
-          {!temporary && !securePersistenceAvailable && <p className="text-xs text-muted">Secure password storage is unavailable. Passwords can be remembered until the app quits.</p>}
+          {!temporary && !securePersistenceAvailable && <p className="text-xs text-muted">Secure password storage is unavailable. Passwords can be remembered until the app quits.</p>}</>}
           <NativeSelect fullWidth variant="secondary">
             <Label htmlFor={`${formId}-resolution`}>Desktop resolution</Label>
             <NativeSelect.Trigger id={`${formId}-resolution`} value={resolution} disabled={Boolean(pending)} onChange={(event) => {

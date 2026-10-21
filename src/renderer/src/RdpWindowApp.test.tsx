@@ -178,6 +178,33 @@ describe("standalone remote desktop window", () => {
     expect(await screen.findByLabelText("Remote desktop for Saved desktop")).toBeInTheDocument();
   });
 
+  it("opens a remote-screen profile immediately without asking for or sending credentials", async () => {
+    state = { ...state, profiles: [{ ...profile, signInMode: "remote-screen", username: "", domain: "", hasCredential: false, credentialPersistence: "none" }] };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    expect(await screen.findByText("Sign in on the remote screen")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Connect to Saved desktop" }));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(connectedInput).toMatchObject({ profileId: profile.id, signInMode: "remote-screen", username: "", domain: "", persistence: "none" });
+    expect(connectedInput).not.toHaveProperty("password");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it.each(["nla", "remote-screen"] as const)("reconnects a %s tab with the appropriate credential flow", async (signInMode) => {
+    state = { ...state, tabs: [{ ...firstTab, signInMode, state: "disconnected" }], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Reconnect" }));
+    if (signInMode === "remote-screen") {
+      await waitFor(() => expect(api.reconnect).toHaveBeenCalledExactlyOnceWith({ tabId: firstTab.id }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByRole("dialog", { name: "Reconnect to Remote Desktop" })).toBeInTheDocument();
+      expect(api.reconnect).not.toHaveBeenCalled();
+    }
+  });
+
   it("shows saved frames beside first-session placeholders and opens cards with the keyboard", async () => {
     const preview = { dataUrl: "data:image/jpeg;base64,/9j/2Q==", width: 480, height: 270, capturedAt: "2026-10-19T12:00:00Z" };
     state = { ...state, profiles: [{ ...profile, domain: "LAB", preview }, { ...profile, id: "new", label: "New desktop" }] };

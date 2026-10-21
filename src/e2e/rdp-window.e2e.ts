@@ -491,6 +491,72 @@ test("saved RDP connections display private frame previews after restart and rem
   }
 });
 
+test("remote-screen sign-in starts without credentials through the main-owned mock runtime", { timeout: 60_000 }, async (context) => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporary = await mkdtemp(join(tmpdir(), "sliver-rdp-remote-screen-offline-"));
+  const artifacts = join(repositoryRoot, "artifacts/e2e");
+  let application: ElectronApplication | undefined;
+  let rdp: Page | undefined;
+  const errors: string[] = [];
+  try {
+    await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporary, name))));
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(temporary, "client/armories.json"), "[]", { mode: 0o600 });
+    application = await launchOfflineRdpApplication(repositoryRoot, temporary, ["--overview-rdp-fixture"]);
+    const ownedProcess = application.process();
+    context.signal.addEventListener("abort", () => ownedProcess.kill("SIGKILL"), { once: true });
+    const workspace = await application.firstWindow();
+    await workspace.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Cancel", exact: true }).click();
+    await setSecureStorageAvailable(application, false);
+    rdp = await openRdpWindow(application, errors);
+    await assertRdpBoundary(application, rdp);
+    await rdp.getByRole("button", { name: "New connection", exact: true }).click();
+    const dialog = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
+    const remoteScreen = dialog.getByRole("switch", { name: "Sign in on the remote screen", exact: true });
+    assert.equal(await remoteScreen.isChecked(), false, "The default connection mode remains NLA");
+    await dialog.getByLabel("Connection name", { exact: true }).fill("Offline remote sign-in");
+    await dialog.getByLabel("Computer", { exact: true }).fill("remote-screen.example.invalid");
+    await dialog.getByLabel("Username", { exact: true }).fill("discarded-fixture-user");
+    await dialog.getByLabel("Domain", { exact: true }).fill("DISCARDED");
+    await dialog.getByLabel("Password", { exact: true }).fill("inert-discarded-fixture-password");
+    await dialog.getByLabel("Remember password", { exact: true }).selectOption("session");
+    await remoteScreen.press("Space");
+    for (const label of ["Username", "Domain", "Password", "Remember password"]) {
+      assert.equal(await dialog.getByLabel(label, { exact: true }).count(), 0, "Remote-screen sign-in hides initial credential controls");
+    }
+    await dialog.getByText("Requires a server that allows connections without NLA.", { exact: true }).waitFor();
+    await remoteScreen.press("Space");
+    for (const label of ["Username", "Domain", "Password"]) assert.equal(await dialog.getByLabel(label, { exact: true }).inputValue(), "");
+    assert.equal(await dialog.getByLabel("Remember password", { exact: true }).inputValue(), "none");
+    await remoteScreen.press("Space");
+    await rdp.screenshot({ path: join(artifacts, "rdp-remote-screen-connect.png"), animations: "disabled" });
+    await dialog.getByRole("button", { name: "Connect", exact: true }).click();
+    await dialog.waitFor({ state: "hidden" });
+    await waitForOverviewRdpAudit(application, (audit) => audit.connections.length === 1);
+    const audit = await readOverviewRdpAudit(application);
+    assert.deepEqual(audit.connections, [{ host: "remote-screen.example.invalid", port: 3389,
+      username: "", domain: "", signInMode: "remote-screen", passwordSupplied: false }],
+    "Real main validation must pass only the explicit mode and empty credentials to the mock runtime");
+    const current = await readState(rdp);
+    assert.equal(current.tabs[0]?.state, "active");
+    assert.equal(current.tabs[0]?.signInMode, "remote-screen");
+    assert.equal(current.tabs[0]?.username, "");
+    assert.equal(current.tabs[0]?.domain, "");
+    assert.deepEqual(current.profiles, []);
+    await rdp.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await waitForOverviewRdpAudit(application, (value) => value.runtimeStops === 1);
+    const persisted = await readFile(join(temporary, "client/gui/rdp.json"), "utf8").catch(() => "");
+    for (const discarded of ["discarded-fixture-user", "DISCARDED", "inert-discarded-fixture-password"]) assert.equal(persisted.includes(discarded), false);
+    assert.deepEqual(errors, []);
+  } catch (error) {
+    if (rdp && !rdp.isClosed()) await rdp.screenshot({ path: join(artifacts, "rdp-remote-screen-offline-failure.png") }).catch(() => undefined);
+    throw error;
+  } finally {
+    if (application) await application.close().catch(() => { application?.process().kill("SIGKILL"); });
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("saved RDP cards connect directly and request only missing passwords without contacting a server", { timeout: 60_000 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporary = await mkdtemp(join(tmpdir(), "sliver-rdp-profile-actions-e2e-"));
@@ -941,12 +1007,12 @@ async function waitForConnectRequests(application: ElectronApplication, count: n
   assert.equal((await readConnectRequests(application)).length, count);
 }
 
-async function launchOfflineRdpApplication(repositoryRoot: string, temporary: string): Promise<ElectronApplication> {
+async function launchOfflineRdpApplication(repositoryRoot: string, temporary: string, extraArgs: readonly string[] = []): Promise<ElectronApplication> {
   return electron.launch({
     args: ["--enable-sandbox", ...(process.platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
       join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"), `--repository-root=${repositoryRoot}`,
       `--saved-config-directory=${join(temporary, "saved")}`, `--managed-config-directory=${join(temporary, "managed")}`,
-      `--user-data-directory=${join(temporary, "user-data")}`, `--console-client-root-directory=${join(temporary, "client")}`],
+      `--user-data-directory=${join(temporary, "user-data")}`, `--console-client-root-directory=${join(temporary, "client")}`, ...extraArgs],
     cwd: repositoryRoot, timeout: 30_000, bypassCSP: false, chromiumSandbox: true,
   } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
 }
