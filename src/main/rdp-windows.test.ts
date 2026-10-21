@@ -12,6 +12,7 @@ import { RDP_IPC, type RdpTab } from "../shared/rdp-contracts.js";
 import { RdpStore } from "./rdp-store.js";
 import { RdpWindows } from "./rdp-windows.js";
 import type { RdpRuntimeEvent } from "./rdp-runtime.js";
+import type { RdpTemporaryRoute } from "./rdp-temporary-route.js";
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 import * as secureFile from "./secure-file.js";
 import type { RdpLocalClipboardFiles } from "./rdp-file-clipboard.js";
@@ -114,6 +115,115 @@ beforeEach(async () => {
 afterEach(async () => { await manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  async function temporaryConnection() {
+    const route = { host: "127.0.0.1", port: 49152, close: vi.fn(async () => undefined), isActive: vi.fn(() => true) };
+    await manager.openTemporary(async () => ({ label: "Windows lab", route }));
+    const pending = manager.state().pendingConnection!;
+    const input = { ...connection, host: pending.host, port: pending.port, label: pending.label, temporaryId: pending.id, persistence: "none" };
+    return { route, pending, input };
+  }
+
+  it("owns one pending loopback route and releases it on cancel", async () => {
+    const { route, pending } = await temporaryConnection();
+    expect(pending).toMatchObject({ label: "Windows lab", host: "127.0.0.1", port: 49152 });
+    const prepare = vi.fn();
+    await expect(manager.openTemporary(prepare)).rejects.toThrow(/pending/);
+    expect(prepare).not.toHaveBeenCalled();
+    expect((await invoke(RDP_IPC.cancelTemporary, "stale")).ok).toBe(false);
+    expect(route.close).not.toHaveBeenCalled();
+    expect((await invoke(RDP_IPC.cancelTemporary, pending.id)).ok).toBe(true);
+    expect(route.close).toHaveBeenCalledOnce();
+    expect(manager.state().pendingConnection).toBeUndefined();
+    expect(mocks.runtimes).toHaveLength(0);
+  });
+
+  it("binds temporary connects to the owned endpoint and forbids saved credentials", async () => {
+    const { route, pending, input } = await temporaryConnection();
+    const { temporaryId: _temporaryId, ...ordinary } = input;
+    expect((await invoke(RDP_IPC.connect, ordinary)).ok).toBe(false);
+    expect((await invoke(RDP_IPC.connect, { ...ordinary, host: "localhost" })).ok).toBe(false);
+    expect((await invoke(RDP_IPC.saveProfile, ordinary)).ok).toBe(false);
+    for (const patch of [{ host: "other.test" }, { port: 3389 }, { persistence: "secure" }, { persistence: "session" }, { profileId: "profile" }, { temporaryId: "stale" }]) {
+      expect((await invoke(RDP_IPC.connect, { ...input, ...patch })).ok).toBe(false);
+    }
+    expect(manager.state().pendingConnection).toEqual(pending);
+    expect(mocks.runtimes).toHaveLength(0);
+    const result = await invoke(RDP_IPC.connect, input);
+    expect(result.ok).toBe(true);
+    const tab = result.value as RdpTab;
+    expect(tab.temporary).toBe(true);
+    expect(tab.profileId).toBeUndefined();
+    expect(store.profiles()).toHaveLength(0);
+    expect(store.credential(tab.id, tab)).toBeUndefined();
+    expect(manager.state().pendingConnection).toBeUndefined();
+    const runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "ready", protocol: 1 });
+    expect(runtime.send).toHaveBeenCalledWith(expect.objectContaining({ type: "connect", host: pending.host, port: pending.port }));
+    expect(runtime.send.mock.calls[0]![0]).not.toHaveProperty("pinnedFingerprint");
+    runtime.receive(certificateEvent());
+    const reviewToken = manager.state().tabs[0]!.review!.token;
+    expect((await invoke(RDP_IPC.respondToCertificate, { token: reviewToken, decision: "pin" })).ok).toBe(false);
+    expect((await invoke(RDP_IPC.respondToCertificate, { token: reviewToken, decision: "once" })).ok).toBe(true);
+    runtime.receive({ type: "state", state: "active" });
+    expect((await invoke(RDP_IPC.disconnect, tab.id)).ok).toBe(true);
+    expect(route.close).toHaveBeenCalledOnce();
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id, password: "private" })).ok).toBe(false);
+    await invoke(RDP_IPC.closeTab, tab.id);
+    expect(route.close).toHaveBeenCalledOnce();
+  });
+
+  it("closes temporary routes when startup fails or a viewer closes", async () => {
+    const first = await temporaryConnection();
+    resolveRuntime.mockRejectedValueOnce(new Error("unavailable"));
+    expect((await invoke(RDP_IPC.connect, first.input)).ok).toBe(false);
+    expect(first.route.close).toHaveBeenCalledOnce();
+    expect(manager.state().tabs).toHaveLength(0);
+    const second = await temporaryConnection();
+    mocks.windows[0]!.emit("close", { preventDefault: vi.fn() });
+    await Promise.resolve();
+    expect(second.route.close).toHaveBeenCalledOnce();
+    expect(manager.state().pendingConnection).toBeUndefined();
+  });
+
+  it("disconnects a temporary runtime when its source or forward expires", async () => {
+    vi.useFakeTimers();
+    const { route, input } = await temporaryConnection();
+    await invoke(RDP_IPC.connect, input);
+    const runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" });
+    route.isActive.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(route.close).toHaveBeenCalledOnce();
+    expect(runtime.stop).toHaveBeenCalledOnce();
+    expect(manager.state().tabs[0]).toMatchObject({ state: "failed", error: expect.stringMatching(/port forward/) });
+  });
+
+  it("cleans a route that finishes preparing after application disposal", async () => {
+    let finish!: (value: { label: string; route: RdpTemporaryRoute }) => void;
+    const opening = manager.openTemporary(() => new Promise((resolve) => { finish = resolve; }));
+    const disposed = vi.fn();
+    const disposal = manager.dispose().then(disposed);
+    await Promise.resolve();
+    expect(disposed).not.toHaveBeenCalled();
+    const route = { host: "127.0.0.1", port: 49153, close: vi.fn(async () => undefined), isActive: () => true };
+    finish({ label: "Late route", route });
+    await expect(opening).rejects.toThrow();
+    await disposal;
+    expect(route.close).toHaveBeenCalledOnce();
+    expect(manager.state().pendingConnection).toBeUndefined();
+  });
+
+  it("does not reopen a viewer closed while a temporary route is preparing", async () => {
+    let finish!: (value: { label: string; route: RdpTemporaryRoute }) => void;
+    const opening = manager.openTemporary(() => new Promise((resolve) => { finish = resolve; }));
+    mocks.windows[0]!.emit("close", { preventDefault: vi.fn() });
+    const route = { host: "127.0.0.1", port: 49153, close: vi.fn(async () => undefined), isActive: () => true };
+    finish({ label: "Late route", route });
+    await expect(opening).rejects.toThrow(/canceled/);
+    expect(route.close).toHaveBeenCalledOnce();
+    expect(manager.state().pendingConnection).toBeUndefined();
+  });
+
   it("publishes compact upload progress and cancels it exactly once before reconnecting", async () => {
     const tab = await connect(), runtime = mocks.runtimes[0]!;
     runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });

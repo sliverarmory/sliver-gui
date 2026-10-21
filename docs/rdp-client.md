@@ -32,6 +32,22 @@ field. Authentication requires a compatible password-based NLA account and serve
 policy. Legacy non-NLA security, Kerberos/SSO and RD Gateway are not offered.
 Certificate review expires after 60 seconds; cancel or review again after reconnect.
 
+## Connect from Overview
+
+Right-click a live Windows session in **Overview** and select **RDP**. The app
+opens a temporary forward on `127.0.0.1` using an OS-assigned local port, through
+that exact Sliver session to `127.0.0.1:3389` on the remote machine. The RDP
+credentials dialog opens with that local endpoint filled in. Enter a Windows
+account and password, then select **Connect**. Windows beacons show the action
+disabled until an interactive session is available; non-Windows machines omit it.
+
+The endpoint is read-only. Temporary connections do not save profiles, passwords,
+previews or certificate pins; certificate review offers **Trust once**. Canceling
+the dialog, disconnecting, closing the tab/window, reloading the viewer, losing
+the source session/backend, or quitting the app removes the forward. To connect
+again, select **RDP** from Overview again. Other RDP sessions retain their normal
+lifecycle.
+
 ## Desktop controls and lifecycle
 
 - **Fit** scales the remote image to the window; **Actual size** uses its natural
@@ -80,7 +96,7 @@ Certificate review expires after 60 seconds; cancel or review again after reconn
 - **Disconnect** ends RDP without logging the Windows account off. **Reconnect**
   starts a new attempt and asks for a password when none was remembered. Closing
   a tab disconnects it; up to four tabs may be open, including disconnected tabs.
-- Closing the RDP window preserves live connections until the app quits. Reopen
+- Closing the RDP window preserves direct live connections until the app quits. Reopen
   it through File → Remote Desktop; select **Reattach viewer** if prompted.
   Renderer reload normally reattaches automatically. Pending certificate review
   is canceled when its viewer closes. App quit ends every connection.
@@ -144,8 +160,9 @@ to Windows Explorer and back, including byte hashes and progress toasts; see
 local clients and pasting received files through Finder's UI remain unverified.
 Audio/microphone, multiple monitors, RemoteApp,
 device/drive/printer redirection, smart cards, UDP, `.rdp` import and advanced multimedia codecs are
-outside the current feature set. Supplied networking/Sliver routes require a future
-typed native transport integration; the current client always uses direct TCP.
+outside the current feature set. Overview connections use a main-owned loopback
+TCP forward; the native helper connects to that listener. Arbitrary supplied
+streams and custom native transports are not implemented.
 
 Package targets match the GUI: macOS universal (Intel and Apple Silicon), Windows
 x64 and Linux x64. A complete live-GUI scenario passed on macOS 27.0.1 arm64;

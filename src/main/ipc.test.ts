@@ -163,6 +163,21 @@ describe("trusted Electron IPC boundary", () => {
     });
   });
 
+  it("passes only a validated target and trusted source to temporary RDP", async () => {
+    const openTarget = vi.fn(async () => ({ ok: true as const }));
+    registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL,
+      undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined, { open: vi.fn(), openTarget });
+    const { event } = invokeEvent(RENDERER_URL, 77);
+    const target = { mode: "session", id: "windows-session", backendEpoch: 1, domainRevision: 2, fingerprint: "a".repeat(64) };
+    await expect(electronMocks.handlers.get(IPC.openTargetRdpWindow)?.(event, target)).resolves.toEqual({ ok: true });
+    expect(openTarget).toHaveBeenCalledExactlyOnceWith({ contentsId: 77, rendererProcessId: 100, rendererFrameToken: "main-frame" }, target);
+    for (const input of [{ ...target, host: "public.example" }, { ...target, mode: "invalid" }, { ...target, backendEpoch: 0 }]) {
+      expect(() => electronMocks.handlers.get(IPC.openTargetRdpWindow)?.(event, input)).toThrow();
+    }
+    expect(openTarget).toHaveBeenCalledOnce();
+  });
+
   it("opens Cloud Deployment with the exact trusted renderer identity", async () => {
     const open = vi.fn(async () => ({ ok: true as const }));
     const registry = registryMock();
@@ -569,6 +584,7 @@ describe("trusted Electron IPC boundary", () => {
         reportScreenshotDirectory: DEFAULT_APPLICATION_SETTINGS_STATE.reportScreenshotDirectory,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
       },
     };
 

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Button, Chip, Label, ListBox, SearchField, Select, Switch, toast } from "@heroui/react";
-import { faCloudArrowUp, faCopy, faList, faPen, faPlay, faRotate, faServer, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
+import { faCloudArrowUp, faCopy, faDesktop, faList, faPen, faPlay, faRotate, faServer, faShieldHalved, faStop, faTerminal, faTrashCan, faUserPlus } from "@fortawesome/free-solid-svg-icons";
 import type { ManagedServerReference, SliverSnapshot } from "../../../shared/contracts";
 import type { CloudDeploymentNavigationRequest } from "../../../shared/cloud-deployment-ipc";
 import type { BeaconSummary, SessionSummary, TargetRef } from "../../../shared/target-contracts";
@@ -28,6 +28,10 @@ interface OverviewPageProps {
 }
 
 export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, onOpenBeacon }: OverviewPageProps) {
+  const latestSnapshot = useRef(snapshot);
+  latestSnapshot.current = snapshot;
+  const openingRdp = useRef(false);
+  const [rdpPending, setRdpPending] = useState(false);
   const { actionsForTarget, dialogs } = useSessionContextActions({
     snapshot, onSnapshot,
     ...(onOpenSession ? { onOpenSession } : {}),
@@ -83,16 +87,45 @@ export function OverviewPage({ snapshot, onSnapshot, onNavigate, onOpenSession, 
       ? snapshot.targetContext.selectableTargets.find((ref) =>
           ref.mode === mode && ref.id === node.resource?.id && ref.backendEpoch === snapshot.connection.epoch)
       : undefined;
-    const actions = target ? actionsForTarget(target) : [];
-    return <ApplicationContextMenuScope actions={actions.length ? actions : sessionContextMenuActions({
+    const targetActions = target ? actionsForTarget(target) : [];
+    const actions = targetActions.length ? [...targetActions] : sessionContextMenuActions({
       target: undefined, mode, activeTarget: null, capabilities: [], disabled: true,
       showUnavailable: true, onAction: () => undefined,
-    })}>{content}</ApplicationContextMenuScope>;
-  }, [actionsForTarget, onNavigate, snapshot, topology.scope.id]);
+    });
+    const summary = (mode === "session" ? source.domains.sessions.items : source.domains.beacons.items)
+      .find((item) => item.id === node.resource?.id);
+    if (summary?.os.toLowerCase().startsWith("windows")) {
+      actions.splice(2, 0, {
+        id: "target.rdp", label: mode === "beacon" ? "RDP (requires live session)" : "RDP", icon: faDesktop,
+        isDisabled: rdpPending || !target || !currentRdpSession(snapshot, target),
+        onAction: async () => {
+          if (!target || openingRdp.current) return;
+          const current = latestSnapshot.current;
+          const ref = current.targetContext.selectableTargets.find((item) =>
+            item.mode === target.mode && item.id === target.id && item.backendEpoch === target.backendEpoch && item.fingerprint === target.fingerprint);
+          if (!ref || !currentRdpSession(current, ref)) return;
+          openingRdp.current = true; setRdpPending(true);
+          try {
+            const result = await window.sliver.openTargetRdpWindow(ref);
+            if (!result.ok) toast.danger("Could not open Remote Desktop", { description: result.error });
+          } catch (error) {
+            toast.danger("Could not open Remote Desktop", { description: error instanceof Error ? error.message : String(error) });
+          } finally { openingRdp.current = false; setRdpPending(false); }
+        },
+      });
+    }
+    return <ApplicationContextMenuScope actions={actions}>{content}</ApplicationContextMenuScope>;
+  }, [actionsForTarget, onNavigate, rdpPending, snapshot, source, topology.scope.id]);
   return <>
     <OverviewDocument key={topology.scope.id} document={topology} onNavigate={onNavigate} decorateNode={decorateNode} />
     {dialogs}
   </>;
+}
+
+function currentRdpSession(snapshot: SliverSnapshot, target: TargetRef): boolean {
+  if (target.mode !== "session" || target.backendEpoch !== snapshot.connection.epoch || !isUsableConnection(snapshot.connection.status)) return false;
+  const session = snapshot.domains.sessions.items.find((item) => item.id === target.id);
+  return session?.liveness === "active" && session.os.toLowerCase().startsWith("windows");
 }
 
 function serverContextMenuActions({ managed, canViewJobs, onViewJobs }: {

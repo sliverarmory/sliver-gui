@@ -37,6 +37,7 @@ const invokeArguments = {
   openWindow: [{ inheritConnection: true }],
   openCloudDeploymentWindow: [],
   openRdpWindow: [],
+  openTargetRdpWindow: [{ mode: "session", id: "session_1", backendEpoch: 1, domainRevision: 1, fingerprint: "a".repeat(64) }],
   copyManagedServerSshCommand: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   copyManagedServerPublicIp: [{ deploymentId: "22222222-2222-4222-8222-222222222222" }],
   openInteractionWindow: [],

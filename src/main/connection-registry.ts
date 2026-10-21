@@ -24,6 +24,7 @@ import {
 } from "sliver-script";
 import type { Subscription } from "rxjs";
 import { normalizePivotTopology } from "./pivot-topology.js";
+import { createRdpTemporaryRoute, type RdpTemporaryRoute } from "./rdp-temporary-route.js";
 import { normalizeCrackstations, normalizeExternalBuilders } from "./infrastructure-services.js";
 import type { InfrastructureServiceSummary, InfrastructureServicesSnapshot, PivotTopologySnapshot } from "../shared/topology-contracts.js";
 
@@ -1440,6 +1441,44 @@ export class ConnectionRegistry {
       assertBinding();
       return pool.networkForwarding.startPortForward({ ...input, session });
     });
+  }
+
+  /** A temporary RDP listener belongs to the captured backend and target, not a mutable window selection. */
+  async prepareTemporaryRdpRoute(
+    contentsId: number,
+    target: TargetRef,
+  ): Promise<OperationResult<{ label: string; route: RdpTemporaryRoute }>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      const session = this.requireActiveNetworkSession(pool, target, true);
+      const current = pool.targetStore.revalidateTargetRef(session, pool.epoch);
+      if (!current || current.target.os.toLowerCase() !== "windows") {
+        throw new Error("Remote Desktop requires an active Windows session");
+      }
+      const assertCurrent = (): void => {
+        assertBinding();
+        this.requireActiveNetworkSession(pool, session, false);
+      };
+      const route = await createRdpTemporaryRoute(pool.client, session.id, assertCurrent);
+      try {
+        assertCurrent();
+        this.broadcastNetworkForwardingChanged(pool.key, pool.epoch);
+        return {
+          label: (current.target.hostname || current.target.name || "Windows session").slice(0, 120),
+          route: Object.freeze({
+            host: route.host,
+            port: route.port,
+            isActive: () => route.isActive(),
+            close: async () => {
+              await route.close();
+              this.broadcastNetworkForwardingChanged(pool.key, pool.epoch);
+            },
+          }),
+        };
+      } catch (error) {
+        await route.close();
+        throw error;
+      }
+    }, false);
   }
 
   async stopNetworkPortForward(contentsId: number, id: string): Promise<OperationResult> {

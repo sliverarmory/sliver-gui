@@ -143,6 +143,7 @@ describe("SSH IPC boundary", () => {
         reportScreenshotDirectory: null,
         terminal: DEFAULT_APPLICATION_SETTINGS_STATE.terminal,
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
+        rdp: DEFAULT_APPLICATION_SETTINGS_STATE.rdp,
       },
     });
 

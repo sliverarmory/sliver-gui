@@ -73,10 +73,27 @@ and operation results, and sends typed input/control requests.
 
 ## Transport boundary
 
-The shipped transport is **direct TCP only**. Hostname/IP and port are validated
-control fields; the renderer does not create or receive sockets. The current
-native engine opens the direct connection itself. No `RouteRef`, supplied-stream
-connector, Sliver pivot route, RD Gateway or local WebSocket gateway is implemented.
+The native transport is **TCP**. Hostname/IP and port are validated control
+fields; the renderer does not create or receive sockets. Direct connections work
+offline. Overview can also launch a temporary connection through a live Windows
+Sliver session: main binds `127.0.0.1:0`, forwards to the implant's
+`127.0.0.1:3389`, and supplies the allocated local port to the native helper.
+The workspace sends a current `TargetRef`; the RDP renderer receives an opaque
+pending ID and read-only endpoint, with no generic forwarding API. Main checks
+the backend binding and target identity before and after setup and while the
+route is owned. It closes the captured forwarding handle on cancellation,
+startup failure, disconnect, viewer closure/reload, source loss or app shutdown.
+Beacons require an interactive session. Temporary connections cannot save
+profiles, credentials, previews or endpoint pins and must be reopened from
+Overview after disconnecting. Certificate review permits trust for one attempt.
+No supplied-stream connector, RD Gateway or local WebSocket gateway is implemented.
+
+The Overview Electron scenario exercises the real menu, IPC, registry, route
+ownership and RDP window with a simulated Sliver backend and native runtime. It
+verifies the port-zero request, allocated endpoint, cancel/connect/disconnect
+cleanup and absence of persisted profiles or credentials. This is separate from
+the live GOAD file-transfer acceptance; the Overview forwarding path has not yet
+been exercised against a live implant.
 
 Future supplied networking belongs at a typed main/helper transport boundary.
 Add an explicit route descriptor/capability owned by main and a cancellable,
@@ -188,7 +205,7 @@ workflow.
   no automatic network/authentication retry policy is implemented.
 - Disconnect/close-tab ends the connection without logging Windows off. A closed
   tab frees one of the four tab slots. Profiles can launch separate sessions.
-- Closing the window preserves live sessions while the application runs. Reopen
+- Closing the window preserves direct live sessions while the application runs. Reopen
   File → Remote Desktop and use Reattach viewer when requested. Reload/crash
   revokes the old port and restores a full snapshot without reauthentication.
   Pending certificate review is canceled when its viewer closes.

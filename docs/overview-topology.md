@@ -209,6 +209,11 @@ accessible name **Interact in new window**. It resolves the display resource ID
 against current main-issued target references outside the JSON model and confirms
 the exact target before navigation. Session Rename and lifecycle review dialogs
 reuse the existing UI; right-clicking alone never selects or changes a target.
+Windows nodes also expose **RDP**. A live Windows session creates a temporary
+loopback forward to that machine's `127.0.0.1:3389` and opens the RDP credentials
+dialog at the allocated local port. Windows beacons and unavailable sessions
+show a disabled action; non-Windows nodes omit it. See [Remote Desktop](rdp-client.md#connect-from-overview)
+for temporary connection cleanup and credential handling.
 Stale event telemetry does not hide these actions when the backend remains
 connected, degraded, or reconnecting and still issues a matching target reference.
 These views share the application's connection-usability rule. Retained nodes

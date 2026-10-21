@@ -174,13 +174,13 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
   useEffect(() => {
     // Reattaching the viewer keeps the connection attempt. Share its save queue
     // so an older viewer's pending final image cannot overwrite a newer frame.
-    const preview = tab.profileId ? new RdpPreview((dataUrl) => api.savePreview({ tabId: tab.id, attempt: tab.attempt, dataUrl })) : undefined;
+    const preview = tab.profileId && !tab.temporary ? new RdpPreview((dataUrl) => api.savePreview({ tabId: tab.id, attempt: tab.attempt, dataUrl })) : undefined;
     previewRef.current = preview;
     return () => {
       preview?.stop();
       if (previewRef.current === preview) previewRef.current = undefined;
     };
-  }, [api, tab.attempt, tab.id, tab.profileId]);
+  }, [api, tab.attempt, tab.id, tab.profileId, tab.temporary]);
 
   const live = tab.state !== "disconnected" && tab.state !== "failed";
   useEffect(() => {

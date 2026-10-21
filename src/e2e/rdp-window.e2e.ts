@@ -9,6 +9,146 @@ import { _electron as electron, type ElectronApplication, type Locator, type Pag
 
 import type { RdpConnectInput, RdpFileTransferProgress, RdpViewerMessage, RdpWindowAPI, RdpWindowState } from "../shared/rdp-contracts.js";
 
+test("Overview RDP uses a temporary session forward and closes it on cancel or disconnect", { timeout: 90_000 }, async (context) => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporary = await mkdtemp(join(tmpdir(), "sliver-rdp-overview-e2e-"));
+  const artifacts = join(repositoryRoot, "artifacts/e2e");
+  let application: ElectronApplication | undefined;
+  let rdp: Page | undefined;
+  let workspace: Page | undefined;
+  const errors: string[] = [];
+  const password = "FAKE_TEMPORARY_RDP_PASSWORD_DO_NOT_PERSIST";
+  try {
+    await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporary, name))));
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(temporary, "client/armories.json"), "[]", { mode: 0o600 });
+    await writeFile(join(temporary, "saved/overview-rdp.cfg"), JSON.stringify({ operator: "rdp-overview-fixture", lhost: "127.0.0.1", lport: 31337,
+      ca_certificate: "FAKE_CA", certificate: "FAKE_CERT", private_key: "FAKE_KEY", token: "FAKE_TOKEN_M0_DO_NOT_RENDER" }), { mode: 0o600 });
+    application = await electron.launch({
+      args: ["--enable-sandbox", ...(process.platform === "darwin" ? ["--password-store=basic", "--use-mock-keychain"] : []),
+        join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"), `--repository-root=${repositoryRoot}`,
+        `--saved-config-directory=${join(temporary, "saved")}`, `--managed-config-directory=${join(temporary, "managed")}`,
+        `--user-data-directory=${join(temporary, "user-data")}`, `--console-client-root-directory=${join(temporary, "client")}`,
+        "--overview-rdp-fixture"],
+      cwd: repositoryRoot, timeout: 30_000, bypassCSP: false, chromiumSandbox: true,
+    } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
+    const ownedProcess = application.process();
+    context.signal.addEventListener("abort", () => ownedProcess.kill("SIGKILL"), { once: true });
+    const observe = (page: Page): void => {
+      page.setDefaultTimeout(15_000);
+      page.on("pageerror", (error) => errors.push(error.message));
+      page.on("console", (message) => { if (/Content Security Policy/iu.test(message.text())) errors.push(message.text()); });
+    };
+    application.on("window", observe);
+    workspace = await application.firstWindow(); observe(workspace);
+    await workspace.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
+    await workspace.getByRole("dialog", { name: "Saved configurations" }).waitFor({ state: "hidden" });
+    await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
+    const node = (host: string): Locator => workspace!.getByTestId("topology-node").filter({ has: workspace!.locator("strong").filter({ hasText: new RegExp(`^${host}$`, "u") }) });
+    const menu = workspace.getByRole("menu", { name: "Application context menu", exact: true });
+    await node("rdp-windows-host").waitFor();
+    await node("rdp-linux-host").click({ button: "right" });
+    await menu.waitFor();
+    assert.equal(await menu.getByRole("menuitem", { name: /^RDP/u }).count(), 0, "Linux nodes do not offer RDP");
+    await workspace.keyboard.press("Escape");
+    await node("rdp-windows-beacon-host").click({ button: "right" });
+    await menu.waitFor();
+    assert.equal(await menu.getByRole("menuitem", { name: "RDP (requires live session)", exact: true }).isDisabled(), true);
+    await workspace.keyboard.press("Escape");
+    const opened = application.waitForEvent("window"); void opened.catch(() => undefined);
+    await node("rdp-windows-host").click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "RDP", exact: true }).waitFor();
+    await workspace.screenshot({ path: join(artifacts, "rdp-overview-context-menu.png"), animations: "disabled" });
+    await menu.getByRole("menuitem", { name: "RDP", exact: true }).click();
+    rdp = await opened;
+    await rdp.getByRole("heading", { name: "Remote Desktop", exact: true }).waitFor();
+    await assertRdpBoundary(application, rdp);
+    const prompt = rdp.getByRole("dialog", { name: "Connect to Remote Desktop", exact: true });
+    await prompt.waitFor();
+    const first = await readState(rdp);
+    assert.ok(first.pendingConnection);
+    assert.equal(first.pendingConnection.host, "127.0.0.1");
+    assert.equal(first.pendingConnection.port, 45550);
+    assert.equal(await prompt.getByLabel("Computer", { exact: true }).inputValue(), first.pendingConnection.host);
+    assert.equal(await prompt.getByLabel("Port", { exact: true }).inputValue(), String(first.pendingConnection.port));
+    assert.equal(await prompt.getByLabel("Computer", { exact: true }).isEditable(), false);
+    assert.equal(await prompt.getByLabel("Port", { exact: true }).isEditable(), false);
+    for (const name of ["Username", "Domain", "Password"]) assert.equal(await prompt.getByLabel(name, { exact: true }).inputValue(), "");
+    assert.equal(await prompt.getByLabel("Remember password", { exact: true }).count(), 0);
+    assert.equal(await prompt.getByRole("button", { name: "Save profile", exact: true }).count(), 0);
+    let audit = await readOverviewRdpAudit(application);
+    assert.equal(audit.forwards.length, 1);
+    assert.deepEqual(audit.forwards[0], { id: audit.forwards[0]!.id, sessionId: "m1_session", requestedBind: { host: "127.0.0.1", port: 0 },
+      bind: { host: "127.0.0.1", port: 45550 }, target: { host: "127.0.0.1", port: 3389 }, closed: false });
+    assert.deepEqual(audit.connections, [], "The credential prompt must not start RDP");
+    await rdp.screenshot({ path: join(artifacts, "rdp-overview-temporary-prompt.png"), animations: "disabled" });
+    await prompt.getByRole("button", { name: "Cancel", exact: true }).click();
+    await prompt.waitFor({ state: "hidden" });
+    await waitForOverviewRdpAudit(application, (value) => value.forwards[0]?.closed === true);
+    assert.equal((await readState(rdp)).pendingConnection, undefined);
+    assert.deepEqual((await readState(rdp)).tabs, []);
+
+    await workspace.bringToFront();
+    await node("rdp-windows-host").click({ button: "right" });
+    await menu.getByRole("menuitem", { name: "RDP", exact: true }).click();
+    await prompt.waitFor();
+    const second = await readState(rdp);
+    assert.ok(second.pendingConnection);
+    assert.notEqual(second.pendingConnection.id, first.pendingConnection.id);
+    assert.equal(second.pendingConnection.port, 45551);
+    await prompt.getByLabel("Username", { exact: true }).fill("temporary-user");
+    await prompt.getByLabel("Domain", { exact: true }).fill("FIXTURE");
+    await prompt.getByLabel("Password", { exact: true }).fill(password);
+    await prompt.getByRole("button", { name: "Connect", exact: true }).click();
+    await prompt.waitFor({ state: "hidden" });
+    await rdp.getByRole("button", { name: "Disconnect", exact: true }).waitFor();
+    const active = await readState(rdp);
+    assert.equal(active.pendingConnection, undefined);
+    assert.equal(active.tabs.length, 1);
+    assert.equal(active.tabs[0]?.temporary, true);
+    assert.equal(active.tabs[0]?.state, "active");
+    assert.equal(active.tabs[0]?.host, "127.0.0.1");
+    assert.equal(active.tabs[0]?.port, 45551);
+    assert.deepEqual(active.profiles, []);
+    await rdp.getByText("Temporary connection", { exact: true }).waitFor();
+    audit = await readOverviewRdpAudit(application);
+    assert.deepEqual(audit.connections, [{ host: "127.0.0.1", port: 45551, username: "temporary-user", domain: "FIXTURE", passwordSupplied: true }]);
+    assert.equal(audit.forwards[1]?.closed, false);
+    await rdp.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await waitForOverviewRdpAudit(application, (value) => value.forwards[1]?.closed === true && value.runtimeStops === 1);
+    assert.equal(await rdp.getByRole("button", { name: "Reconnect", exact: true }).count(), 0, "A closed temporary route cannot be reconnected");
+    assert.deepEqual((await readState(rdp)).profiles, []);
+    const persisted = await readFile(join(temporary, "client/gui/rdp.json"), "utf8").catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    for (const privateValue of [password, "temporary-user", "45550", "45551"]) assert.equal(persisted.includes(privateValue), false);
+    assert.deepEqual(errors, []);
+  } catch (error) {
+    if (application) process.stderr.write(`Overview RDP E2E diagnostics: ${JSON.stringify(await readOverviewRdpAudit(application).catch(() => undefined))}\n`);
+    if (workspace) process.stderr.write(`Overview RDP workspace: ${(await workspace.locator("body").innerText().catch(() => "unavailable")).slice(0, 6000)}\n`);
+    await workspace?.screenshot({ path: join(artifacts, "rdp-overview-workspace-failure.png") }).catch(() => undefined);
+    await rdp?.screenshot({ path: join(artifacts, "rdp-overview-temporary-failure.png") }).catch(() => undefined);
+    throw error;
+  } finally {
+    await application?.close();
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+async function readOverviewRdpAudit(application: ElectronApplication) {
+  return application.evaluate(() => ({ forwards: globalThis.__SLIVER_GUI_E2E_STATE__.portForwards,
+    connections: globalThis.__SLIVER_GUI_E2E_STATE__.rdpConnections, runtimeStops: globalThis.__SLIVER_GUI_E2E_STATE__.rdpRuntimeStops }));
+}
+
+async function waitForOverviewRdpAudit(application: ElectronApplication, predicate: (audit: Awaited<ReturnType<typeof readOverviewRdpAudit>>) => boolean): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  while (!predicate(await readOverviewRdpAudit(application))) {
+    if (Date.now() >= deadline) throw new Error("Temporary RDP forwarding lifecycle timed out");
+    await delay(25);
+  }
+}
+
 test("standalone RDP window saves profiles offline behind its isolated renderer boundary", { timeout: 90_000 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
   const temporary = await mkdtemp(join(tmpdir(), "sliver-rdp-window-e2e-"));
@@ -954,7 +1094,7 @@ async function assertRdpBoundary(application: ElectronApplication, page: Page): 
   });
   assert.equal(bridge.frozen, true);
   assert.deepEqual(bridge.unavailable, Array(6).fill("undefined"));
-  assert.deepEqual(bridge.keys, ["attach", "clipboard", "closeTab", "connect", "deleteProfile", "disconnect", "getApplicationSettings", "getState",
+  assert.deepEqual(bridge.keys, ["attach", "cancelTemporary", "clipboard", "closeTab", "connect", "deleteProfile", "disconnect", "getApplicationSettings", "getState",
     "onApplicationSettingsChanged", "onFileTransferProgress", "onStateChanged", "openRdpStream", "reconnect", "renameTab", "respondToCertificate", "savePreview", "saveProfile", "selectTab", "setInputCapture", "toggleFullscreen", "updateApplicationSettings"]);
   assert.equal(bridge.contextMenuFrozen, true);
   assert.deepEqual(bridge.contextMenuKeys, ["executeAction", "onMenuRequested", "setOpen"]);

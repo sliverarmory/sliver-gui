@@ -94,7 +94,7 @@ import { ApplicationSettingsStore } from "./application-settings.js";
 import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
 import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
-import { RdpWindows } from "./rdp-windows.js";
+import { RdpWindows, type RdpRuntimeFactory } from "./rdp-windows.js";
 import { RdpStore } from "./rdp-store.js";
 import { resolveVerifiedRdpRuntime } from "./rdp-runtime-loader.js";
 import { RDP_SESSION_PARTITION } from "./window-options.js";
@@ -213,6 +213,8 @@ export interface StartApplicationOptions {
   textEditorPreloadPath?: string;
   rdpPreloadPath?: string;
   rdpRuntimeRootDirectory?: string;
+  /** Main-owned runtime override for application integration tests/embedding. */
+  rdpRuntime?: RdpRuntimeFactory;
   applicationAssetsDirectory?: string;
   consoleClientExecutable?: string;
   consoleClientRootDirectory?: string;
@@ -2294,6 +2296,28 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return openRdpWindow();
   }
 
+  async function openTargetRdpWindow(source: TrustedWindowIdentity, target: TargetRef): Promise<OperationResult> {
+    const requireSource = (): void => {
+      const window = windowsByContentsId.get(source.contentsId);
+      if (shutdown.isStopping || !rdpWindows || !window || window.isDestroyed() ||
+          !sameWindowIdentity(source, identityForWindow(window)) || nativeWindowSurfaces.get(window) !== "workspace") {
+        throw new Error("Remote Desktop can only be opened from an available workspace window");
+      }
+    };
+    try {
+      requireSource();
+      await rdpWindows!.openTemporary(async () => {
+        const result = await registry.prepareTemporaryRdpRoute(source.contentsId, target);
+        if (!result.ok) throw new Error(result.error);
+        try { requireSource(); return result.value; }
+        catch (error) { await result.value.route.close(); throw error; }
+      });
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "The temporary RDP connection could not be opened" };
+    }
+  }
+
   function installMenu(): void {
     if (shutdown.isStopping) return;
     const focusedConsole = focusedConsoleWindow();
@@ -3037,7 +3061,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       rendererUrl: rdpRendererUrl,
       preloadPath: options.rdpPreloadPath ?? join(mainBundleDirectory, "../preload/rdp.cjs"),
       store: rdpStore,
-      resolveRuntime: () => resolveVerifiedRdpRuntime({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, developmentRoot: options.rdpRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../..") }),
+      resolveRuntime: options.rdpRuntime?.resolve ?? (() => resolveVerifiedRdpRuntime({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, developmentRoot: options.rdpRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../..") })),
+      ...(options.rdpRuntime ? { createRuntime: options.rdpRuntime.create } : {}),
       getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
       updateApplicationSettings,
       prepareWindow: (window) => trackWindow(window, undefined, undefined, undefined, undefined, "rdp", false),
@@ -3189,7 +3214,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       open: openSessionPanelWindow,
       claim: claimSessionPanelWindow,
     },
-    { open: openRdpWindowFromRenderer },
+    { open: openRdpWindowFromRenderer, openTarget: openTargetRdpWindow },
   );
   registerCloudDeploymentIpcHandlers(
     cloudDeploymentController,

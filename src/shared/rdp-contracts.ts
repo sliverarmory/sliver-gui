@@ -37,6 +37,7 @@ export const RDP_IPC = Object.freeze({
   stateChanged: "sliver:rdp:state:changed",
   fileTransferProgress: "sliver:rdp:file-transfer:progress",
   connect: "sliver:rdp:connect",
+  cancelTemporary: "sliver:rdp:temporary:cancel",
   reconnect: "sliver:rdp:reconnect",
   disconnect: "sliver:rdp:disconnect",
   closeTab: "sliver:rdp:tab:close",
@@ -97,6 +98,7 @@ export interface RdpConnectInput extends RdpConnectionOptions {
   readonly password?: string;
   readonly persistence: RdpCredentialPersistence;
   readonly profileId?: string;
+  readonly temporaryId?: string;
   readonly scaleMode: RdpScaleMode;
 }
 
@@ -125,6 +127,7 @@ export interface RdpTab extends RdpConnectionOptions {
   readonly attempt: number;
   readonly label: string;
   readonly profileId?: string;
+  readonly temporary?: boolean;
   readonly scaleMode: RdpScaleMode;
   readonly state: RdpSessionPhase;
   readonly error?: string;
@@ -136,10 +139,18 @@ export interface RdpTab extends RdpConnectionOptions {
   readonly fileTransfer?: RdpFileTransferProgress;
 }
 
+export interface RdpPendingConnection {
+  readonly id: string;
+  readonly label: string;
+  readonly host: string;
+  readonly port: number;
+}
+
 export interface RdpWindowState {
   readonly tabs: readonly RdpTab[];
   readonly profiles: readonly RdpProfile[];
   readonly activeTabId?: string;
+  readonly pendingConnection?: RdpPendingConnection;
   readonly securePersistenceAvailable: boolean;
   readonly maxSessions: number;
 }
@@ -204,6 +215,7 @@ export type RdpHostMessage = RdpFrame | RdpCursorDelivery
 export interface RdpWindowAPI {
   getState(): Promise<OperationResult<RdpWindowState>>;
   connect(input: RdpConnectInput): Promise<OperationResult<RdpTab>>;
+  cancelTemporary(id: string): Promise<OperationResult>;
   reconnect(input: { readonly tabId: string; readonly password?: string }): Promise<OperationResult<RdpTab>>;
   disconnect(tabId: string): Promise<OperationResult>;
   closeTab(tabId: string): Promise<OperationResult>;

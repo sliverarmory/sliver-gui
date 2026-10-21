@@ -49,7 +49,8 @@ export function RdpWindowApp(): React.JSX.Element {
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
   const reviewTab = state.tabs.find((tab) => tab.review !== undefined);
   const review = reviewTab?.review;
-  const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(renameId || reconnectId || review || deleteProfile || passwordProfile);
+  const temporaryConnection = state.pendingConnection;
+  const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(temporaryConnection || renameId || reconnectId || review || deleteProfile || passwordProfile);
 
   const acceptState = useCallback((next: RdpWindowState): void => {
     const previous = latestState.current;
@@ -123,6 +124,14 @@ export function RdpWindowApp(): React.JSX.Element {
     const present = new Set(state.tabs.map(({ id }) => id));
     for (const id of refs.current.keys()) if (!present.has(id)) refs.current.delete(id);
   }, [activeTab, state.tabs]);
+
+  useEffect(() => {
+    if (!temporaryConnection) return;
+    for (const desktop of refs.current.values()) desktop.current?.release();
+    setConnectOpen(false); setSelectedProfile(undefined); setProfilesOpen(false); setSettingsOpen(false);
+    setPasswordProfile(undefined); setReconnectId(undefined); setReconnectPassword("");
+    setRenameId(undefined); setDeleteProfile(undefined); setError(undefined);
+  }, [temporaryConnection?.id]);
 
   const act = useCallback(async (key: string, operation: () => Promise<OperationResult | OperationResult<unknown>>, success?: () => void, errorHandled?: () => boolean): Promise<boolean> => {
     if (pendingRef.current) return false;
@@ -223,7 +232,7 @@ export function RdpWindowApp(): React.JSX.Element {
         </Tabs.List></Tabs.ListContainer>
         {activeTab && <div className="rdp-toolbar" aria-label="Remote desktop controls">
           <Chip size="sm" color={activeTab.state === "active" ? "success" : activeTab.state === "failed" ? "danger" : "default"} variant="soft"><Chip.Label>{phaseLabel(activeTab.state)}</Chip.Label></Chip>
-          <span className="mr-auto hidden truncate text-xs text-muted sm:block">{activeTab.host}:{activeTab.port}</span>
+          <span className="mr-auto hidden truncate text-xs text-muted sm:block">{activeTab.temporary ? "Temporary connection" : `${activeTab.host}:${activeTab.port}`}</span>
           <NativeSelect className="w-28"><NativeSelect.Trigger aria-label="Desktop scale" value={scaleMode} onChange={(event) => setScaleModes((current) => ({ ...current, [activeTab.id]: event.target.value as RdpScaleMode }))}>
             <NativeSelect.Option value="fit">Fit</NativeSelect.Option><NativeSelect.Option value="actual">Actual size</NativeSelect.Option>
           </NativeSelect.Trigger></NativeSelect>
@@ -232,8 +241,8 @@ export function RdpWindowApp(): React.JSX.Element {
           <IconButton label="Send clipboard" icon={faUpload} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("send")} />
           <IconButton label="Receive clipboard" icon={faDownload} disabled={!activeConnected || !(activeTab.clipboardAvailable || activeTab.clipboardFilesAvailable) || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("receive")} />
           <IconButton label="Toggle fullscreen" icon={faExpand} disabled={!api} onPress={() => { void act("fullscreen", () => api!.toggleFullscreen()); }} />
-          {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setError(undefined); setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
-          <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
+          {activeTab.state === "disconnected" || activeTab.state === "failed" ? !activeTab.temporary && <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setError(undefined); setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { if (!activeTab.temporary) await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
+          <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { if (!activeTab.temporary) await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
         </div>}
         <div className="rdp-tab-panels">
           {api && state.tabs.map((tab) => {
@@ -246,7 +255,7 @@ export function RdpWindowApp(): React.JSX.Element {
       </Tabs>
       <footer className="rdp-footer"><span>Click the desktop to control it. Ctrl+Alt+Escape releases keyboard input.</span><span>{liveCount}/{state.maxSessions} connected</span></footer>
     </>}
-    {api && connectOpen && <RdpConnectDialog api={api} initial={selectedProfile} securePersistenceAvailable={state.securePersistenceAvailable} onClose={() => setConnectOpen(false)} onProfileSaved={() => { void refresh(); }} onConnected={(id) => { setConnectOpen(false); void refresh(); void api.selectTab(id); }} />}
+    {api && (connectOpen || temporaryConnection) && <RdpConnectDialog key={temporaryConnection?.id ?? selectedProfile?.id ?? "new"} api={api} initial={selectedProfile} temporary={temporaryConnection} securePersistenceAvailable={state.securePersistenceAvailable} onClose={() => { setConnectOpen(false); if (temporaryConnection) void refresh(); }} onProfileSaved={() => { void refresh(); }} onConnected={(id) => { setConnectOpen(false); void refresh(); void api.selectTab(id); }} />}
     {passwordProfile && <RdpProfilePasswordDialog key={passwordProfile.id} profile={passwordProfile}
       securePersistenceAvailable={state.securePersistenceAvailable} pending={Boolean(pending)} error={error}
       onClose={() => setPasswordProfile(undefined)} onConnect={(password, persistence) => { void connectProfile(passwordProfile, password, persistence); }} />}
@@ -265,7 +274,7 @@ export function RdpWindowApp(): React.JSX.Element {
       <Modal.Body className="grid max-h-[60vh] gap-4 overflow-y-auto"><p className="text-sm">{review.reason}</p><dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
         <dt className="text-muted">Computer</dt><dd className="break-all">{review.host}:{review.port}</dd><dt className="text-muted">Subject</dt><dd className="break-all">{review.subject || "Not provided"}</dd><dt className="text-muted">Issuer</dt><dd className="break-all">{review.issuer || "Not provided"}</dd><dt className="text-muted">Valid from</dt><dd>{review.validFrom || "Not provided"}</dd><dt className="text-muted">Valid until</dt><dd>{review.validTo || "Not provided"}</dd><dt className="text-muted">SHA-256</dt><dd className="break-all font-mono text-xs">{review.fingerprint}</dd>
       </dl>{error && <p role="alert" className="text-sm text-danger">{error}</p>}<p className="text-xs text-muted">Verify this fingerprint with the computer administrator before trusting the connection.</p>{!review.canOverride && <p className="text-sm text-danger">This certificate cannot be accepted. Correct the server certificate before reconnecting.</p>}</Modal.Body>
-      <Modal.Footer className="flex-wrap"><Button variant="secondary" isDisabled={Boolean(pending)} onPress={() => { void act("trust-reject", () => api.respondToCertificate({ token: review.token, decision: "reject" })); }}>Cancel connection</Button><Button variant="secondary" isDisabled={Boolean(pending) || !review.canOverride} onPress={() => { void act("trust-once", () => api.respondToCertificate({ token: review.token, decision: "once" })); }}>Trust once</Button><Button isDisabled={Boolean(pending) || !review.canOverride} onPress={() => { void act("trust-pin", () => api.respondToCertificate({ token: review.token, decision: "pin" })); }}>Trust and remember</Button></Modal.Footer>
+      <Modal.Footer className="flex-wrap"><Button variant="secondary" isDisabled={Boolean(pending)} onPress={() => { void act("trust-reject", () => api.respondToCertificate({ token: review.token, decision: "reject" })); }}>Cancel connection</Button><Button variant="secondary" isDisabled={Boolean(pending) || !review.canOverride} onPress={() => { void act("trust-once", () => api.respondToCertificate({ token: review.token, decision: "once" })); }}>Trust once</Button>{!reviewTab?.temporary && <Button isDisabled={Boolean(pending) || !review.canOverride} onPress={() => { void act("trust-pin", () => api.respondToCertificate({ token: review.token, decision: "pin" })); }}>Trust and remember</Button>}</Modal.Footer>
     </Modal.Dialog></Modal.Container></Modal.Backdrop>}
     <Modal.Backdrop isOpen={Boolean(reconnectId)} variant="blur" onOpenChange={(open) => { if (!open) { setReconnectId(undefined); setReconnectPassword(""); } }}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Reconnect to Remote Desktop</Modal.Heading></Modal.Header><Modal.Body><TextField value={reconnectPassword} onChange={setReconnectPassword}><Label>Password</Label><Input type="password" autoComplete="new-password" placeholder="Use remembered password if available" maxLength={4096} /></TextField><p className="mt-2 text-xs text-muted">Enter your password if it was not remembered for this connection.</p>{error && <p role="alert" className="mt-2 text-sm text-danger">{error}</p>}</Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => { setReconnectId(undefined); setReconnectPassword(""); }}>Cancel</Button><Button isPending={pending === "reconnect"} onPress={() => {
       if (!api || !reconnectId) return;

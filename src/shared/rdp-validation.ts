@@ -110,6 +110,7 @@ export function parseRdpConnect(value: unknown): RdpConnectInput {
   const { id: _id, ...profile } = parseRdpProfile(value);
   if (item["persistence"] !== "none" && item["persistence"] !== "session" && item["persistence"] !== "secure") throw new Error("Invalid RDP credential preference");
   return { ...profile, persistence: item["persistence"],
+    ...(item["temporaryId"] === undefined ? {} : { temporaryId: rdpString(item["temporaryId"], 80) }),
     ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }),
     ...(item["profileId"] === undefined ? {} : { profileId: rdpString(item["profileId"], 80) }) };
 }

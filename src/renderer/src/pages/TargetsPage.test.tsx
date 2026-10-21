@@ -521,6 +521,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     openInteractionWindow: vi.fn(failed),
     openCloudDeploymentWindow: vi.fn(failed),
     openRdpWindow: vi.fn(failed),
+    openTargetRdpWindow: vi.fn(failed),
     copyManagedServerSshCommand: vi.fn(async () => ({ ok: true as const })),
     copyManagedServerPublicIp: vi.fn(async () => ({ ok: true as const })),
     claimInteractionWindow: vi.fn(failed),

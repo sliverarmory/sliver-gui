@@ -193,6 +193,7 @@ function installSliverAPI(
     openInteractionWindow: vi.fn(failedOperation),
     openCloudDeploymentWindow: vi.fn(failedOperation),
     openRdpWindow: vi.fn(failedOperation),
+    openTargetRdpWindow: vi.fn(failedOperation),
     copyManagedServerSshCommand: vi.fn(async () => ({ ok: true as const })),
     copyManagedServerPublicIp: vi.fn(async () => ({ ok: true as const })),
     claimInteractionWindow: vi.fn(failedOperation),

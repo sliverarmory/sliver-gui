@@ -176,6 +176,7 @@ export interface CloudDeploymentWindowController {
 
 export interface RdpWindowController {
   open(source: TrustedWindowIdentity): MaybePromise<OperationResult>;
+  openTarget?(source: TrustedWindowIdentity, target: TargetRef): MaybePromise<OperationResult>;
 }
 
 export interface ManagedServerSshCommandController {
@@ -396,6 +397,10 @@ export function registerIpcHandlers(
   });
   handleTrusted(IPC.openRdpWindow, rendererUrl, parseNoArguments, ({ contentsId, rendererProcessId, rendererFrameToken }) =>
     rdpWindows?.open({ contentsId, rendererProcessId, rendererFrameToken }) ??
+      { ok: false, error: "Remote Desktop is unavailable" },
+  );
+  handleTrusted(IPC.openTargetRdpWindow, rendererUrl, parseTargetRefArguments, ({ contentsId, rendererProcessId, rendererFrameToken }, target) =>
+    rdpWindows?.openTarget?.({ contentsId, rendererProcessId, rendererFrameToken }, target) ??
       { ok: false, error: "Remote Desktop is unavailable" },
   );
   handleTrusted(

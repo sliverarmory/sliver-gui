@@ -21,6 +21,7 @@ import {
   type ApplicationCloudDeploymentController,
 } from "../main/application.js";
 import { createAppProtocolHandler } from "../main/app-protocol.js";
+import type { RdpRuntimeEvent } from "../main/rdp-runtime.js";
 import type {
   NativePty,
   NativePtyDisposable,
@@ -78,6 +79,10 @@ interface FakeMainState {
   configFactoryCalls: number;
   dialogCalls: number;
   methods: string[];
+  portForwards: Array<{ id: string; sessionId: string; requestedBind: { host: string; port: number }; bind: { host: string; port: number };
+    target: { host: string; port: number }; closed: boolean }>;
+  rdpConnections: Array<{ host: string; port: number; username: string; domain?: string; passwordSupplied: boolean }>;
+  rdpRuntimeStops: number;
   uploads: Array<{
     path: string;
     fileName: string;
@@ -217,6 +222,9 @@ const state: FakeMainState = {
   configFactoryCalls: 0,
   dialogCalls: 0,
   methods: [],
+  portForwards: [],
+  rdpConnections: [],
+  rdpRuntimeStops: 0,
   uploads: [],
   disconnects: 0,
   ssh: [],
@@ -281,6 +289,7 @@ const overviewCloudArgument = process.argv.find((argument) => argument.startsWit
 const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const overviewEgressFixture = process.argv.includes("--overview-egress-fixture");
 const overviewSoftwareFixture = process.argv.includes("--overview-software-fixture");
+const overviewRdpFixture = process.argv.includes("--overview-rdp-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
@@ -641,12 +650,35 @@ void startApplication({
   textEditorPreloadPath: `${repositoryRoot}/dist/preload/text-editor.cjs`,
   rdpPreloadPath: `${repositoryRoot}/dist/preload/rdp.cjs`,
   rdpRuntimeRootDirectory: repositoryRoot,
+  ...(overviewRdpFixture ? { rdpRuntime: { resolve: async () => "fake-rdp-runtime", create: createFakeRdpRuntime } } : {}),
   armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
   app.exit(1);
 });
+
+function createFakeRdpRuntime(_executable: string, receive: (event: RdpRuntimeEvent) => void, exited: (code: string) => void) {
+  let stopped = false;
+  // Keep the real RdpWindows lifecycle, including its private-pipe handshake,
+  // without launching a native process or opening an RDP connection.
+  setImmediate(() => { if (!stopped) receive({ type: "ready", protocol: 1 }); });
+  return {
+    send(command: object): void {
+      const input = command as Record<string, unknown>;
+      if (stopped || input["type"] !== "connect") return;
+      state.rdpConnections.push({ host: String(input["host"]), port: Number(input["port"]), username: String(input["username"]),
+        ...(input["domain"] === undefined ? {} : { domain: String(input["domain"]) }), passwordSupplied: typeof input["password"] === "string" && input["password"].length > 0 });
+      receive({ type: "state", state: "active" });
+    },
+    stop(): void {
+      if (stopped) return;
+      stopped = true;
+      state.rdpRuntimeStops++;
+      setImmediate(() => exited("disconnected"));
+    },
+  };
+}
 
 function fakeSshTarget(deploymentId: string): ManagedSshTarget {
   const azure = deploymentId === E2E_AZURE_DEPLOYMENT_ID;
@@ -832,6 +864,13 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       UUID: "overview-egress-beacon-host-id",
       RemoteAddress: "198.51.100.10:43001",
     }] : [seedBeacon(testState.beaconName)];
+  if (overviewRdpFixture) {
+    sessions = [
+      clientpb.Session.create({ ...seedSession("rdp-windows"), OS: "windows", Arch: "amd64", Hostname: "rdp-windows-host" }),
+      clientpb.Session.create({ ...seedSession("rdp-linux"), ID: "rdp_linux", UUID: "rdp-linux-host-id", OS: "linux", Hostname: "rdp-linux-host" }),
+    ];
+    beacons = [clientpb.Beacon.create({ ...seedBeacon("rdp-windows-beacon"), OS: "windows", Arch: "amd64", Hostname: "rdp-windows-beacon-host" })];
+  }
   if (beaconsTableFixture) {
     beacons.push(clientpb.Beacon.create({
       ...seedBeacon("m2-beacon"),
@@ -1176,10 +1215,13 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       const connection = new Subject<never>();
       let current = state.value;
       const subscription = state.subscribe((next) => { current = next; });
+      const audit = { id, sessionId, requestedBind: { ...options.bind },
+        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port }, target: { ...options.target }, closed: false };
+      testState.portForwards.push(audit);
       const forward: PortForward = {
         id,
         sessionId,
-        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port },
+        bind: audit.bind,
         target: { ...options.target },
         get state() { return current; },
         state$: state.asObservable(),
@@ -1187,6 +1229,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         async close() {
           if (!portForwards.has(id)) return;
           record("stopPortForward");
+          audit.closed = true;
           current = localForwardState("closed", "requested");
           state.next(current);
           state.complete();

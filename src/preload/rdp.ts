@@ -30,9 +30,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const api: RdpWindowAPI = {
   getState: () => invokeValue(RDP_IPC.getState, parseState),
   connect: (input) => {
-    keys(input, [...PROFILE.filter((key) => key !== "id"), "password", "profileId", "persistence"]);
+    keys(input, [...PROFILE.filter((key) => key !== "id"), "password", "profileId", "persistence", "temporaryId"]);
     return invokeValue(RDP_IPC.connect, parseTab, parseRdpConnect(input));
   },
+  cancelTemporary: (id) => invokeEmpty(RDP_IPC.cancelTemporary, identity(id)),
   reconnect: (input) => {
     const item = keys(input, ["tabId", "password"]);
     return invokeValue(RDP_IPC.reconnect, parseTab, { tabId: identity(item["tabId"]), ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }) });
@@ -111,20 +112,23 @@ function subscribe<T>(channel: string, parse: (value: unknown) => T, listener: (
 }
 
 function parseState(raw: unknown): RdpWindowState {
-  const value = keys(raw, ["tabs", "profiles", "activeTabId", "securePersistenceAvailable", "maxSessions"]);
+  const value = keys(raw, ["tabs", "profiles", "activeTabId", "pendingConnection", "securePersistenceAvailable", "maxSessions"]);
   if (!Array.isArray(value["tabs"]) || value["tabs"].length > 128 || !Array.isArray(value["profiles"]) || value["profiles"].length > 256) throw new TypeError("Invalid RDP state");
   const tabs = value["tabs"].map(parseTab);
   const profiles = value["profiles"].map(parseProfile);
   if (new Set(tabs.map(({ id }) => id)).size !== tabs.length || new Set(profiles.map(({ id }) => id)).size !== profiles.length) throw new TypeError("Duplicate RDP identities");
   const activeTabId = value["activeTabId"] === undefined ? undefined : identity(value["activeTabId"]);
   if (activeTabId !== undefined && !tabs.some(({ id }) => id === activeTabId)) throw new TypeError("Invalid active RDP tab");
+  const pending = value["pendingConnection"] === undefined ? undefined : keys(value["pendingConnection"], ["id", "label", "host", "port"]);
+  if (pending && pending["host"] !== "127.0.0.1") throw new TypeError("Invalid temporary RDP endpoint");
   return Object.freeze({ tabs: Object.freeze(tabs), profiles: Object.freeze(profiles),
+    ...(pending === undefined ? {} : { pendingConnection: Object.freeze({ id: identity(pending["id"]), label: rdpString(pending["label"], 120), host: "127.0.0.1", port: rdpInteger(pending["port"], 1, 65535) }) }),
     ...(activeTabId === undefined ? {} : { activeTabId }), securePersistenceAvailable: rdpBoolean(value["securePersistenceAvailable"]),
     maxSessions: rdpInteger(value["maxSessions"], 1, RDP_MAX_SESSIONS) });
 }
 
 function parseTab(raw: unknown): RdpTab {
-  const value = keys(raw, [...PROFILE, "attempt", "profileId", "state", "error", "review", "clipboardReady", "clipboardAvailable", "clipboardFilesAvailable", "clipboardFilesSupported", "fileTransfer"]);
+  const value = keys(raw, [...PROFILE, "attempt", "profileId", "temporary", "state", "error", "review", "clipboardReady", "clipboardAvailable", "clipboardFilesAvailable", "clipboardFilesSupported", "fileTransfer"]);
   const state = value["state"];
   if (state !== "connecting" && state !== "certificate-review" && state !== "authenticating" && state !== "active" && state !== "disconnected" && state !== "failed") throw new TypeError("Invalid RDP connection state");
   return Object.freeze({ ...parseRdpOptions(value), id: identity(value["id"]), label: rdpString(value["label"], 120), scaleMode: scale(value["scaleMode"]),
@@ -133,6 +137,7 @@ function parseTab(raw: unknown): RdpTab {
     ...(value["clipboardFilesSupported"] === undefined ? {} : { clipboardFilesSupported: rdpBoolean(value["clipboardFilesSupported"]) }),
     ...(value["fileTransfer"] === undefined ? {} : { fileTransfer: parseRdpFileTransferProgress(value["fileTransfer"]) }),
     ...(value["profileId"] === undefined ? {} : { profileId: identity(value["profileId"]) }),
+    ...(value["temporary"] === undefined ? {} : { temporary: rdpBoolean(value["temporary"]) }),
     ...(value["error"] === undefined ? {} : { error: displayText(value["error"], 2048) }),
     ...(value["review"] === undefined ? {} : { review: parseCertificate(value["review"]) }) });
 }

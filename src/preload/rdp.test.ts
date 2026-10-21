@@ -30,6 +30,22 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("RDP sandbox preload", () => {
+  it("carries temporary route intent without exposing forwarding authority", async () => {
+    const pendingConnection = { id: "temporary", label: "Windows host", host: "127.0.0.1", port: 49152 };
+    const snapshot = { ...state, pendingConnection, tabs: [{ ...tab, temporary: true }] };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: snapshot });
+    expect(await bridge().getState()).toEqual({ ok: true, value: snapshot });
+    await bridge().cancelTemporary(pendingConnection.id);
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.cancelTemporary, pendingConnection.id);
+    const input: RdpConnectInput = { ...tab, temporaryId: "temporary", persistence: "none", password: "private" };
+    const { id: _id, attempt: _attempt, state: _state, clipboardReady: _ready, clipboardAvailable: _available, ...request } = input as RdpConnectInput & RdpTab;
+    await bridge().connect(request);
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.connect, expect.objectContaining({ temporaryId: "temporary", persistence: "none" }));
+    for (const patch of [{ host: "0.0.0.0" }, { port: 0 }, { port: 65536 }, { route: {} }]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, pendingConnection: { ...pendingConnection, ...patch } } });
+      await expect(bridge().getState()).rejects.toThrow();
+    }
+  });
   it("accepts immutable transfer counters and rejects malformed or privileged progress events", async () => {
     const progress = { id: "transfer", direction: "receive", phase: "transferring", transferredBytes: 3, totalBytes: 6, completedFiles: 1, totalFiles: 2 };
     const snapshot = { ...state, tabs: [{ ...tab, fileTransfer: progress }] };

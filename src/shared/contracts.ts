@@ -130,6 +130,7 @@ export const IPC_INVOKE = {
   openWindow: "sliver:window:open",
   openCloudDeploymentWindow: "sliver:window:open-cloud-deployment",
   openRdpWindow: "sliver:window:open-rdp",
+  openTargetRdpWindow: "sliver:window:open-target-rdp",
   copyManagedServerSshCommand: "sliver:managed-server:copy-ssh-command",
   copyManagedServerPublicIp: "sliver:managed-server:copy-public-ip",
   openInteractionWindow: "sliver:window:open-interaction",
@@ -841,6 +842,10 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   };
   [IPC.openRdpWindow]: {
     args: [];
+    result: OperationResult;
+  };
+  [IPC.openTargetRdpWindow]: {
+    args: [target: TargetRef];
     result: OperationResult;
   };
   [IPC.copyManagedServerPublicIp]: {

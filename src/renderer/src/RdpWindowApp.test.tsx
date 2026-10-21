@@ -42,7 +42,8 @@ beforeEach(() => {
   progressListener = undefined;
   api = {
     getState: vi.fn(async () => ({ ok: true as const, value: state })),
-    connect: vi.fn(async (input) => { connectedInput = { ...input }; const tab = { ...firstTab, ...input, password: undefined }; state = { ...state, tabs: [tab], activeTabId: tab.id }; listener?.(state); return { ok: true as const, value: tab }; }),
+    connect: vi.fn(async (input) => { connectedInput = { ...input }; const tab = { ...firstTab, ...input, password: undefined, ...(input.temporaryId ? { temporary: true } : {}) }; const { pendingConnection: _pending, ...remaining } = state; state = { ...remaining, tabs: [tab], activeTabId: tab.id }; listener?.(state); return { ok: true as const, value: tab }; }),
+    cancelTemporary: vi.fn(async () => { const { pendingConnection: _pending, ...remaining } = state; state = remaining; listener?.(state); return { ok: true as const }; }),
     reconnect: vi.fn(async () => ({ ok: true as const, value: firstTab })),
     disconnect: vi.fn(async () => ({ ok: true as const })), closeTab: vi.fn(async () => ({ ok: true as const })),
     selectTab: vi.fn(async (tabId) => { state = { ...state, activeTabId: tabId }; listener?.(state); return { ok: true as const }; }),
@@ -63,6 +64,77 @@ beforeEach(() => {
 afterEach(() => { cleanup(); toast.clear(); delete window.rdp; Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("standalone remote desktop window", () => {
+  it("opens a pending Overview connection and submits fresh credentials without saving a profile", async () => {
+    state = { ...state, profiles: [profile], pendingConnection: { id: "temporary-one", label: "Windows workstation", host: "127.0.0.1", port: 42001 } };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const dialog = await screen.findByRole("dialog", { name: "Connect to Remote Desktop" });
+    expect(within(dialog).getByLabelText("Computer")).toHaveValue("127.0.0.1");
+    expect(within(dialog).getByLabelText("Computer")).toHaveAttribute("readonly");
+    expect(within(dialog).getByLabelText("Port")).toHaveAttribute("readonly");
+    expect(within(dialog).queryByLabelText("Remember password")).not.toBeInTheDocument();
+    expect(within(dialog).queryByRole("button", { name: "Save profile" })).not.toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText("Username"), "Administrator");
+    await user.type(within(dialog).getByLabelText("Password"), "private-input");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ temporaryId: "temporary-one", host: "127.0.0.1", port: 42001,
+      persistence: "none", username: "Administrator", password: "private-input" }));
+    expect(connectedInput).not.toHaveProperty("profileId");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+    expect(await screen.findByText("Temporary connection")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("cancels an incoming temporary connection and resets credentials for the next request", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const desktop = await screen.findByLabelText("Remote desktop for Office");
+    act(() => { state = { ...state, pendingConnection: { id: "temporary-one", label: "Windows one", host: "127.0.0.1", port: 42001 } }; listener?.(state); });
+    const dialog = await screen.findByRole("dialog", { name: "Connect to Remote Desktop" });
+    expect(desktop).toHaveAttribute("data-input-enabled", "false");
+    await user.type(within(dialog).getByLabelText("Password"), "private-input");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(api.cancelTemporary).toHaveBeenCalledWith("temporary-one"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(desktop).toHaveAttribute("data-input-enabled", "true");
+    act(() => { state = { ...state, pendingConnection: { id: "temporary-two", label: "Windows two", host: "127.0.0.1", port: 42002 } }; listener?.(state); });
+    await screen.findByRole("dialog", { name: "Connect to Remote Desktop" });
+    expect(screen.getByLabelText("Connection name")).toHaveValue("Windows two");
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+
+  it("offers trust once for a temporary certificate and removes reconnect after disconnect", async () => {
+    state = { ...state, tabs: [{ ...firstTab, temporary: true, state: "certificate-review", review: { token: "review", host: "127.0.0.1", port: 42001, fingerprint: "SHA256:reviewed", subject: "CN=office.test", issuer: "CN=office.test", validFrom: "2026-01-01", validTo: "2027-01-01", reason: "Untrusted certificate", canOverride: true, expiresAt: "2026-12-01" } }], activeTabId: "first" };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await screen.findByRole("heading", { name: "Review Server Certificate" });
+    expect(screen.queryByRole("button", { name: "Trust and remember" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Trust once" }));
+    expect(api.respondToCertificate).toHaveBeenCalledWith({ token: "review", decision: "once" });
+    act(() => { state = { ...state, tabs: [{ ...firstTab, temporary: true, state: "disconnected" }] }; listener?.(state); });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Reconnect" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close remote desktop tab" })).toBeEnabled();
+  });
+
+  it("keeps a temporary startup failure visible after main has consumed its pending request", async () => {
+    state = { ...state, pendingConnection: { id: "temporary-one", label: "Windows workstation", host: "127.0.0.1", port: 42001 } };
+    vi.mocked(api.connect).mockImplementation(async () => {
+      const { pendingConnection: _pending, ...remaining } = state;
+      state = remaining; listener?.(state);
+      return { ok: false, error: "The Windows session disconnected." };
+    });
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const dialog = await screen.findByRole("dialog", { name: "Connect to Remote Desktop" });
+    await user.type(within(dialog).getByLabelText("Username"), "Administrator");
+    await user.type(within(dialog).getByLabelText("Password"), "private-input");
+    await user.click(within(dialog).getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(toast.danger).toHaveBeenCalledWith("Could not start Remote Desktop", { description: "The Windows session disconnected." });
+  });
+
   it("opens with no Sliver configuration and submits a direct connection while clearing password entry", async () => {
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);

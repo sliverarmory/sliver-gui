@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import type { MessagePortMain, WebContents } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
-import { clientpb, sliverpb, type SliverEventStreamState } from "sliver-script";
+import { clientpb, sliverpb, type LocalForwardState, type PortForward, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
@@ -110,6 +110,94 @@ afterEach(async () => {
     await registry.unregisterWindow(3);
   }
   await rm(root, { recursive: true, force: true });
+});
+
+describe("temporary RDP forwarding", () => {
+  function forwarding(client: FakeSliverClient) {
+    const state: LocalForwardState = { status: "listening", activeConnections: 0, totalConnections: 0, bytesToTarget: 0, bytesFromTarget: 0 };
+    const close = vi.fn(async () => undefined);
+    const forward: PortForward = { id: "rdp-forward", sessionId: "rdp-windows", bind: { host: "127.0.0.1", port: 49152 },
+      target: { host: "127.0.0.1", port: 3389 }, state, state$: new BehaviorSubject(state), connection$: new Subject(), close };
+    const start = vi.fn(async () => forward);
+    Object.assign(client.adapter, { startPortForward: start });
+    return { start, close, forward };
+  }
+
+  async function setup() {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({ ...session("rdp-windows", "desktop"), OS: "windows" })];
+    const forward = forwarding(client);
+    const registry = createRegistry(() => client.adapter);
+    registry.registerWindow(1);
+    await connectSaved(registry, 1);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "rdp-windows")!;
+    return { client, registry, target, ...forward };
+  }
+
+  it("prepares an OS-assigned route to the authoritative Windows target", async () => {
+    const { registry, target, start, close } = await setup();
+    const result = await registry.prepareTemporaryRdpRoute(1, target);
+    expect(result).toMatchObject({ ok: true, value: { label: "desktop-host", route: { host: "127.0.0.1", port: 49152 } } });
+    expect(start).toHaveBeenCalledWith("rdp-windows", expect.objectContaining({
+      bind: { host: "127.0.0.1", port: 0 }, target: { host: "127.0.0.1", port: 3389 },
+    }), { timeoutSeconds: 30 });
+    if (!result.ok) throw new Error(result.error);
+    expect(result.value.route.isActive()).toBe(true);
+    await result.value.route.close();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("rejects beacons, stale references, non-Windows and dead sessions before binding", async () => {
+    const { client, registry, target, start } = await setup();
+    for (const changed of [{ ...target, mode: "beacon" as const }, { ...target, backendEpoch: target.backendEpoch + 1 },
+      { ...target, domainRevision: target.domainRevision + 1 }, { ...target, fingerprint: "b".repeat(64) }]) {
+      expect((await registry.prepareTemporaryRdpRoute(1, changed)).ok).toBe(false);
+    }
+    client.sessionState.Sessions = [session("rdp-linux", "linux"), clientpb.Session.create({ ...session("rdp-dead", "dead"), OS: "windows", IsDead: true })];
+    await registry.refresh(1);
+    for (const ref of registry.snapshot(1).targetContext.selectableTargets) {
+      expect((await registry.prepareTemporaryRdpRoute(1, ref)).ok).toBe(false);
+    }
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("keeps routes through unrelated catalog changes and invalidates a removed target", async () => {
+    const { client, registry, target } = await setup();
+    const result = await registry.prepareTemporaryRdpRoute(1, target);
+    if (!result.ok) throw new Error(result.error);
+    client.sessionState.Sessions.push(session("another-session", "other"));
+    await registry.refresh(1);
+    expect(result.value.route.isActive()).toBe(true);
+    client.sessionState.Sessions = [];
+    await registry.refresh(1);
+    expect(result.value.route.isActive()).toBe(false);
+    await result.value.route.close();
+  });
+
+  it("closes its captured handle after the source unbinds from a still-shared backend", async () => {
+    const { client, registry, target, close } = await setup();
+    registry.registerWindow(2);
+    registry.inheritConnection(1, 2);
+    const result = await registry.prepareTemporaryRdpRoute(1, target);
+    if (!result.ok) throw new Error(result.error);
+    await registry.disconnect(1);
+    expect(client.disconnect).not.toHaveBeenCalled();
+    expect(result.value.route.isActive()).toBe(false);
+    await Promise.all([result.value.route.close(), result.value.route.close()]);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("retires a listener that finishes opening after its source binding changes", async () => {
+    const { registry, target, start, forward, close } = await setup();
+    let finish!: (value: PortForward) => void;
+    start.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = registry.prepareTemporaryRdpRoute(1, target);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    await registry.disconnect(1);
+    finish(forward);
+    expect((await pending).ok).toBe(false);
+    expect(close).toHaveBeenCalledOnce();
+  });
 });
 
 describe("BOF execution records", () => {

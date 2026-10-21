@@ -246,6 +246,17 @@ describe("remote desktop viewer lifecycle", () => {
     expect(api.savePreview).toHaveBeenCalledTimes(1);
   });
 
+  it("does not encode or save a preview for a temporary desktop even if a profile ID is present", async () => {
+    const encode = vi.spyOn(HTMLCanvasElement.prototype, "toDataURL");
+    const view = await mount(false, { ...tab, temporary: true, profileId: "office" });
+    act(() => message({ type: "frame", seq: 1, frameId: 1, geometry: 1, width: 2, height: 2,
+      tileWidth: 2, tileHeight: 2, x: 0, y: 0, full: true, first: true, last: true, data: new Uint8Array(16).buffer }));
+    await act(async () => { await view.handle.current?.savePreview(); });
+    view.unmount();
+    expect(encode).not.toHaveBeenCalled();
+    expect(api.savePreview).not.toHaveBeenCalled();
+  });
+
   it("shares pending preview saves across viewer reattachment so an older frame cannot overwrite the latest", async () => {
     const finishes: ((result: OperationResult) => void)[] = [];
     vi.mocked(api.savePreview).mockImplementation(() => new Promise((resolve) => { finishes.push(resolve); }));

@@ -3,7 +3,7 @@ import { Button, FieldError, Input, Label, Modal, ScrollShadow, TextField, toast
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faWindows } from "@fortawesome/free-brands-svg-icons";
-import type { RdpConnectInput, RdpCredentialPersistence, RdpProfile, RdpSaveProfileInput, RdpWindowAPI } from "../../../../shared/rdp-contracts";
+import type { RdpConnectInput, RdpCredentialPersistence, RdpPendingConnection, RdpProfile, RdpSaveProfileInput, RdpWindowAPI } from "../../../../shared/rdp-contracts";
 import { useApplicationSettings } from "../ApplicationSettingsProvider";
 import { SwitchRow } from "../FormControls";
 import { RDP_RESOLUTIONS, validateRdpConnectForm, type RdpConnectFormField } from "./rdp-connect-form";
@@ -12,18 +12,20 @@ interface Props {
   readonly api: RdpWindowAPI;
   readonly securePersistenceAvailable: boolean;
   readonly initial?: RdpProfile | undefined;
+  readonly temporary?: RdpPendingConnection | undefined;
   readonly onClose: () => void;
   readonly onConnected: (tabId: string) => void;
   readonly onProfileSaved: () => void;
 }
 
-export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onClose, onConnected, onProfileSaved }: Props): React.JSX.Element {
+export function RdpConnectDialog({ api, securePersistenceAvailable, initial: selectedProfile, temporary, onClose, onConnected, onProfileSaved }: Props): React.JSX.Element {
+  const initial = temporary ? undefined : selectedProfile;
   const applicationSettings = useApplicationSettings();
   const formId = useId();
   const formRef = useRef<HTMLFormElement>(null);
-  const [label, setLabel] = useState(initial?.label ?? "");
-  const [host, setHost] = useState(initial?.host ?? "");
-  const [port, setPort] = useState(String(initial?.port ?? 3389));
+  const [label, setLabel] = useState(temporary?.label ?? initial?.label ?? "");
+  const [host, setHost] = useState(temporary?.host ?? initial?.host ?? "");
+  const [port, setPort] = useState(String(temporary?.port ?? initial?.port ?? 3389));
   const [username, setUsername] = useState(initial?.username ?? "");
   const [domain, setDomain] = useState(initial?.domain ?? "");
   const [password, setPassword] = useState("");
@@ -39,7 +41,8 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   const preferencesPending = savingClipboard || Boolean(applicationSettings && !applicationSettings.isReady);
   const [profileId, setProfileId] = useState(initial?.id);
   const [credentialProfile, setCredentialProfile] = useState(initial);
-  const [pending, setPending] = useState<"connect" | "save">();
+  const [pending, setPending] = useState<"connect" | "save" | "cancel">();
+  const operationPending = useRef(false);
   const [error, setError] = useState<string>();
   const [touched, setTouched] = useState<Partial<Record<RdpConnectFormField, boolean>>>({});
   const [submitted, setSubmitted] = useState<"connect" | "save">();
@@ -87,7 +90,7 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   };
 
   const submit = async (action: "connect" | "save"): Promise<void> => {
-    if (pending || preferencesPending) return;
+    if (operationPending.current || preferencesPending || (temporary && action === "save")) return;
     setError(undefined);
     setSubmitted(action);
     const errors = validateRdpConnectForm(formValues, action === "connect" && !canUseSavedCredential);
@@ -97,10 +100,11 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       return;
     }
     const input = values();
+    operationPending.current = true;
     setPending(action);
     try {
       let selectedProfileId = profileId;
-      if (action === "save" || (persistence !== "none" && !selectedProfileId)) {
+      if (!temporary && (action === "save" || (persistence !== "none" && !selectedProfileId))) {
         const saved = await api.saveProfile(input);
         if (!saved.ok) throw new Error(saved.error);
         selectedProfileId = saved.value.id;
@@ -114,8 +118,8 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       }
       const connection: RdpConnectInput = {
         host: input.host, port: input.port, username: input.username, domain: input.domain, width: input.width, height: input.height,
-        clipboard: input.clipboard, label: input.label, scaleMode: input.scaleMode, persistence,
-        ...(selectedProfileId ? { profileId: selectedProfileId } : {}),
+        clipboard: input.clipboard, label: input.label, scaleMode: input.scaleMode, persistence: temporary ? "none" : persistence,
+        ...(temporary ? { temporaryId: temporary.id } : selectedProfileId ? { profileId: selectedProfileId } : {}),
         ...((canUseSavedCredential && password === "") ? {} : { password }),
       };
       setPassword("");
@@ -126,38 +130,60 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       if (!result.ok) throw new Error(result.error);
       onConnected(result.value.id);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The connection could not be started.");
-    } finally { setPassword(""); setPending(undefined); }
+      const message = cause instanceof Error ? cause.message : "The connection could not be started.";
+      setError(message);
+      // Consuming a temporary request can unmount this dialog before the native
+      // connection finishes, so its failure must also survive outside the form.
+      if (temporary) toast.danger("Could not start Remote Desktop", { description: message });
+    } finally { setPassword(""); setPending(undefined); operationPending.current = false; }
   };
 
-  return <Modal.Backdrop isOpen isDismissable={!pending} isKeyboardDismissDisabled={Boolean(pending)} variant="blur" onOpenChange={(open) => { if (!open) { setPassword(""); onClose(); } }}>
+  const close = async (): Promise<void> => {
+    if (operationPending.current) return;
+    setPassword("");
+    if (!temporary) { onClose(); return; }
+    operationPending.current = true;
+    setPending("cancel"); setError(undefined);
+    try {
+      const result = await api.cancelTemporary(temporary.id);
+      if (!result.ok) throw new Error(result.error);
+      onClose();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "The temporary connection could not be canceled.";
+      setError(message);
+      if (temporary) toast.danger("Could not cancel Remote Desktop", { description: message });
+    } finally { setPending(undefined); operationPending.current = false; }
+  };
+
+  return <Modal.Backdrop isOpen isDismissable={!pending} isKeyboardDismissDisabled={Boolean(pending)} variant="blur" onOpenChange={(open) => { if (!open) void close(); }}>
     <Modal.Container size="md" placement="center"><Modal.Dialog>
       <Modal.CloseTrigger isDisabled={Boolean(pending)} />
       <Modal.Header><Modal.Heading className="flex items-center gap-2 pr-8">
         <FontAwesomeIcon aria-hidden icon={faWindows} />
-        {initial ? "Edit Remote Desktop" : "New Remote Desktop"}
+        {temporary ? "Connect to Remote Desktop" : initial ? "Edit Remote Desktop" : "New Remote Desktop"}
       </Modal.Heading>
       </Modal.Header>
       <Modal.Body className="max-h-[65vh] overflow-y-auto"
         render={(props) => <ScrollShadow {...props} hideScrollBar={false} size={28} />}>
         <form ref={formRef} id={formId} noValidate className="grid gap-4" onSubmit={(event) => { event.preventDefault(); void submit("connect"); }}>
+          {temporary && <p className="text-sm text-muted">Connect through the selected Sliver session using a Windows account. This temporary connection closes when the session or desktop disconnects.</p>}
           <TextField {...fieldProps("label")} value={label} onChange={setLabel} isDisabled={Boolean(pending)}>
             <Label>Connection name</Label><Input variant="secondary" maxLength={120} placeholder="Optional display name" />
             {fieldError("label") && <FieldError>{fieldError("label")}</FieldError>}
           </TextField>
           <div className="grid grid-cols-[1fr_7rem] gap-4">
-            <TextField {...fieldProps("host")} value={host} onChange={setHost} isRequired isDisabled={Boolean(pending)}>
-              <Label>Computer</Label><Input variant="secondary" autoFocus maxLength={253} placeholder="hostname or IP address" autoComplete="off" />
+            <TextField {...fieldProps("host")} value={host} onChange={setHost} isRequired isReadOnly={Boolean(temporary)} isDisabled={Boolean(pending)}>
+              <Label>Computer</Label><Input variant="secondary" autoFocus={!temporary} maxLength={253} placeholder="hostname or IP address" autoComplete="off" />
               {fieldError("host") && <FieldError className="text-balance">{fieldError("host")}</FieldError>}
             </TextField>
-            <TextField {...fieldProps("port")} value={port} onChange={setPort} isRequired isDisabled={Boolean(pending)}>
+            <TextField {...fieldProps("port")} value={port} onChange={setPort} isRequired isReadOnly={Boolean(temporary)} isDisabled={Boolean(pending)}>
               <Label>Port</Label><Input variant="secondary" inputMode="numeric" maxLength={5} />
               {fieldError("port") && <FieldError className="text-balance">{fieldError("port")}</FieldError>}
             </TextField>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <TextField {...fieldProps("username")} value={username} onChange={setUsername} isRequired isDisabled={Boolean(pending)}>
-              <Label>Username</Label><Input variant="secondary" maxLength={256} autoComplete="off" placeholder="Administrator" />
+              <Label>Username</Label><Input variant="secondary" autoFocus={Boolean(temporary)} maxLength={256} autoComplete="off" placeholder="Administrator" />
               {fieldError("username") && <FieldError>{fieldError("username")}</FieldError>}
             </TextField>
             <TextField {...fieldProps("domain")} value={domain} onChange={setDomain} isDisabled={Boolean(pending)}>
@@ -169,13 +195,13 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
             <Label>Password</Label><Input variant="secondary" type="password" maxLength={4096} autoComplete="new-password" placeholder={canUseSavedCredential ? "Use saved credential" : "Windows account password"} />
             {fieldError("password") && <FieldError>{fieldError("password")}</FieldError>}
           </TextField>
-          <NativeSelect fullWidth variant="secondary"><Label htmlFor={`${formId}-remember`}>Remember password</Label>
+          {!temporary && <NativeSelect fullWidth variant="secondary"><Label htmlFor={`${formId}-remember`}>Remember password</Label>
             <NativeSelect.Trigger id={`${formId}-remember`} aria-label="Remember password" value={persistence} disabled={Boolean(pending)} onChange={(event) => setPersistence(event.target.value as RdpCredentialPersistence)}>
               <NativeSelect.Option value="none">Do not save</NativeSelect.Option><NativeSelect.Option value="session">Until the app quits</NativeSelect.Option>
               <NativeSelect.Option value="secure" disabled={!securePersistenceAvailable}>Save securely on this device</NativeSelect.Option>
             </NativeSelect.Trigger>
-          </NativeSelect>
-          {!securePersistenceAvailable && <p className="text-xs text-muted">Secure password storage is unavailable. Passwords can be remembered until the app quits.</p>}
+          </NativeSelect>}
+          {!temporary && !securePersistenceAvailable && <p className="text-xs text-muted">Secure password storage is unavailable. Passwords can be remembered until the app quits.</p>}
           <NativeSelect fullWidth variant="secondary">
             <Label htmlFor={`${formId}-resolution`}>Desktop resolution</Label>
             <NativeSelect.Trigger id={`${formId}-resolution`} value={resolution} disabled={Boolean(pending)} onChange={(event) => {
@@ -204,8 +230,8 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
         </form>
       </Modal.Body>
-      <Modal.Footer className="flex-wrap"><Button variant="tertiary" isDisabled={Boolean(pending)} onPress={onClose}>Cancel</Button>
-        <Button variant="secondary" isDisabled={Boolean(pending) || preferencesPending} isPending={pending === "save"} onPress={() => void submit("save")}>Save profile</Button>
+      <Modal.Footer className="flex-wrap"><Button variant="tertiary" isDisabled={Boolean(pending)} isPending={pending === "cancel"} onPress={() => void close()}>Cancel</Button>
+        {!temporary && <Button variant="secondary" isDisabled={Boolean(pending) || preferencesPending} isPending={pending === "save"} onPress={() => void submit("save")}>Save profile</Button>}
         <Button type="submit" form={formId} isPending={pending === "connect"} isDisabled={Boolean(pending) || preferencesPending}>Connect</Button>
       </Modal.Footer>
     </Modal.Dialog></Modal.Container>

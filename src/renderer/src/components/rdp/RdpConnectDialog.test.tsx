@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { toast } from "@heroui/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RdpConnectInput, RdpProfile, RdpSaveProfileInput, RdpTab, RdpWindowAPI } from "../../../../shared/rdp-contracts";
+import type { RdpConnectInput, RdpPendingConnection, RdpProfile, RdpSaveProfileInput, RdpTab, RdpWindowAPI } from "../../../../shared/rdp-contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../../../../shared/application-settings-contracts";
 import { ApplicationSettingsProvider, type ApplicationSettingsAPI } from "../ApplicationSettingsProvider";
 import { RdpConnectDialog } from "./RdpConnectDialog";
@@ -31,6 +31,7 @@ beforeEach(() => {
       return { ok: true as const, value: tab };
     }),
     saveProfile: vi.fn(async (input: RdpSaveProfileInput) => ({ ok: true as const, value: { ...profile, ...input } })),
+    cancelTemporary: vi.fn(async () => ({ ok: true as const })),
   } as unknown as RdpWindowAPI;
 });
 
@@ -59,6 +60,42 @@ function expectFieldError(label: string, text: RegExp): void {
 }
 
 describe("Remote Desktop connection form", () => {
+  it("ignores saved credentials and persistence when connecting through a temporary endpoint", async () => {
+    const user = userEvent.setup();
+    const temporary: RdpPendingConnection = { id: "temporary-one", label: "Windows host", host: "127.0.0.1", port: 42001 };
+    render(<RdpConnectDialog api={api} temporary={temporary} initial={{ ...profile, hasCredential: true, credentialPersistence: "secure" }}
+      securePersistenceAvailable onClose={vi.fn()} onConnected={onConnected} onProfileSaved={onProfileSaved} />);
+    expect(screen.getByLabelText("Username")).toHaveValue("");
+    expect(screen.getByLabelText("Domain")).toHaveValue("");
+    expect(screen.getByLabelText("Computer")).toHaveAttribute("readonly");
+    expect(screen.getByLabelText("Port")).toHaveAttribute("readonly");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(api.connect).not.toHaveBeenCalled();
+    change("Username", "Administrator"); change("Password", "private-input");
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+    expect(connectedInput).toMatchObject({ temporaryId: temporary.id, host: temporary.host, port: temporary.port, persistence: "none", password: "private-input" });
+    expect(connectedInput).not.toHaveProperty("profileId");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+  });
+
+  it("keeps temporary cancellation failures visible and allows retry without retaining the password", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.mocked(api.cancelTemporary).mockResolvedValueOnce({ ok: false, error: "Forward could not be stopped." });
+    render(<RdpConnectDialog api={api} temporary={{ id: "temporary-one", label: "Windows host", host: "127.0.0.1", port: 42001 }}
+      securePersistenceAvailable onClose={onClose} onConnected={onConnected} onProfileSaved={onProfileSaved} />);
+    change("Password", "private-input");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Forward could not be stopped.");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Password")).toHaveValue("");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(api.cancelTemporary).toHaveBeenCalledTimes(2);
+  });
+
   it("enables clipboard for a new connection and retains a saved profile's explicit choice", () => {
     mount();
     expect(screen.getByRole("switch", { name: "Clipboard" })).toBeChecked();

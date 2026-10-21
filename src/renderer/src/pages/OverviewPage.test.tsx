@@ -160,6 +160,70 @@ describe("Overview target context menu", () => {
   });
 });
 
+describe("Overview Remote Desktop action", () => {
+  const openTargetRdpWindow = vi.fn(async (_target: unknown): Promise<OperationResult> => ({ ok: true }));
+  beforeEach(() => { openTargetRdpWindow.mockReset().mockResolvedValue({ ok: true }); vi.stubGlobal("sliver", { openTargetRdpWindow }); });
+  afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  function windowsSnapshot(): SliverSnapshot {
+    const snapshot = sessionSnapshot();
+    snapshot.domains.sessions.items[0]!.os = "windows";
+    return snapshot;
+  }
+
+  it("opens RDP for a current active Windows session using its main-issued reference", async () => {
+    const user = userEvent.setup();
+    const snapshot = windowsSnapshot();
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" })); rendered.contextMenu.emit();
+    const item = await screen.findByRole("menuitem", { name: "RDP" });
+    expect(item).not.toHaveAttribute("aria-disabled", "true");
+    await user.click(item);
+    await waitFor(() => expect(openTargetRdpWindow).toHaveBeenCalledExactlyOnceWith(snapshot.targetContext.selectableTargets[0]));
+  });
+
+  it.each(["dead", "missing-reference", "disconnected"])("disables RDP for a %s Windows session", async (reason) => {
+    const snapshot = windowsSnapshot();
+    if (reason === "dead") snapshot.domains.sessions.items[0]!.liveness = "dead";
+    if (reason === "missing-reference") snapshot.targetContext.selectableTargets = [];
+    const props = { onNavigate: vi.fn(), onSnapshot: vi.fn() };
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} {...props} />);
+    if (reason === "disconnected") rendered.rerender(<OverviewPage snapshot={disconnectedSnapshot()} {...props} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" })); rendered.contextMenu.emit();
+    expect(await screen.findByRole("menuitem", { name: "RDP" })).toHaveAttribute("aria-disabled", "true");
+    expect(openTargetRdpWindow).not.toHaveBeenCalled();
+  });
+
+  it("omits RDP for other operating systems and explains the live-session requirement on Windows beacons", async () => {
+    const user = userEvent.setup();
+    const snapshot = sessionSnapshot();
+    const beacon: BeaconSummary = { ...snapshot.sessions[0]!, os: "windows", mode: "beacon", id: "beacon-one", hostname: "beacon-host", checkinStatus: "on-time" };
+    snapshot.domains.beacons = { ...snapshot.domains.sessions, items: [beacon] }; snapshot.beacons = [beacon];
+    snapshot.targetContext.selectableTargets.push({ ...snapshot.targetContext.selectableTargets[0]!, mode: "beacon", id: beacon.id });
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} onNavigate={vi.fn()} onSnapshot={vi.fn()} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" })); rendered.contextMenu.emit();
+    await screen.findByRole("menu");
+    expect(screen.queryByRole("menuitem", { name: /RDP/u })).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    fireEvent.contextMenu(screen.getByRole("button", { name: "beacon-host" })); rendered.contextMenu.emit();
+    expect(await screen.findByRole("menuitem", { name: "RDP (requires live session)" })).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("does not dispatch an open menu's RDP action after its target incarnation changes", async () => {
+    const user = userEvent.setup();
+    const snapshot = windowsSnapshot();
+    const props = { onNavigate: vi.fn(), onSnapshot: vi.fn() };
+    const rendered = renderWithApplicationContextMenu(<OverviewPage snapshot={snapshot} {...props} />);
+    fireEvent.contextMenu(screen.getByRole("button", { name: "session-host" })); rendered.contextMenu.emit();
+    const item = await screen.findByRole("menuitem", { name: "RDP" });
+    rendered.rerender(<OverviewPage snapshot={{ ...snapshot, targetContext: { ...snapshot.targetContext,
+      selectableTargets: [{ ...snapshot.targetContext.selectableTargets[0]!, fingerprint: "b".repeat(64) }] } }} {...props} />);
+    await user.click(item);
+    expect(openTargetRdpWindow).not.toHaveBeenCalled();
+  });
+});
+
 function managedServerSnapshot(state = "running"): SliverSnapshot {
   const snapshot = sessionSnapshot();
   snapshot.connection.managedServer = {
