@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-import type { RdpConnectInput, RdpViewerMessage, RdpWindowAPI, RdpWindowState } from "../shared/rdp-contracts.js";
+import type { RdpConnectInput, RdpFileTransferProgress, RdpViewerMessage, RdpWindowAPI, RdpWindowState } from "../shared/rdp-contracts.js";
 
 test("standalone RDP window saves profiles offline behind its isolated renderer boundary", { timeout: 90_000 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -55,8 +55,8 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
 
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     const connection = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
-    const clipboard = connection.getByRole("switch", { name: "Text clipboard", exact: true });
-    assert.equal(await clipboard.isChecked(), true, "New connections enable text clipboard by default");
+    const clipboard = connection.getByRole("switch", { name: "Clipboard", exact: true });
+    assert.equal(await clipboard.isChecked(), true, "New connections enable clipboard by default");
     assert.equal(await connection.getByText("Connect directly to a Windows computer using Network Level Authentication.", { exact: true }).count(), 0);
     assert.equal(await connection.locator('svg[data-icon="windows"]').count(), 1);
     const resolution = connection.getByLabel("Desktop resolution", { exact: true });
@@ -139,7 +139,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     const editor = rdp.getByRole("dialog", { name: "Edit Remote Desktop", exact: true });
     assert.equal(await editor.getByLabel("Computer", { exact: true }).inputValue(), "rdp.invalid");
     assert.equal(await editor.getByLabel("Desktop resolution", { exact: true }).inputValue(), "1920x1080");
-    assert.equal(await editor.getByRole("switch", { name: "Text clipboard", exact: true }).isChecked(), false);
+    assert.equal(await editor.getByRole("switch", { name: "Clipboard", exact: true }).isChecked(), false);
     assert.equal(await editor.getByLabel("Password", { exact: true }).inputValue(), "");
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await editor.waitFor({ state: "hidden" });
@@ -152,7 +152,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await connection.waitFor({ state: "hidden" });
     await openSavedProfileMenu(rdp, profiles.getByRole("button", { name: "Connect to Offline RDP profile", exact: true }));
     await profileMenu.getByRole("menuitem", { name: "Edit", exact: true }).click();
-    assert.equal(await editor.getByRole("switch", { name: "Text clipboard", exact: true }).isChecked(), false,
+    assert.equal(await editor.getByRole("switch", { name: "Clipboard", exact: true }).isChecked(), false,
       "A saved profile keeps its explicit clipboard choice when the new-connection preference changes");
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await editor.waitFor({ state: "hidden" });
@@ -176,7 +176,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     assert.equal((await readState(rdp)).securePersistenceAvailable, true);
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     const secureDialog = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
-    assert.equal(await secureDialog.getByRole("switch", { name: "Text clipboard", exact: true }).isChecked(), true,
+    assert.equal(await secureDialog.getByRole("switch", { name: "Clipboard", exact: true }).isChecked(), true,
       "The clipboard preference survives closing and reopening the standalone window");
     const secureRemember = secureDialog.getByLabel("Remember password", { exact: true });
     assert.equal(await secureRemember.locator('option[value="secure"]').isDisabled(), false);
@@ -503,9 +503,9 @@ test("RDP configuration, clipboard controls and transient toasts preserve the co
     await settings.getByRole("button", { name: "Done", exact: true }).click();
     await settings.waitFor({ state: "hidden" });
 
-    const sendClipboard = rdp.getByRole("button", { name: "Send clipboard text", exact: true });
-    const receiveClipboard = rdp.getByRole("button", { name: "Receive clipboard text", exact: true });
-    for (const [button, label] of [[sendClipboard, "Send clipboard text"], [receiveClipboard, "Receive clipboard text"]] as const) {
+    const sendClipboard = rdp.getByRole("button", { name: "Send clipboard", exact: true });
+    const receiveClipboard = rdp.getByRole("button", { name: "Receive clipboard", exact: true });
+    for (const [button, label] of [[sendClipboard, "Send clipboard"], [receiveClipboard, "Receive clipboard"]] as const) {
       assert.equal((await button.innerText()).trim(), "", `${label} is an icon-only button`);
       assert.equal(await button.locator("svg").count(), 1);
       await button.hover();
@@ -514,21 +514,59 @@ test("RDP configuration, clipboard controls and transient toasts preserve the co
       await rdp.getByRole("tooltip", { name: label, exact: true }).waitFor({ state: "hidden" });
     }
     await sendClipboard.click();
-    const sent = rdpToast(rdp, "Clipboard text sent to the remote desktop.");
+    const sent = rdpToast(rdp, "Clipboard ready to paste on the remote desktop.");
     await sent.waitFor();
     assert.deepEqual(await viewer.boundingBox(), originalBounds, "Clipboard success does not shift the remote desktop");
     await settleRdpToast(sent);
     await rdp.screenshot({ path: join(artifacts, "rdp-clipboard-toast.png"), animations: "disabled" });
     await dismissRdpToast(sent);
+    assert.equal(await receiveClipboard.isEnabled(), true, "A remote file clipboard enables Receive without a text format");
     await receiveClipboard.click();
-    const received = rdpToast(rdp, "Remote text copied to the clipboard.");
+    const receiving = rdpToast(rdp, "Receiving files");
+    await receiving.waitFor();
+    assert.equal(await receiving.getByRole("progressbar").getAttribute("aria-valuenow"), null);
+    await receiving.evaluate((element) => element.setAttribute("data-rdp-progress-fixture", "same-toast"));
+    const transfer: RdpFileTransferProgress = { id: "offline-receive", direction: "receive", phase: "transferring",
+      transferredBytes: 1024 * 1024, totalBytes: 2 * 1024 * 1024, completedFiles: 1, totalFiles: 2 };
+    await emitFileTransferProgress(application, transfer);
+    await receiving.getByText("50%", { exact: true }).waitFor();
+    assert.equal(await receiving.getByRole("progressbar").getAttribute("aria-valuenow"), "50");
+    assert.equal(await receiving.getAttribute("data-rdp-progress-fixture"), "same-toast");
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "File transfer progress does not shift the remote desktop");
+    await settleRdpToast(receiving);
+    const toastBounds = await receiving.boundingBox();
+    const progressBounds = await receiving.getByRole("progressbar").boundingBox();
+    assert.ok(toastBounds && progressBounds && progressBounds.width > toastBounds.width * 0.75,
+      "File transfer progress spans most of the notification width");
+    await rdp.screenshot({ path: join(artifacts, "rdp-file-transfer-progress.png"), animations: "disabled" });
+    await emitFileTransferProgress(application, { ...transfer, phase: "completed", transferredBytes: transfer.totalBytes, completedFiles: 2 });
+    const received = rdpToast(rdp, "Files received");
     await received.waitFor();
+    assert.equal(await received.getAttribute("data-rdp-progress-fixture"), "same-toast");
+    assert.equal(await received.getByRole("progressbar").count(), 0);
+    assert.equal(await rdpToast(rdp, "Remote content copied to the clipboard.").count(), 0, "File completion has no duplicate generic clipboard toast");
     assert.deepEqual(await viewer.boundingBox(), originalBounds);
     await dismissRdpToast(received);
+    const upload: RdpFileTransferProgress = { ...transfer, id: "offline-send", direction: "send" };
+    await emitFileTransferProgress(application, upload);
+    const sending = rdpToast(rdp, "Sending files");
+    await sending.waitFor();
+    await dismissRdpToast(sending);
+    await emitFileTransferProgress(application, { ...upload, phase: "completed", transferredBytes: upload.totalBytes, completedFiles: 2 });
+    await rdp.evaluate(() => new Promise<void>((done) => {
+      const browser = globalThis as unknown as { requestAnimationFrame(callback: () => void): void };
+      browser.requestAnimationFrame(() => browser.requestAnimationFrame(() => done()));
+    }));
+    assert.equal(await rdpToast(rdp, "Files sent").count(), 0, "Dismissed transfers stay dismissed when they complete");
+    await emitFileTransferProgress(application, { ...transfer, id: "offline-failure", phase: "failed", error: "The remote file could not be read." });
+    const transferFailed = rdpToast(rdp, "File transfer failed");
+    await transferFailed.waitFor();
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "File transfer failures leave desktop geometry unchanged");
+    await dismissRdpToast(transferFailed);
     await application.evaluate(() => {
       (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe.clipboardError = "The offline clipboard fixture rejected this request.";
     });
-    await rdp.getByRole("button", { name: "Send clipboard text", exact: true }).click();
+    await rdp.getByRole("button", { name: "Send clipboard", exact: true }).click();
     const failed = rdpToast(rdp, "Remote Desktop action failed").filter({ hasText: "The offline clipboard fixture rejected this request." });
     await failed.waitFor();
     assert.deepEqual(await viewer.boundingBox(), originalBounds, "Clipboard errors do not shift the remote desktop");
@@ -631,10 +669,10 @@ interface OfflineDesktopProbe {
 }
 
 async function installOfflineDesktop(application: ElectronApplication): Promise<void> {
-  await application.evaluate(({ ipcMain }) => {
+  await application.evaluate(({ ipcMain, BrowserWindow }) => {
     const tab = { id: "offline-desktop", attempt: 1, label: "Offline desktop", host: "desktop.example.invalid", port: 3389,
       username: "operator", domain: "LAB", width: 320, height: 200, clipboard: true, scaleMode: "fit" as const,
-      state: "active" as const, clipboardReady: true, clipboardAvailable: true };
+      state: "active" as const, clipboardReady: true, clipboardAvailable: false, clipboardFilesSupported: true, clipboardFilesAvailable: true };
     const probe: OfflineDesktopProbe = { state: { tabs: [tab], profiles: [], activeTabId: tab.id,
       securePersistenceAvailable: false, maxSessions: 4 }, messages: [], clipboardRequests: [], connectionAttempts: 0 };
     (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe = probe;
@@ -646,6 +684,12 @@ async function installOfflineDesktop(application: ElectronApplication): Promise<
     ipcMain.handle("sliver:rdp:input:capture", () => ({ ok: true }));
     ipcMain.handle("sliver:rdp:clipboard", (_event, input: { direction: string }) => {
       probe.clipboardRequests.push(input.direction);
+      if (!probe.clipboardError && input.direction === "receive") {
+        const progress: RdpFileTransferProgress = { id: "offline-receive", direction: "receive", phase: "preparing", transferredBytes: 0, totalBytes: 0, completedFiles: 0, totalFiles: 0 };
+        probe.state = { ...probe.state, tabs: probe.state.tabs.map((current) => ({ ...current, fileTransfer: progress })) };
+        BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL().includes("surface=rdp"))?.webContents.send(
+          "sliver:rdp:file-transfer:progress", { tabId: tab.id, attempt: tab.attempt, progress });
+      }
       return probe.clipboardError ? { ok: false, error: probe.clipboardError } : { ok: true };
     });
     for (const channel of ["sliver:rdp:connect", "sliver:rdp:reconnect"]) ipcMain.handle(channel, () => {
@@ -697,6 +741,17 @@ async function emitDesktopWarning(application: ElectronApplication): Promise<voi
     if (!window) throw new Error("The offline RDP window is missing");
     window.webContents.send("sliver:rdp:state:changed", probe.state);
   });
+}
+
+async function emitFileTransferProgress(application: ElectronApplication, progress: RdpFileTransferProgress): Promise<void> {
+  await application.evaluate(({ BrowserWindow }, next) => {
+    const probe = (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe;
+    const tab = probe.state.tabs[0]!;
+    probe.state = { ...probe.state, tabs: [{ ...tab, fileTransfer: next }] };
+    const window = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL().includes("surface=rdp"));
+    if (!window) throw new Error("The offline RDP window is missing");
+    window.webContents.send("sliver:rdp:file-transfer:progress", { tabId: tab.id, attempt: tab.attempt, progress: next });
+  }, progress);
 }
 
 function rdpToast(page: Page, title: string): Locator {
@@ -900,7 +955,7 @@ async function assertRdpBoundary(application: ElectronApplication, page: Page): 
   assert.equal(bridge.frozen, true);
   assert.deepEqual(bridge.unavailable, Array(6).fill("undefined"));
   assert.deepEqual(bridge.keys, ["attach", "clipboard", "closeTab", "connect", "deleteProfile", "disconnect", "getApplicationSettings", "getState",
-    "onApplicationSettingsChanged", "onStateChanged", "openRdpStream", "reconnect", "renameTab", "respondToCertificate", "savePreview", "saveProfile", "selectTab", "setInputCapture", "toggleFullscreen", "updateApplicationSettings"]);
+    "onApplicationSettingsChanged", "onFileTransferProgress", "onStateChanged", "openRdpStream", "reconnect", "renameTab", "respondToCertificate", "savePreview", "saveProfile", "selectTab", "setInputCapture", "toggleFullscreen", "updateApplicationSettings"]);
   assert.equal(bridge.contextMenuFrozen, true);
   assert.deepEqual(bridge.contextMenuKeys, ["executeAction", "onMenuRequested", "setOpen"]);
   const native = await (await application.browserWindow(page)).evaluate((window) => {

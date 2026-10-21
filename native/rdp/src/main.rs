@@ -2,6 +2,7 @@ mod clipboard;
 mod display;
 mod input;
 mod protocol;
+mod upload_progress;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use display::{Credits, Display};
@@ -208,13 +209,14 @@ async fn run(
                                 send_input(sender,RdpInputEvent::Resize{width,height,scale_factor,physical_size:None}).await
                             }
                             Command::ClipboardSend{mut text} if clipboard_enabled&&text.len()<=MAX_CLIPBOARD&&!text.contains('\0')=>{
-                                clip.lock().unwrap().offer_local_text(std::mem::take(&mut text));
-                                emit(&output,json!({"type":"clipboardAvailable","available":false})).await;
-                                send_input(sender,RdpInputEvent::Clipboard(ClipboardMessage::SendInitiateCopy(clipboard::formats()))).await
+                                clipboard::offer_text(&clip,sender,&output,std::mem::take(&mut text)).await
                             }
                             Command::ClipboardRequest{} if clipboard_enabled=>{
                                 let available=clip.lock().unwrap().request_remote_text();
                                 if available{send_input(sender,RdpInputEvent::Clipboard(ClipboardMessage::SendInitiatePaste(ClipboardFormatId::CF_UNICODETEXT))).await}else{Err("clipboard-unavailable")}
+                            }
+                            command @ (Command::ClipboardFilesOffer{..}|Command::ClipboardFilesRequest{..}|Command::ClipboardFileRead{..}|Command::ClipboardFileResponse{..}|Command::ClipboardFilesCancel{}) if clipboard_enabled=>{
+                                clipboard::handle_file_command(&clip,sender,&output,command).await
                             }
                             _=>Err("invalid-command-state"),
                         };

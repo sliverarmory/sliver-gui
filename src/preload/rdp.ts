@@ -17,8 +17,9 @@ import {
   type RdpTab,
   type RdpWindowAPI,
   type RdpWindowState,
+  type RdpFileTransferProgressEvent,
 } from "../shared/rdp-contracts.js";
-import { parseRdpConnect, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { parseRdpConnect, parseRdpFileTransferProgress, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { OperationResult } from "../shared/contracts.js";
 
 const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard"];
@@ -72,6 +73,7 @@ const api: RdpWindowAPI = {
   getApplicationSettings: async () => parseApplicationSettingsState(await ipcRenderer.invoke(RDP_IPC.getApplicationSettings)),
   updateApplicationSettings: (input) => invokeValue(RDP_IPC.updateApplicationSettings, parseApplicationSettingsState, parseApplicationSettingsUpdateInput(input)),
   onStateChanged: (listener) => subscribe(RDP_IPC.stateChanged, parseState, listener),
+  onFileTransferProgress: (listener) => subscribe(RDP_IPC.fileTransferProgress, parseTransferEvent, listener),
   onApplicationSettingsChanged: (listener) => subscribe(RDP_IPC.applicationSettingsChanged, parseApplicationSettingsState, listener),
 };
 
@@ -122,14 +124,23 @@ function parseState(raw: unknown): RdpWindowState {
 }
 
 function parseTab(raw: unknown): RdpTab {
-  const value = keys(raw, [...PROFILE, "attempt", "profileId", "state", "error", "review", "clipboardReady", "clipboardAvailable"]);
+  const value = keys(raw, [...PROFILE, "attempt", "profileId", "state", "error", "review", "clipboardReady", "clipboardAvailable", "clipboardFilesAvailable", "clipboardFilesSupported", "fileTransfer"]);
   const state = value["state"];
   if (state !== "connecting" && state !== "certificate-review" && state !== "authenticating" && state !== "active" && state !== "disconnected" && state !== "failed") throw new TypeError("Invalid RDP connection state");
   return Object.freeze({ ...parseRdpOptions(value), id: identity(value["id"]), label: rdpString(value["label"], 120), scaleMode: scale(value["scaleMode"]),
     attempt: rdpInteger(value["attempt"], 0, Number.MAX_SAFE_INTEGER), state, clipboardReady: rdpBoolean(value["clipboardReady"]), clipboardAvailable: rdpBoolean(value["clipboardAvailable"]),
+    ...(value["clipboardFilesAvailable"] === undefined ? {} : { clipboardFilesAvailable: rdpBoolean(value["clipboardFilesAvailable"]) }),
+    ...(value["clipboardFilesSupported"] === undefined ? {} : { clipboardFilesSupported: rdpBoolean(value["clipboardFilesSupported"]) }),
+    ...(value["fileTransfer"] === undefined ? {} : { fileTransfer: parseRdpFileTransferProgress(value["fileTransfer"]) }),
     ...(value["profileId"] === undefined ? {} : { profileId: identity(value["profileId"]) }),
     ...(value["error"] === undefined ? {} : { error: displayText(value["error"], 2048) }),
     ...(value["review"] === undefined ? {} : { review: parseCertificate(value["review"]) }) });
+}
+
+function parseTransferEvent(raw: unknown): RdpFileTransferProgressEvent {
+  const value = keys(raw, ["tabId", "attempt", "progress"]);
+  return Object.freeze({ tabId: identity(value["tabId"]), attempt: rdpInteger(value["attempt"], 1, Number.MAX_SAFE_INTEGER),
+    progress: parseRdpFileTransferProgress(value["progress"]) });
 }
 
 function parseProfile(raw: unknown): RdpProfile {

@@ -61,17 +61,17 @@ function expectFieldError(label: string, text: RegExp): void {
 describe("Remote Desktop connection form", () => {
   it("enables clipboard for a new connection and retains a saved profile's explicit choice", () => {
     mount();
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Clipboard" })).toBeChecked();
     cleanup();
     mount(profile);
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Clipboard" })).not.toBeChecked();
   });
 
   it("remembers the clipboard default immediately without saving a profile or connecting", async () => {
     const user = userEvent.setup();
     const settingsApi = installSettings();
     const view = renderWithSettings(settingsApi);
-    const clipboard = screen.getByRole("switch", { name: "Text clipboard" });
+    const clipboard = screen.getByRole("switch", { name: "Clipboard" });
     await waitFor(() => expect(clipboard).toBeEnabled());
     await user.click(clipboard);
     await waitFor(() => expect(settingsApi.updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
@@ -82,8 +82,8 @@ describe("Remote Desktop connection form", () => {
     expect(api.connect).not.toHaveBeenCalled();
     view.unmount();
     renderWithSettings(settingsApi);
-    await waitFor(() => expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeEnabled());
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Clipboard" })).toBeEnabled());
+    expect(screen.getByRole("switch", { name: "Clipboard" })).not.toBeChecked();
   });
 
   it("loads the remembered choice before enabling submissions", async () => {
@@ -91,17 +91,17 @@ describe("Remote Desktop connection form", () => {
     const settingsApi = installSettings();
     settingsApi.getApplicationSettings = vi.fn(() => new Promise<ApplicationSettingsState>((resolve) => { resolveSettings = resolve; }));
     renderWithSettings(settingsApi);
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeDisabled();
+    expect(screen.getByRole("switch", { name: "Clipboard" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
     await act(async () => { resolveSettings({ ...DEFAULT_APPLICATION_SETTINGS_STATE, rdp: { clipboard: false, transparentClipboard: false } }); });
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+    expect(screen.getByRole("switch", { name: "Clipboard" })).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
   });
 
   it("keeps a profile's clipboard choice when the remembered default differs", async () => {
     renderWithSettings(installSettings(), profile);
-    await waitFor(() => expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeEnabled());
-    expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
+    await waitFor(() => expect(screen.getByRole("switch", { name: "Clipboard" })).toBeEnabled());
+    expect(screen.getByRole("switch", { name: "Clipboard" })).not.toBeChecked();
   });
 
   it("restores the clipboard choice and shows feedback if saving the preference fails", async () => {
@@ -109,10 +109,10 @@ describe("Remote Desktop connection form", () => {
     const settingsApi = installSettings();
     settingsApi.updateApplicationSettings = vi.fn(async () => ({ ok: false as const, error: "Disk is unavailable." }));
     renderWithSettings(settingsApi);
-    const clipboard = screen.getByRole("switch", { name: "Text clipboard" });
+    const clipboard = screen.getByRole("switch", { name: "Clipboard" });
     await waitFor(() => expect(clipboard).toBeEnabled());
     await user.click(clipboard);
-    expect(await screen.findByRole("alert")).toHaveTextContent("The text clipboard preference could not be saved.");
+    expect(await screen.findByRole("alert")).toHaveTextContent("The clipboard preference could not be saved.");
     expect(clipboard).toBeChecked();
     expect(clipboard).toBeEnabled();
   });

@@ -19,7 +19,9 @@ unsupported or timed-out resize requests require an explicit GUI reconnect.
 
 The fork caps inbound static/dynamic channel message reassembly at 64 MiB,
 including compressed static fragments, before completed messages reach backend
-validation. Clipboard content has the tighter 1 MiB limit. Graphics caches and
+validation. Clipboard text has the tighter 1 MiB limit. File collections are
+limited to 64 regular files and 256 MiB total, transferred through 256 KiB host
+chunks with bounded native aggregation. Graphics caches and
 codec state retain IronRDP's independent limits; the frame/presentation limits
 are not a global process memory quota.
 
@@ -39,8 +41,16 @@ The helper limits frame dimensions and presentation credits before allocating
 or queueing output. It applies every upstream desktop update to its current
 framebuffer, coalesces presentation damage, and supports a full snapshot for a
 new viewer attachment. Key/button state is tracked for release on focus loss and
-disconnect. EOF and broken stdout cancel the session. Clipboard transfer is
-Unicode text and explicit in both directions; file/OS clipboard access is absent.
+disconnect. EOF and broken stdout cancel the session. Clipboard transfer supports
+explicit Unicode text and regular files in both directions. Main owns file
+selection, destination selection, filesystem handles and writes; native receives
+only basenames, sizes and bounded chunks. Directories and clipboard locks are
+not supported. Clipboard changes and cancellation invalidate pending transfers.
+The helper never accesses the filesystem or native OS clipboard for transfers.
+Upload progress reports unique byte ranges accepted by the RDP input queue, with
+bounded coverage tracking and throttled events. Completion does not acknowledge
+remote filesystem persistence. The pinned backend cannot observe descriptor-only
+copies of empty files; they may finish without a native progress notification.
 
 TLS certificate decisions precede CredSSP authentication. Matching saved pins
 are still checked on every certificate; hard verification errors cannot be

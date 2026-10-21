@@ -124,7 +124,7 @@
 }
 
 @layer components {
-  .toast:has(.application-update-toast, .release-download-toast) {
+  .toast:has(.application-update-toast, .release-download-toast, .rdp-transfer-toast) {
     display: grid;
     grid-template-columns: 2rem minmax(0, 1fr);
     align-items: center;

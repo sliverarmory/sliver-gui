@@ -7,6 +7,8 @@ pub const MAX_COMMAND: usize = 2 * 1024 * 1024;
 pub const MAX_HEADER: usize = 2 * 1024 * 1024;
 pub const MAX_PAYLOAD: usize = 256 * 1024;
 pub const MAX_CLIPBOARD: usize = 1024 * 1024;
+pub const MAX_CLIPBOARD_FILES: usize = 64;
+pub const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIXELS: usize = 16_000_000;
 
 #[derive(Deserialize)]
@@ -44,11 +46,42 @@ pub enum Command {
         text: String,
     },
     ClipboardRequest {},
+    #[serde(rename_all = "camelCase")]
+    ClipboardFilesOffer {
+        offer_id: String,
+        files: Vec<ClipboardFile>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClipboardFilesRequest {
+        request_id: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClipboardFileRead {
+        request_id: String,
+        clipboard_id: String,
+        index: u32,
+        offset: u64,
+        length: u32,
+    },
+    #[serde(rename_all = "camelCase")]
+    ClipboardFileResponse {
+        request_id: String,
+        data: Option<String>,
+        error: Option<bool>,
+    },
+    ClipboardFilesCancel {},
     Snapshot {},
     Ack {
         seq: u64,
     },
     Disconnect {},
+}
+
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClipboardFile {
+    pub name: String,
+    pub size: u64,
 }
 
 #[derive(Clone, Deserialize)]

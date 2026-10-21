@@ -78,6 +78,38 @@ describe("RdpWireDecoder", () => {
 });
 
 describe("parseRdpRuntimeEvent", () => {
+  it("bounds upload progress counters and rejects premature completion or binary data", () => {
+    const progress = { type: "clipboardFileUploadProgress", offerId: "offer", transferId: "upload-1", phase: "transferring",
+      transferredBytes: 3, totalBytes: 6, completedFiles: 0, totalFiles: 1 };
+    expect(parseRdpRuntimeEvent(progress, Buffer.alloc(0))).toEqual(progress);
+    for (const patch of [{ phase: "preparing" }, { phase: "completed" }, { transferredBytes: 7 }, { transferredBytes: -1 },
+      { totalBytes: 256 * 1024 * 1024 + 1 }, { totalFiles: 65 }, { completedFiles: 2 }, { transferId: "" }]) {
+      expect(() => parseRdpRuntimeEvent({ ...progress, ...patch }, Buffer.alloc(0))).toThrow();
+    }
+    expect(() => parseRdpRuntimeEvent(progress, Buffer.alloc(1))).toThrow();
+    expect(parseRdpRuntimeEvent({ ...progress, phase: "completed", transferredBytes: 6, completedFiles: 1 }, Buffer.alloc(0))).toMatchObject({ phase: "completed" });
+  });
+
+  it("decodes bounded file metadata and binary chunks without exposing pipe buffers", () => {
+    const files = Array.from({ length: 64 }, (_, index) => ({ name: `${index}-` + "a".repeat(250), size: 0 }));
+    const events: RdpRuntimeEvent[] = [];
+    const bytes = wire({ type: "clipboardFiles", requestId: "request", clipboardId: "remote", files });
+    new RdpWireDecoder().push(bytes, (event) => events.push(event));
+    expect(events).toEqual([{ type: "clipboardFiles", requestId: "request", clipboardId: "remote", files }]);
+    const payload = Buffer.from("file bytes");
+    const event = parseRdpRuntimeEvent({ type: "clipboardFileChunk", requestId: "chunk", error: false }, payload);
+    payload.fill(0);
+    expect(event).toEqual({ type: "clipboardFileChunk", requestId: "chunk", error: false, data: Buffer.from("file bytes") });
+  });
+
+  it("rejects invalid file counts, names, sizes, ranges and failed payloads", () => {
+    for (const files of [[], Array.from({ length: 65 }, () => ({ name: "a", size: 0 })), [{ name: "../escape", size: 1 }], [{ name: "large", size: 256 * 1024 * 1024 + 1 }], [{ name: "a", size: 256 * 1024 * 1024 }, { name: "b", size: 1 }]]) {
+      expect(() => parseRdpRuntimeEvent({ type: "clipboardFiles", requestId: "id", clipboardId: "remote", files }, Buffer.alloc(0))).toThrow();
+    }
+    expect(() => parseRdpRuntimeEvent({ type: "clipboardFileRequest", requestId: "id", offerId: "offer", index: 64, offset: 0, length: 1 }, Buffer.alloc(0))).toThrow();
+    expect(() => parseRdpRuntimeEvent({ type: "clipboardFileRequest", requestId: "id", offerId: "offer", index: 0, offset: 0, length: 256 * 1024 + 1 }, Buffer.alloc(0))).toThrow();
+    expect(() => parseRdpRuntimeEvent({ type: "clipboardFileChunk", requestId: "id", error: true }, Buffer.alloc(1))).toThrow();
+  });
   it("accepts explicit clipboard-ready and resize-fallback notifications", () => {
     expect(parseRdpRuntimeEvent({ type: "clipboardReady" }, Buffer.alloc(0))).toEqual({ type: "clipboardReady" });
     expect(parseRdpRuntimeEvent({ type: "resizeFallback" }, Buffer.alloc(0))).toEqual({ type: "resizeFallback" });

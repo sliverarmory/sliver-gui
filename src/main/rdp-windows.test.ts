@@ -14,14 +14,19 @@ import { RdpWindows } from "./rdp-windows.js";
 import type { RdpRuntimeEvent } from "./rdp-runtime.js";
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 import * as secureFile from "./secure-file.js";
+import type { RdpLocalClipboardFiles } from "./rdp-file-clipboard.js";
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>>(),
   listeners: new Map<string, (event: unknown, raw: unknown) => void>(),
   windows: [] as MockWindow[], runtimes: [] as MockRuntime[],
-  clipboard: { readText: vi.fn(async () => "local text"), writeText: vi.fn(async (_value: string) => undefined) },
+  clipboard: { read: vi.fn(async () => []), readText: vi.fn(async () => "local text"), writeText: vi.fn(async (_value: string) => undefined) },
   image: { createFromDataURL: vi.fn() },
+  fileClipboard: { read: vi.fn<() => Promise<RdpLocalClipboardFiles | undefined>>(async () => undefined),
+    write: vi.fn(async () => undefined), publish: vi.fn(async () => "download-signature"), dispose: vi.fn(async (): Promise<void> => undefined) },
 }));
+vi.mock("./rdp-file-clipboard.js", () => ({ readRdpClipboardFiles: mocks.fileClipboard.read,
+  createRdpClipboardStaging: vi.fn(async () => ({ write: mocks.fileClipboard.write, publish: mocks.fileClipboard.publish, dispose: mocks.fileClipboard.dispose })) }));
 interface MockWindow extends EventEmitter {
   focused: boolean; visible: boolean;
   webContents: EventEmitter & { id: number; mainFrame: { processId: number; frameToken: string; url: string; isDestroyed: () => boolean }; getURL: () => string; isDestroyed: () => boolean; send: ReturnType<typeof vi.fn>; setIgnoreMenuShortcuts: ReturnType<typeof vi.fn> };
@@ -91,6 +96,9 @@ beforeEach(async () => {
   applicationSettings = DEFAULT_APPLICATION_SETTINGS_STATE;
   mocks.clipboard.readText.mockResolvedValue("local text");
   mocks.clipboard.writeText.mockResolvedValue(undefined);
+  mocks.fileClipboard.read.mockResolvedValue(undefined);
+  mocks.fileClipboard.publish.mockResolvedValue("download-signature");
+  mocks.fileClipboard.dispose.mockResolvedValue(undefined);
   mocks.image.createFromDataURL.mockImplementation(() => ({
     getSize: () => ({ width: 1, height: 1 }), isEmpty: () => false,
     toJPEG: () => Buffer.from(RDP_PREVIEW_FIXTURE.dataUrl.split(",")[1]!, "base64"),
@@ -103,9 +111,133 @@ beforeEach(async () => {
     getApplicationSettings: () => applicationSettings, updateApplicationSettings, prepareWindow: () => undefined });
   await manager.open();
 });
-afterEach(async () => { manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
+afterEach(async () => { await manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  it("publishes compact upload progress and cancels it exactly once before reconnecting", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardFilesCapability", supported: true });
+    mocks.fileClipboard.read.mockResolvedValue({ files: [{ name: "a", size: 6 }], signature: "files", read: vi.fn(), close: vi.fn(async () => undefined) });
+    await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "send" });
+    const offer = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFilesOffer")![0];
+    const send = mocks.windows[0]!.webContents.send;
+    send.mockClear();
+    const progress = { type: "clipboardFileUploadProgress" as const, offerId: offer.offerId, transferId: "upload-1", phase: "transferring" as const,
+      transferredBytes: 3, totalBytes: 6, completedFiles: 0, totalFiles: 1 };
+    runtime.receive(progress);
+    const expected = { id: `${offer.offerId}:upload-1`, direction: "send", phase: "transferring", transferredBytes: 3, totalBytes: 6, completedFiles: 0, totalFiles: 1 };
+    expect(send).toHaveBeenCalledExactlyOnceWith(RDP_IPC.fileTransferProgress, { tabId: tab.id, attempt: tab.attempt, progress: expected });
+    expect(manager.state().tabs[0]?.fileTransfer).toEqual(expected);
+    runtime.receive({ type: "clipboardFilesError", requestId: "local-old", code: "clipboard-files-stale-request" });
+    expect(manager.state().tabs[0]?.error).toBeUndefined();
+    expect(send).toHaveBeenCalledOnce();
+    expect(mocks.handlers.has(RDP_IPC.fileTransferProgress)).toBe(false);
+    await invoke(RDP_IPC.disconnect, tab.id);
+    runtime.receive({ ...progress, phase: "completed", transferredBytes: 6, completedFiles: 1 });
+    expect(manager.state().tabs[0]?.fileTransfer?.phase).toBe("canceled");
+    expect(send.mock.calls.filter(([channel, event]) => channel === RDP_IPC.fileTransferProgress && event.progress.phase === "canceled")).toHaveLength(1);
+    await invoke(RDP_IPC.reconnect, { tabId: tab.id });
+    expect(manager.state().tabs[0]?.fileTransfer).toBeUndefined();
+  });
+
+  it("offers copied local files without exposing paths and revokes the offer on blur", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardFilesCapability", supported: true });
+    const files = { files: [{ name: "copied.txt", size: 3 }], signature: "file-signature", read: vi.fn(async () => Buffer.from("abc")), close: vi.fn(async () => undefined) };
+    mocks.fileClipboard.read.mockResolvedValue(files);
+    expect(await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "send" })).toEqual({ ok: true });
+    const offer = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFilesOffer")![0];
+    expect(offer).toEqual({ type: "clipboardFilesOffer", offerId: expect.any(String), files: [{ name: "copied.txt", size: 3 }] });
+    expect(mocks.clipboard.readText).not.toHaveBeenCalled();
+    runtime.receive({ type: "clipboardFileRequest", offerId: offer.offerId, requestId: "remote-read", index: 0, offset: 0, length: 3 });
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith({ type: "clipboardFileResponse", requestId: "remote-read", data: "YWJj" }));
+    mocks.windows[0]!.focused = false; mocks.windows[0]!.emit("blur");
+    expect(files.close).toHaveBeenCalledOnce();
+    runtime.receive({ type: "clipboardFileRequest", offerId: offer.offerId, requestId: "late-read", index: 0, offset: 0, length: 3 });
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith({ type: "clipboardFileResponse", requestId: "late-read", error: true }));
+    expect(files.read).toHaveBeenCalledOnce();
+  });
+
+  it("downloads remote files before publishing and ignores text replies during a file receive", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardFilesAvailable", available: true });
+    mocks.windows[0]!.webContents.send.mockClear();
+    const receiving = invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "receive" });
+    expect(manager.state().tabs[0]?.fileTransfer).toMatchObject({ phase: "preparing", direction: "receive", totalBytes: 0 });
+    const metadata = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFilesRequest")![0];
+    runtime.receive({ type: "clipboard", text: "unsolicited text" });
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
+    runtime.receive({ type: "clipboardFiles", requestId: metadata.requestId, clipboardId: "remote", files: [{ name: "received.txt", size: 3 }] });
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(expect.objectContaining({ type: "clipboardFileRead", length: 3 })));
+    expect(mocks.fileClipboard.publish).not.toHaveBeenCalled();
+    const read = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFileRead")![0];
+    runtime.receive({ type: "clipboardFileChunk", requestId: read.requestId, error: false, data: Buffer.from("abc") });
+    expect(await receiving).toEqual({ ok: true });
+    expect(mocks.fileClipboard.write).toHaveBeenCalledOnce();
+    expect(mocks.fileClipboard.publish).toHaveBeenCalledOnce();
+    expect(manager.state().tabs[0]?.fileTransfer).toMatchObject({ phase: "completed", transferredBytes: 3, totalBytes: 3, completedFiles: 1, totalFiles: 1 });
+    expect(mocks.windows[0]!.webContents.send.mock.calls.every(([channel]) => channel === RDP_IPC.fileTransferProgress)).toBe(true);
+    expect(mocks.fileClipboard.dispose).not.toHaveBeenCalled();
+    await manager.dispose();
+    expect(mocks.fileClipboard.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer files when clipboard file streaming was not negotiated", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    const files = { files: [{ name: "a", size: 1 }], signature: "files", read: vi.fn(), close: vi.fn(async () => undefined) };
+    mocks.fileClipboard.read.mockResolvedValue(files);
+    expect(await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "send" })).toMatchObject({ ok: false, error: "The server does not support file clipboard transfers" });
+    expect(files.close).toHaveBeenCalledOnce();
+    expect(runtime.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "clipboardFilesOffer" }));
+  });
+
+  it("synchronizes files transparently without echoing a completed remote download", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardFilesCapability", supported: true });
+    await attach(tab.id);
+    const files = { files: [{ name: "empty", size: 0 }], signature: "local-files", read: vi.fn(), close: vi.fn(async () => undefined) };
+    mocks.fileClipboard.read.mockResolvedValue(files);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send.mock.calls.filter(([command]) => command.type === "clipboardFilesOffer")).toHaveLength(1);
+    runtime.receive({ type: "clipboardFilesAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    const request = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFilesRequest")![0];
+    mocks.fileClipboard.publish.mockImplementationOnce(async () => {
+      mocks.fileClipboard.read.mockResolvedValue({ ...files, signature: "download-signature" });
+      return "download-signature";
+    });
+    runtime.receive({ type: "clipboardFiles", requestId: request.requestId, clipboardId: "new-remote-copy", files: [{ name: "remote-empty", size: 0 }] });
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.fileClipboard.publish).toHaveBeenCalledOnce();
+    expect(runtime.send.mock.calls.filter(([command]) => command.type === "clipboardFilesOffer")).toHaveLength(1);
+    expect(runtime.send.mock.calls.filter(([command]) => command.type === "clipboardFilesRequest")).toHaveLength(1);
+  });
+
+  it("waits for an interrupted download to remove its staging during shutdown", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardFilesAvailable", available: true });
+    const receiving = invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "receive" });
+    const metadata = runtime.send.mock.calls.find(([command]) => command.type === "clipboardFilesRequest")![0];
+    runtime.receive({ type: "clipboardFiles", requestId: metadata.requestId, clipboardId: "remote", files: [{ name: "unfinished", size: 3 }] });
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledWith(expect.objectContaining({ type: "clipboardFileRead" })));
+    let cleanup!: () => void;
+    mocks.fileClipboard.dispose.mockImplementationOnce(() => new Promise<void>((resolve) => { cleanup = resolve; }));
+    const finished = vi.fn(), disposing = manager.dispose().then(finished);
+    expect(await receiving).toMatchObject({ ok: false });
+    await vi.waitFor(() => expect(mocks.fileClipboard.dispose).toHaveBeenCalledOnce());
+    expect(finished).not.toHaveBeenCalled();
+    cleanup(); await disposing;
+    expect(finished).toHaveBeenCalledOnce();
+    expect(mocks.fileClipboard.publish).not.toHaveBeenCalled();
+  });
   it("saves a frame only to its owning profile and accepts the final frame after disconnect", async () => {
     const profile = await store.saveProfile({ ...connection, scaleMode: "fit" });
     const tab = (await invoke(RDP_IPC.connect, { ...connection, profileId: profile.id })).value as RdpTab;
@@ -586,7 +718,7 @@ describe("RDP main authority", () => {
     runtime.receive(frame(1));
     expect(port.postMessage).toHaveBeenLastCalledWith(expect.objectContaining({ type: "frame", seq: 1 }));
     const unavailable = await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "receive" });
-    expect(unavailable).toMatchObject({ ok: false, error: "The remote clipboard does not contain text" });
+    expect(unavailable).toMatchObject({ ok: false, error: "The remote clipboard does not contain text or files" });
     runtime.receive({ type: "clipboardAvailable", available: true });
     const retry = invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "receive" });
     runtime.receive({ type: "clipboard", text: "fresh selection" });
@@ -819,6 +951,32 @@ describe("RDP main authority", () => {
     port.emit("close");
     expect(window.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(false);
     expect((await invoke(RDP_IPC.setInputCapture, { tabId: tab.id, captured: true })).ok).toBe(false);
+  });
+
+  it("keeps a newly acknowledged capture when an older port key release arrives late", async () => {
+    const tab = await connect(), runtime = mocks.runtimes[0]!, port = await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" });
+    expect((await invoke(RDP_IPC.setInputCapture, { tabId: tab.id, captured: true })).ok).toBe(true);
+    // Renderer release sends both an IPC capture change and a MessagePort key
+    // release. Those channels can deliver the key release after recapture ACK.
+    expect((await invoke(RDP_IPC.setInputCapture, { tabId: tab.id, captured: false })).ok).toBe(true);
+    expect((await invoke(RDP_IPC.setInputCapture, { tabId: tab.id, captured: true })).ok).toBe(true);
+    const input = { type: "input", events: [
+      { kind: "key", scanCode: 0x5b, extended: true, down: true },
+      { kind: "key", scanCode: 0x13, extended: false, down: true },
+      { kind: "key", scanCode: 0x13, extended: false, down: false },
+      { kind: "key", scanCode: 0x5b, extended: true, down: false },
+    ] };
+    runtime.send.mockClear();
+    port.emit("message", { data: { type: "releaseAll" } });
+    port.emit("message", { data: input });
+    expect(runtime.send.mock.calls).toEqual([[{ type: "releaseAll" }], [input]]);
+    expect(mocks.windows[0]!.webContents.setIgnoreMenuShortcuts).toHaveBeenLastCalledWith(true);
+    // The authoritative capture release still blocks all subsequent input.
+    await invoke(RDP_IPC.setInputCapture, { tabId: tab.id, captured: false });
+    runtime.send.mockClear();
+    port.emit("message", { data: input });
+    expect(runtime.send).not.toHaveBeenCalled();
   });
 
   it("cancels connection preparation before launching a helper when the tab closes", async () => {

@@ -15,7 +15,7 @@ renderer. See the [architecture and acceptance status](rdp-client-design.md).
    to enter width and height. Invalid fields show an inline explanation; correct
    them before connecting or saving a profile. Saving a profile does not require
    a password.
-3. Choose whether to remember the password. **Text clipboard** is enabled by
+3. Choose whether to remember the password. **Clipboard** is enabled by
    default. Changing it saves your preference immediately for new connections,
    including when you cancel the dialog; saved profiles retain their own choice.
    **Save profile** stores connection preferences separately from the password.
@@ -48,23 +48,35 @@ Certificate review expires after 60 seconds; cancel or review again after reconn
   remembered resolution. This fallback preserves the resolution only, not Windows
   text/icon scaling. The client does not reconnect automatically. The picture
   keeps its actual server geometry until it changes.
-- The toolbar's upload and download icons have **Send clipboard text** and
-  **Receive clipboard text** tooltips. Send copies local text into the remote
-  clipboard; paste it remotely with Ctrl+V. Copy text remotely with Ctrl+C, then
-  select Receive to replace the local clipboard. These actions need the focused
-  active RDP window and a connection started with Text clipboard enabled. Receive
-  becomes available only when the server advertises text. Limit: 1 MiB UTF-8.
-  After sending local text, copy remotely again to enable Receive. A clipboard
-  failure leaves the desktop connected; copy the text again before retrying.
+- The toolbar's upload and download icons have **Send clipboard** and
+  **Receive clipboard** tooltips. Copy text or files locally, select Send, then
+  paste remotely with Ctrl+V. To copy from the remote desktop, copy text or files
+  there with Ctrl+C and select Receive; after it completes, paste into a local
+  application or folder. These actions need the focused active RDP window and a
+  connection started with Clipboard enabled. Receive becomes available when the
+  server advertises text or files. Files take priority when both are available.
+  Text is limited to 1 MiB UTF-8. File transfers support up to 64 regular files
+  totaling at most 256 MiB; folders and symbolic links are not supported.
+  Received files are downloaded into private temporary storage before the local
+  clipboard is updated. Paste them locally before quitting the app; quitting
+  removes the staged files. Across received clipboard copies, the app retains up
+  to 1 GiB or 1,024 files. Another receive fails if it would exceed either total;
+  paste the files you need locally, then quit and reopen the app to clear storage.
+  After sending local content, copy remotely again to enable Receive. A clipboard
+  failure leaves the desktop connected; copy the content again before retrying.
 - **Configuration → Transparent clipboard** automatically sends changed local
-  text and receives copied remote text while the RDP window is focused and its
-  active connection has Text clipboard enabled. It is disabled by default, and
+  text or files and receives copied remote content while the RDP window is focused
+  and its active connection has Clipboard enabled. It is disabled by default, and
   changing it saves the preference for future RDP windows. Turning it off returns
-  clipboard transfer to the manual toolbar buttons. The same text-only size limit
-  applies; clipboard contents are never persisted.
+  clipboard transfer to the manual toolbar buttons. The same transfer limits apply.
+  Clipboard contents are not stored in settings.
 - Clipboard confirmations, action failures and active-session warnings appear as
   toast notifications without moving or resizing the remote desktop. Repeated
   updates for the same session warning do not show it again after dismissal.
+  File transfers show a progress bar with bytes and file counts, followed by their
+  completion, failure or cancellation in the same toast. Sending files starts
+  transferring when the remote desktop requests them after Paste. Dismissing a
+  progress toast leaves the transfer running and keeps that notification dismissed.
 - **Disconnect** ends RDP without logging the Windows account off. **Reconnect**
   starts a new attempt and asks for a password when none was remembered. Closing
   a tab disconnects it; up to four tabs may be open, including disconnected tabs.
@@ -102,7 +114,7 @@ Linux `basic_text`/unknown backends. Existing credentials are never filled back 
 the form. A blank password on an existing saved profile requests its stored
 credential; a locked/unavailable backend asks for fresh input.
 
-The default text clipboard and transparent clipboard preferences use the existing
+The default clipboard and transparent clipboard preferences use the existing
 application settings store, `gui/application-settings.json`, under the configured
 Sliver GUI client root.
 Clipboard contents are never saved in this file.
@@ -110,7 +122,7 @@ Clipboard contents are never saved in this file.
 The RDP-specific private file is `gui/rdp.json` under the configured Sliver GUI
 client root. It contains profile metadata, endpoint pins and encrypted credential
 envelopes, never plaintext passwords. Failed persistence does not replace/delete
-previously stored credentials. Clipboard text and desktop contents are not saved
+previously stored credentials. Clipboard data and desktop images are not saved
 in that settings file. Preview images are stored separately in private
 `gui/rdp.json.preview-*.json` files alongside it. These local thumbnails may contain
 visible desktop information and are not encrypted with the password vault.
@@ -122,11 +134,16 @@ not edit this file while the application is running.
 ## Current limits
 
 The client implements one monitor, password NLA, cursor/mouse/keyboard/Unicode,
-local scaling, fullscreen, server resize, manual text clipboard transfer and
-optional automatic text clipboard synchronization. Display
+local scaling, fullscreen, server resize, manual text/file clipboard transfer and
+optional automatic clipboard synchronization. Display
 requests are 200–8192 pixels per axis with at most 16,777,216 pixels total.
-File clipboard, audio/microphone, multiple monitors, RemoteApp, device/drive/printer
-redirection, smart cards, UDP, `.rdp` import and advanced multimedia codecs are
+File clipboard requires server file-transfer support and compatible local file
+clipboard formats. Live GOAD tests verify macOS native file clipboard transfers
+to Windows Explorer and back, including byte hashes and progress toasts; see
+[file-transfer acceptance](rdp-file-transfer-acceptance.md). Windows and Linux
+local clients and pasting received files through Finder's UI remain unverified.
+Audio/microphone, multiple monitors, RemoteApp,
+device/drive/printer redirection, smart cards, UDP, `.rdp` import and advanced multimedia codecs are
 outside the current feature set. Supplied networking/Sliver routes require a future
 typed native transport integration; the current client always uses direct TCP.
 
@@ -209,6 +226,30 @@ These ignored screenshots may contain remote desktop information. Keep them with
 private test evidence rather than committing them. The result file must come from
 a terminal successful run and be paired with GUI/helper revisions and exact
 client/server versions; its existence from an older run is not current evidence.
+
+For file interoperability, the SSH alias must reach the same disposable Windows
+host, with public-key access and permission to create a temporary test directory
+and a temporary scheduled task in the RDP user's existing interactive session.
+The file scenario stages its helper over SSH, pastes an 8 MiB binary, Unicode-named
+text file and empty file into Windows Explorer through RDP, verifies SHA-256 over
+SSH, and receives those files through the native local clipboard. It checks byte
+progress and toast outcomes in both directions, restores the local clipboard and
+removes its test files and Explorer window.
+Filename comparisons account for macOS Unicode normalization; file contents must
+match exactly. The helper runs only in the configured account's existing active
+RDP session, and its temporary scheduled tasks are removed during cleanup.
+
+```sh
+SLIVER_RDP_E2E_CONFIG_FILE=/absolute/private/rdp-test.json \
+SLIVER_RDP_E2E_SSH_HOST=disposable-windows \
+SLIVER_RDP_FILES_E2E_ARTIFACT_PREFIX=rdp-files-disposable \
+npm run test:e2e:rdp-files-live
+```
+
+Set `SLIVER_RDP_E2E_TRANSPARENT=1` to exercise Transparent clipboard instead of
+the manual Send/Receive buttons. Choose a distinct artifact prefix per host and
+mode. Results and screenshots are written under ignored `artifacts/e2e/` paths.
+The test brings its RDP window to the foreground; keep it focused while it runs.
 
 Recorded final live-GUI result: **PASS, 2026-10-20T02:08:43.278Z**, macOS 27.0.1
 arm64, Electron 44.5.1, Windows Server 2019, fork

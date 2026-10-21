@@ -2466,7 +2466,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ghosttySettingsIpc?.dispose();
     systemIconAppearance.dispose();
     if (!shutdown.isStopping) {
-      rdpWindows?.dispose();
+      const rdpCleanup = rdpWindows?.dispose();
+      if (rdpCleanup) trackPendingCleanup(rdpCleanup);
       armoryService.dispose();
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
@@ -3305,7 +3306,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterArmoryIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
-      rdpWindows?.dispose();
+      await rdpWindows?.dispose();
       websitePreviewServer.dispose();
       unregisterIpcHandlers();
       for (const window of [...windows]) {

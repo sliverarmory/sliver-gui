@@ -114,6 +114,8 @@ pixel header. Tiles carry sequence, frame and geometry identifiers, bounds,
 | Incoming static/dynamic channel message | 64 MiB before semantic limits |
 | Input batch | 64 events |
 | Text clipboard | 1 MiB UTF-8 |
+| File clipboard | 64 regular files; 256 MiB combined; 256 KiB per chunk |
+| Retained received clipboard files | 1 GiB and 1,024 files per app lifetime |
 | Attachment grant | 15 seconds, single use |
 | Certificate review / startup | 60 seconds / 90 seconds |
 
@@ -200,24 +202,38 @@ workflow.
   live, automatic resize reconnection is disabled in the embedded engine; the
   connection stops and the requested dimensions are retained for explicit reconnect;
   the active canvas retains its existing geometry until actual frames change.
-- Text clipboard is enabled by default for new connections. Changing its switch
+- Clipboard is enabled by default for new connections. Changing its switch
   persists the new-connection preference immediately through the existing
   revisioned application settings store (`gui/application-settings.json`), even
   when the dialog is canceled. Saved profiles retain their explicit choice.
-  Text transfers through the toolbar's Send/Receive actions by default.
+  Text and files transfer through the toolbar's Send/Receive actions by default.
   **Configuration → Transparent clipboard** opts into automatic bidirectional
-  text synchronization for the focused active RDP tab with an attached viewer.
+  clipboard synchronization for the focused active RDP tab with an attached viewer.
   This preference is persisted separately and defaults to false, including for
-  existing settings. Main polls for local text changes and consumes fresh remote
-  clipboard announcements; received text is tracked to avoid sending it back.
-  Receiving waits for the
-  actual server reply and local clipboard write. A ready channel permits sending
-  before remote text exists; receiving additionally needs an advertised text
-  format. Blur/tab/attempt changes cancel a pending receive.
-  Sending local text clears remote availability until a fresh remote copy is
-  advertised. Clipboard failures reject the operation without ending RDP. The
-  helper permits one outstanding wire request and drains stale ownership replies
-  before accepting another, since CLIPRDR replies do not carry request IDs.
+  existing settings. Main polls for local clipboard changes and consumes fresh
+  remote clipboard announcements; received content is tracked to avoid sending it
+  back. Files take priority over text when both formats are available.
+  Receiving waits for the actual server reply and local clipboard write. A ready
+  channel permits sending before remote content exists; receiving additionally
+  needs an advertised text or file format. Blur/tab/attempt changes cancel a
+  pending receive. Sending local content clears remote availability until a fresh
+  remote copy is advertised. Clipboard failures reject the operation without
+  ending RDP. For text, the helper permits one outstanding wire request and drains
+  stale ownership replies before accepting another, since CLIPRDR format-data
+  replies do not carry request IDs.
+- File clipboard uses CLIPRDR file descriptors and bounded file-content requests.
+  Main owns local file access and temporary storage; paths and file bytes never
+  enter the renderer. Only regular files are supported, with at most 64 files and
+  256 MiB combined, transferred in chunks of at most 256 KiB. Folders and symbolic
+  links are rejected. Received files are staged in a private temporary directory
+  before native local file clipboard formats are written; staging lasts until
+  the app quits so files remain available for local paste. Completed staging is
+  bounded to 1 GiB and 1,024 files across copies; another receive fails before
+  publication if it would exceed either total. App shutdown awaits cleanup of
+  staged files and in-flight transfers. File clipboard does
+  not enable drive redirection. Native file-manager interoperability on macOS,
+  Windows and Linux and live Windows file round-trips remain acceptance work;
+  previous Unicode text clipboard evidence does not establish file transfer.
 
 ## Platforms, packaging and evidence
 
@@ -292,11 +308,11 @@ statement that every milestone was unimplemented no longer applies.
 | --- | --- | --- |
 | R0: architecture proof | Native helper/canvas path, strict TLS/NLA, fork hooks, clipboard split and bounded WASM codec comparison implemented; native selected | Broader codec/reset coverage, complete IPC-to-canvas and memory measurements on each target |
 | R1: standalone vertical slice | Offline File menu/window, direct form, trust review, explicit disconnect and isolated bridge implemented | Bad-credential/cancel/startup-failure smoke on installed packages |
-| R2: integrated client | Profiles, credential choices, tabs/rename, theme, fit/fullscreen/resize, input and explicit text clipboard implemented | Local/domain account policies; cross-platform modifiers/IME/AltGr/high-DPI; multi-tab isolation; pin-management and persisted scale UX follow-ups |
+| R2: integrated client | Profiles, credential choices, tabs/rename, theme, fit/fullscreen/resize, input and manual/automatic text and file clipboard implemented | File clipboard live round-trips and native file-manager interoperability; local/domain account policies; cross-platform modifiers/IME/AltGr/high-DPI; multi-tab isolation; pin-management and persisted scale UX follow-ups |
 | R3: lifecycle/performance | Attempts/ports/credits, framebuffer snapshots, viewer recovery, helper failure isolation and explicit reconnect implemented | Sustained screen-load/idle soak, suspended/stalled viewer tests, sleep/wake and network loss; define measured latency/memory thresholds; optional retry policy remains future work |
 | R4: release matrix | Four target build/signing/provenance/content-check lanes configured; platform ADR updated | Native installed and live acceptance on all supported targets/package forms, update with an active session, exact immutable artifact/log evidence. This is the shipping gate. |
 | R5: optional WASM graphics | Codec experiment only; production extraction deferred | Extract after shared session decompression/channel processing; preserve caches/fragments/surfaces/ACKs; golden pixels, resize/reactivation and lost-worker recovery; comparative performance on every target |
-| R6: additional capabilities | Deferred | Typed supplied transports first as needed; separately scope Kerberos/SSO, RD Gateway, UDP, multi-monitor, audio/microphone, RemoteApp, file clipboard, drive/printer/device/smart-card redirection, `.rdp` import and advanced codecs |
+| R6: additional capabilities | Deferred | Typed supplied transports first as needed; separately scope Kerberos/SSO, RD Gateway, UDP, multi-monitor, audio/microphone, RemoteApp, drive/printer/device/smart-card redirection, `.rdp` import and advanced codecs |
 
 A future WASM worker must be local and integrity checked, own a precisely defined
 graphics state, and keep credentials/TLS/NLA/native channel authority outside the

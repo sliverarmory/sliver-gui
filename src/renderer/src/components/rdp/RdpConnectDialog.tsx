@@ -79,10 +79,10 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
       const saved = await applicationSettings.updateSettings((current) => ({
         ...current, rdp: { ...current.rdp, clipboard: selected },
       }));
-      if (!saved) throw new Error("The text clipboard preference could not be saved. Try again.");
+      if (!saved) throw new Error("The clipboard preference could not be saved. Try again.");
     } catch {
       setClipboardDraft(previous);
-      setError("The text clipboard preference could not be saved. Try again.");
+      setError("The clipboard preference could not be saved. Try again.");
     } finally { setSavingClipboard(false); }
   };
 
@@ -199,7 +199,7 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
               {fieldError("height") && <FieldError>{fieldError("height")}</FieldError>}
             </TextField>
           </div>}
-          <SwitchRow label="Text clipboard" description="Use the toolbar to send or receive clipboard text for this connection." selected={clipboard}
+          <SwitchRow label="Clipboard" description="Use the toolbar to send or receive text and files for this connection." selected={clipboard}
             onChange={(selected) => { void updateClipboard(selected); }} disabled={Boolean(pending) || preferencesPending} />
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
         </form>

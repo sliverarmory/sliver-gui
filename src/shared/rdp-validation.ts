@@ -1,4 +1,21 @@
-import { RDP_MAX_PIXELS, RDP_PREVIEW_MAX_DATA_URL_LENGTH, RDP_PREVIEW_MAX_HEIGHT, RDP_PREVIEW_MAX_WIDTH, type RdpConnectInput, type RdpConnectionOptions, type RdpPreview, type RdpSavePreviewInput, type RdpSaveProfileInput, type RdpViewerMessage } from "./rdp-contracts.js";
+import { RDP_MAX_CLIPBOARD_FILES, RDP_MAX_CLIPBOARD_FILE_BYTES, RDP_MAX_PIXELS, RDP_PREVIEW_MAX_DATA_URL_LENGTH, RDP_PREVIEW_MAX_HEIGHT, RDP_PREVIEW_MAX_WIDTH, type RdpFileTransferProgress, type RdpConnectInput, type RdpConnectionOptions, type RdpPreview, type RdpSavePreviewInput, type RdpSaveProfileInput, type RdpViewerMessage } from "./rdp-contracts.js";
+
+/** Only bounded counters and sanitized status cross into the desktop renderer. */
+export function parseRdpFileTransferProgress(raw: unknown): RdpFileTransferProgress {
+  const value = rdpRecord(raw);
+  if (Object.keys(value).some((key) => !["id", "direction", "phase", "transferredBytes", "totalBytes", "completedFiles", "totalFiles", "error"].includes(key))) throw new Error("Unexpected RDP transfer field");
+  const id = rdpString(value["id"], 256), direction = value["direction"], phase = value["phase"];
+  if (direction !== "send" && direction !== "receive") throw new Error("Invalid RDP transfer direction");
+  if (phase !== "preparing" && phase !== "transferring" && phase !== "completed" && phase !== "failed" && phase !== "canceled") throw new Error("Invalid RDP transfer phase");
+  const totalBytes = rdpInteger(value["totalBytes"], 0, RDP_MAX_CLIPBOARD_FILE_BYTES);
+  const transferredBytes = rdpInteger(value["transferredBytes"], 0, totalBytes);
+  const totalFiles = rdpInteger(value["totalFiles"], 0, RDP_MAX_CLIPBOARD_FILES);
+  const completedFiles = rdpInteger(value["completedFiles"], 0, totalFiles);
+  if ((phase === "transferring" || phase === "completed") && totalFiles === 0) throw new Error("Invalid RDP transfer file count");
+  if (phase === "completed" && (transferredBytes !== totalBytes || completedFiles !== totalFiles)) throw new Error("Incomplete RDP file transfer");
+  return Object.freeze({ id, direction, phase, totalBytes, transferredBytes, totalFiles, completedFiles,
+    ...(value["error"] === undefined ? {} : { error: rdpString(value["error"], 512) }) });
+}
 
 /** Bound JPEG dimensions before the native decoder or renderer sees the image. */
 export function rdpPreviewDimensions(value: unknown): { dataUrl: string; width: number; height: number } {

@@ -7,6 +7,25 @@ export const RDP_MAX_PAYLOAD_BYTES = 256 * 1024;
 export const RDP_MAX_DISPLAY_CREDIT_BYTES = 8 * 1024 * 1024;
 export const RDP_MAX_PIXELS = 16_777_216;
 export const RDP_MAX_CLIPBOARD_BYTES = 1024 * 1024;
+export const RDP_MAX_CLIPBOARD_FILES = 64;
+export const RDP_MAX_CLIPBOARD_FILE_BYTES = 256 * 1024 * 1024;
+export const RDP_MAX_CLIPBOARD_FILE_CHUNK_BYTES = 256 * 1024;
+export interface RdpClipboardFile { readonly name: string; readonly size: number }
+export interface RdpFileTransferProgress {
+  readonly id: string;
+  readonly direction: "send" | "receive";
+  readonly phase: "preparing" | "transferring" | "completed" | "failed" | "canceled";
+  readonly transferredBytes: number;
+  readonly totalBytes: number;
+  readonly completedFiles: number;
+  readonly totalFiles: number;
+  readonly error?: string;
+}
+export interface RdpFileTransferProgressEvent {
+  readonly tabId: string;
+  readonly attempt: number;
+  readonly progress: RdpFileTransferProgress;
+}
 export const RDP_MAX_CONTROL_BYTES = 2 * 1024 * 1024;
 export const RDP_PREVIEW_MAX_WIDTH = 480;
 export const RDP_PREVIEW_MAX_HEIGHT = 300;
@@ -16,6 +35,7 @@ export const RDP_PORT_MESSAGE = "sliver:rdp:stream";
 export const RDP_IPC = Object.freeze({
   getState: "sliver:rdp:state:get",
   stateChanged: "sliver:rdp:state:changed",
+  fileTransferProgress: "sliver:rdp:file-transfer:progress",
   connect: "sliver:rdp:connect",
   reconnect: "sliver:rdp:reconnect",
   disconnect: "sliver:rdp:disconnect",
@@ -111,6 +131,9 @@ export interface RdpTab extends RdpConnectionOptions {
   readonly review?: RdpCertificateReview;
   readonly clipboardReady: boolean;
   readonly clipboardAvailable: boolean;
+  readonly clipboardFilesAvailable?: boolean;
+  readonly clipboardFilesSupported?: boolean;
+  readonly fileTransfer?: RdpFileTransferProgress;
 }
 
 export interface RdpWindowState {
@@ -198,5 +221,6 @@ export interface RdpWindowAPI {
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   updateApplicationSettings(input: ApplicationSettingsUpdateInput): Promise<OperationResult<ApplicationSettingsState>>;
   onStateChanged(listener: (state: RdpWindowState) => void): () => void;
+  onFileTransferProgress(listener: (event: RdpFileTransferProgressEvent) => void): () => void;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;
 }

@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_PAYLOAD_BYTES, RDP_PROTOCOL_VERSION, type RdpCursor, type RdpFrame, type RdpSessionPhase } from "../shared/rdp-contracts.js";
-import { rdpBoolean, rdpDimensions, rdpInteger, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CLIPBOARD_FILES, RDP_MAX_CLIPBOARD_FILE_BYTES, RDP_MAX_CLIPBOARD_FILE_CHUNK_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_PAYLOAD_BYTES, RDP_PROTOCOL_VERSION, type RdpClipboardFile, type RdpCursor, type RdpFrame, type RdpSessionPhase } from "../shared/rdp-contracts.js";
+import { parseRdpFileTransferProgress, rdpBoolean, rdpDimensions, rdpInteger, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 
 export type RdpRuntimeEvent =
   | Omit<RdpFrame, "data"> & { data: ArrayBuffer }
@@ -10,8 +10,18 @@ export type RdpRuntimeEvent =
   | { type: "certificate" | "peerCertificate"; requestId?: string; endpoint: string; fingerprint: string; certificateDer: string; validationKind: string; canOverride: boolean }
   | { type: "clipboard"; text: string }
   | { type: "clipboardAvailable"; available: boolean }
+  | RdpFileRuntimeEvent
   | { type: "clipboardReady" | "resizeFallback" }
   | { type: "error" | "terminated"; code: string };
+
+export type RdpFileRuntimeEvent =
+  | { type: "clipboardFilesAvailable"; available: boolean }
+  | { type: "clipboardFilesCapability"; supported: boolean }
+  | { type: "clipboardFiles"; requestId: string; clipboardId: string; files: RdpClipboardFile[] }
+  | { type: "clipboardFileRequest"; requestId: string; offerId: string; index: number; offset: number; length: number }
+  | { type: "clipboardFileChunk"; requestId: string; error: boolean; data: Buffer }
+  | { type: "clipboardFileUploadProgress"; offerId: string; transferId: string; phase: "transferring" | "completed" | "failed" | "canceled"; transferredBytes: number; totalBytes: number; completedFiles: number; totalFiles: number }
+  | { type: "clipboardFilesError"; requestId?: string; code: string };
 
 const MAX_HEADER = 16 * 1024;
 
@@ -36,7 +46,7 @@ export class RdpWireDecoder {
         const header: unknown = JSON.parse(this.#pending.subarray(8, 8 + headerLength).toString("utf8"));
         const payload = this.#pending.subarray(8 + headerLength, length);
         const event = parseRdpRuntimeEvent(header, payload);
-        if (headerLength > MAX_HEADER && event.type !== "clipboard") throw new Error("Oversized RDP runtime header");
+        if (headerLength > MAX_HEADER && event.type !== "clipboard" && !(event.type === "clipboardFiles" && headerLength <= 128 * 1024)) throw new Error("Oversized RDP runtime header");
         this.#pending = this.#pending.subarray(length);
         receive(event);
       }
@@ -48,7 +58,7 @@ export class RdpWireDecoder {
 export function parseRdpRuntimeEvent(raw: unknown, payload: Buffer): RdpRuntimeEvent {
   const item = rdpRecord(raw);
   const type = item["type"];
-  if (type !== "frame" && type !== "cursor" && payload.length) throw new Error("Unexpected RDP binary payload");
+  if (type !== "frame" && type !== "cursor" && type !== "clipboardFileChunk" && payload.length) throw new Error("Unexpected RDP binary payload");
   switch (type) {
     case "ready":
       if (item["protocol"] !== RDP_PROTOCOL_VERSION) throw new Error("Incompatible RDP runtime protocol");
@@ -88,6 +98,37 @@ export function parseRdpRuntimeEvent(raw: unknown, payload: Buffer): RdpRuntimeE
       return { type, text: item["text"] };
     }
     case "clipboardAvailable": return { type, available: rdpBoolean(item["available"]) };
+    case "clipboardFilesAvailable": return { type, available: rdpBoolean(item["available"]) };
+    case "clipboardFilesCapability": return { type, supported: rdpBoolean(item["supported"]) };
+    case "clipboardFiles": {
+      const files = item["files"];
+      if (!Array.isArray(files) || !files.length || files.length > RDP_MAX_CLIPBOARD_FILES) throw new Error("Invalid RDP clipboard file list");
+      let total = 0;
+      const parsed = files.map((rawFile) => {
+        const file = rdpRecord(rawFile), name = rdpString(file["name"], 255), size = rdpInteger(file["size"], 0, RDP_MAX_CLIPBOARD_FILE_BYTES);
+        total += size;
+        if (/[\\/\x00-\x1f]/u.test(name) || name === "." || name === ".." || total > RDP_MAX_CLIPBOARD_FILE_BYTES) throw new Error("Invalid RDP clipboard file");
+        return { name, size };
+      });
+      return { type, requestId: rdpString(item["requestId"], 80), clipboardId: rdpString(item["clipboardId"], 80), files: parsed };
+    }
+    case "clipboardFileRequest": return { type, requestId: rdpString(item["requestId"], 80), offerId: rdpString(item["offerId"], 80),
+      index: rdpInteger(item["index"], 0, RDP_MAX_CLIPBOARD_FILES - 1), offset: rdpInteger(item["offset"], 0, RDP_MAX_CLIPBOARD_FILE_BYTES), length: rdpInteger(item["length"], 0, RDP_MAX_CLIPBOARD_FILE_CHUNK_BYTES) };
+    case "clipboardFileChunk": {
+      const error = rdpBoolean(item["error"]);
+      if (payload.length > RDP_MAX_CLIPBOARD_FILE_CHUNK_BYTES || (error && payload.length)) throw new Error("Invalid RDP file chunk");
+      return { type, requestId: rdpString(item["requestId"], 80), error, data: Buffer.from(payload) };
+    }
+    case "clipboardFileUploadProgress": {
+      const phase = item["phase"];
+      if (phase !== "transferring" && phase !== "completed" && phase !== "failed" && phase !== "canceled") throw new Error("Invalid RDP upload phase");
+      const transferId = rdpString(item["transferId"], 80);
+      const progress = parseRdpFileTransferProgress({ id: transferId, direction: "send", phase, transferredBytes: item["transferredBytes"],
+        totalBytes: item["totalBytes"], completedFiles: item["completedFiles"], totalFiles: item["totalFiles"] });
+      return { type, offerId: rdpString(item["offerId"], 80), transferId, phase, transferredBytes: progress.transferredBytes,
+        totalBytes: progress.totalBytes, completedFiles: progress.completedFiles, totalFiles: progress.totalFiles };
+    }
+    case "clipboardFilesError": return { type, code: rdpString(item["code"], 120), ...(item["requestId"] === undefined ? {} : { requestId: rdpString(item["requestId"], 80) }) };
     case "clipboardReady": case "resizeFallback": return { type };
     case "error": case "terminated": return { type, code: rdpString(item["code"], 120) };
     default: throw new Error("Unknown RDP runtime event");

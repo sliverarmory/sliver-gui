@@ -15,6 +15,7 @@ import { useApplicationSettings } from "./components/ApplicationSettingsProvider
 import { RdpConnectDialog } from "./components/rdp/RdpConnectDialog";
 import { RdpProfileGrid } from "./components/rdp/RdpProfileGrid";
 import { RdpProfilePasswordDialog } from "./components/rdp/RdpProfilePasswordDialog";
+import { RdpFileTransferToasts } from "./components/rdp/RdpFileTransferToasts";
 import { phaseLabel, RdpDesktop, type RdpDesktopHandle } from "./components/rdp/RdpDesktop";
 import "./components/rdp/rdp.css";
 
@@ -41,6 +42,7 @@ export function RdpWindowApp(): React.JSX.Element {
   const [autoResize, setAutoResize] = useState(false);
   const [highDpi, setHighDpi] = useState(false);
   const stateEvents = useRef(0);
+  const latestState = useRef(state);
   const pendingRef = useRef(false);
   const refs = useRef(new Map<string, RefObject<RdpDesktopHandle | null>>());
   const warnedTabs = useRef(new Map<string, { attempt: number; message: string }>());
@@ -48,6 +50,25 @@ export function RdpWindowApp(): React.JSX.Element {
   const reviewTab = state.tabs.find((tab) => tab.review !== undefined);
   const review = reviewTab?.review;
   const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(renameId || reconnectId || review || deleteProfile || passwordProfile);
+
+  const acceptState = useCallback((next: RdpWindowState): void => {
+    const previous = latestState.current;
+    const merged = { ...next, tabs: next.tabs.map((tab) => {
+      const current = previous.tabs.find((item) => item.id === tab.id && item.attempt === tab.attempt)?.fileTransfer;
+      const incoming = tab.fileTransfer;
+      if (!current) return tab;
+      // Compact progress can arrive while a full snapshot is being read. Keep
+      // one transfer monotonic without carrying progress into a new attempt.
+      if (!incoming || (incoming.id === current.id && (
+        current.phase === "completed" || current.phase === "failed" || current.phase === "canceled" ||
+        (current.phase === "transferring" && incoming.phase === "preparing") ||
+        incoming.transferredBytes < current.transferredBytes || incoming.completedFiles < current.completedFiles
+      ))) return { ...tab, fileTransfer: current };
+      return tab;
+    }) };
+    latestState.current = merged;
+    setState(merged);
+  }, []);
 
   const reportError = useCallback((message: string): void => {
     setError(message);
@@ -60,23 +81,31 @@ export function RdpWindowApp(): React.JSX.Element {
     try {
       const result = await api.getState();
       if (!result.ok) reportError(result.error);
-      else if (events === stateEvents.current) setState(result.value);
+      else if (events === stateEvents.current) acceptState(result.value);
     } catch { reportError("Remote Desktop state could not be refreshed."); }
-  }, [api, reportError]);
+  }, [api, reportError, acceptState]);
 
   useEffect(() => {
     if (!api) { reportError("Remote Desktop is unavailable in this window."); setLoading(false); return; }
     let mounted = true;
     let receivedEvent = false;
-    const remove = api.onStateChanged((next) => { if (mounted) { stateEvents.current += 1; receivedEvent = true; setState(next); setLoading(false); } });
+    const remove = api.onStateChanged((next) => { if (mounted) { stateEvents.current += 1; receivedEvent = true; acceptState(next); setLoading(false); } });
+    const removeProgress = api.onFileTransferProgress((event) => {
+      const current = latestState.current;
+      if (!mounted || !current.tabs.some((tab) => tab.id === event.tabId && tab.attempt === event.attempt)) return;
+      stateEvents.current += 1;
+      receivedEvent = true;
+      acceptState({ ...current, tabs: current.tabs.map((tab) => tab.id === event.tabId && tab.attempt === event.attempt
+        ? { ...tab, fileTransfer: event.progress } : tab) });
+    });
     void api.getState().then((result) => {
       if (!mounted) return;
       if (!result.ok) reportError(result.error);
-      else if (!receivedEvent) setState(result.value);
+      else if (!receivedEvent) acceptState(result.value);
       setLoading(false);
     }).catch(() => { if (mounted) { reportError("Remote Desktop could not be initialized."); setLoading(false); } });
-    return () => { mounted = false; remove(); };
-  }, [api, reportError]);
+    return () => { mounted = false; remove(); removeProgress(); };
+  }, [api, reportError, acceptState]);
 
   useEffect(() => {
     for (const [id, previous] of warnedTabs.current) {
@@ -95,7 +124,7 @@ export function RdpWindowApp(): React.JSX.Element {
     for (const id of refs.current.keys()) if (!present.has(id)) refs.current.delete(id);
   }, [activeTab, state.tabs]);
 
-  const act = useCallback(async (key: string, operation: () => Promise<OperationResult | OperationResult<unknown>>, success?: () => void): Promise<boolean> => {
+  const act = useCallback(async (key: string, operation: () => Promise<OperationResult | OperationResult<unknown>>, success?: () => void, errorHandled?: () => boolean): Promise<boolean> => {
     if (pendingRef.current) return false;
     pendingRef.current = true;
     setPending(key); setError(undefined);
@@ -105,9 +134,28 @@ export function RdpWindowApp(): React.JSX.Element {
       success?.();
       await refresh();
       return true;
-    } catch (cause) { reportError(cause instanceof Error ? cause.message : "The remote desktop action failed."); return false; }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "The remote desktop action failed.";
+      if (errorHandled?.()) setError(message); else reportError(message);
+      return false;
+    }
     finally { pendingRef.current = false; setPending(undefined); }
   }, [refresh, reportError]);
+
+  const transferClipboard = (direction: "send" | "receive"): void => {
+    if (!activeTab || !api) return;
+    const tabId = activeTab.id;
+    const previousTransfer = latestState.current.tabs.find((tab) => tab.id === tabId)?.fileTransfer?.id;
+    const receivingFiles = direction === "receive" && activeTab.clipboardFilesAvailable;
+    const hasTransferNotice = (): boolean => {
+      const progress = latestState.current.tabs.find((tab) => tab.id === tabId)?.fileTransfer;
+      return progress?.direction === direction && progress.id !== previousTransfer;
+    };
+    void act(`clipboard-${direction}`, () => api.clipboard({ tabId, direction }), () => {
+      if (direction === "send" && !hasTransferNotice()) toast.success("Clipboard ready to paste on the remote desktop.");
+      else if (!receivingFiles && !hasTransferNotice()) toast.success("Remote content copied to the clipboard.");
+    }, hasTransferNotice);
+  };
 
   const newConnection = (profile?: RdpProfile): void => {
     activeTab && refs.current.get(activeTab.id)?.current?.release();
@@ -151,6 +199,7 @@ export function RdpWindowApp(): React.JSX.Element {
     disabled={Boolean(pending) || state.tabs.length >= state.maxSessions} onConnect={openProfile} onEdit={newConnection} onDelete={setDeleteProfile} />;
 
   return <AuxiliaryWindowFrame ariaLabel="Remote Desktop" className="rdp-window">
+    <RdpFileTransferToasts tabs={state.tabs} />
     <header className="rdp-toolbar">
       <div className="mr-auto flex items-center gap-2"><FontAwesomeIcon aria-hidden icon={faDesktop} className="text-muted" /><h1 className="text-sm font-semibold">Remote Desktop</h1></div>
       <Button size="sm" isDisabled={!api || loading || state.tabs.length >= state.maxSessions} onPress={() => newConnection()}><FontAwesomeIcon aria-hidden icon={faPlus} />New connection</Button>
@@ -180,8 +229,8 @@ export function RdpWindowApp(): React.JSX.Element {
           </NativeSelect.Trigger></NativeSelect>
           <IconButton label="Send Ctrl+Alt+Delete" icon={faKey} disabled={!activeConnected} onPress={() => activeHandle()?.specialKey("ctrl-alt-delete")} />
           <IconButton label="Send Windows key" icon={faDesktop} disabled={!activeConnected} onPress={() => activeHandle()?.specialKey("windows")} />
-          <IconButton label="Send clipboard text" icon={faUpload} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-send", () => api!.clipboard({ tabId: activeTab.id, direction: "send" }), () => toast.success("Clipboard text sent to the remote desktop.")); }} />
-          <IconButton label="Receive clipboard text" icon={faDownload} disabled={!activeConnected || !activeTab.clipboardAvailable || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-receive", () => api!.clipboard({ tabId: activeTab.id, direction: "receive" }), () => toast.success("Remote text copied to the clipboard.")); }} />
+          <IconButton label="Send clipboard" icon={faUpload} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("send")} />
+          <IconButton label="Receive clipboard" icon={faDownload} disabled={!activeConnected || !(activeTab.clipboardAvailable || activeTab.clipboardFilesAvailable) || !activeTab.clipboard || Boolean(pending)} onPress={() => transferClipboard("receive")} />
           <IconButton label="Toggle fullscreen" icon={faExpand} disabled={!api} onPress={() => { void act("fullscreen", () => api!.toggleFullscreen()); }} />
           {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setError(undefined); setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
           <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
@@ -203,7 +252,7 @@ export function RdpWindowApp(): React.JSX.Element {
       onClose={() => setPasswordProfile(undefined)} onConnect={(password, persistence) => { void connectProfile(passwordProfile, password, persistence); }} />}
     <Modal.Backdrop isOpen={profilesOpen && !deleteProfile} variant="blur" onOpenChange={setProfilesOpen}><Modal.Container size="lg"><Modal.Dialog className="rdp-profiles-dialog"><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Saved Connections</Modal.Heading></Modal.Header><Modal.Body className="max-h-[65vh] overflow-y-auto">{profiles}</Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setProfilesOpen(false)}>Close</Button><Button isDisabled={state.tabs.length >= state.maxSessions} onPress={() => newConnection()}>New connection</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
     <Modal.Backdrop isOpen={settingsOpen} variant="blur" onOpenChange={setSettingsOpen}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Configuration</Modal.Heading></Modal.Header><Modal.Body className="grid max-h-[65vh] gap-4 overflow-y-auto">
-      <SwitchRow label="Transparent clipboard" description="Automatically share clipboard text with the selected desktop while this window is focused. Requires Text clipboard on the connection."
+      <SwitchRow label="Transparent clipboard" description="Automatically share text and files with the selected desktop while this window is focused. Requires Clipboard on the connection."
         selected={applicationSettings?.settings.rdp.transparentClipboard ?? false} disabled={!applicationSettings?.isReady || applicationSettings.isSaving}
         onChange={(selected) => { void applicationSettings?.updateSettings((current) => ({ ...current, rdp: { ...current.rdp, transparentClipboard: selected } })); }} />
       <SwitchRow label="Resize desktop with window" description="Request a desktop size matching this window. Some servers require reconnecting to change their size." selected={autoResize} disabled={!activeTab} onChange={setAutoResize} />

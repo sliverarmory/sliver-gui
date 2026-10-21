@@ -2,9 +2,11 @@ import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypt
 import { BrowserWindow, clipboard, ipcMain, nativeTheme, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
 import { parseApplicationSettingsUpdateInput, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
-import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
+import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpFileTransferProgress, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
 import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpSavePreview, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import { normalizeRdpPreview } from "./rdp-preview.js";
+import { readRdpClipboardFiles, type RdpLocalClipboardFiles, type RdpClipboardStaging } from "./rdp-file-clipboard.js";
+import { RdpFileTransfer } from "./rdp-file-transfer.js";
 import { RdpRuntime, type RdpRuntimeEvent } from "./rdp-runtime.js";
 import { RdpStore } from "./rdp-store.js";
 import { isSameRendererDocument } from "./security.js";
@@ -23,6 +25,8 @@ interface RdpWindowsOptions {
 }
 interface Session {
   tab: RdpTab;
+  files?: RdpFileTransfer;
+  localFiles?: boolean;
   runtime?: RdpRuntime;
   port?: MessagePortMain;
   captured: boolean;
@@ -35,12 +39,12 @@ interface Session {
   lastResize?: { width: number; height: number; scaleFactor: number };
   clipboardSync: { generation: number; remoteRevision: number; receivedRevision: number; localSignature?: string; busy: boolean; draining?: boolean };
   pendingClipboard?: { attempt: number; expires: number; timer: ReturnType<typeof setTimeout>; resolve: () => void; reject: (error: Error) => void;
-    automatic: boolean; localSignature?: string; remoteRevision: number; receiving?: boolean };
+    automatic: boolean; localSignature?: string; remoteRevision: number; receiving?: boolean; files?: boolean };
   certificate?: { requestId: string; fingerprint: string; timer: ReturnType<typeof setTimeout> };
   connectTimer?: ReturnType<typeof setTimeout>;
 }
 interface AttachmentTicket extends RdpAttachment { expires: number; frameToken: string; contentsId: number }
-const channels = Object.values(RDP_IPC).filter((channel) => channel !== RDP_IPC.stateChanged && channel !== RDP_IPC.applicationSettingsChanged && channel !== RDP_IPC.openStream);
+const channels = Object.values(RDP_IPC).filter((channel) => channel !== RDP_IPC.stateChanged && channel !== RDP_IPC.fileTransferProgress && channel !== RDP_IPC.applicationSettingsChanged && channel !== RDP_IPC.openStream);
 const overridableCertificateReasons = new Set(["unknownIssuer", "expired", "notValidYet", "nameMismatch", "pinMismatch"]);
 const certificateReasons: Record<string, string> = {
   unknownIssuer: "The server certificate is self-signed or its issuer is not trusted.",
@@ -62,6 +66,11 @@ export class RdpWindows {
   readonly #options: RdpWindowsOptions;
   readonly #sessions = new Map<string, Session>();
   readonly #tickets = new Map<string, AttachmentTicket>();
+  readonly #stagedFiles = new Set<RdpClipboardStaging>();
+  readonly #fileDownloads = new Set<Promise<void>>();
+  #stagedBytes = 0;
+  #stagedCount = 0;
+  #cleanup: Promise<void> | undefined;
   #window: BrowserWindow | undefined;
   #activeTabId: string | undefined;
   #disposed = false;
@@ -195,12 +204,16 @@ export class RdpWindows {
         if (!session.tab.clipboard || !session.tab.clipboardReady) throw new Error("Clipboard is not available for this connection");
         if (input["direction"] === "send") {
           const attempt = session.tab.attempt;
-          const text = await clipboard.readText();
-          this.#requireSender(event); this.#requireActive(session);
-          if (session.tab.attempt !== attempt) throw new Error("RDP connection changed");
-          this.#sendClipboard(session, text);
+          let files = await readRdpClipboardFiles();
+          try {
+            const text = files ? undefined : await clipboard.readText();
+            this.#requireSender(event); this.#requireActive(session);
+            if (session.tab.attempt !== attempt) throw new Error("RDP connection changed");
+            if (files) { this.#sendFiles(session, files); files = undefined; }
+            else this.#sendClipboard(session, text!);
+          } finally { await files?.close(); }
         } else if (input["direction"] === "receive") {
-          if (!session.tab.clipboardAvailable) throw new Error("The remote clipboard does not contain text");
+          if (!session.tab.clipboardAvailable && !session.tab.clipboardFilesAvailable) throw new Error("The remote clipboard does not contain text or files");
           if (session.pendingClipboard || session.clipboardSync.draining) throw new Error("A clipboard request is already pending");
           await this.#requestClipboard(session, false);
         } else throw new Error("Invalid clipboard direction");
@@ -229,6 +242,17 @@ export class RdpWindows {
         ...(profileId === undefined ? {} : { profileId }), state: "disconnected", clipboardReady: false, clipboardAvailable: false }, captured: false, outstanding: new Map(), displayBytes: 0, lastSeq: 0,
         cursor: { shapeDirty: false, positionDirty: false, sequence: 0 },
         clipboardSync: { generation: 0, remoteRevision: 0, receivedRevision: 0, busy: false } };
+      session.files = new RdpFileTransfer((command) => session.runtime?.send(command), () => {
+        this.#requireActive(session);
+        if (this.#disposed || !session.runtime || !session.tab.clipboard || this.#sessions.get(id) !== session) throw new Error("Clipboard connection expired");
+      }, (staging) => {
+        this.#stagedFiles.add(staging);
+      }, (files) => {
+        const bytes = files.reduce((total, file) => total + file.size, 0);
+        if (this.#stagedBytes + bytes > 1024 * 1024 * 1024 || this.#stagedCount + files.length > 1024) throw new Error("Clipboard file storage is full (1 GiB or 1024 files). Restart the app after pasting your downloaded files.");
+        this.#stagedBytes += bytes; this.#stagedCount += files.length;
+        return () => { this.#stagedBytes -= bytes; this.#stagedCount -= files.length; };
+      }, (progress) => this.#publishFileTransfer(session, progress));
       if (input.password !== undefined) await this.#options.store.saveCredential(profileId ?? id, session.tab, input.password, input.persistence);
       this.#requireSender(event);
       this.#sessions.set(id, session); this.#activeTabId = id;
@@ -255,8 +279,8 @@ export class RdpWindows {
     delete session.lastResize;
     session.cursor = { shapeDirty: false, positionDirty: false, sequence: 0 };
     session.clipboardSync = { generation: session.clipboardSync.generation + 1, remoteRevision: 0, receivedRevision: 0, busy: false };
-    const { review: _review, error: _error, ...previous } = session.tab;
-    session.tab = { ...previous, ...session.reconnectSize, attempt: previous.attempt + 1, state: "connecting", clipboardReady: false, clipboardAvailable: false };
+    const { review: _review, error: _error, fileTransfer: _fileTransfer, ...previous } = session.tab;
+    session.tab = { ...previous, ...session.reconnectSize, attempt: previous.attempt + 1, state: "connecting", clipboardReady: false, clipboardAvailable: false, clipboardFilesAvailable: false, clipboardFilesSupported: false };
     this.#publish();
     const attempt = session.tab.attempt;
     try {
@@ -347,10 +371,31 @@ export class RdpWindows {
         if (message.available) session.clipboardSync.remoteRevision++;
         if (session.tab.clipboardAvailable === message.available) return;
         session.tab = { ...session.tab, clipboardAvailable: message.available }; this.#publish(); return;
+      case "clipboardFilesCapability":
+        session.tab = { ...session.tab, clipboardFilesSupported: message.supported }; this.#publish(); return;
+      case "clipboardFilesAvailable":
+        session.files?.receive(message);
+        if (message.available) session.clipboardSync.remoteRevision++;
+        session.tab = { ...session.tab, clipboardFilesAvailable: message.available }; this.#publish(); return;
+      case "clipboardFilesError": {
+        const previous = session.tab.fileTransfer;
+        const offerFailed = session.files?.ownsOffer(message.requestId);
+        session.files?.receive(message);
+        if (offerFailed && session.localFiles && !session.pendingClipboard?.files) {
+          delete session.localFiles;
+          if (session.tab.fileTransfer === previous || session.tab.fileTransfer?.phase !== "failed") {
+            session.tab = { ...session.tab, error: "The remote desktop could not accept the copied files. Copy the files again and retry Send." };
+            this.#publish();
+          }
+        }
+        return;
+      }
+      case "clipboardFiles": case "clipboardFileRequest": case "clipboardFileChunk": case "clipboardFileUploadProgress":
+        session.files?.receive(message); return;
       case "clipboard": {
         if (session.clipboardSync.draining) { delete session.clipboardSync.draining; return; }
         const request = session.pendingClipboard;
-        if (!request || request.receiving) return;
+        if (!request || request.receiving || request.files) return;
         request.receiving = true;
         void this.#writeClipboard(session, request, message.text);
         return;
@@ -358,6 +403,7 @@ export class RdpWindows {
       case "error": {
         const reason = Object.hasOwn(clipboardErrors, message.code) ? clipboardErrors[message.code] : undefined;
         if (reason !== undefined) {
+          if (session.pendingClipboard?.files) return;
           if (session.pendingClipboard) session.pendingClipboard.receiving = true;
           delete session.clipboardSync.draining;
           this.#cancelClipboard(session, reason);
@@ -417,7 +463,13 @@ export class RdpWindows {
           delete session.cursor.outstanding;
           this.#flushCursor(session); return;
         }
-        if (message.type === "releaseAll") { session.captured = false; if (session.tab.state === "active") session.runtime?.send(message); return; }
+        if (message.type === "releaseAll") {
+          // Capture authority travels through setInputCapture IPC. A key release
+          // on this independent port can arrive after a newer capture was granted.
+          // Keep it ordered with subsequent key events without revoking that grant.
+          if (session.tab.state === "active") session.runtime?.send(message);
+          return;
+        }
         if (message.type === "input") { this.#requireActive(session); if (!session.captured) return; }
         if (message.type === "resize") {
           this.#requireActive(session);
@@ -474,11 +526,12 @@ export class RdpWindows {
     if (!this.#window?.isFocused() || !this.#window.isVisible() || this.#activeTabId !== session.tab.id || session.tab.state !== "active") throw new Error("Focus the active RDP tab first");
   }
   #releaseInputs(): void {
-    for (const session of this.#sessions.values()) { session.captured = false; session.clipboardSync.generation++; this.#cancelClipboard(session); if (session.tab.state === "active") session.runtime?.send({ type: "releaseAll" }); }
+    for (const session of this.#sessions.values()) { session.captured = false; session.clipboardSync.generation++; this.#cancelClipboard(session); this.#cancelFiles(session); if (session.tab.state === "active") session.runtime?.send({ type: "releaseAll" }); }
     if (this.#window && !this.#window.isDestroyed()) this.#window.webContents.setIgnoreMenuShortcuts(false);
   }
   #detach(session: Session): void {
     session.captured = false; session.clipboardSync.generation++; this.#cancelClipboard(session);
+    this.#cancelFiles(session);
     if (this.#activeTabId === session.tab.id && this.#window && !this.#window.isDestroyed()) this.#window.webContents.setIgnoreMenuShortcuts(false);
     const port = session.port; delete session.port;
     if (![...this.#sessions.values()].some((item) => item.port)) { clearInterval(this.#clipboardTimer); this.#clipboardTimer = undefined; }
@@ -509,7 +562,7 @@ export class RdpWindows {
     this.#detach(session);
     delete session.clipboardSync.localSignature;
     const { review: _review, error: _error, ...tab } = session.tab;
-    session.tab = { ...tab, state: code === "disconnected" ? "disconnected" : "failed", clipboardReady: false, clipboardAvailable: false,
+    session.tab = { ...tab, state: code === "disconnected" ? "disconnected" : "failed", clipboardReady: false, clipboardAvailable: false, clipboardFilesAvailable: false, clipboardFilesSupported: false,
       ...(code === "disconnected" ? {} : { error: code.startsWith("runtime-") ? runtimeError(code) : code }) };
     this.#publish();
   }
@@ -517,10 +570,22 @@ export class RdpWindows {
     const window = this.#window;
     if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) window.webContents.send(RDP_IPC.stateChanged, this.state());
   }
+  #publishFileTransfer(session: Session, progress: RdpFileTransferProgress): void {
+    if (this.#disposed || this.#sessions.get(session.tab.id) !== session) return;
+    const terminal = progress.phase === "completed" || progress.phase === "failed" || progress.phase === "canceled";
+    if (terminal ? session.tab.fileTransfer?.id !== progress.id : session.tab.state !== "active") return;
+    session.tab = { ...session.tab, fileTransfer: progress };
+    const window = this.#window;
+    if (window && !window.isDestroyed() && !window.webContents.isDestroyed()) {
+      // Frequent byte updates must not resend saved desktop previews and profiles.
+      window.webContents.send(RDP_IPC.fileTransferProgress, { tabId: session.tab.id, attempt: session.tab.attempt, progress });
+    }
+  }
   #cancelClipboard(session: Session, reason = "Clipboard request canceled when focus changed"): void {
     const request = session.pendingClipboard; delete session.pendingClipboard;
     if (request) {
-      if (!request.receiving) {
+      if (request.files) session.files?.cancel();
+      else if (!request.receiving) {
         // CLIPRDR has no request IDs. Drain the old reply before allowing another
         // request, and retain the remote offer for when this tab is focused again.
         session.clipboardSync.draining = true;
@@ -555,23 +620,45 @@ export class RdpWindows {
   async #syncClipboard(session: Session): Promise<void> {
     const sync = session.clipboardSync, generation = sync.generation;
     sync.busy = true;
+    let files: RdpLocalClipboardFiles | undefined;
     try {
-      const text = await clipboard.readText();
+      files = await readRdpClipboardFiles();
+      const text = files ? undefined : await clipboard.readText();
       if (!this.#canSyncClipboard(session) || sync !== session.clipboardSync || generation !== sync.generation || session.pendingClipboard) return;
-      const signature = clipboardSignature(text), changed = signature !== sync.localSignature;
+      const signature = files?.signature ?? clipboardSignature(text!), changed = signature !== sync.localSignature;
       const hadLocal = sync.localSignature !== undefined;
       // Remember unsupported local text too, so it cannot starve a fresh remote
       // copy. Keep only a digest rather than retaining system clipboard content.
       sync.localSignature = signature;
       // A local copy since the last transfer takes precedence over an older
       // remote offer, including when returning from another application.
-      if (hadLocal && changed) this.#sendClipboard(session, text);
-      else if (!sync.draining && session.tab.clipboardAvailable && sync.receivedRevision !== sync.remoteRevision) {
+      const send = (): void => {
+        if (files) { this.#sendFiles(session, files); files = undefined; }
+        else this.#sendClipboard(session, text!);
+      };
+      if (hadLocal && changed) send();
+      else if (!sync.draining && (session.tab.clipboardAvailable || session.tab.clipboardFilesAvailable) && sync.receivedRevision !== sync.remoteRevision) {
         sync.receivedRevision = sync.remoteRevision;
         await this.#requestClipboard(session, true, signature);
-      } else if (changed) this.#sendClipboard(session, text);
+      } else if (changed) send();
     } catch { /* A fresh clipboard change or explicit action can retry the transfer. */ }
-    finally { sync.busy = false; }
+    finally { await files?.close(); sync.busy = false; }
+  }
+
+  #cancelFiles(session: Session): void {
+    session.files?.cancel();
+    if (session.localFiles) { delete session.localFiles; delete session.clipboardSync.localSignature; }
+  }
+
+  #sendFiles(session: Session, files: RdpLocalClipboardFiles): void {
+    if (!session.tab.clipboardFilesSupported) throw new Error("The server does not support file clipboard transfers");
+    this.#cancelClipboard(session, "The remote clipboard request was canceled because local files were sent.");
+    delete session.clipboardSync.draining;
+    session.files!.offer(files);
+    session.localFiles = true;
+    session.clipboardSync.localSignature = files.signature;
+    session.clipboardSync.generation++;
+    session.tab = { ...session.tab, clipboardAvailable: false, clipboardFilesAvailable: false }; this.#publish();
   }
 
   #sendClipboard(session: Session, text: string): void {
@@ -580,9 +667,10 @@ export class RdpWindows {
     const command = { type: "clipboardSend", text };
     if (Buffer.byteLength(JSON.stringify(command)) + 1 > RDP_MAX_CONTROL_BYTES) throw new Error("Encoded clipboard text exceeds the transfer limit");
     this.#cancelClipboard(session, "The remote clipboard request was canceled because local text was sent.");
+    this.#cancelFiles(session);
     delete session.clipboardSync.draining;
     // Local copy takes ownership until another remote format announcement.
-    if (session.tab.clipboardAvailable) { session.tab = { ...session.tab, clipboardAvailable: false }; this.#publish(); }
+    if (session.tab.clipboardAvailable || session.tab.clipboardFilesAvailable) { session.tab = { ...session.tab, clipboardAvailable: false, clipboardFilesAvailable: false }; this.#publish(); }
     session.clipboardSync.localSignature = clipboardSignature(text);
     session.clipboardSync.generation++;
     session.runtime?.send(command);
@@ -590,11 +678,44 @@ export class RdpWindows {
 
   #requestClipboard(session: Session, automatic: boolean, localSignature?: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => this.#cancelClipboard(session, "The remote clipboard request timed out"), 10_000); timer.unref();
-      session.pendingClipboard = { attempt: session.tab.attempt, expires: Date.now() + 10_000, timer, resolve, reject,
-        automatic, remoteRevision: session.clipboardSync.remoteRevision, ...(localSignature === undefined ? {} : { localSignature }) };
-      session.runtime?.send({ type: "clipboardRequest" });
+      const files = !!session.tab.clipboardFilesAvailable, timeout = files ? 10 * 60_000 : 10_000;
+      const timer = setTimeout(() => this.#cancelClipboard(session, "The remote clipboard request timed out"), timeout); timer.unref();
+      session.pendingClipboard = { attempt: session.tab.attempt, expires: Date.now() + timeout, timer, resolve, reject,
+        automatic, files, remoteRevision: session.clipboardSync.remoteRevision, ...(localSignature === undefined ? {} : { localSignature }) };
+      if (files) {
+        const download = this.#downloadClipboard(session, session.pendingClipboard);
+        this.#fileDownloads.add(download);
+        void download.finally(() => this.#fileDownloads.delete(download));
+      }
+      else session.runtime?.send({ type: "clipboardRequest" });
     });
+  }
+
+  async #localClipboardSignature(): Promise<string> {
+    const files = await readRdpClipboardFiles();
+    try { return files?.signature ?? clipboardSignature(await clipboard.readText()); }
+    finally { await files?.close(); }
+  }
+
+  async #downloadClipboard(session: Session, request: NonNullable<Session["pendingClipboard"]>): Promise<void> {
+    const sync = session.clipboardSync;
+    try {
+      const signature = await session.files!.download(async () => {
+        if (request.automatic && await this.#localClipboardSignature() !== request.localSignature) throw new Error("The local clipboard changed during the file transfer");
+        if (session.pendingClipboard !== request || session.tab.attempt !== request.attempt || request.expires < Date.now() ||
+          (request.automatic && !this.#canSyncClipboard(session))) throw new Error("Clipboard request expired");
+      });
+      if (session.pendingClipboard !== request || session.tab.attempt !== request.attempt) return;
+      sync.localSignature = signature; sync.generation++;
+      sync.receivedRevision = Math.max(sync.receivedRevision, request.remoteRevision);
+      request.resolve();
+    } catch (error) {
+      // Retry an automatic transfer after the user copies again, not every poll.
+      request.reject(error instanceof Error ? error : new Error("Clipboard file transfer failed"));
+    } finally {
+      clearTimeout(request.timer);
+      if (session.pendingClipboard === request) delete session.pendingClipboard;
+    }
   }
 
   async #writeClipboard(session: Session, request: NonNullable<Session["pendingClipboard"]>, text: string): Promise<void> {
@@ -602,7 +723,7 @@ export class RdpWindows {
     try {
       if (request.automatic && !this.#canSyncClipboard(session)) throw new Error("Clipboard request expired");
       // Do not overwrite a local copy made while the remote reply was in flight.
-      const localChanged = request.automatic && clipboardSignature(await clipboard.readText()) !== request.localSignature;
+      const localChanged = request.automatic && await this.#localClipboardSignature() !== request.localSignature;
       if (session.pendingClipboard !== request || request.attempt !== session.tab.attempt || request.expires < Date.now() ||
           !session.tab.clipboard || (request.automatic && !this.#canSyncClipboard(session))) throw new Error("Clipboard request expired");
       this.#requireActive(session);
@@ -624,14 +745,20 @@ export class RdpWindows {
       if (session.pendingClipboard === request) delete session.pendingClipboard;
     }
   }
-  dispose(): void {
-    if (this.#disposed) return;
+  dispose(): Promise<void> {
+    if (this.#disposed) return this.#cleanup ?? Promise.resolve();
     this.#disposed = true;
     for (const channel of channels) ipcMain.removeHandler(channel);
     ipcMain.removeListener(RDP_IPC.openStream, this.#streamListener);
     for (const session of this.#sessions.values()) this.#disconnect(session);
+    const fileCleanup = [...this.#sessions.values()].map((session) => session.files?.dispose());
     this.#sessions.clear(); this.#options.store.dispose();
     if (this.#window && !this.#window.isDestroyed()) this.#window.destroy();
+    this.#cleanup = Promise.allSettled([...fileCleanup, ...this.#fileDownloads]).then(async () => {
+      await Promise.allSettled([...this.#stagedFiles].map((staging) => staging.dispose()));
+      this.#stagedFiles.clear();
+    });
+    return this.#cleanup;
   }
 }
 

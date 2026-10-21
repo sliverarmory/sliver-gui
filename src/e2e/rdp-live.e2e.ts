@@ -72,7 +72,7 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await dialog.getByLabel("Desktop resolution", { exact: true }).selectOption("custom");
     await dialog.getByLabel("Desktop width", { exact: true }).fill(String(config.width));
     await dialog.getByLabel("Desktop height", { exact: true }).fill(String(config.height));
-    const clipboardSwitch = dialog.getByRole("switch", { name: "Text clipboard", exact: true });
+    const clipboardSwitch = dialog.getByRole("switch", { name: "Clipboard", exact: true });
     if (await clipboardSwitch.isChecked() !== config.clipboard) await clipboardSwitch.press("Space");
     assert.equal(await clipboardSwitch.isChecked(), config.clipboard);
     // Keep authentication values out of Playwright action logs and assertion output.
@@ -89,7 +89,9 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await until(async () => Number(await page!.locator('.rdp-screen[data-active], .rdp-viewer[data-active="true"] .rdp-screen').first().getAttribute("data-frame-count")) > 0);
     await until(async () => (await state(page!)).tabs[0]?.clipboardReady === true, 20_000);
     const input = page.getByLabel(`Keyboard input for ${config.label}`, { exact: true });
+    await application.evaluate(({ app }) => app.focus({ steal: true }));
     await window.evaluate((win) => { win.show(); win.focus(); });
+    await until(async () => await window.evaluate((win) => win.isFocused()));
     await input.focus();
     await page.locator('.rdp-screen[data-input-capture="captured"]').waitFor();
     const beforeRun = Number(await page.locator(".rdp-screen").getAttribute("data-frame-count"));
@@ -107,10 +109,10 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await page.keyboard.press("Control+a");
     await page.keyboard.press("Control+c");
     await until(async () => (await state(page!)).tabs[0]?.clipboardAvailable === true);
-    await page.getByRole("button", { name: "Receive clipboard text", exact: true }).click();
+    await page.getByRole("button", { name: "Receive clipboard", exact: true }).click();
     await until(async () => await application!.evaluate(({ clipboard }) => clipboard.readText()) === "Sliver RDP keyboard test");
     await application.evaluate(async ({ clipboard }, text) => { await clipboard.writeText(text); }, marker);
-    await page.getByRole("button", { name: "Send clipboard text", exact: true }).click();
+    await page.getByRole("button", { name: "Send clipboard", exact: true }).click();
     await input.focus();
     await page.locator('.rdp-screen[data-input-capture="captured"]').waitFor();
     await page.keyboard.press("Control+v");
@@ -119,7 +121,7 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await page.keyboard.press("Control+c");
     await until(async () => (await state(page!)).tabs[0]?.clipboardAvailable === true);
     await application.evaluate(async ({ clipboard }) => { await clipboard.writeText("local clipboard sentinel"); });
-    await page.getByRole("button", { name: "Receive clipboard text", exact: true }).click();
+    await page.getByRole("button", { name: "Receive clipboard", exact: true }).click();
     await until(async () => await application!.evaluate(({ clipboard }) => clipboard.readText()) === marker, 15_000);
     await page.screenshot({ path: join(artifacts, "rdp-live-desktop.png") });
 

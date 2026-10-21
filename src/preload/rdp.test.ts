@@ -30,6 +30,38 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("RDP sandbox preload", () => {
+  it("accepts immutable transfer counters and rejects malformed or privileged progress events", async () => {
+    const progress = { id: "transfer", direction: "receive", phase: "transferring", transferredBytes: 3, totalBytes: 6, completedFiles: 1, totalFiles: 2 };
+    const snapshot = { ...state, tabs: [{ ...tab, fileTransfer: progress }] };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: snapshot });
+    expect(await bridge().getState()).toEqual({ ok: true, value: snapshot });
+    const listener = vi.fn(), remove = bridge().onFileTransferProgress(listener);
+    const handler = mocks.on.mock.calls.find(([channel]) => channel === RDP_IPC.fileTransferProgress)![1] as (event: unknown, ...args: unknown[]) => void;
+    const event = { tabId: tab.id, attempt: tab.attempt, progress };
+    handler({ sender: "private" }, event);
+    for (const invalid of [
+      { ...event, attempt: 0 }, { ...event, path: "/private/file" },
+      ...[{ transferredBytes: 7 }, { totalBytes: 256 * 1024 * 1024 + 1 }, { completedFiles: 3 }, { totalFiles: 65 },
+        { phase: "completed" }, { totalFiles: 0, completedFiles: 0 }, { direction: "upload" }, { path: "/private/file" }]
+        .map((patch) => ({ ...event, progress: { ...progress, ...patch } })),
+    ]) handler({}, invalid);
+    handler({}, event, "extra");
+    expect(listener).toHaveBeenCalledExactlyOnceWith(event);
+    expect(Object.isFrozen(listener.mock.calls[0]![0].progress)).toBe(true);
+    remove(); expect(mocks.removeListener).toHaveBeenCalledWith(RDP_IPC.fileTransferProgress, handler);
+  });
+
+  it("passes file clipboard availability through snapshots and events without file authority", async () => {
+    const fileState = { ...state, tabs: [{ ...tab, clipboardFilesAvailable: true, clipboardFilesSupported: true }] };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: fileState });
+    expect(await bridge().getState()).toEqual({ ok: true, value: fileState });
+    const listener = vi.fn(); bridge().onStateChanged(listener);
+    const handler = mocks.on.mock.calls.find(([channel]) => channel === RDP_IPC.stateChanged)![1] as (event: unknown, value: unknown) => void;
+    handler({}, fileState);
+    handler({}, { ...fileState, tabs: [{ ...fileState.tabs[0], clipboardFilesAvailable: "true" }] });
+    handler({}, { ...fileState, tabs: [{ ...fileState.tabs[0], files: ["/private/file"] }] });
+    expect(listener).toHaveBeenCalledExactlyOnceWith(fileState);
+  });
   it("exposes only frozen dedicated desktop and context-menu bridges", () => {
     expect(mocks.expose.mock.calls.map(([name]) => name)).toEqual(["rdp", "applicationContextMenu"]);
     expect(Object.isFrozen(bridge())).toBe(true);

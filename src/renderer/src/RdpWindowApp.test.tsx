@@ -1,9 +1,9 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { toast } from "@heroui/react";
+import { Toast, toast } from "@heroui/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
-import type { RdpConnectInput, RdpProfile, RdpTab, RdpWindowAPI, RdpWindowState } from "../../shared/rdp-contracts";
+import type { RdpConnectInput, RdpFileTransferProgressEvent, RdpProfile, RdpTab, RdpWindowAPI, RdpWindowState } from "../../shared/rdp-contracts";
 import { renderWithApplicationContextMenu } from "./application-context-menu-test-utils";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 
@@ -27,6 +27,7 @@ const profile: RdpProfile = { id: "saved", label: "Saved desktop", host: "saved.
 let state: RdpWindowState;
 let api: RdpWindowAPI;
 let listener: ((value: RdpWindowState) => void) | undefined;
+let progressListener: ((value: RdpFileTransferProgressEvent) => void) | undefined;
 let connectedInput: RdpConnectInput | undefined;
 
 beforeEach(() => {
@@ -38,6 +39,7 @@ beforeEach(() => {
   state = { tabs: [], profiles: [], securePersistenceAvailable: true, maxSessions: 4 };
   connectedInput = undefined;
   listener = undefined;
+  progressListener = undefined;
   api = {
     getState: vi.fn(async () => ({ ok: true as const, value: state })),
     connect: vi.fn(async (input) => { connectedInput = { ...input }; const tab = { ...firstTab, ...input, password: undefined }; state = { ...state, tabs: [tab], activeTabId: tab.id }; listener?.(state); return { ok: true as const, value: tab }; }),
@@ -53,11 +55,12 @@ beforeEach(() => {
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
     updateApplicationSettings: vi.fn(async (input) => ({ ok: true as const, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } })),
     onStateChanged: vi.fn((next) => { listener = next; return () => { listener = undefined; }; }),
+    onFileTransferProgress: vi.fn((next) => { progressListener = next; return () => { progressListener = undefined; }; }),
     onApplicationSettingsChanged: vi.fn(() => () => undefined),
   };
   Object.defineProperty(window, "rdp", { configurable: true, value: api });
 });
-afterEach(() => { cleanup(); delete window.rdp; Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); toast.clear(); delete window.rdp; Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("standalone remote desktop window", () => {
   it("opens with no Sliver configuration and submits a direct connection while clearing password entry", async () => {
@@ -262,7 +265,7 @@ describe("standalone remote desktop window", () => {
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);
     await user.click(await screen.findByRole("tab", { name: "Lab" }));
-    await user.click(screen.getByRole("button", { name: "Send clipboard text" }));
+    await user.click(screen.getByRole("button", { name: "Send clipboard" }));
     expect(api.clipboard).toHaveBeenCalledWith({ tabId: "second", direction: "send" });
     await waitFor(() => expect(screen.getByRole("button", { name: "Configuration" })).not.toBeDisabled());
     await user.click(screen.getByRole("button", { name: "Configuration" }));
@@ -275,16 +278,93 @@ describe("standalone remote desktop window", () => {
     state = { ...state, tabs: [{ ...firstTab, clipboardAvailable: false }], activeTabId: firstTab.id };
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);
-    await user.click(await screen.findByRole("button", { name: "Send clipboard text" }));
+    await user.click(await screen.findByRole("button", { name: "Send clipboard" }));
     expect(api.clipboard).toHaveBeenCalledWith({ tabId: firstTab.id, direction: "send" });
-    expect(screen.getByRole("button", { name: "Receive clipboard text" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Receive clipboard" })).toBeDisabled();
+  });
+
+  it("receives an advertised file clipboard without an advertised text format", async () => {
+    state = { ...state, tabs: [{ ...firstTab, clipboardAvailable: false, clipboardFilesAvailable: true, clipboardFilesSupported: true }], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const receive = await screen.findByRole("button", { name: "Receive clipboard" });
+    expect(receive).toBeEnabled();
+    await user.click(receive);
+    expect(api.clipboard).toHaveBeenCalledWith({ tabId: firstTab.id, direction: "receive" });
+    expect(toast.success).not.toHaveBeenCalled();
+    await act(async () => { listener?.({ ...state, tabs: [{ ...state.tabs[0]!, clipboard: false }] }); });
+    expect(receive).toBeDisabled();
+  });
+
+  it.each(["completed", "failed"] as const)("uses the file transfer outcome instead of duplicate manual %s feedback", async (phase) => {
+    state = { ...state, tabs: [{ ...firstTab, clipboardAvailable: false, clipboardFilesAvailable: true }], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const receive = await screen.findByRole("button", { name: "Receive clipboard" });
+    vi.mocked(api.clipboard).mockImplementation(async () => {
+      const progress = { id: "receive-files", direction: "receive" as const, phase, transferredBytes: phase === "completed" ? 4 : 0,
+        totalBytes: 4, completedFiles: phase === "completed" ? 1 : 0, totalFiles: 1, ...(phase === "failed" ? { error: "File read failed" } : {}) };
+      state = { ...state, tabs: [{ ...state.tabs[0]!, fileTransfer: progress }] };
+      progressListener?.({ tabId: firstTab.id, attempt: firstTab.attempt, progress });
+      return phase === "completed" ? { ok: true } : { ok: false, error: "File read failed" };
+    });
+    await user.click(receive);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.danger).not.toHaveBeenCalled();
+    expect(toast.getQueue().visibleToasts).toHaveLength(1);
+    expect(toast.getQueue().visibleToasts[0]!.content.title).toBe(phase === "completed" ? "Files received" : "File transfer failed");
+  });
+
+  it("ignores file progress from an earlier connection attempt", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await screen.findByRole("tab", { name: "Office" });
+    await act(async () => { progressListener?.({ tabId: firstTab.id, attempt: firstTab.attempt - 1,
+      progress: { id: "old-copy", direction: "send", phase: "transferring", transferredBytes: 2, totalBytes: 4, completedFiles: 0, totalFiles: 1 } }); });
+    expect(toast.getQueue().visibleToasts).toHaveLength(0);
+  });
+
+  it("skips the clipboard-ready notice when file sending has already started", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const send = await screen.findByRole("button", { name: "Send clipboard" });
+    vi.mocked(api.clipboard).mockImplementation(async () => {
+      const progress = { id: "fast-send", direction: "send" as const, phase: "transferring" as const,
+        transferredBytes: 2, totalBytes: 4, completedFiles: 0, totalFiles: 1 };
+      state = { ...state, tabs: [{ ...firstTab, fileTransfer: progress }] };
+      progressListener?.({ tabId: firstTab.id, attempt: firstTab.attempt, progress });
+      return { ok: true };
+    });
+    await user.click(send);
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(toast.getQueue().visibleToasts[0]!.content.title).toBe("Sending files");
+  });
+
+  it("keeps compact file progress ahead of older snapshots without replacing the desktop", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    renderWithApplicationContextMenu(<><RdpWindowApp /><Toast.Provider placement="bottom" /></>);
+    const desktop = await screen.findByLabelText("Remote desktop for Office");
+    const progress = { id: "current-copy", direction: "receive" as const, phase: "transferring" as const,
+      transferredBytes: 512, totalBytes: 1024, completedFiles: 0, totalFiles: 1 };
+    await act(async () => { progressListener?.({ tabId: firstTab.id, attempt: firstTab.attempt, progress }); });
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    await act(async () => { listener?.({ ...state, tabs: [{ ...firstTab, fileTransfer: { ...progress, phase: "preparing", transferredBytes: 0 } }] }); });
+    expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "50");
+    await act(async () => { progressListener?.({ tabId: firstTab.id, attempt: firstTab.attempt,
+      progress: { ...progress, phase: "completed", transferredBytes: 1024, completedFiles: 1 } }); });
+    expect(await screen.findByText("Files received")).toBeInTheDocument();
+    await act(async () => { listener?.({ ...state, tabs: [{ ...firstTab, fileTransfer: progress }] }); });
+    expect(screen.getByText("Files received")).toBeInTheDocument();
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Remote desktop for Office")).toBe(desktop);
   });
 
   it("uses icon-only clipboard actions with tooltips for both directions", async () => {
     state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);
-    for (const label of ["Send clipboard text", "Receive clipboard text"]) {
+    for (const label of ["Send clipboard", "Receive clipboard"]) {
       const button = await screen.findByRole("button", { name: label });
       expect(button.textContent).toBe("");
       expect(button.querySelector("svg")).toBeInTheDocument();
@@ -336,18 +416,18 @@ describe("standalone remote desktop window", () => {
     const desktop = await screen.findByLabelText("Remote desktop for Office");
     const main = screen.getByRole("main", { name: "Remote Desktop" });
     const children = Array.from(main.children);
-    await user.click(screen.getByRole("button", { name: "Send clipboard text" }));
-    expect(toast.success).toHaveBeenCalledWith("Clipboard text sent to the remote desktop.");
-    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
-    expect(toast.success).toHaveBeenCalledWith("Remote text copied to the clipboard.");
+    await user.click(screen.getByRole("button", { name: "Send clipboard" }));
+    expect(toast.success).toHaveBeenCalledWith("Clipboard ready to paste on the remote desktop.");
+    await user.click(screen.getByRole("button", { name: "Receive clipboard" }));
+    expect(toast.success).toHaveBeenCalledWith("Remote content copied to the clipboard.");
     vi.mocked(api.clipboard).mockResolvedValue({ ok: false, error: "Remote clipboard timed out." });
-    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
-    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
+    await user.click(screen.getByRole("button", { name: "Receive clipboard" }));
+    await user.click(screen.getByRole("button", { name: "Receive clipboard" }));
     expect(toast.danger).toHaveBeenCalledTimes(2);
     expect(toast.danger).toHaveBeenLastCalledWith("Remote Desktop action failed", { description: "Remote clipboard timed out." });
     expect(Array.from(main.children)).toEqual(children);
     expect(screen.getByLabelText("Remote desktop for Office")).toBe(desktop);
-    expect(within(main).queryByText("Clipboard text sent to the remote desktop.")).not.toBeInTheDocument();
+    expect(within(main).queryByText("Clipboard ready to paste on the remote desktop.")).not.toBeInTheDocument();
     expect(within(main).queryByText("Remote clipboard timed out.")).not.toBeInTheDocument();
     await act(async () => { listener?.({ ...state, tabs: [{ ...firstTab, state: "disconnected" }] }); });
     await user.click(screen.getByRole("button", { name: "Reconnect" }));
