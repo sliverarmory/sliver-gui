@@ -1650,13 +1650,14 @@ async function verifyApplicationSettings(
   await commandPalette.waitFor({ timeout: 5_000 });
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    20,
+    21,
     "the connected workspace should expose the bounded app command catalog",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /^Go back\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /^Go forward\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /Cloud Deployment/u }).waitFor();
+  await commandPalette.getByRole("menuitem", { name: /^Remote Desktop\b/u }).waitFor();
   await page.keyboard.press("Escape");
   await commandPalette.waitFor({ state: "hidden" });
 
