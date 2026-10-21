@@ -965,6 +965,9 @@ function rdpToast(page: Page, title: string): Locator {
 }
 
 async function settleRdpToast(notification: Locator): Promise<void> {
+  // HeroUI clears its offscreen entry state from an effect after two frames.
+  // Our own frame wait can finish first, before any transition exists to await.
+  await notification.and(notification.page().locator(':not([data-entering="true"])')).waitFor({ state: "visible" });
   await notification.evaluate(async (element) => {
     const view = element.ownerDocument.defaultView!;
     await new Promise<void>((resolveFrame) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolveFrame())));
