@@ -85,7 +85,7 @@ describe("RDP sandbox preload", () => {
   });
 
   it("validates application settings updates and their response before crossing the bridge", async () => {
-    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false } } };
+    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false, transparentClipboard: false } } };
     const updated = { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: 1 };
     mocks.invoke.mockResolvedValueOnce({ ok: true, value: updated });
     expect(await bridge().updateApplicationSettings(input)).toEqual({ ok: true, value: updated });

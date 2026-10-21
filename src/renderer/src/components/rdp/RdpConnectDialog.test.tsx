@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "@heroui/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RdpConnectInput, RdpProfile, RdpSaveProfileInput, RdpTab, RdpWindowAPI } from "../../../../shared/rdp-contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../../../../shared/application-settings-contracts";
@@ -74,7 +75,7 @@ describe("Remote Desktop connection form", () => {
     await waitFor(() => expect(clipboard).toBeEnabled());
     await user.click(clipboard);
     await waitFor(() => expect(settingsApi.updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
-      settings: expect.objectContaining({ rdp: { clipboard: false } }),
+      settings: expect.objectContaining({ rdp: { clipboard: false, transparentClipboard: false } }),
     })));
     await waitFor(() => expect(clipboard).toBeEnabled());
     expect(api.saveProfile).not.toHaveBeenCalled();
@@ -92,7 +93,7 @@ describe("Remote Desktop connection form", () => {
     renderWithSettings(settingsApi);
     expect(screen.getByRole("switch", { name: "Text clipboard" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
-    await act(async () => { resolveSettings({ ...DEFAULT_APPLICATION_SETTINGS_STATE, rdp: { clipboard: false } }); });
+    await act(async () => { resolveSettings({ ...DEFAULT_APPLICATION_SETTINGS_STATE, rdp: { clipboard: false, transparentClipboard: false } }); });
     expect(screen.getByRole("switch", { name: "Text clipboard" })).not.toBeChecked();
     expect(screen.getByRole("button", { name: "Connect" })).toBeEnabled();
   });
@@ -241,6 +242,22 @@ describe("Remote Desktop connection form", () => {
     expect(vi.mocked(api.saveProfile).mock.calls[0]?.[0]).not.toHaveProperty("password");
     expect(onProfileSaved).toHaveBeenCalledOnce();
     expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("shows profile-save success in a toast while keeping failures inline", async () => {
+    const user = userEvent.setup();
+    const success = vi.spyOn(toast, "success");
+    mount(profile);
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(success).toHaveBeenCalledExactlyOnceWith("Profile saved", {
+      description: "Passwords are stored only when you connect with a remember option.",
+    }));
+    expect(screen.getByRole("dialog").querySelector('[role="status"]')).toBeNull();
+    expect(screen.queryByText("Profile saved. Passwords are stored only when you connect with a remember option.")).not.toBeInTheDocument();
+    vi.mocked(api.saveProfile).mockResolvedValueOnce({ ok: false, error: "The profile could not be saved." });
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The profile could not be saved.");
+    expect(success).toHaveBeenCalledOnce();
   });
 
   it("reuses a matching saved credential with normalized host and trimmed account fields", async () => {

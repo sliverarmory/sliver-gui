@@ -204,8 +204,13 @@ workflow.
   persists the new-connection preference immediately through the existing
   revisioned application settings store (`gui/application-settings.json`), even
   when the dialog is canceled. Saved profiles retain their explicit choice.
-  Text transfers only through explicit Send/Receive actions in the focused active
-  RDP window. Receiving waits for the
+  Text transfers through the toolbar's Send/Receive actions by default.
+  **Configuration → Transparent clipboard** opts into automatic bidirectional
+  text synchronization for the focused active RDP tab with an attached viewer.
+  This preference is persisted separately and defaults to false, including for
+  existing settings. Main polls for local text changes and consumes fresh remote
+  clipboard announcements; received text is tracked to avoid sending it back.
+  Receiving waits for the
   actual server reply and local clipboard write. A ready channel permits sending
   before remote text exists; receiving additionally needs an advertised text
   format. Blur/tab/attempt changes cancel a pending receive.

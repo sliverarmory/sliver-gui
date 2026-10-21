@@ -1,5 +1,8 @@
 .rdp-window { display: flex; flex-direction: column; height: 100%; min-height: 0; }
 .rdp-tabs { display: flex; flex-direction: column; min-height: 0; flex: 1; gap: 0; }
+.rdp-tabs__bar { align-self: stretch; flex-shrink: 0; min-width: 0; margin: .5rem .75rem; }
+.rdp-tabs__list { gap: .125rem; padding: .25rem; }
+.rdp-tabs__tab { min-width: 6rem; height: 1.75rem; padding: 0 .75rem; font-size: .75rem; }
 .rdp-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .625rem 1rem; border-bottom: 1px solid var(--color-border); }
 .rdp-window > header.rdp-toolbar { user-select: none; -webkit-app-region: drag; }
 .rdp-tab-panels { position: relative; flex: 1; min-height: 0; overflow: hidden; }
@@ -20,20 +23,23 @@
 .rdp-profile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 21rem), 1fr)); gap: 1.5rem; }
 .rdp-profiles-dialog { width: 100%; max-width: 64rem; }
 .rdp-profile-card { position: relative; aspect-ratio: 16 / 10; min-width: 0; padding: 0; gap: 0; overflow: hidden; isolation: isolate; background: var(--color-surface-secondary); }
-.rdp-profile-card[data-has-preview="true"] { background: #111; }
+.rdp-profile-card[data-has-preview="true"] { background: #111; clip-path: inset(0 round min(32px, var(--radius-3xl))); }
 .rdp-profile-card__image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 .rdp-profile-card__placeholder { position: absolute; inset: 0 0 4rem; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .75rem; color: var(--color-muted); font-size: .75rem; }
 .rdp-profile-card__placeholder svg { width: 2.5rem; height: 2.5rem; opacity: .6; }
 .rdp-profile-card__connect { position: absolute; inset: 0; display: block; width: 100%; height: 100%; max-width: none; min-width: 0; padding: 0; border-radius: inherit; white-space: normal; color: var(--color-foreground); text-align: left; cursor: var(--cursor-interactive, pointer); }
 .rdp-profile-card__connect:hover, .rdp-profile-card__connect[data-hovered="true"] { background: transparent; }
-.rdp-profile-card[data-has-preview="true"] .rdp-profile-card__connect { color: #fff; background: linear-gradient(180deg, #0002 0%, transparent 35%, #0006 60%, #000e 100%); }
+.rdp-profile-card[data-has-preview="true"] .rdp-profile-card__connect { color: #fff; background: linear-gradient(180deg, #0002 0%, transparent 35%); }
 .rdp-profile-card__connect::after { content: ""; position: absolute; inset: 0; border: 1px solid color-mix(in srgb, var(--color-foreground) 12%, transparent); border-radius: inherit; pointer-events: none; }
 .rdp-profile-card__connect:hover::after, .rdp-profile-card__connect[data-focus-visible="true"]::after, .rdp-profile-card[data-connected="true"] .rdp-profile-card__connect::after { border: 2px solid var(--color-accent); }
 .rdp-profile-card__connect[data-focus-visible="true"] { outline: 2px solid var(--color-accent); outline-offset: -4px; }
 .rdp-profile-card__badge { position: absolute; top: .875rem; left: .875rem; display: flex; align-items: center; gap: .5rem; max-width: calc(100% - 4.5rem); padding: .375rem .625rem; border-radius: .625rem; background: var(--color-surface); font-size: .75rem; font-weight: 500; }
 .rdp-profile-card[data-has-preview="true"] .rdp-profile-card__badge, .rdp-profile-card[data-has-preview="true"] .rdp-profile-card__delete { background: #18181bcc; color: #fff; backdrop-filter: blur(12px); }
 .rdp-profile-card__status { width: .4375rem; height: .4375rem; border-radius: 50%; background: var(--color-success); }
-.rdp-profile-card__identity { position: absolute; bottom: 1rem; left: 1.125rem; right: 1.125rem; display: flex; flex-direction: column; gap: .125rem; }
+.rdp-profile-card__identity { position: absolute; bottom: 1rem; left: 1.125rem; right: 1.125rem; display: flex; flex-direction: column; gap: .125rem; isolation: isolate; }
+.rdp-profile-card[data-has-preview="true"] .rdp-profile-card__identity::before { content: ""; position: absolute; inset: -1.5rem -1.125rem -1rem; z-index: -1; pointer-events: none; background: linear-gradient(to top, #18181bb3, #18181b8c); backdrop-filter: blur(12px); mask-image: linear-gradient(to bottom, transparent, #000 1.5rem); }
+html.light .rdp-profile-card[data-has-preview="true"] .rdp-profile-card__identity { color: var(--color-foreground); }
+html.light .rdp-profile-card[data-has-preview="true"] .rdp-profile-card__identity::before { background: linear-gradient(to top, color-mix(in srgb, var(--color-surface) 70%, transparent), color-mix(in srgb, var(--color-surface) 55%, transparent)); }
 .rdp-profile-card__name, .rdp-profile-card__account, .rdp-profile-card__host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rdp-profile-card__name { font-size: 1.125rem; line-height: 1.5; font-weight: 650; }
 .rdp-profile-card__account { font-size: .875rem; font-weight: 400; opacity: .85; }

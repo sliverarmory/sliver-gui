@@ -434,7 +434,7 @@ describe("SSH preload bridge", () => {
       revision: 5,
       disableWindowTransparency: false,
       keyboardShortcuts: { ...valid.keyboardShortcuts, textEditorRedo: "mod+y" },
-      rdp: { clipboard: false },
+      rdp: { clipboard: false, transparentClipboard: false },
     };
     handler({}, windowsRedo);
     handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });

@@ -13,6 +13,7 @@ let message: (value: RdpHostMessage) => void;
 let api: RdpWindowAPI;
 let viewport: { width: number; height: number };
 let resizeObservers: { notify(): void; disconnect: ReturnType<typeof vi.fn> }[];
+let resolutionQueries: { query: string; notify(): void; remove: ReturnType<typeof vi.fn> }[];
 
 beforeEach(() => {
   Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
@@ -21,6 +22,16 @@ beforeEach(() => {
   api = { setInputCapture: vi.fn(async () => ({ ok: true })), savePreview: vi.fn(async () => ({ ok: true })), reconnect: vi.fn(), disconnect: vi.fn() } as unknown as RdpWindowAPI;
   viewport = { width: 1280, height: 800 };
   resizeObservers = [];
+  resolutionQueries = [];
+  vi.stubGlobal("devicePixelRatio", 1);
+  const originalMatchMedia = window.matchMedia;
+  vi.spyOn(window, "matchMedia").mockImplementation((query) => {
+    if (!query.startsWith("(resolution:")) return originalMatchMedia(query);
+    let listener: (() => void) | undefined;
+    const remove = vi.fn(() => { listener = undefined; });
+    resolutionQueries.push({ query, notify: () => listener?.(), remove });
+    return { media: query, matches: true, addEventListener: (_event: string, changed: () => void) => { listener = changed; }, removeEventListener: remove } as unknown as MediaQueryList;
+  });
   vi.stubGlobal("ResizeObserver", class {
     readonly disconnect = vi.fn();
     constructor(callback: ResizeObserverCallback) { resizeObservers.push({ notify: () => callback([], this), disconnect: this.disconnect }); }
@@ -36,9 +47,9 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
-async function mount(autoResize = false, connection = tab): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
+async function mount(autoResize = false, connection = tab, highDpi = false): Promise<ReturnType<typeof render> & { handle: React.RefObject<RdpDesktopHandle | null> }> {
   const handle = createRef<RdpDesktopHandle>();
-  const result = render(<RdpDesktop ref={handle} api={api} tab={connection} active inputEnabled scaleMode="fit" autoResize={autoResize} />);
+  const result = render(<RdpDesktop ref={handle} api={api} tab={connection} active inputEnabled scaleMode="fit" autoResize={autoResize} highDpi={highDpi} />);
   await act(async () => {});
   act(() => message({ type: "ready", protocol: 1 }));
   return { ...result, handle };
@@ -96,7 +107,7 @@ describe("remote desktop viewer lifecycle", () => {
 
   it("retains resize deduplication after viewer reattachment and permits a changed scale factor", async () => {
     vi.useFakeTimers();
-    await mount(true);
+    await mount(true, tab, true);
     act(() => { vi.advanceTimersByTime(350); });
     act(() => message({ type: "closed", reason: "Window hidden" }));
     fireEvent.click(screen.getByRole("button", { name: "Reattach viewer" }));
@@ -109,8 +120,59 @@ describe("remote desktop viewer lifecycle", () => {
     act(() => { resizeObservers.at(-1)!.notify(); vi.advanceTimersByTime(350); });
     expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toEqual([
       [{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }],
-      [{ type: "resize", width: 1280, height: 800, scaleFactor: 200 }],
+      [{ type: "resize", width: 2560, height: 1600, scaleFactor: 200 }],
     ]);
+  });
+
+  it("applies high-DPI toggles without a viewport resize and retains one observer", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("devicePixelRatio", 2);
+    const view = await mount(true);
+    const requests = () => mocks.send.mock.calls.filter(([value]) => value.type === "resize");
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(requests()).toEqual([[{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }]]);
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize highDpi />);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(requests().at(-1)).toEqual([{ type: "resize", width: 2560, height: 1600, scaleFactor: 200 }]);
+    expect(resizeObservers).toHaveLength(1);
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize highDpi={false} />);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(requests().at(-1)).toEqual([{ type: "resize", width: 1280, height: 800, scaleFactor: 100 }]);
+    expect(requests()).toHaveLength(3);
+    expect(resolutionQueries.at(-1)?.remove).toHaveBeenCalledOnce();
+  });
+
+  it("tracks display density changes without logical resize, rearms its query and deduplicates unchanged density", async () => {
+    vi.useFakeTimers();
+    const view = await mount(true, tab, true);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(resolutionQueries.at(-1)?.query).toBe("(resolution: 1dppx)");
+    const firstQuery = resolutionQueries.at(-1)!;
+    vi.stubGlobal("devicePixelRatio", 2);
+    act(() => { firstQuery.notify(); vi.advanceTimersByTime(350); });
+    expect(firstQuery.remove).toHaveBeenCalledOnce();
+    expect(resolutionQueries.at(-1)?.query).toBe("(resolution: 2dppx)");
+    expect(mocks.send).toHaveBeenLastCalledWith({ type: "resize", width: 2560, height: 1600, scaleFactor: 200 });
+    act(() => { resolutionQueries.at(-1)!.notify(); vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toHaveLength(2);
+    const lastQuery = resolutionQueries.at(-1)!;
+    view.unmount();
+    expect(lastQuery.remove).toHaveBeenCalledOnce();
+  });
+
+  it("uses the selected DPI for manual resize while automatic resize is off", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("devicePixelRatio", 2);
+    const view = await mount(false);
+    view.rerender(<RdpDesktop ref={view.handle} api={api} tab={tab} active inputEnabled scaleMode="fit" autoResize={false} highDpi />);
+    act(() => { vi.advanceTimersByTime(350); });
+    expect(mocks.send.mock.calls.filter(([value]) => value.type === "resize")).toHaveLength(0);
+    expect(resolutionQueries).toHaveLength(0);
+    act(() => view.handle.current?.resizeToWindow());
+    expect(mocks.send).toHaveBeenLastCalledWith({ type: "resize", width: 2560, height: 1600, scaleFactor: 200 });
+    viewport = { width: 3000, height: 3000 };
+    act(() => view.handle.current?.resizeToWindow());
+    expect(mocks.send).toHaveBeenLastCalledWith({ type: "resize", width: 4000, height: 4000, scaleFactor: 133 });
   });
 
   it("acknowledges cursors only after drawing and preserves the bitmap across position updates", async () => {

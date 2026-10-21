@@ -292,7 +292,7 @@ describe("ApplicationSettingsProvider", () => {
       },
     }));
     installSettingsAPI({
-      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency, rdp: { clipboard: false } })),
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency, rdp: { clipboard: false, transparentClipboard: false } })),
       updateApplicationSettings,
     });
     renderProvider();
@@ -317,7 +317,7 @@ describe("ApplicationSettingsProvider", () => {
           transparentWindows: true,
         },
         overview: DEFAULT_APPLICATION_SETTINGS_STATE.overview,
-        rdp: { clipboard: false },
+        rdp: { clipboard: false, transparentClipboard: false },
       },
     });
     expect(screen.getByTestId("revision")).toHaveTextContent("1");
@@ -382,7 +382,7 @@ describe("ApplicationSettingsProvider", () => {
     await user.click(screen.getByRole("button", { name: "Disable RDP clipboard" }));
     await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("1"));
     expect(screen.getByTestId("rdp-clipboard")).toHaveTextContent("false");
-    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.rdp).toEqual({ clipboard: false });
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.rdp).toEqual({ clipboard: false, transparentClipboard: false });
 
     await user.click(screen.getByRole("button", { name: "Disable RDP clipboard" }));
     expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
@@ -390,14 +390,14 @@ describe("ApplicationSettingsProvider", () => {
     await user.click(screen.getByRole("button", { name: "Use light theme" }));
     await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("2"));
     expect(updateApplicationSettings.mock.calls[1]?.[0].settings).toMatchObject({
-      theme: "light", rdp: { clipboard: false },
+      theme: "light", rdp: { clipboard: false, transparentClipboard: false },
     });
 
     await user.click(screen.getByRole("button", { name: "Enable RDP clipboard" }));
     await waitFor(() => expect(screen.getByTestId("revision")).toHaveTextContent("3"));
     expect(screen.getByTestId("rdp-clipboard")).toHaveTextContent("true");
     expect(updateApplicationSettings.mock.calls[2]?.[0].settings).toMatchObject({
-      theme: "light", rdp: { clipboard: true },
+      theme: "light", rdp: { clipboard: true, transparentClipboard: false },
     });
   });
 });
@@ -437,13 +437,13 @@ function SettingsProbe(): React.JSX.Element {
       </button>
       <button
         type="button"
-        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: false } }))}
+        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: false, transparentClipboard: false } }))}
       >
         Disable RDP clipboard
       </button>
       <button
         type="button"
-        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: true } }))}
+        onClick={() => void context.updateSettings((current) => ({ ...current, rdp: { clipboard: true, transparentClipboard: false } }))}
       >
         Enable RDP clipboard
       </button>

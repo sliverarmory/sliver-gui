@@ -35,7 +35,7 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn((): ApplicationSettingsState => ({
-      v: 9,
+      v: 10,
       revision: 0,
       theme: "dark",
       appIcon: "auto",
@@ -53,7 +53,7 @@ const harness = vi.hoisted(() => ({
         transparentWindows: true,
       },
       overview: { kinds: "default", statuses: "all", lightning: false, sidebarDisabled: false, presentation: "graph" },
-      rdp: { clipboard: true },
+      rdp: { clipboard: true, transparentClipboard: false },
     })),
     update: vi.fn<(input: ApplicationSettingsUpdateInput) => Promise<OperationResult<ApplicationSettingsState>>>(
       async () => ({ ok: false, error: "not used by this test" }),

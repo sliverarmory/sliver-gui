@@ -591,7 +591,7 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     ["v", "revision", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"],
     "application settings",
   );
-  if (state["v"] !== 9 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 10 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
@@ -637,10 +637,10 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
     (overview["presentation"] !== "graph" && overview["presentation"] !== "list")) {
     throw new TypeError("Invalid overview settings");
   }
-  const rdp = exactRecord(state["rdp"], ["clipboard"], "RDP settings");
-  if (typeof rdp["clipboard"] !== "boolean") throw new TypeError("Invalid RDP clipboard setting");
+  const rdp = exactRecord(state["rdp"], ["clipboard", "transparentClipboard"], "RDP settings");
+  if (typeof rdp["clipboard"] !== "boolean" || typeof rdp["transparentClipboard"] !== "boolean") throw new TypeError("Invalid RDP clipboard setting");
   return Object.freeze({
-    v: 9,
+    v: 10,
     revision: state["revision"] as number,
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
@@ -664,7 +664,7 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
       sidebarDisabled: overview["sidebarDisabled"],
       presentation: overview["presentation"],
     }),
-    rdp: Object.freeze({ clipboard: rdp["clipboard"] }),
+    rdp: Object.freeze({ clipboard: rdp["clipboard"], transparentClipboard: rdp["transparentClipboard"] }),
   });
 }
 

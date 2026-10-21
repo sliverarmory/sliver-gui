@@ -1,5 +1,5 @@
 import { useId, useRef, useState } from "react";
-import { Button, FieldError, Input, Label, Modal, ScrollShadow, TextField } from "@heroui/react";
+import { Button, FieldError, Input, Label, Modal, ScrollShadow, TextField, toast } from "@heroui/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faWindows } from "@fortawesome/free-brands-svg-icons";
@@ -41,7 +41,6 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   const [credentialProfile, setCredentialProfile] = useState(initial);
   const [pending, setPending] = useState<"connect" | "save">();
   const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
   const [touched, setTouched] = useState<Partial<Record<RdpConnectFormField, boolean>>>({});
   const [submitted, setSubmitted] = useState<"connect" | "save">();
   const preset = RDP_RESOLUTIONS.find((size) => size.value === resolution);
@@ -90,7 +89,6 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
   const submit = async (action: "connect" | "save"): Promise<void> => {
     if (pending || preferencesPending) return;
     setError(undefined);
-    setNotice(undefined);
     setSubmitted(action);
     const errors = validateRdpConnectForm(formValues, action === "connect" && !canUseSavedCredential);
     const firstInvalid = Object.keys(errors)[0];
@@ -109,7 +107,10 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
         setProfileId(selectedProfileId);
         setCredentialProfile(saved.value);
         onProfileSaved();
-        if (action === "save") { setNotice("Profile saved. Passwords are stored only when you connect with a remember option."); return; }
+        if (action === "save") {
+          toast.success("Profile saved", { description: "Passwords are stored only when you connect with a remember option." });
+          return;
+        }
       }
       const connection: RdpConnectInput = {
         host: input.host, port: input.port, username: input.username, domain: input.domain, width: input.width, height: input.height,
@@ -201,7 +202,6 @@ export function RdpConnectDialog({ api, securePersistenceAvailable, initial, onC
           <SwitchRow label="Text clipboard" description="Use the toolbar to send or receive clipboard text for this connection." selected={clipboard}
             onChange={(selected) => { void updateClipboard(selected); }} disabled={Boolean(pending) || preferencesPending} />
           {error && <p role="alert" className="text-sm text-danger">{error}</p>}
-          {notice && <p role="status" className="text-sm text-muted">{notice}</p>}
         </form>
       </Modal.Body>
       <Modal.Footer className="flex-wrap"><Button variant="tertiary" isDisabled={Boolean(pending)} onPress={onClose}>Cancel</Button>

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_PAYLOAD_BYTES, RDP_PROTOCOL_VERSION, type RdpCursor, type RdpFrame, type RdpSessionPhase } from "../shared/rdp-contracts.js";
+import { RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_PAYLOAD_BYTES, RDP_PROTOCOL_VERSION, type RdpCursor, type RdpFrame, type RdpSessionPhase } from "../shared/rdp-contracts.js";
 import { rdpBoolean, rdpDimensions, rdpInteger, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 
 export type RdpRuntimeEvent =
@@ -14,7 +14,6 @@ export type RdpRuntimeEvent =
   | { type: "error" | "terminated"; code: string };
 
 const MAX_HEADER = 16 * 1024;
-const MAX_CONTROL = 2 * 1024 * 1024;
 
 export function rdpRuntimeEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const allowed = new Set(["PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP", "TMPDIR"]);
@@ -31,7 +30,7 @@ export class RdpWireDecoder {
       while (this.#pending.length >= 8) {
         const headerLength = this.#pending.readUInt32LE(0);
         const payloadLength = this.#pending.readUInt32LE(4);
-        if (!headerLength || headerLength > MAX_CONTROL || payloadLength > RDP_MAX_PAYLOAD_BYTES) throw new Error("Invalid RDP runtime record length");
+        if (!headerLength || headerLength > RDP_MAX_CONTROL_BYTES || payloadLength > RDP_MAX_PAYLOAD_BYTES) throw new Error("Invalid RDP runtime record length");
         const length = 8 + headerLength + payloadLength;
         if (this.#pending.length < length) break;
         const header: unknown = JSON.parse(this.#pending.subarray(8, 8 + headerLength).toString("utf8"));
@@ -128,7 +127,7 @@ export class RdpRuntime {
   send(command: object): void {
     if (this.#closed || this.#stopping) return;
     const bytes = Buffer.from(`${JSON.stringify(command)}\n`, "utf8");
-    if (bytes.length > MAX_CONTROL || this.#child.stdin.writableLength > 2 * MAX_CONTROL) {
+    if (bytes.length > RDP_MAX_CONTROL_BYTES || this.#child.stdin.writableLength > 2 * RDP_MAX_CONTROL_BYTES) {
       bytes.fill(0); this.stop(); this.#finish("runtime-input-limit"); return;
     }
     try { this.#child.stdin.write(bytes, () => bytes.fill(0)); }
@@ -138,7 +137,7 @@ export class RdpRuntime {
     if (this.#stopping) return;
     this.#stopping = true;
     try {
-      if (!this.#closed && this.#child.stdin.writableLength < MAX_CONTROL && !this.#child.stdin.destroyed) {
+      if (!this.#closed && this.#child.stdin.writableLength < RDP_MAX_CONTROL_BYTES && !this.#child.stdin.destroyed) {
         this.#child.stdin.write('{"type":"disconnect"}\n');
       }
       this.#child.stdin.end();

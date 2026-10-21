@@ -36,18 +36,35 @@ Certificate review expires after 60 seconds; cancel or review again after reconn
 
 - **Fit** scales the remote image to the window; **Actual size** uses its natural
   pixel dimensions. These choices are local to the current tab.
-- **Display settings** requests a window-sized desktop, optionally on later window
-  resizes. Repeated requests for the same size are ignored. If the server cannot
-  resize live, the connection stops with a size-specific explanation; use
-  **Reconnect** to apply the remembered dimensions. The client does not reconnect
-  automatically. The picture keeps its actual server geometry until it changes.
-- **Send clipboard text** copies local text into the remote clipboard. Paste it
-  remotely with Ctrl+V. Copy text remotely with Ctrl+C, then select **Receive
-  clipboard** to replace the local clipboard. These actions need the focused
+- **Configuration** requests a window-sized desktop, optionally on later window
+  resizes. With **Resize desktop with window** enabled, turn on **Scale desktop
+  for high-DPI displays** to request more desktop pixels and matching Windows
+  text/icon scaling for the current display. It starts off; changing it applies
+  immediately while automatic resizing is enabled. These display choices are
+  local to this window and are not saved. Repeated requests for the same size are ignored.
+  High-DPI Windows scaling requires live display-control support. If the server
+  cannot resize live, the connection stops with a size-specific explanation;
+  disable **Resize desktop with window**, then use **Reconnect** to apply the
+  remembered resolution. This fallback preserves the resolution only, not Windows
+  text/icon scaling. The client does not reconnect automatically. The picture
+  keeps its actual server geometry until it changes.
+- The toolbar's upload and download icons have **Send clipboard text** and
+  **Receive clipboard text** tooltips. Send copies local text into the remote
+  clipboard; paste it remotely with Ctrl+V. Copy text remotely with Ctrl+C, then
+  select Receive to replace the local clipboard. These actions need the focused
   active RDP window and a connection started with Text clipboard enabled. Receive
   becomes available only when the server advertises text. Limit: 1 MiB UTF-8.
   After sending local text, copy remotely again to enable Receive. A clipboard
   failure leaves the desktop connected; copy the text again before retrying.
+- **Configuration → Transparent clipboard** automatically sends changed local
+  text and receives copied remote text while the RDP window is focused and its
+  active connection has Text clipboard enabled. It is disabled by default, and
+  changing it saves the preference for future RDP windows. Turning it off returns
+  clipboard transfer to the manual toolbar buttons. The same text-only size limit
+  applies; clipboard contents are never persisted.
+- Clipboard confirmations, action failures and active-session warnings appear as
+  toast notifications without moving or resizing the remote desktop. Repeated
+  updates for the same session warning do not show it again after dismissal.
 - **Disconnect** ends RDP without logging the Windows account off. **Reconnect**
   starts a new attempt and asks for a password when none was remembered. Closing
   a tab disconnects it; up to four tabs may be open, including disconnected tabs.
@@ -74,7 +91,7 @@ Changing the computer, port, username or domain clears
 the old preview; deleting a profile removes its preview and remembered credential.
 Endpoint certificate pins are independent of profiles; deleting a profile does
 not erase its pin. A pin-management UI is not yet available. There is no automatic
-reconnect or automatic clipboard synchronization.
+reconnect.
 
 ## Password storage
 
@@ -85,8 +102,9 @@ Linux `basic_text`/unknown backends. Existing credentials are never filled back 
 the form. A blank password on an existing saved profile requests its stored
 credential; a locked/unavailable backend asks for fresh input.
 
-The default text clipboard preference uses the existing application settings store,
-`gui/application-settings.json`, under the configured Sliver GUI client root.
+The default text clipboard and transparent clipboard preferences use the existing
+application settings store, `gui/application-settings.json`, under the configured
+Sliver GUI client root.
 Clipboard contents are never saved in this file.
 
 The RDP-specific private file is `gui/rdp.json` under the configured Sliver GUI
@@ -104,7 +122,8 @@ not edit this file while the application is running.
 ## Current limits
 
 The client implements one monitor, password NLA, cursor/mouse/keyboard/Unicode,
-local scaling, fullscreen, server resize and explicit text clipboard. Display
+local scaling, fullscreen, server resize, manual text clipboard transfer and
+optional automatic text clipboard synchronization. Display
 requests are 200–8192 pixels per axis with at most 16,777,216 pixels total.
 File clipboard, audio/microphone, multiple monitors, RemoteApp, device/drive/printer
 redirection, smart cards, UDP, `.rdp` import and advanced multimedia codecs are

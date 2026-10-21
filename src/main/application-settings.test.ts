@@ -63,7 +63,7 @@ describe("ApplicationSettingsStore", () => {
       },
       overview: { kinds: ["future-kind", "operator"], statuses: ["healthy"], lightning: true,
         sidebarDisabled: true, presentation: "list" },
-      rdp: { clipboard: false },
+      rdp: { clipboard: false, transparentClipboard: false },
     };
     await writeFile(settingsPath, JSON.stringify(persisted), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
@@ -131,18 +131,18 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     let store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true } });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true, transparentClipboard: false } });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     for (const clipboard of [false, true]) {
       const { v: _version, revision, ...settings } = store.getState();
       const result = await store.update({
         expectedRevision: revision,
-        settings: { ...settings, rdp: { clipboard } },
+        settings: { ...settings, rdp: { clipboard, transparentClipboard: !clipboard } },
       });
       expect(result).toEqual({
         ok: true,
-        value: { ...previous, v: APPLICATION_SETTINGS_VERSION, revision: revision + 1, rdp: { clipboard } },
+        value: { ...previous, v: APPLICATION_SETTINGS_VERSION, revision: revision + 1, rdp: { clipboard, transparentClipboard: !clipboard } },
       });
       expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
       store = await ApplicationSettingsStore.load(settingsPath);

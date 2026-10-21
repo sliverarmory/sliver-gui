@@ -107,7 +107,7 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await page.keyboard.press("Control+a");
     await page.keyboard.press("Control+c");
     await until(async () => (await state(page!)).tabs[0]?.clipboardAvailable === true);
-    await page.getByRole("button", { name: "Receive clipboard", exact: true }).click();
+    await page.getByRole("button", { name: "Receive clipboard text", exact: true }).click();
     await until(async () => await application!.evaluate(({ clipboard }) => clipboard.readText()) === "Sliver RDP keyboard test");
     await application.evaluate(async ({ clipboard }, text) => { await clipboard.writeText(text); }, marker);
     await page.getByRole("button", { name: "Send clipboard text", exact: true }).click();
@@ -119,7 +119,7 @@ test("standalone RDP logs in, renders, types, round-trips Unicode clipboard, and
     await page.keyboard.press("Control+c");
     await until(async () => (await state(page!)).tabs[0]?.clipboardAvailable === true);
     await application.evaluate(async ({ clipboard }) => { await clipboard.writeText("local clipboard sentinel"); });
-    await page.getByRole("button", { name: "Receive clipboard", exact: true }).click();
+    await page.getByRole("button", { name: "Receive clipboard text", exact: true }).click();
     await until(async () => await application!.evaluate(({ clipboard }) => clipboard.readText()) === marker, 15_000);
     await page.screenshot({ path: join(artifacts, "rdp-live-desktop.png") });
 

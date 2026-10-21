@@ -113,7 +113,7 @@ describe("application settings contracts", () => {
     const previous = { ...previousSettings, v: 8, revision: 37 };
 
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
-      ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true },
+      ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true, transparentClipboard: false },
     });
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     expect(() => parseApplicationSettingsValues(previousSettings)).toThrow("Invalid application settings");
@@ -121,14 +121,28 @@ describe("application settings contracts", () => {
       .toThrow("Invalid persisted application settings state");
   });
 
-  it.each([false, true])("parses and freezes the explicit RDP clipboard=%s preference", (clipboard) => {
-    const rdp = parseApplicationRdpSettings({ clipboard });
-    expect(rdp).toEqual({ clipboard });
-    expect(Object.isFrozen(rdp)).toBe(true);
-    expect(parseApplicationSettingsValues({ ...settings, rdp }).rdp).toEqual({ clipboard });
+  it.each([false, true])("migrates version-nine settings preserving clipboard=%s with transparent clipboard disabled", (clipboard) => {
+    const previous = { ...settings, v: 9, revision: 41, rdp: { clipboard } };
+    expect(parsePersistedApplicationSettingsState(previous)).toEqual({
+      ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard, transparentClipboard: false },
+    });
+    expect(() => parseApplicationSettingsState(previous)).toThrow();
+    expect(() => parsePersistedApplicationSettingsState({ ...previous, rdp: { clipboard, transparentClipboard: true } })).toThrow();
   });
 
-  it.each([undefined, null, {}, { clipboard: "false" }, { clipboard: 0 }, { clipboard: true, extra: true }])(
+  it.each([false, true])("parses and freezes the explicit RDP clipboard=%s preference", (clipboard) => {
+    const rdp = parseApplicationRdpSettings({ clipboard, transparentClipboard: false });
+    expect(rdp).toEqual({ clipboard, transparentClipboard: false });
+    expect(Object.isFrozen(rdp)).toBe(true);
+    expect(parseApplicationSettingsValues({ ...settings, rdp }).rdp).toEqual({ clipboard, transparentClipboard: false });
+  });
+
+  it.each([false, true])("accepts transparent clipboard=%s without changing the connection default", (transparentClipboard) => {
+    expect(parseApplicationRdpSettings({ clipboard: false, transparentClipboard })).toEqual({ clipboard: false, transparentClipboard });
+  });
+
+  it.each([undefined, null, {}, { clipboard: "false" }, { clipboard: 0 }, { clipboard: true },
+    { clipboard: true, transparentClipboard: "false" }, { clipboard: true, transparentClipboard: false, extra: true }])(
     "rejects malformed RDP preferences %#", (rdp) => {
       expect(() => parseApplicationRdpSettings(rdp)).toThrow("Invalid RDP settings");
       expect(() => parseApplicationSettingsValues({ ...settings, rdp })).toThrow("Invalid application settings");

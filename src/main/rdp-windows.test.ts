@@ -60,6 +60,7 @@ vi.mock("./window-options.js", () => ({ rdpWindowOptions: () => ({}) }));
 let temporary: string, manager: RdpWindows, store: RdpStore;
 let resolveRuntime: ReturnType<typeof vi.fn<() => Promise<string>>>;
 let updateApplicationSettings: ReturnType<typeof vi.fn<(input: ApplicationSettingsUpdateInput) => Promise<OperationResult<ApplicationSettingsState>>>>;
+let applicationSettings: ApplicationSettingsState;
 const certificate = new X509Certificate(await readFile(new URL("../e2e/fixtures/server.crt.fixture", import.meta.url)));
 const certificateEvent = (overrides: Partial<Extract<RdpRuntimeEvent, { type: "certificate" | "peerCertificate" }>> = {}): Extract<RdpRuntimeEvent, { type: "certificate" | "peerCertificate" }> => ({
   type: "certificate", requestId: "challenge-1", endpoint: "rdp.example.test:3389", fingerprint: certificate.fingerprint256.replaceAll(":", "").toLowerCase(),
@@ -87,6 +88,9 @@ async function connect(): Promise<RdpTab> {
 }
 beforeEach(async () => {
   mocks.windows.length = 0; mocks.runtimes.length = 0; vi.clearAllMocks();
+  applicationSettings = DEFAULT_APPLICATION_SETTINGS_STATE;
+  mocks.clipboard.readText.mockResolvedValue("local text");
+  mocks.clipboard.writeText.mockResolvedValue(undefined);
   mocks.image.createFromDataURL.mockImplementation(() => ({
     getSize: () => ({ width: 1, height: 1 }), isEmpty: () => false,
     toJPEG: () => Buffer.from(RDP_PREVIEW_FIXTURE.dataUrl.split(",")[1]!, "base64"),
@@ -96,7 +100,7 @@ beforeEach(async () => {
   updateApplicationSettings = vi.fn(async (input) => ({ ok: true, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } }));
   store = new RdpStore(join(temporary, "rdp.json"), { isEncryptionAvailable: () => false, getSelectedStorageBackend: () => "basic_text", encryptString: () => { throw new Error("unavailable"); }, decryptString: () => { throw new Error("unavailable"); } });
   manager = new RdpWindows({ rendererUrl: "sliver://app/index.html?surface=rdp", preloadPath: "/trusted/rdp.cjs", store, resolveRuntime,
-    getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE, updateApplicationSettings, prepareWindow: () => undefined });
+    getApplicationSettings: () => applicationSettings, updateApplicationSettings, prepareWindow: () => undefined });
   await manager.open();
 });
 afterEach(async () => { manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
@@ -161,7 +165,7 @@ describe("RDP main authority", () => {
   });
 
   it("routes validated application settings updates to the shared persistence service", async () => {
-    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false } } };
+    const input = { expectedRevision: 0, settings: { ...DEFAULT_APPLICATION_SETTINGS_VALUES, rdp: { clipboard: false, transparentClipboard: false } } };
     expect(await invoke(RDP_IPC.updateApplicationSettings, input)).toEqual({
       ok: true,
       value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: 1 },
@@ -337,6 +341,221 @@ describe("RDP main authority", () => {
     mocks.windows[0]!.focused = true;
     expect((await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "send" })).ok).toBe(true);
     expect(runtime.send).toHaveBeenCalledWith({ type: "clipboardSend", text: "local text" });
+  });
+
+  it("keeps automatic clipboard access disabled by default", async () => {
+    vi.useFakeTimers();
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mocks.clipboard.readText).not.toHaveBeenCalled();
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
+    expect(runtime.send).not.toHaveBeenCalledWith({ type: "clipboardRequest" });
+  });
+
+  it("automatically sends local changes, receives repeated remote copies, and suppresses echo", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    let localText = "local text";
+    mocks.clipboard.readText.mockImplementation(async () => localText);
+    mocks.clipboard.writeText.mockImplementation(async (text) => { localText = text; });
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send).toHaveBeenCalledWith({ type: "clipboardSend", text: "local text" });
+    runtime.send.mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(runtime.send).not.toHaveBeenCalled();
+    for (const text of ["remote one", "remote two"]) {
+      runtime.receive({ type: "clipboardAvailable", available: true });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(runtime.send).toHaveBeenLastCalledWith({ type: "clipboardRequest" });
+      runtime.receive({ type: "clipboard", text });
+      await vi.advanceTimersByTimeAsync(500);
+      expect(localText).toBe(text);
+      expect(runtime.send).not.toHaveBeenCalledWith({ type: "clipboardSend", text });
+    }
+    localText = "";
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send).toHaveBeenLastCalledWith({ type: "clipboardSend", text: "" });
+  });
+
+  it("synchronizes only the focused active attached session and stops on disable or detach", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const first = await connect(), firstRuntime = mocks.runtimes[0]!;
+    await attach(first.id);
+    firstRuntime.receive({ type: "state", state: "active" }); firstRuntime.receive({ type: "clipboardReady" });
+    const second = await connect(), secondRuntime = mocks.runtimes[1]!;
+    const port = await attach(second.id);
+    secondRuntime.receive({ type: "state", state: "active" }); secondRuntime.receive({ type: "clipboardReady" });
+    mocks.windows[0]!.focused = false;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.clipboard.readText).not.toHaveBeenCalled();
+    mocks.windows[0]!.focused = true;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(firstRuntime.send).not.toHaveBeenCalledWith({ type: "clipboardSend", text: "local text" });
+    expect(secondRuntime.send).toHaveBeenCalledWith({ type: "clipboardSend", text: "local text" });
+    secondRuntime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: false } };
+    secondRuntime.receive({ type: "clipboard", text: "disabled reply" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
+    mocks.clipboard.readText.mockClear();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.clipboard.readText).not.toHaveBeenCalled();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    port.emit("close");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.clipboard.readText).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a newer local copy with an automatic remote reply", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    await vi.advanceTimersByTimeAsync(500);
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    mocks.clipboard.readText.mockResolvedValue("new local copy");
+    runtime.receive({ type: "clipboard", text: "older remote copy" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
+    expect(runtime.send).toHaveBeenLastCalledWith({ type: "clipboardSend", text: "new local copy" });
+  });
+
+  it("rejects stale automatic reads after a tab switch and ignores unsupported local text", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    let resolveRead!: (text: string) => void;
+    mocks.clipboard.readText.mockImplementationOnce(() => new Promise((resolve) => { resolveRead = resolve; }));
+    await vi.advanceTimersByTimeAsync(500);
+    const second = await connect();
+    await invoke(RDP_IPC.selectTab, tab.id);
+    resolveRead("stale local text");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.send).not.toHaveBeenCalledWith({ type: "clipboardSend", text: "stale local text" });
+    for (const text of ["contains\0nul", "a".repeat(1024 * 1024 + 1), "\u0001".repeat(400_000)]) {
+      mocks.clipboard.readText.mockResolvedValue(text);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(runtime.send).not.toHaveBeenCalledWith({ type: "clipboardSend", text });
+    }
+    expect(manager.state().tabs.find(({ id }) => id === tab.id)?.state).toBe("active");
+    await invoke(RDP_IPC.closeTab, second.id);
+  });
+
+  it("receives fresh remote text after an unsupported local clipboard sample", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    mocks.clipboard.readText.mockResolvedValue("unsupported\0text");
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    await vi.advanceTimersByTimeAsync(500);
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send).toHaveBeenLastCalledWith({ type: "clipboardRequest" });
+    runtime.receive({ type: "clipboard", text: "usable remote text" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.clipboard.writeText).toHaveBeenCalledWith("usable remote text");
+  });
+
+  it("drains a canceled automatic reply before receiving the remote clipboard after refocus", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    mocks.windows[0]!.focused = false; mocks.windows[0]!.emit("blur");
+    mocks.windows[0]!.focused = true;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send.mock.calls.filter(([message]) => message.type === "clipboardRequest")).toHaveLength(1);
+    runtime.receive({ type: "clipboard", text: "canceled remote reply" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
+    expect(runtime.send.mock.calls.filter(([message]) => message.type === "clipboardRequest")).toHaveLength(2);
+    runtime.receive({ type: "clipboard", text: "current remote reply" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.clipboard.writeText).toHaveBeenCalledExactlyOnceWith("current remote reply");
+  });
+
+  it("receives a newer remote announcement queued while an automatic request is pending", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    let text = "local";
+    mocks.clipboard.readText.mockImplementation(async () => text);
+    mocks.clipboard.writeText.mockImplementation(async (value) => { text = value; });
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    runtime.receive({ type: "clipboard", text: "first remote copy" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send.mock.calls.filter(([message]) => message.type === "clipboardRequest")).toHaveLength(2);
+    runtime.receive({ type: "clipboard", text: "latest remote copy" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(text).toBe("latest remote copy");
+  });
+
+  it("does not let an older automatic clipboard read overwrite a manual send", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    let resolveRead!: (text: string) => void;
+    mocks.clipboard.readText.mockImplementationOnce(() => new Promise((resolve) => { resolveRead = resolve; }));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await invoke(RDP_IPC.clipboard, { tabId: tab.id, direction: "send" })).toEqual({ ok: true });
+    resolveRead("older local text");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.send.mock.calls.filter(([message]) => message.type === "clipboardSend")).toEqual([[{ type: "clipboardSend", text: "local text" }]]);
+  });
+
+  it.each(["clipboard-unavailable", "clipboard-invalid", "clipboard-too-large"])("recovers automatic clipboard after %s", async (code) => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    runtime.receive({ type: "error", code });
+    await vi.advanceTimersByTimeAsync(500);
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send.mock.calls.filter(([message]) => message.type === "clipboardRequest")).toHaveLength(2);
+    runtime.receive({ type: "clipboard", text: "retry text" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.clipboard.writeText).toHaveBeenCalledWith("retry text");
+  });
+
+  it("continues sending new local copies after an automatic remote request times out", async () => {
+    vi.useFakeTimers();
+    applicationSettings = { ...applicationSettings, rdp: { clipboard: true, transparentClipboard: true } };
+    const tab = await connect(), runtime = mocks.runtimes[0]!;
+    await attach(tab.id);
+    runtime.receive({ type: "state", state: "active" }); runtime.receive({ type: "clipboardReady" });
+    runtime.receive({ type: "clipboardAvailable", available: true });
+    await vi.advanceTimersByTimeAsync(11_000);
+    mocks.clipboard.readText.mockResolvedValue("local copy after timeout");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(runtime.send).toHaveBeenLastCalledWith({ type: "clipboardSend", text: "local copy after timeout" });
+    runtime.receive({ type: "clipboard", text: "late remote copy" });
+    expect(mocks.clipboard.writeText).not.toHaveBeenCalled();
   });
   it("accepts clipboard responses only for an explicit pending receive and cancels on blur", async () => {
     const tab = await connect(), runtime = mocks.runtimes[0]!;

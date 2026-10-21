@@ -4,6 +4,7 @@ import type { RdpCursor, RdpInputEvent, RdpScaleMode, RdpTab, RdpWindowAPI } fro
 import { RdpDisplay } from "./rdp-display";
 import { DesktopKeyboard, desktopPoint, specialKeyInputs, unicodeInputs } from "./rdp-input";
 import { RdpPreview } from "./rdp-preview";
+import { rdpWindowResize } from "./rdp-resize";
 import { isRdpReady, RdpTransport } from "./rdp-transport";
 
 export interface RdpDesktopHandle {
@@ -21,9 +22,10 @@ interface Props {
   readonly inputEnabled: boolean;
   readonly scaleMode: RdpScaleMode;
   readonly autoResize: boolean;
+  readonly highDpi?: boolean;
 }
 
-export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDesktop({ api, tab, active, inputEnabled, scaleMode, autoResize }, ref) {
+export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDesktop({ api, tab, active, inputEnabled, scaleMode, autoResize, highDpi = false }, ref) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorRef = useRef<HTMLCanvasElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
@@ -51,6 +53,8 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
 
   const resizeAllowedRef = useRef(false);
   resizeAllowedRef.current = attached && active && tab.state === "active";
+  const highDpiRef = useRef(highDpi);
+  highDpiRef.current = highDpi;
   const lastResizeRef = useRef<{ width: number; height: number; scaleFactor: number } | undefined>(undefined);
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -106,11 +110,10 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
 
   const resize = useCallback((): void => {
     const bounds = hostRef.current?.getBoundingClientRect();
-    if (!bounds || !resizeAllowedRef.current || bounds.width < 200 || bounds.height < 200) return;
-    const width = Math.min(8192, Math.max(200, Math.round(bounds.width)));
-    const height = Math.min(8192, Math.max(200, Math.round(bounds.height)));
-    if (width * height > 16_777_216) return;
-    const scaleFactor = Math.max(100, Math.min(500, Math.round(window.devicePixelRatio * 100)));
+    if (!bounds || !resizeAllowedRef.current) return;
+    const dimensions = rdpWindowResize(bounds, highDpiRef.current, window.devicePixelRatio);
+    if (!dimensions) return;
+    const { width, height, scaleFactor } = dimensions;
     const previous = lastResizeRef.current;
     if (!transportRef.current || previous?.width === width && previous.height === height && previous.scaleFactor === scaleFactor) return;
     transportRef.current.send({ type: "resize", width, height, scaleFactor });
@@ -256,12 +259,30 @@ export const RdpDesktop = forwardRef<RdpDesktopHandle, Props>(function RdpDeskto
   }, [active, attached, autoResize, cancelResize, scheduleResize]);
 
   useEffect(() => {
+    if (!autoResize || !highDpi || !active || !attached) return;
+    let resolution: MediaQueryList;
+    const changed = (): void => {
+      resolution.removeEventListener("change", changed);
+      watch();
+      scheduleResize();
+    };
+    const watch = (): void => {
+      resolution = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+      resolution.addEventListener("change", changed);
+    };
+    // Moving the window between displays can change DPR without changing its
+    // CSS dimensions. Re-arm the query after every density change.
+    watch();
+    return () => resolution.removeEventListener("change", changed);
+  }, [active, attached, autoResize, highDpi, scheduleResize]);
+
+  useEffect(() => {
     // A window may have changed size while the server was reconnecting. Apply
     // that latest size once active without replacing the observer for each phase.
     if (autoResize && active && attached && tab.state === "active") scheduleResize();
     else cancelResize();
     return cancelResize;
-  }, [active, attached, autoResize, cancelResize, scheduleResize, tab.state]);
+  }, [active, attached, autoResize, cancelResize, highDpi, scheduleResize, tab.state]);
 
   const point = useCallback((event: { clientX: number; clientY: number }): { x: number; y: number } | undefined => {
     const canvas = canvasRef.current;

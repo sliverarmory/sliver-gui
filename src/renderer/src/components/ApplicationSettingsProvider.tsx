@@ -302,6 +302,7 @@ function sameSettings(left: ApplicationSettingsValues, right: ApplicationSetting
     left.terminal.smoothScrolling === right.terminal.smoothScrolling &&
     left.terminal.transparentWindows === right.terminal.transparentWindows &&
     left.rdp.clipboard === right.rdp.clipboard &&
+    left.rdp.transparentClipboard === right.rdp.transparentClipboard &&
     sameOverviewSettings(left.overview, right.overview);
 }
 

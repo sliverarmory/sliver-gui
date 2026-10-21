@@ -1,9 +1,9 @@
 import { createRef, useCallback, useEffect, useRef, useState, type RefObject } from "react";
-import { Button, Chip, Input, Label, Modal, Tabs, TextField, Tooltip } from "@heroui/react";
+import { Button, Chip, Input, Label, Modal, Tabs, TextField, Tooltip, toast } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faArrowsRotate, faClipboard, faDesktop, faExpand, faFolderOpen, faGear, faKey, faPlus, faPowerOff, faShieldHalved, faXmark } from "@fortawesome/free-solid-svg-icons";
+import { faArrowsRotate, faDesktop, faDownload, faExpand, faFolderOpen, faGear, faKey, faPlus, faPowerOff, faShieldHalved, faUpload, faXmark } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import type { RdpConnectInput, RdpCredentialPersistence, RdpProfile, RdpScaleMode, RdpWindowState } from "../../shared/rdp-contracts";
 import type { OperationResult } from "../../shared/contracts";
@@ -11,6 +11,7 @@ import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { RenamableTab } from "./components/RenamableTab";
 import { RenameTabDialog } from "./components/RenameTabDialog";
 import { SwitchRow } from "./components/FormControls";
+import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
 import { RdpConnectDialog } from "./components/rdp/RdpConnectDialog";
 import { RdpProfileGrid } from "./components/rdp/RdpProfileGrid";
 import { RdpProfilePasswordDialog } from "./components/rdp/RdpProfilePasswordDialog";
@@ -21,10 +22,10 @@ const EMPTY_STATE: RdpWindowState = { tabs: [], profiles: [], securePersistenceA
 
 export function RdpWindowApp(): React.JSX.Element {
   const api = window.rdp;
+  const applicationSettings = useApplicationSettings();
   const [state, setState] = useState<RdpWindowState>(EMPTY_STATE);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
   const [connectOpen, setConnectOpen] = useState(false);
   const [selectedProfile, setSelectedProfile] = useState<RdpProfile>();
   const [passwordProfile, setPasswordProfile] = useState<RdpProfile>();
@@ -38,37 +39,55 @@ export function RdpWindowApp(): React.JSX.Element {
   const [deleteProfile, setDeleteProfile] = useState<RdpProfile>();
   const [scaleModes, setScaleModes] = useState<Readonly<Record<string, RdpScaleMode>>>({});
   const [autoResize, setAutoResize] = useState(false);
+  const [highDpi, setHighDpi] = useState(false);
   const stateEvents = useRef(0);
   const pendingRef = useRef(false);
   const refs = useRef(new Map<string, RefObject<RdpDesktopHandle | null>>());
+  const warnedTabs = useRef(new Map<string, { attempt: number; message: string }>());
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
   const reviewTab = state.tabs.find((tab) => tab.review !== undefined);
   const review = reviewTab?.review;
   const modalOpen = connectOpen || profilesOpen || settingsOpen || Boolean(renameId || reconnectId || review || deleteProfile || passwordProfile);
+
+  const reportError = useCallback((message: string): void => {
+    setError(message);
+    toast.danger("Remote Desktop action failed", { description: message });
+  }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
     if (!api) return;
     const events = stateEvents.current;
     try {
       const result = await api.getState();
-      if (!result.ok) setError(result.error);
+      if (!result.ok) reportError(result.error);
       else if (events === stateEvents.current) setState(result.value);
-    } catch { setError("Remote Desktop state could not be refreshed."); }
-  }, [api]);
+    } catch { reportError("Remote Desktop state could not be refreshed."); }
+  }, [api, reportError]);
 
   useEffect(() => {
-    if (!api) { setError("Remote Desktop is unavailable in this window."); setLoading(false); return; }
+    if (!api) { reportError("Remote Desktop is unavailable in this window."); setLoading(false); return; }
     let mounted = true;
     let receivedEvent = false;
     const remove = api.onStateChanged((next) => { if (mounted) { stateEvents.current += 1; receivedEvent = true; setState(next); setLoading(false); } });
     void api.getState().then((result) => {
       if (!mounted) return;
-      if (!result.ok) setError(result.error);
+      if (!result.ok) reportError(result.error);
       else if (!receivedEvent) setState(result.value);
       setLoading(false);
-    }).catch(() => { if (mounted) { setError("Remote Desktop could not be initialized."); setLoading(false); } });
+    }).catch(() => { if (mounted) { reportError("Remote Desktop could not be initialized."); setLoading(false); } });
     return () => { mounted = false; remove(); };
-  }, [api]);
+  }, [api, reportError]);
+
+  useEffect(() => {
+    for (const [id, previous] of warnedTabs.current) {
+      if (!state.tabs.some((tab) => tab.id === id && tab.attempt === previous.attempt && tab.error === previous.message)) warnedTabs.current.delete(id);
+    }
+    if (activeTab?.state !== "active" || !activeTab.error) return;
+    const previous = warnedTabs.current.get(activeTab.id);
+    if (previous?.attempt === activeTab.attempt && previous.message === activeTab.error) return;
+    warnedTabs.current.set(activeTab.id, { attempt: activeTab.attempt, message: activeTab.error });
+    toast.warning("Remote Desktop warning", { description: activeTab.error });
+  }, [activeTab, state.tabs]);
 
   useEffect(() => {
     document.title = activeTab ? `Remote Desktop — ${activeTab.label}` : "Remote Desktop";
@@ -79,16 +98,16 @@ export function RdpWindowApp(): React.JSX.Element {
   const act = useCallback(async (key: string, operation: () => Promise<OperationResult | OperationResult<unknown>>, success?: () => void): Promise<boolean> => {
     if (pendingRef.current) return false;
     pendingRef.current = true;
-    setPending(key); setError(undefined); setNotice(undefined);
+    setPending(key); setError(undefined);
     try {
       const result = await operation();
       if (!result.ok) throw new Error(result.error);
       success?.();
       await refresh();
       return true;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "The remote desktop action failed."); return false; }
+    } catch (cause) { reportError(cause instanceof Error ? cause.message : "The remote desktop action failed."); return false; }
     finally { pendingRef.current = false; setPending(undefined); }
-  }, [refresh]);
+  }, [refresh, reportError]);
 
   const newConnection = (profile?: RdpProfile): void => {
     activeTab && refs.current.get(activeTab.id)?.current?.release();
@@ -121,7 +140,7 @@ export function RdpWindowApp(): React.JSX.Element {
     if (!api || id === activeTab?.id) return;
     if (activeTab) refs.current.get(activeTab.id)?.current?.release();
     setState((current) => ({ ...current, activeTabId: id }));
-    void api.selectTab(id).then((result) => { if (!result.ok) setError(result.error); }).catch(() => setError("The tab could not be selected."));
+    void api.selectTab(id).then((result) => { if (!result.ok) reportError(result.error); }).catch(() => reportError("The tab could not be selected."));
   };
   const liveCount = state.tabs.filter(({ state: phase }) => phase !== "disconnected" && phase !== "failed").length;
   const activeHandle = (): RdpDesktopHandle | null | undefined => activeTab ? refs.current.get(activeTab.id)?.current : undefined;
@@ -136,11 +155,8 @@ export function RdpWindowApp(): React.JSX.Element {
       <div className="mr-auto flex items-center gap-2"><FontAwesomeIcon aria-hidden icon={faDesktop} className="text-muted" /><h1 className="text-sm font-semibold">Remote Desktop</h1></div>
       <Button size="sm" isDisabled={!api || loading || state.tabs.length >= state.maxSessions} onPress={() => newConnection()}><FontAwesomeIcon aria-hidden icon={faPlus} />New connection</Button>
       <IconButton label="Saved profiles" icon={faFolderOpen} disabled={!api || loading} onPress={() => setProfilesOpen(true)} />
-      <IconButton label="Display settings" icon={faGear} disabled={!activeTab} onPress={() => setSettingsOpen(true)} />
+      <IconButton label="Configuration" icon={faGear} disabled={!api || loading} onPress={() => setSettingsOpen(true)} />
     </header>
-    {error && <div role="alert" className="flex items-center justify-between gap-4 border-b border-border px-4 py-2 text-sm text-danger"><p>{error}</p><Button aria-label="Dismiss error" isIconOnly size="sm" variant="ghost" onPress={() => setError(undefined)}><FontAwesomeIcon icon={faXmark} /></Button></div>}
-    {activeConnected && activeTab.error && <p role="status" className="border-b border-border px-4 py-2 text-sm text-warning">{activeTab.error}</p>}
-    {notice && <p role="status" className="border-b border-border px-4 py-2 text-sm text-muted">{notice}</p>}
     {loading ? <div className="grid flex-1 place-items-center text-sm text-muted" role="status">Opening Remote Desktop…</div> : state.tabs.length === 0 ? <div className="min-h-0 flex-1 overflow-y-auto">
       {state.profiles.length === 0 ? <EmptyState className="mx-auto max-w-lg py-12"><EmptyState.Header><EmptyState.Media variant="icon"><FontAwesomeIcon aria-hidden icon={faDesktop} /></EmptyState.Media><EmptyState.Title>Your Windows desktops</EmptyState.Title><EmptyState.Description>Connect directly to a Windows computer. Remote Desktop works independently of your Sliver connections.</EmptyState.Description></EmptyState.Header>
         <EmptyState.Content><Button isDisabled={!api} onPress={() => newConnection()}>Connect to a computer</Button></EmptyState.Content>
@@ -151,8 +167,8 @@ export function RdpWindowApp(): React.JSX.Element {
       </section>}
     </div> : <>
       <Tabs className="rdp-tabs" selectedKey={activeTab?.id ?? ""} onSelectionChange={(id) => selectTab(String(id))}>
-        <Tabs.ListContainer><Tabs.List aria-label="Remote desktop sessions" className="px-3">
-          {state.tabs.map((tab) => <RenamableTab key={tab.id} id={tab.id} ariaLabel={tab.label} onRename={(id) => { setRenameId(id); setRenameName(tab.label); }}>
+        <Tabs.ListContainer className="rdp-tabs__bar"><Tabs.List aria-label="Remote desktop sessions" className="rdp-tabs__list">
+          {state.tabs.map((tab) => <RenamableTab key={tab.id} id={tab.id} className="rdp-tabs__tab" ariaLabel={tab.label} onRename={(id) => { setRenameId(id); setRenameName(tab.label); }}>
             <span className="max-w-52 truncate">{tab.label}</span><span className="sr-only">{phaseLabel(tab.state)}</span><Tabs.Indicator />
           </RenamableTab>)}
         </Tabs.List></Tabs.ListContainer>
@@ -164,10 +180,10 @@ export function RdpWindowApp(): React.JSX.Element {
           </NativeSelect.Trigger></NativeSelect>
           <IconButton label="Send Ctrl+Alt+Delete" icon={faKey} disabled={!activeConnected} onPress={() => activeHandle()?.specialKey("ctrl-alt-delete")} />
           <IconButton label="Send Windows key" icon={faDesktop} disabled={!activeConnected} onPress={() => activeHandle()?.specialKey("windows")} />
-          <IconButton label="Send clipboard text" icon={faClipboard} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-send", () => api!.clipboard({ tabId: activeTab.id, direction: "send" }), () => setNotice("Clipboard text sent to the remote desktop.")); }} />
-          <Button size="sm" variant="ghost" isDisabled={!activeConnected || !activeTab.clipboardAvailable || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-receive", () => api!.clipboard({ tabId: activeTab.id, direction: "receive" }), () => setNotice("Remote text copied to the clipboard.")); }}>Receive clipboard</Button>
+          <IconButton label="Send clipboard text" icon={faUpload} disabled={!activeConnected || !activeTab.clipboardReady || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-send", () => api!.clipboard({ tabId: activeTab.id, direction: "send" }), () => toast.success("Clipboard text sent to the remote desktop.")); }} />
+          <IconButton label="Receive clipboard text" icon={faDownload} disabled={!activeConnected || !activeTab.clipboardAvailable || !activeTab.clipboard || Boolean(pending)} onPress={() => { void act("clipboard-receive", () => api!.clipboard({ tabId: activeTab.id, direction: "receive" }), () => toast.success("Remote text copied to the clipboard.")); }} />
           <IconButton label="Toggle fullscreen" icon={faExpand} disabled={!api} onPress={() => { void act("fullscreen", () => api!.toggleFullscreen()); }} />
-          {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
+          {activeTab.state === "disconnected" || activeTab.state === "failed" ? <IconButton label="Reconnect" icon={faArrowsRotate} disabled={Boolean(pending)} onPress={() => { setError(undefined); setReconnectPassword(""); setReconnectId(activeTab.id); }} /> : <IconButton label={activeConnected ? "Disconnect" : "Cancel connection"} icon={faPowerOff} disabled={Boolean(pending)} onPress={() => { void act("disconnect", async () => { await activeHandle()?.savePreview(); return api!.disconnect(activeTab.id); }); }} />}
           <IconButton label="Close remote desktop tab" icon={faXmark} disabled={Boolean(pending)} onPress={() => { void act("close", async () => { await activeHandle()?.savePreview(); return api!.closeTab(activeTab.id); }); }} />
         </div>}
         <div className="rdp-tab-panels">
@@ -175,7 +191,7 @@ export function RdpWindowApp(): React.JSX.Element {
             let desktopRef = refs.current.get(tab.id);
             if (!desktopRef) { desktopRef = createRef<RdpDesktopHandle>(); refs.current.set(tab.id, desktopRef); }
             return <RdpDesktop key={`${tab.id}:${tab.attempt}`} ref={desktopRef} api={api} tab={tab} active={tab.id === activeTab?.id} inputEnabled={!modalOpen}
-              scaleMode={scaleModes[tab.id] ?? tab.scaleMode} autoResize={autoResize} />;
+              scaleMode={scaleModes[tab.id] ?? tab.scaleMode} autoResize={autoResize} highDpi={highDpi} />;
           })}
         </div>
       </Tabs>
@@ -186,8 +202,12 @@ export function RdpWindowApp(): React.JSX.Element {
       securePersistenceAvailable={state.securePersistenceAvailable} pending={Boolean(pending)} error={error}
       onClose={() => setPasswordProfile(undefined)} onConnect={(password, persistence) => { void connectProfile(passwordProfile, password, persistence); }} />}
     <Modal.Backdrop isOpen={profilesOpen && !deleteProfile} variant="blur" onOpenChange={setProfilesOpen}><Modal.Container size="lg"><Modal.Dialog className="rdp-profiles-dialog"><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Saved Connections</Modal.Heading></Modal.Header><Modal.Body className="max-h-[65vh] overflow-y-auto">{profiles}</Modal.Body><Modal.Footer><Button variant="secondary" onPress={() => setProfilesOpen(false)}>Close</Button><Button isDisabled={state.tabs.length >= state.maxSessions} onPress={() => newConnection()}>New connection</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>
-    <Modal.Backdrop isOpen={settingsOpen} variant="blur" onOpenChange={setSettingsOpen}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Display Settings</Modal.Heading></Modal.Header><Modal.Body className="grid gap-4">
-      <SwitchRow label="Resize desktop with window" description="Request a desktop size matching this window. Some servers require reconnecting to change their size." selected={autoResize} onChange={setAutoResize} />
+    <Modal.Backdrop isOpen={settingsOpen} variant="blur" onOpenChange={setSettingsOpen}><Modal.Container size="sm"><Modal.Dialog><Modal.CloseTrigger /><Modal.Header><Modal.Heading>Configuration</Modal.Heading></Modal.Header><Modal.Body className="grid max-h-[65vh] gap-4 overflow-y-auto">
+      <SwitchRow label="Transparent clipboard" description="Automatically share clipboard text with the selected desktop while this window is focused. Requires Text clipboard on the connection."
+        selected={applicationSettings?.settings.rdp.transparentClipboard ?? false} disabled={!applicationSettings?.isReady || applicationSettings.isSaving}
+        onChange={(selected) => { void applicationSettings?.updateSettings((current) => ({ ...current, rdp: { ...current.rdp, transparentClipboard: selected } })); }} />
+      <SwitchRow label="Resize desktop with window" description="Request a desktop size matching this window. Some servers require reconnecting to change their size." selected={autoResize} disabled={!activeTab} onChange={setAutoResize} />
+      <SwitchRow label="Scale desktop for high-DPI displays" description="Use this display’s pixel density for a sharper desktop with matching text and icon scaling." selected={highDpi} disabled={!activeTab || !autoResize} onChange={setHighDpi} />
       <Button variant="secondary" isDisabled={!activeConnected} onPress={() => { activeHandle()?.resizeToWindow(); setSettingsOpen(false); }}>Resize to this window</Button>
       <p className="text-xs text-muted">Fit scales the remote picture locally. Actual size displays one screen pixel per desktop pixel.</p>
     </Modal.Body><Modal.Footer><Button onPress={() => setSettingsOpen(false)}>Done</Button></Modal.Footer></Modal.Dialog></Modal.Container></Modal.Backdrop>

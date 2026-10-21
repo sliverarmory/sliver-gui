@@ -4,7 +4,8 @@ import {
   type KeyboardShortcutOverrides,
 } from "./keyboard-shortcuts.js";
 
-export const APPLICATION_SETTINGS_VERSION = 9 as const;
+export const APPLICATION_SETTINGS_VERSION = 10 as const;
+const PRE_TRANSPARENT_CLIPBOARD_APPLICATION_SETTINGS_VERSION = 9 as const;
 const PRE_RDP_APPLICATION_SETTINGS_VERSION = 8 as const;
 const REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION = 5 as const;
 const KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION = 4 as const;
@@ -53,6 +54,7 @@ export interface ApplicationOverviewSettings {
 
 export interface ApplicationRdpSettings {
   readonly clipboard: boolean;
+  readonly transparentClipboard: boolean;
 }
 
 export interface ApplicationSettingsValues {
@@ -98,6 +100,7 @@ export const DEFAULT_APPLICATION_OVERVIEW_SETTINGS: ApplicationOverviewSettings 
 
 export const DEFAULT_APPLICATION_RDP_SETTINGS: ApplicationRdpSettings = Object.freeze({
   clipboard: true,
+  transparentClipboard: false,
 });
 
 export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Object.freeze({
@@ -133,7 +136,7 @@ const TERMINAL_KEYS = [
 ] as const;
 const OVERVIEW_KEYS = ["kinds", "statuses", "lightning", "sidebarDisabled", "presentation"] as const;
 const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
-const RDP_KEYS = ["clipboard"] as const;
+const RDP_KEYS = ["clipboard", "transparentClipboard"] as const;
 const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"] as const;
 const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
 const PRE_RDP_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
@@ -250,10 +253,10 @@ export function parseApplicationOverviewSettings(value: unknown): ApplicationOve
 }
 
 export function parseApplicationRdpSettings(value: unknown): ApplicationRdpSettings {
-  if (!hasExactKeys(value, RDP_KEYS) || typeof value["clipboard"] !== "boolean") {
+  if (!hasExactKeys(value, RDP_KEYS) || typeof value["clipboard"] !== "boolean" || typeof value["transparentClipboard"] !== "boolean") {
     throw new TypeError("Invalid RDP settings");
   }
-  return Object.freeze({ clipboard: value["clipboard"] });
+  return Object.freeze({ clipboard: value["clipboard"], transparentClipboard: value["transparentClipboard"] });
 }
 
 function isOverviewKindSelection(value: unknown): value is OverviewKindSelection {
@@ -343,6 +346,10 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
 }
 
 export function parsePersistedApplicationSettingsState(value: unknown): ApplicationSettingsState {
+  if (hasExactKeys(value, SETTINGS_STATE_KEYS) && value["v"] === PRE_TRANSPARENT_CLIPBOARD_APPLICATION_SETTINGS_VERSION &&
+      hasExactKeys(value["rdp"], ["clipboard"]) && typeof value["rdp"]["clipboard"] === "boolean") {
+    value = { ...value, v: APPLICATION_SETTINGS_VERSION, rdp: { ...value["rdp"], transparentClipboard: false } };
+  }
   if (isRecord(value) && Number.isInteger(value["v"]) && Number(value["v"]) >= 1 && Number(value["v"]) <= 6 &&
       hasExactKeys(value["terminal"], TERMINAL_KEYS.filter((key) => key !== "transparentWindows"))) {
     value = { ...value, terminal: { ...value["terminal"], transparentWindows: true } };

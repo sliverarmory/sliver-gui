@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { _electron as electron, type ElectronApplication, type Locator, type Page } from "playwright-core";
 
-import type { RdpConnectInput, RdpWindowAPI, RdpWindowState } from "../shared/rdp-contracts.js";
+import type { RdpConnectInput, RdpViewerMessage, RdpWindowAPI, RdpWindowState } from "../shared/rdp-contracts.js";
 
 test("standalone RDP window saves profiles offline behind its isolated renderer boundary", { timeout: 90_000 }, async (context) => {
   const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -46,6 +46,13 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await invokeRdpMenu(application, "rdp.open");
     assert.equal(application.windows().length, windowCount, "File > Remote Desktop reuses the standalone window");
 
+    await rdp.getByRole("button", { name: "Configuration", exact: true }).click();
+    const initialConfiguration = rdp.getByRole("dialog", { name: "Configuration", exact: true });
+    assert.equal(await initialConfiguration.getByRole("switch", { name: "Transparent clipboard", exact: true }).isChecked(), false,
+      "Transparent clipboard starts disabled and can be configured without a connection");
+    await initialConfiguration.getByRole("button", { name: "Done", exact: true }).click();
+    await initialConfiguration.waitFor({ state: "hidden" });
+
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     const connection = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
     const clipboard = connection.getByRole("switch", { name: "Text clipboard", exact: true });
@@ -57,7 +64,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     assert.equal(await connection.getByLabel("Desktop width", { exact: true }).count(), 0);
     await rdp.screenshot({ path: join(artifacts, "rdp-connect-form.png"), animations: "disabled" });
     await clipboard.press("Space");
-    await assertClipboardPreference(temporary, false);
+    await assertRdpPreference(temporary, "clipboard", false);
     await connection.getByRole("button", { name: "Cancel", exact: true }).click();
     await connection.waitFor({ state: "hidden" });
     await rdp.reload();
@@ -99,7 +106,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await connection.getByLabel("Computer", { exact: true }).fill("rdp.invalid");
     await connection.getByLabel("Username", { exact: true }).fill("offline-operator");
     await connection.getByRole("button", { name: "Save profile", exact: true }).click();
-    await connection.getByRole("status").filter({ hasText: "Profile saved." }).waitFor();
+    await rdpToast(rdp, "Profile saved").waitFor();
     assert.equal(await connection.getByLabel("Password", { exact: true }).inputValue(), "");
     const saved = await readState(rdp);
     assert.equal(saved.profiles.length, 1);
@@ -140,7 +147,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     assert.equal(await clipboard.isChecked(), false);
     await clipboard.press("Space");
-    await assertClipboardPreference(temporary, true);
+    await assertRdpPreference(temporary, "clipboard", true);
     await connection.getByRole("button", { name: "Cancel", exact: true }).click();
     await connection.waitFor({ state: "hidden" });
     await openSavedProfileMenu(rdp, profiles.getByRole("button", { name: "Connect to Offline RDP profile", exact: true }));
@@ -313,7 +320,7 @@ test("saved RDP connections display private frame previews after restart and rem
     await profileMenu.getByRole("menuitem", { name: "Edit", exact: true }).click();
     await editor.getByLabel("Computer", { exact: true }).fill("replacement.example.invalid");
     await editor.getByRole("button", { name: "Save profile", exact: true }).click();
-    await editor.getByRole("status").filter({ hasText: "Profile saved." }).waitFor();
+    await rdpToast(rdp, "Profile saved").waitFor();
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     await editor.waitFor({ state: "hidden" });
     assert.equal(await saved.getByRole("img", { name: "Last saved desktop for BUILD-SERVER", exact: true }).count(), 0,
@@ -394,7 +401,7 @@ test("saved RDP cards connect directly and request only missing passwords withou
     };
     assert.deepEqual((await readConnectRequests(application))[0], expected,
       "Direct connect sends only stored connection options and requests the main-owned credential");
-    await rdp.getByRole("alert").filter({ hasText: "Offline RDP connection intercepted." }).waitFor();
+    await rdpToast(rdp, "Remote Desktop action failed").filter({ hasText: "Offline RDP connection intercepted." }).waitFor();
 
     const profileMenu = await openSavedProfileMenu(rdp, rememberedCard);
     await profileMenu.getByRole("menuitem", { name: "Connect", exact: true }).click();
@@ -428,6 +435,145 @@ test("saved RDP cards connect directly and request only missing passwords withou
     assert.deepEqual(errors, []);
   } catch (error) {
     if (rdp && !rdp.isClosed()) await rdp.screenshot({ path: join(artifacts, "rdp-saved-connection-actions-failure.png") }).catch(() => undefined);
+    throw error;
+  } finally {
+    if (application) await application.close().catch(() => { application?.process().kill("SIGKILL"); });
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("RDP configuration, clipboard controls and transient toasts preserve the connected viewer layout offline", { timeout: 60_000 }, async (context) => {
+  const repositoryRoot = resolve(import.meta.dirname, "../../..");
+  const temporary = await mkdtemp(join(tmpdir(), "sliver-rdp-display-e2e-"));
+  const artifacts = join(repositoryRoot, "artifacts/e2e");
+  let application: ElectronApplication | undefined;
+  let rdp: Page | undefined;
+  const errors: string[] = [];
+  try {
+    await Promise.all(["saved", "managed", "user-data", "client"].map((name) => mkdir(join(temporary, name))));
+    await mkdir(artifacts, { recursive: true });
+    await writeFile(join(temporary, "client/armories.json"), "[]", { mode: 0o600 });
+    application = await launchOfflineRdpApplication(repositoryRoot, temporary);
+    const ownedProcess = application.process();
+    context.signal.addEventListener("abort", () => ownedProcess.kill("SIGKILL"), { once: true });
+    const workspace = await application.firstWindow();
+    workspace.setDefaultTimeout(15_000);
+    await workspace.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Cancel", exact: true }).click();
+    await installOfflineDesktop(application);
+    rdp = await openRdpWindow(application, errors);
+    await setRdpTheme(rdp, "dark");
+    await rdp.locator('.rdp-screen[data-frame-count="1"]').waitFor();
+    const viewer = rdp.locator(".rdp-tab-panels");
+    const originalBounds = await viewer.boundingBox();
+    assert.ok(originalBounds);
+    // A deterministic Retina density exercises the renderer's real resize
+    // transport on every CI display, without changing the native display setup.
+    await rdp.evaluate(() => Object.defineProperty(globalThis, "devicePixelRatio", { configurable: true, value: 2 }));
+    await rdp.getByRole("button", { name: "Configuration", exact: true }).click();
+    const settings = rdp.getByRole("dialog", { name: "Configuration", exact: true });
+    const automatic = settings.getByRole("switch", { name: "Resize desktop with window", exact: true });
+    const density = settings.getByRole("switch", { name: "Scale desktop for high-DPI displays", exact: true });
+    const transparentClipboard = settings.getByRole("switch", { name: "Transparent clipboard", exact: true });
+    assert.equal(await automatic.isChecked(), false);
+    assert.equal(await density.isChecked(), false);
+    assert.equal(await transparentClipboard.isChecked(), false, "Automatic clipboard transfers require explicit opt-in");
+    assert.equal(await density.isDisabled(), true, "Density scaling is available with automatic desktop resizing");
+    await automatic.press("Space");
+    assert.equal(await density.isDisabled(), false);
+    const standard = await waitForDesktopResize(application, 1);
+    assert.equal(standard.scaleFactor, 100);
+    await density.press("Space");
+    assert.equal(await density.isChecked(), true);
+    const scaled = await waitForDesktopResize(application, 2);
+    assert.equal(scaled.scaleFactor, 200);
+    assert.ok(scaled.width >= standard.width * 2 && scaled.width <= standard.width * 2 + 2);
+    assert.ok(scaled.height >= standard.height * 2 && scaled.height <= standard.height * 2 + 1);
+    await rdp.screenshot({ path: join(artifacts, "rdp-display-high-dpi.png"), animations: "disabled" });
+    await settings.getByRole("button", { name: "Done", exact: true }).click();
+    await settings.waitFor({ state: "hidden" });
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "Configuration leaves the viewer geometry unchanged");
+    await rdp.getByRole("button", { name: "Configuration", exact: true }).click();
+    assert.equal(await automatic.isChecked(), true);
+    assert.equal(await density.isChecked(), true, "The density choice remains selected when reopening Configuration");
+    await density.press("Space");
+    const restored = await waitForDesktopResize(application, 3);
+    assert.deepEqual(restored, standard, "Turning density scaling off restores the ordinary desktop request");
+    await automatic.press("Space");
+    assert.equal(await density.isDisabled(), true);
+    await settings.getByRole("button", { name: "Done", exact: true }).click();
+    await settings.waitFor({ state: "hidden" });
+
+    const sendClipboard = rdp.getByRole("button", { name: "Send clipboard text", exact: true });
+    const receiveClipboard = rdp.getByRole("button", { name: "Receive clipboard text", exact: true });
+    for (const [button, label] of [[sendClipboard, "Send clipboard text"], [receiveClipboard, "Receive clipboard text"]] as const) {
+      assert.equal((await button.innerText()).trim(), "", `${label} is an icon-only button`);
+      assert.equal(await button.locator("svg").count(), 1);
+      await button.hover();
+      await rdp.getByRole("tooltip", { name: label, exact: true }).waitFor();
+      await viewer.hover();
+      await rdp.getByRole("tooltip", { name: label, exact: true }).waitFor({ state: "hidden" });
+    }
+    await sendClipboard.click();
+    const sent = rdpToast(rdp, "Clipboard text sent to the remote desktop.");
+    await sent.waitFor();
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "Clipboard success does not shift the remote desktop");
+    await settleRdpToast(sent);
+    await rdp.screenshot({ path: join(artifacts, "rdp-clipboard-toast.png"), animations: "disabled" });
+    await dismissRdpToast(sent);
+    await receiveClipboard.click();
+    const received = rdpToast(rdp, "Remote text copied to the clipboard.");
+    await received.waitFor();
+    assert.deepEqual(await viewer.boundingBox(), originalBounds);
+    await dismissRdpToast(received);
+    await application.evaluate(() => {
+      (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe.clipboardError = "The offline clipboard fixture rejected this request.";
+    });
+    await rdp.getByRole("button", { name: "Send clipboard text", exact: true }).click();
+    const failed = rdpToast(rdp, "Remote Desktop action failed").filter({ hasText: "The offline clipboard fixture rejected this request." });
+    await failed.waitFor();
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "Clipboard errors do not shift the remote desktop");
+    await dismissRdpToast(failed);
+
+    await emitDesktopWarning(application);
+    const warning = rdpToast(rdp, "Remote Desktop warning").filter({ hasText: "The offline session has a temporary clipboard warning." });
+    await warning.waitFor();
+    assert.equal(await warning.count(), 1);
+    assert.deepEqual(await viewer.boundingBox(), originalBounds, "Active-session warnings do not shift the remote desktop");
+    await settleRdpToast(warning);
+    await rdp.screenshot({ path: join(artifacts, "rdp-session-warning-toast.png"), animations: "disabled" });
+    await dismissRdpToast(warning);
+    for (let repetition = 0; repetition < 3; repetition += 1) {
+      await emitDesktopWarning(application);
+      await rdp.evaluate(() => new Promise<void>((resolveFrame) => {
+        const browser = globalThis as unknown as { requestAnimationFrame(callback: () => void): void };
+        browser.requestAnimationFrame(() => browser.requestAnimationFrame(resolveFrame));
+      }));
+    }
+    assert.equal(await warning.count(), 0, "Repeated state updates do not redisplay a dismissed session warning");
+    assert.deepEqual(await viewer.boundingBox(), originalBounds);
+    assert.deepEqual(await application.evaluate(() => {
+      const probe = (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe;
+      return { clipboard: probe.clipboardRequests, connectionAttempts: probe.connectionAttempts };
+    }), { clipboard: ["send", "receive", "send"], connectionAttempts: 0 }, "The fixture never contacts a server or the system clipboard");
+
+    await rdp.getByRole("button", { name: "Configuration", exact: true }).click();
+    await transparentClipboard.press("Space");
+    await assertRdpPreference(temporary, "transparentClipboard", true);
+    await rdp.screenshot({ path: join(artifacts, "rdp-transparent-clipboard-configuration.png"), animations: "disabled" });
+    await settings.getByRole("button", { name: "Done", exact: true }).click();
+    await rdp.reload();
+    await rdp.locator('.rdp-screen[data-frame-count="1"]').waitFor();
+    await rdp.getByRole("button", { name: "Configuration", exact: true }).click();
+    assert.equal(await transparentClipboard.isChecked(), true, "Transparent clipboard survives a renderer reload");
+    await transparentClipboard.press("Space");
+    await assertRdpPreference(temporary, "transparentClipboard", false);
+    await settings.getByRole("button", { name: "Done", exact: true }).click();
+    assert.deepEqual(errors, []);
+  } catch (error) {
+    if (rdp && !rdp.isClosed()) {
+      await rdp.screenshot({ path: join(artifacts, "rdp-display-toasts-failure.png") }).catch(() => undefined);
+      context.diagnostic(JSON.stringify({ errors, body: (await rdp.locator("body").innerText().catch(() => "<unavailable>")).slice(0, 4000) }));
+    }
     throw error;
   } finally {
     if (application) await application.close().catch(() => { application?.process().kill("SIGKILL"); });
@@ -475,6 +621,107 @@ test("malformed private RDP settings preserve the file and leave the operator wo
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+interface OfflineDesktopProbe {
+  state: RdpWindowState;
+  messages: RdpViewerMessage[];
+  clipboardRequests: string[];
+  clipboardError?: string;
+  connectionAttempts: number;
+}
+
+async function installOfflineDesktop(application: ElectronApplication): Promise<void> {
+  await application.evaluate(({ ipcMain }) => {
+    const tab = { id: "offline-desktop", attempt: 1, label: "Offline desktop", host: "desktop.example.invalid", port: 3389,
+      username: "operator", domain: "LAB", width: 320, height: 200, clipboard: true, scaleMode: "fit" as const,
+      state: "active" as const, clipboardReady: true, clipboardAvailable: true };
+    const probe: OfflineDesktopProbe = { state: { tabs: [tab], profiles: [], activeTabId: tab.id,
+      securePersistenceAvailable: false, maxSessions: 4 }, messages: [], clipboardRequests: [], connectionAttempts: 0 };
+    (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe = probe;
+    // Replace only this disposable process's RDP endpoints. No native RDP
+    // runtime, remote socket, credentials, or system clipboard are involved.
+    for (const channel of ["sliver:rdp:state:get", "sliver:rdp:attach", "sliver:rdp:clipboard", "sliver:rdp:input:capture", "sliver:rdp:connect", "sliver:rdp:reconnect"]) ipcMain.removeHandler(channel);
+    ipcMain.handle("sliver:rdp:state:get", () => ({ ok: true, value: probe.state }));
+    ipcMain.handle("sliver:rdp:attach", () => ({ ok: true, value: { tabId: tab.id, attempt: tab.attempt, attachmentToken: "a".repeat(43) } }));
+    ipcMain.handle("sliver:rdp:input:capture", () => ({ ok: true }));
+    ipcMain.handle("sliver:rdp:clipboard", (_event, input: { direction: string }) => {
+      probe.clipboardRequests.push(input.direction);
+      return probe.clipboardError ? { ok: false, error: probe.clipboardError } : { ok: true };
+    });
+    for (const channel of ["sliver:rdp:connect", "sliver:rdp:reconnect"]) ipcMain.handle(channel, () => {
+      probe.connectionAttempts += 1;
+      return { ok: false, error: "Connections are disabled in this offline desktop fixture." };
+    });
+    ipcMain.removeAllListeners("sliver:rdp:stream:open");
+    ipcMain.on("sliver:rdp:stream:open", (event) => {
+      const port = event.ports[0];
+      if (!port) throw new Error("The offline desktop needs its isolated display port");
+      port.on("message", ({ data }) => { probe.messages.push(data as RdpViewerMessage); });
+      port.start();
+      port.postMessage({ type: "ready", protocol: 1 });
+      const pixels = new Uint8Array(tab.width * tab.height * 4);
+      for (let y = 0; y < tab.height; y += 1) {
+        for (let x = 0; x < tab.width; x += 1) {
+          const panel = x >= 48 && x < 272 && y >= 28 && y < 164;
+          const heading = panel && y < 46;
+          const taskbar = y >= 186;
+          const offset = (y * tab.width + x) * 4;
+          pixels[offset] = taskbar ? 20 : heading ? 32 : panel ? 237 : 18 + Math.floor(x / 8);
+          pixels[offset + 1] = taskbar ? 25 : heading ? 42 : panel ? 241 : 62 + Math.floor(y / 4);
+          pixels[offset + 2] = taskbar ? 38 : heading ? 64 : panel ? 248 : 126 + Math.floor(x / 5);
+          pixels[offset + 3] = 255;
+        }
+      }
+      port.postMessage({ type: "frame", seq: 1, frameId: 1, geometry: 1, width: tab.width, height: tab.height,
+        x: 0, y: 0, tileWidth: tab.width, tileHeight: tab.height, full: true, first: true, last: true, data: pixels.buffer });
+    });
+  });
+}
+
+async function waitForDesktopResize(application: ElectronApplication, count: number): Promise<Extract<RdpViewerMessage, { type: "resize" }>> {
+  const deadline = Date.now() + 10_000;
+  while (true) {
+    const messages = await application.evaluate(() => (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe })
+      .rdpDesktopProbe.messages.filter((message): message is Extract<RdpViewerMessage, { type: "resize" }> => message.type === "resize"));
+    if (messages.length >= count) return messages.at(-1)!;
+    if (Date.now() >= deadline) throw new Error(`Expected ${count} offline desktop resize messages`);
+    await delay(25);
+  }
+}
+
+async function emitDesktopWarning(application: ElectronApplication): Promise<void> {
+  await application.evaluate(({ BrowserWindow }) => {
+    const probe = (globalThis as unknown as { rdpDesktopProbe: OfflineDesktopProbe }).rdpDesktopProbe;
+    probe.state = { ...probe.state, tabs: probe.state.tabs.map((tab) => ({ ...tab, error: "The offline session has a temporary clipboard warning." })) };
+    const window = BrowserWindow.getAllWindows().find((candidate) => candidate.webContents.getURL().includes("surface=rdp"));
+    if (!window) throw new Error("The offline RDP window is missing");
+    window.webContents.send("sliver:rdp:state:changed", probe.state);
+  });
+}
+
+function rdpToast(page: Page, title: string): Locator {
+  return page.locator('[data-slot="toast"]').filter({ has: page.getByText(title, { exact: true }) });
+}
+
+async function settleRdpToast(notification: Locator): Promise<void> {
+  await notification.evaluate(async (element) => {
+    const view = element.ownerDocument.defaultView!;
+    await new Promise<void>((resolveFrame) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolveFrame())));
+    await Promise.all(element.getAnimations({ subtree: true }).map((animation: { finished: Promise<unknown> }) => animation.finished.catch(() => undefined)));
+  });
+  assert.equal(await notification.evaluate((element) => {
+    const bounds = element.getBoundingClientRect();
+    const view = element.ownerDocument.defaultView!;
+    return bounds.top >= 0 && bounds.bottom <= view.innerHeight && bounds.left >= 0 && bounds.right <= view.innerWidth;
+  }), true, "The settled toast is fully within the window");
+}
+
+async function dismissRdpToast(notification: Locator): Promise<void> {
+  await settleRdpToast(notification);
+  await notification.hover();
+  await notification.locator('[data-slot="toast-close"]').click();
+  await notification.waitFor({ state: "hidden" });
+}
 
 async function openSavedProfileMenu(page: Page, card: Locator): Promise<Locator> {
   await card.click({ button: "right" });
@@ -626,17 +873,17 @@ async function readState(page: Page): Promise<RdpWindowState> {
   });
 }
 
-async function assertClipboardPreference(temporary: string, expected: boolean): Promise<void> {
+async function assertRdpPreference(temporary: string, preference: "clipboard" | "transparentClipboard", expected: boolean): Promise<void> {
   const settingsPath = join(temporary, "client/gui/application-settings.json");
   const deadline = Date.now() + 10_000;
   while (true) {
     try {
-      const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { rdp?: { clipboard?: boolean } };
-      if (settings.rdp?.clipboard === expected) return;
+      const settings = JSON.parse(await readFile(settingsPath, "utf8")) as { rdp?: { clipboard?: boolean; transparentClipboard?: boolean } };
+      if (settings.rdp?.[preference] === expected) return;
     } catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ENOENT") throw error;
     }
-    if (Date.now() >= deadline) throw new Error(`Text clipboard preference ${expected} was not persisted to application settings`);
+    if (Date.now() >= deadline) throw new Error(`RDP preference ${preference}=${expected} was not persisted to application settings`);
     await delay(25);
   }
 }

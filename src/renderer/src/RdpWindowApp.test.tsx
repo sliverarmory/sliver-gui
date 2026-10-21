@@ -1,16 +1,18 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "@heroui/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import type { RdpConnectInput, RdpProfile, RdpTab, RdpWindowAPI, RdpWindowState } from "../../shared/rdp-contracts";
 import { renderWithApplicationContextMenu } from "./application-context-menu-test-utils";
+import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 
 vi.mock("./components/rdp/RdpDesktop", async () => {
   const React = await import("react");
   return {
-    RdpDesktop: React.forwardRef((props: { tab: RdpTab; active: boolean; inputEnabled: boolean }, ref) => {
+    RdpDesktop: React.forwardRef((props: { tab: RdpTab; active: boolean; inputEnabled: boolean; autoResize: boolean; highDpi: boolean }, ref) => {
       React.useImperativeHandle(ref, () => ({ release: vi.fn(), focus: vi.fn(), specialKey: vi.fn(), resizeToWindow: vi.fn(), savePreview: vi.fn(async () => undefined) }));
-      return <section aria-label={`Remote desktop for ${props.tab.label}`} data-active={props.active} data-input-enabled={props.inputEnabled} />;
+      return <section aria-label={`Remote desktop for ${props.tab.label}`} data-active={props.active} data-input-enabled={props.inputEnabled} data-auto-resize={props.autoResize} data-high-dpi={props.highDpi} />;
     }),
     phaseLabel: (state: string) => state,
   };
@@ -28,6 +30,9 @@ let listener: ((value: RdpWindowState) => void) | undefined;
 let connectedInput: RdpConnectInput | undefined;
 
 beforeEach(() => {
+  vi.spyOn(toast, "success").mockReturnValue("success-toast");
+  vi.spyOn(toast, "danger").mockReturnValue("error-toast");
+  vi.spyOn(toast, "warning").mockReturnValue("warning-toast");
   Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
   vi.stubGlobal("ResizeObserver", class { observe(): void {} unobserve(): void {} disconnect(): void {} });
   state = { tabs: [], profiles: [], securePersistenceAvailable: true, maxSessions: 4 };
@@ -192,7 +197,8 @@ describe("standalone remote desktop window", () => {
     expect(card).toHaveAttribute("aria-disabled", "true");
     await act(async () => finish({ ok: false, error: "Connection canceled" }));
     expect(card).not.toHaveAttribute("aria-disabled", "true");
-    expect(screen.getByRole("alert")).toHaveTextContent("Connection canceled");
+    expect(toast.danger).toHaveBeenCalledWith("Remote Desktop action failed", { description: "Connection canceled" });
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("deletes a preview card only after confirmation without opening a connection", async () => {
@@ -258,8 +264,8 @@ describe("standalone remote desktop window", () => {
     await user.click(await screen.findByRole("tab", { name: "Lab" }));
     await user.click(screen.getByRole("button", { name: "Send clipboard text" }));
     expect(api.clipboard).toHaveBeenCalledWith({ tabId: "second", direction: "send" });
-    await waitFor(() => expect(screen.getByRole("button", { name: "Display settings" })).not.toBeDisabled());
-    await user.click(screen.getByRole("button", { name: "Display settings" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Configuration" })).not.toBeDisabled());
+    await user.click(screen.getByRole("button", { name: "Configuration" }));
     expect(screen.getByLabelText("Remote desktop for Lab")).toHaveAttribute("data-input-enabled", "false");
     await user.click(screen.getByRole("button", { name: "Done" }));
     expect(screen.getByLabelText("Remote desktop for Lab")).toHaveAttribute("data-input-enabled", "true");
@@ -271,7 +277,125 @@ describe("standalone remote desktop window", () => {
     renderWithApplicationContextMenu(<RdpWindowApp />);
     await user.click(await screen.findByRole("button", { name: "Send clipboard text" }));
     expect(api.clipboard).toHaveBeenCalledWith({ tabId: firstTab.id, direction: "send" });
-    expect(screen.getByRole("button", { name: "Receive clipboard" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Receive clipboard text" })).toBeDisabled();
+  });
+
+  it("uses icon-only clipboard actions with tooltips for both directions", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    for (const label of ["Send clipboard text", "Receive clipboard text"]) {
+      const button = await screen.findByRole("button", { name: label });
+      expect(button.textContent).toBe("");
+      expect(button.querySelector("svg")).toBeInTheDocument();
+      await user.hover(button);
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(label);
+      await user.unhover(button);
+      await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+    }
+  });
+
+  it("defaults transparent clipboard off and saves it independently of the connection clipboard preference", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.getApplicationSettings).mockResolvedValue({ ...DEFAULT_APPLICATION_SETTINGS_STATE,
+      rdp: { clipboard: false, transparentClipboard: false } });
+    renderWithApplicationContextMenu(<ApplicationSettingsProvider api={api}><RdpWindowApp /></ApplicationSettingsProvider>);
+    await user.click(await screen.findByRole("button", { name: "Configuration" }));
+    const toggle = screen.getByRole("switch", { name: "Transparent clipboard" });
+    expect(toggle).not.toBeChecked();
+    await waitFor(() => expect(toggle).toBeEnabled());
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).toBeChecked());
+    expect(api.updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({ rdp: { clipboard: false, transparentClipboard: true } }),
+    }));
+    await user.click(toggle);
+    await waitFor(() => expect(toggle).not.toBeChecked());
+    expect(api.updateApplicationSettings).toHaveBeenLastCalledWith(expect.objectContaining({
+      settings: expect.objectContaining({ rdp: { clipboard: false, transparentClipboard: false } }),
+    }));
+  });
+
+  it("keeps transparent clipboard off if its settings update fails", async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.updateApplicationSettings).mockResolvedValue({ ok: false, error: "Settings could not be saved." });
+    renderWithApplicationContextMenu(<ApplicationSettingsProvider api={api}><RdpWindowApp /></ApplicationSettingsProvider>);
+    await user.click(await screen.findByRole("button", { name: "Configuration" }));
+    const toggle = screen.getByRole("switch", { name: "Transparent clipboard" });
+    await waitFor(() => expect(toggle).toBeEnabled());
+    await user.click(toggle);
+    await waitFor(() => expect(api.updateApplicationSettings).toHaveBeenCalledOnce());
+    expect(toggle).not.toBeChecked();
+    expect(toast.danger).toHaveBeenCalledWith("Settings not saved", expect.anything());
+  });
+
+  it("shows clipboard success and repeated operation failures as toasts without adding desktop banners", async () => {
+    state = { ...state, tabs: [firstTab], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    const desktop = await screen.findByLabelText("Remote desktop for Office");
+    const main = screen.getByRole("main", { name: "Remote Desktop" });
+    const children = Array.from(main.children);
+    await user.click(screen.getByRole("button", { name: "Send clipboard text" }));
+    expect(toast.success).toHaveBeenCalledWith("Clipboard text sent to the remote desktop.");
+    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
+    expect(toast.success).toHaveBeenCalledWith("Remote text copied to the clipboard.");
+    vi.mocked(api.clipboard).mockResolvedValue({ ok: false, error: "Remote clipboard timed out." });
+    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
+    await user.click(screen.getByRole("button", { name: "Receive clipboard text" }));
+    expect(toast.danger).toHaveBeenCalledTimes(2);
+    expect(toast.danger).toHaveBeenLastCalledWith("Remote Desktop action failed", { description: "Remote clipboard timed out." });
+    expect(Array.from(main.children)).toEqual(children);
+    expect(screen.getByLabelText("Remote desktop for Office")).toBe(desktop);
+    expect(within(main).queryByText("Clipboard text sent to the remote desktop.")).not.toBeInTheDocument();
+    expect(within(main).queryByText("Remote clipboard timed out.")).not.toBeInTheDocument();
+    await act(async () => { listener?.({ ...state, tabs: [{ ...firstTab, state: "disconnected" }] }); });
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+    expect(within(screen.getByRole("dialog", { name: "Reconnect to Remote Desktop" })).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("announces each active session warning once across repeated updates and tab switches", async () => {
+    const warning = "The requested desktop size was not accepted.";
+    const warnedTab = { ...firstTab, error: warning };
+    state = { ...state, tabs: [warnedTab, { ...firstTab, id: "second", label: "Lab" }], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await screen.findByRole("tab", { name: "Office" });
+    expect(toast.warning).toHaveBeenCalledExactlyOnceWith("Remote Desktop warning", { description: warning });
+    await act(async () => { listener?.({ ...state, tabs: [...state.tabs] }); });
+    await user.click(screen.getByRole("tab", { name: "Lab" }));
+    await user.click(screen.getByRole("tab", { name: "Office" }));
+    expect(toast.warning).toHaveBeenCalledOnce();
+    expect(screen.queryByText(warning)).not.toBeInTheDocument();
+    await act(async () => { listener?.({ ...state, tabs: [{ ...warnedTab, attempt: 2 }] }); });
+    expect(toast.warning).toHaveBeenCalledTimes(2);
+    await act(async () => { listener?.({ ...state, tabs: [{ ...firstTab, attempt: 2 }] }); });
+    await act(async () => { listener?.({ ...state, tabs: [{ ...warnedTab, attempt: 2 }] }); });
+    expect(toast.warning).toHaveBeenCalledTimes(3);
+  });
+
+  it("enables high-DPI scaling alongside automatic resize and shares the setting across desktop tabs", async () => {
+    state = { ...state, tabs: [firstTab, { ...firstTab, id: "second", label: "Lab" }], activeTabId: firstTab.id };
+    const user = userEvent.setup();
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Configuration" }));
+    const automatic = screen.getByRole("switch", { name: "Resize desktop with window" });
+    const highDpi = screen.getByRole("switch", { name: "Scale desktop for high-DPI displays" });
+    expect(highDpi).not.toBeChecked();
+    expect(highDpi).toBeDisabled();
+    await user.click(automatic);
+    expect(highDpi).toBeEnabled();
+    await user.click(highDpi);
+    expect(screen.getByLabelText("Remote desktop for Office")).toHaveAttribute("data-auto-resize", "true");
+    expect(screen.getByLabelText("Remote desktop for Office")).toHaveAttribute("data-high-dpi", "true");
+    expect(screen.getByLabelText("Remote desktop for Lab")).toHaveAttribute("data-high-dpi", "true");
+    await user.click(screen.getByRole("button", { name: "Done" }));
+    await user.click(screen.getByRole("tab", { name: "Lab" }));
+    await user.click(screen.getByRole("button", { name: "Configuration" }));
+    expect(screen.getByRole("switch", { name: "Scale desktop for high-DPI displays" })).toBeChecked();
+    await user.click(screen.getByRole("switch", { name: "Resize desktop with window" }));
+    expect(screen.getByRole("switch", { name: "Scale desktop for high-DPI displays" })).toBeDisabled();
+    expect(screen.getByLabelText("Remote desktop for Lab")).toHaveAttribute("data-auto-resize", "false");
   });
 
   it("uses a fresh state event when initialization finishes after it", async () => {
