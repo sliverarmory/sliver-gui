@@ -17,6 +17,7 @@ import {
 } from "./mtls-fixture.js";
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
 import { cleanupOwnedApplication } from "./packaged-application-update-support.js";
+import { observeConsoleInput, type ConsoleProbeBrowser } from "./console-input-probe.js";
 
 const PACKAGED_MTLS_TEST_TIMEOUT_MS = process.platform === "darwin" ? 300_000 : 120_000;
 const PACKAGED_APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
@@ -312,8 +313,12 @@ async function verifyPackagedSliverConsole({
   let privateRootName: string | undefined;
   const consoleMessages: string[] = [];
   const pageErrors: string[] = [];
+  // ConPTY synthesizes screen deltas; only Unix PTYs preserve readline's
+  // cursor-query protocol and complete echoed lines in their output stream.
+  const observeReadline = process.platform !== "win32";
 
   try {
+    if (observeReadline) await sourcePage.context().addInitScript(observeConsoleInput);
     await sourcePage.locator('button[aria-label="Open Sliver console"]').click();
     consolePage = await waitForConsoleWindow(electronApplication, existingWindows);
     await consolePage.emulateMedia({ reducedMotion: "reduce" });
@@ -390,8 +395,15 @@ async function verifyPackagedSliverConsole({
     const promptCanvas = await waitForTerminalInk(terminal, 750);
     assert.ok(promptCanvas.width > 0 && promptCanvas.height > 0);
 
+    // The Connected tab and banner are visible before upstream readline has
+    // completed its cursor-position handshake. Input sent during that query
+    // can be consumed with the terminal reply instead of becoming a command.
+    if (observeReadline) await waitForConsoleInputProbe(consolePage, "readlineReady");
+    await consolePage.bringToFront();
+    await terminal.click();
     const versionCallsBeforeCommand = fixtureCallCount(fixture, "getVersion");
     await terminal.pressSequentially("version");
+    if (observeReadline) await waitForConsoleInputProbe(consolePage, "commandEchoed");
     const canvasBeforeEnter = await terminalCanvasSummary(terminal);
     await terminal.press("Enter");
     await waitForFixtureCalls(fixture, { getVersion: versionCallsBeforeCommand + 1 });
@@ -446,6 +458,21 @@ async function verifyPackagedSliverConsole({
   assert.ok(privateRootName, "the packaged native console must create one private root");
   await waitForConsoleRootRemoval(privateRootName);
   await waitForWindowCount(electronApplication, initialWindowCount);
+}
+
+async function waitForConsoleInputProbe(
+  page: Page,
+  state: "readlineReady" | "commandEchoed",
+): Promise<void> {
+  try {
+    await page.waitForFunction((expected) =>
+      (globalThis as unknown as ConsoleProbeBrowser).__SLIVER_GUI_PACKAGED_CONSOLE_INPUT__?.[expected] === true,
+    state, { timeout: 30_000 });
+  } catch (error) {
+    const probe = await page.evaluate(() =>
+      (globalThis as unknown as ConsoleProbeBrowser).__SLIVER_GUI_PACKAGED_CONSOLE_INPUT__);
+    throw new Error(`Native console did not reach ${state}; observed ${JSON.stringify(probe)}`, { cause: error });
+  }
 }
 
 async function writePackagedStartupDiagnostics({
