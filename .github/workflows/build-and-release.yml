@@ -115,6 +115,12 @@ jobs:
       - name: Verify pinned terminal runtime
         run: npm run protocol:ghostty
 
+      # Electron 44 downloads on first use. Keep network setup outside each
+      # application scenario's timeout, including on a fresh runner.
+      - name: Install Electron E2E runtime
+        timeout-minutes: 5
+        run: node ./node_modules/electron/install.js
+
       - name: Exercise renderer, preload, IPC, and registry
         run: xvfb-run --auto-servernum npm run test:e2e:electron
 

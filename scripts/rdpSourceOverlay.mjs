@@ -18,7 +18,7 @@ export async function verifyRdpOverlayPatch(projectDirectory, manifest) {
 }
 
 /** Check both the immutable base and the exact reviewed, patched working tree. */
-export async function verifyStagedRdpSource(directory, manifest, run, environment = process.env) {
+export async function verifyStagedRdpSource(directory, manifest, run, environment = process.env, platform = process.platform) {
   if (!(await lstat(directory)).isDirectory() || !(await lstat(join(directory, ".git"))).isDirectory()) throw new Error("Invalid staged IronRDP checkout");
   const git = async (...args) => (await run("git", ["-C", directory, ...args], { env: environment })).stdout.trim();
   const revision = (await git("rev-parse", "HEAD", "HEAD^{tree}")).split(/\r?\n/u);
@@ -33,10 +33,16 @@ export async function verifyStagedRdpSource(directory, manifest, run, environmen
     if (!match) throw new Error("Unsupported staged IronRDP tree entry");
     const [, mode, expected, name] = match;
     const path = join(directory, name), metadata = await lstat(path);
-    if (mode === "120000" ? !metadata.isSymbolicLink() : !metadata.isFile()) throw new Error("Staged IronRDP source file type changed");
-    const bytes = mode === "120000" ? Buffer.from(await readlink(path)) : await readFile(path);
+    if (mode === "120000" ? !metadata.isSymbolicLink() : !metadata.isFile()) throw new Error(`Staged IronRDP source file type changed: ${JSON.stringify(name)}`);
+    let bytes;
+    if (mode === "120000") {
+      const target = await readlink(path);
+      // Git for Windows converts native symlink separators back to Git's '/'.
+      // On POSIX a backslash is a literal filename byte and must stay distinct.
+      bytes = Buffer.from(platform === "win32" ? target.replace(/\\/gu, "/") : target);
+    } else bytes = await readFile(path);
     const actual = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
-    if (actual !== expected) throw new Error("Staged IronRDP source content changed");
+    if (actual !== expected) throw new Error(`Staged IronRDP source content changed: ${JSON.stringify(name)}`);
   }));
   if (digest(await readFile(join(directory, manifest.source.patchInventory))) !== manifest.source.patchInventorySha256) throw new Error("Staged IronRDP fork patch inventory mismatch");
   return directory;

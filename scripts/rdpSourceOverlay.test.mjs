@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,7 +7,7 @@ import { rdpSourceInputs, runRdpCommand, selectedCargoPackages, sha256 } from ".
 import { prepareRdpSource, RDP_SOURCE_PATCH, RDP_STAGED_SOURCE, verifyRdpOverlayPatch, verifyStagedRdpSource } from "./rdpSourceOverlay.mjs";
 import { fixtureManifest, rdpFixture } from "./rdpTestFixtures.mjs";
 
-async function sourceFixture(context) {
+async function sourceFixture(context, { nestedSymlink = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "rdp-overlay-test-"));
   context.after(() => rm(root, { recursive: true, force: true }));
   const source = join(root, "original");
@@ -17,6 +17,10 @@ async function sourceFixture(context) {
   await writeFile(join(source, "LICENSE"), "MIT\n");
   await writeFile(join(source, "SLIVER_GUI_EMBEDDING.md"), "Original reviewed inventory\n");
   await writeFile(join(source, "client.rs"), "original\n");
+  if (nestedSymlink) {
+    await mkdir(join(source, "licenses"));
+    await symlink("../LICENSE", join(source, "licenses/LICENSE"), "file");
+  }
   await git("add", ".");
   await git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Pinned fixture");
   const [commit, tree] = (await git("rev-parse", "HEAD", "HEAD^{tree}")).split("\n");
@@ -65,6 +69,34 @@ test("staging detects changed bytes even when Git marks them assume-unchanged", 
   await runRdpCommand("git", ["-C", destination, "update-index", "--assume-unchanged", "client.rs"]);
   await writeFile(join(destination, "client.rs"), "hidden mutation\n");
   await assert.rejects(verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand), /content changed/u);
+});
+
+test("staging verifies nested license symlinks against the pinned Git tree", async (context) => {
+  const fixture = await sourceFixture(context, { nestedSymlink: true });
+  const destination = await prepareRdpSource(fixture.options);
+  assert.equal(await readFile(join(destination, "licenses/LICENSE"), "utf8"), "MIT\n");
+  assert.equal(await verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand), destination);
+});
+
+test("Windows symlink verification only normalizes separators and still rejects hidden target and type changes", async (context) => {
+  const fixture = await sourceFixture(context, { nestedSymlink: true });
+  const destination = await prepareRdpSource(fixture.options);
+  const link = join(destination, "licenses/LICENSE");
+  await runRdpCommand("git", ["-C", destination, "update-index", "--assume-unchanged", "licenses/LICENSE"]);
+  await unlink(link);
+  await symlink("..\\LICENSE", link, "file");
+  assert.equal(await verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand, undefined, "win32"), destination);
+  if (process.platform !== "win32") {
+    await assert.rejects(verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand), /content changed: "licenses\/LICENSE"/u);
+  }
+  for (const target of ["..\\client.rs", "..\\SLIVER_GUI_EMBEDDING.md"]) {
+    await unlink(link);
+    await symlink(target, link, "file");
+    await assert.rejects(verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand, undefined, "win32"), /content changed: "licenses\/LICENSE"/u);
+  }
+  await unlink(link);
+  await writeFile(link, "../LICENSE");
+  await assert.rejects(verifyStagedRdpSource(destination, fixture.manifest, runRdpCommand, undefined, "win32"), /file type changed: "licenses\/LICENSE"/u);
 });
 
 test("Cargo graph only accepts overlaid IronRDP dependencies from the verified staging path", async (context) => {
