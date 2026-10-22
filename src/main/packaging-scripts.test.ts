@@ -66,6 +66,21 @@ describe("native distribution packaging", () => {
     expect(fixture).toContain("if (!completedGracefully) server.forceShutdown();");
   });
 
+  it("requires successful application E2E before publishing a release", () => {
+    const rootDir = resolve(import.meta.dirname, "../..");
+    const workflow = readFileSync(
+      resolve(rootDir, ".github/workflows/build-and-release.yml"),
+      "utf8",
+    ).replace(/\r\n?/gu, "\n");
+    const releaseConfiguration = workflow.match(/^  release:\n((?:    .*\n|\n)*?)    steps:/mu)?.[1];
+
+    expect(releaseConfiguration).toBeDefined();
+    const dependencies = [...(releaseConfiguration ?? "").matchAll(/^      - ([a-z][a-z0-9-]*)$/gmu)]
+      .map((match) => match[1]);
+    expect(dependencies).toEqual(expect.arrayContaining(["application-e2e", "build", "release-request"]));
+    expect(releaseConfiguration).not.toMatch(/\b(?:always|failure|cancelled)\s*\(/u);
+  });
+
   it("routes workflow verifier flags directly to their Node scripts", () => {
     const rootDir = resolve(import.meta.dirname, "../..");
     const packageJson = JSON.parse(

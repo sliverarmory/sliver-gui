@@ -1104,11 +1104,20 @@ async function assertBeaconBreadcrumbSwitching(
   await menu.getByRole("menuitemradio", { name: /m2-beacon/u }).waitFor();
   await page.screenshot({ animations: "disabled", path: join(screenshotDirectory, "beacon-breadcrumb-menu.png") });
   const beforeCurrent = await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]);
+  const targetBeforeCurrent = await page.evaluate(async () =>
+    (await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot()).targetContext.activeTarget);
   await current.click();
   await menu.waitFor({ state: "hidden" });
   await breadcrumbs.getByText("m1-beacon", { exact: true }).waitFor();
-  assert.deepEqual(await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]), beforeCurrent,
+  // The RDP window polls local SOCKS handles independently of target selection.
+  // Keep every other adapter call observable, including any backend mutation.
+  const afterCurrent = await application.evaluate(() => [...globalThis.__SLIVER_GUI_E2E_STATE__.methods]);
+  assert.deepEqual(afterCurrent.filter((method) => method !== "listSocks5Proxies"),
+    beforeCurrent.filter((method) => method !== "listSocks5Proxies"),
     "choosing the current beacon must leave the backend selection untouched");
+  assert.deepEqual(await page.evaluate(async () =>
+    (await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getSnapshot()).targetContext.activeTarget),
+  targetBeforeCurrent, "choosing the current beacon must preserve its exact main-issued target reference");
 
   await page.getByRole("button", { name: "Beacon details", exact: true }).click();
   await page.getByRole("complementary", { name: "Beacon details", exact: true }).waitFor();

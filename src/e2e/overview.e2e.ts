@@ -360,7 +360,7 @@ for (const hosting of ["unmanaged", "aws", "azure"] as const) {
       const allowedMethods = new Set([
         "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
         "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
-        "lootAll", "credentialsAll",
+        "lootAll", "credentialsAll", "listSocks5Proxies",
         ...(hosting === "unmanaged" ? ["getBeaconTasks", "disconnect"] : []),
       ]);
       assert.deepEqual(state.methods.filter((method) => !allowedMethods.has(method)), [],

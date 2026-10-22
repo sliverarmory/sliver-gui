@@ -476,6 +476,7 @@ jobs:
     name: Verify and publish GitHub release
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.release-request.outputs.release_tag != ''
     needs:
+      - application-e2e
       - build
       - release-request
     runs-on: ubuntu-22.04

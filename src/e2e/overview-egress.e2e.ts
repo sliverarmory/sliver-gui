@@ -180,7 +180,7 @@ test("Overview groups passive session and beacon inventory by incoming IP with d
     const allowedMethods = new Set([
       "connect", "getVersion", "jobs", "implantBuilds", "implantProfiles", "getCompiler",
       "getOperators", "getSessions", "getBeacons", "getPivotGraph", "getExternalBuilders", "getCrackstations",
-      "lootAll", "credentialsAll",
+      "lootAll", "credentialsAll", "listSocks5Proxies",
     ]);
     assert.deepEqual(audit.methods.filter((method) => !allowedMethods.has(method)), []);
     assert.deepEqual(audit.tasks, []);
