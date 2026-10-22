@@ -28,6 +28,30 @@ function mount(disabled = false) {
 }
 
 describe("saved RDP connection card actions", () => {
+  it.each([
+    { host: "different.test", port: 1080, username: "proxy-user" },
+    { host: "proxy.test", port: 1081, username: "proxy-user" },
+    { host: "proxy.test", port: 1080, username: "different-user" },
+  ])("matches connected status to every manual proxy identity field %#", (different) => {
+    const routed: RdpProfile = { ...profile, networking: { kind: "socks5-manual", host: "proxy.test", port: 1080, username: "proxy-user" } };
+    const connection: RdpTab = { ...routed, networking: { kind: "socks5-manual", ...different }, id: "tab-one", profileId: profile.id, attempt: 1, state: "active", clipboardReady: false, clipboardAvailable: false };
+    const callbacks = { onConnect: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn() };
+    const view = renderWithApplicationContextMenu(<RdpProfileGrid profiles={[routed]} tabs={[connection]} disabled={false} {...callbacks} />);
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
+    view.rerender(<RdpProfileGrid profiles={[routed]} tabs={[{ ...connection, networking: routed.networking! }]} disabled={false} {...callbacks} />);
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+  });
+
+  it("matches connected status to the saved proxy route", () => {
+    const routed: RdpProfile = { ...profile, networking: { kind: "socks5", proxyId: "proxy-one" } };
+    const connection: RdpTab = { ...profile, id: "tab-one", profileId: profile.id, attempt: 1, state: "active", clipboardReady: false, clipboardAvailable: false };
+    const callbacks = { onConnect: vi.fn(), onEdit: vi.fn(), onDelete: vi.fn() };
+    const view = renderWithApplicationContextMenu(<RdpProfileGrid profiles={[routed]} tabs={[connection]} disabled={false} {...callbacks} />);
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
+    view.rerender(<RdpProfileGrid profiles={[routed]} tabs={[{ ...connection, networking: routed.networking! }]} disabled={false} {...callbacks} />);
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+  });
+
   it("labels remote-screen profiles and matches connected status to their sign-in mode", () => {
     const remote: RdpProfile = { ...profile, signInMode: "remote-screen", username: "", domain: "", hasCredential: false, credentialPersistence: "none" };
     const connection: RdpTab = { ...remote, signInMode: "nla", id: "tab-one", profileId: remote.id, attempt: 1, state: "active", clipboardReady: false, clipboardAvailable: false };

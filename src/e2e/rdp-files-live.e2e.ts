@@ -147,7 +147,9 @@ test("RDP files paste in Windows Explorer and return through the native clipboar
     await dialog.getByLabel("Port", { exact: true }).fill(String(config.port));
     await dialog.getByLabel("Username", { exact: true }).fill(config.username);
     await dialog.getByLabel("Domain", { exact: true }).fill(config.domain);
-    await dialog.getByLabel("Desktop resolution", { exact: true }).selectOption("custom");
+    await dialog.getByRole("button", { name: "Desktop resolution", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "Custom", exact: true }).click();
+    assert.equal(await dialog.getByRole("button", { name: "Desktop resolution", exact: true }).getAttribute("data-selected-value"), "custom");
     await dialog.getByLabel("Desktop width", { exact: true }).fill(String(config.width));
     await dialog.getByLabel("Desktop height", { exact: true }).fill(String(config.height));
     const clipboardSwitch = dialog.getByRole("switch", { name: "Clipboard", exact: true });

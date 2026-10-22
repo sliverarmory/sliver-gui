@@ -95,14 +95,22 @@ cleanup and absence of persisted profiles or credentials. This is separate from
 the live GOAD file-transfer acceptance; the Overview forwarding path has not yet
 been exercised against a live implant.
 
-Future supplied networking belongs at a typed main/helper transport boundary.
-Add an explicit route descriptor/capability owned by main and a cancellable,
-ordered byte-stream dialer in the native fork. Keep logical destination hostname,
-certificate identity and credential scope separate from a local forwarding
-address. TLS/NLA and RDP state remain in the helper. A new route must have its own
-limits, cancellation, ownership and cross-platform tests while preserving direct,
-standalone operation. Do not make arbitrary socket bytes or helper commands a
-renderer API.
+Managed SOCKS5 networking uses a typed main-owned proxy identity. Main holds the
+proxy credentials, completes bounded SOCKS5 CONNECT negotiation, and exposes the
+tunnel through a one-client loopback listener. The native helper receives only a
+numeric loopback dial override; its logical destination remains authoritative for
+TLS, certificate review, and CredSSP. A tracked patch over the pinned IronRDP
+source adds that dial override and disables UDP bypass. Failure never retries the
+direct destination. Each attempt owns cancellation and socket cleanup; proxy or
+backend loss closes the route. Credentials, previews, and certificate pins are
+scoped by route identity. Renderer APIs expose safe proxy summaries and selections,
+not sockets or proxy credentials.
+
+RDP imports read bounded regular files in main, parse supported settings, and save
+profiles without connecting. Native picker, OS file association, and preload's
+native File bridge share the importer. Missing NLA usernames are valid in saved
+profiles but rejected at connect until supplied. Unsupported routing/security
+requirements are rejected, and ignored fields produce bounded warnings.
 
 ## Display and control protocol
 
@@ -336,7 +344,7 @@ statement that every milestone was unimplemented no longer applies.
 | R3: lifecycle/performance | Attempts/ports/credits, framebuffer snapshots, viewer recovery, helper failure isolation and explicit reconnect implemented | Sustained screen-load/idle soak, suspended/stalled viewer tests, sleep/wake and network loss; define measured latency/memory thresholds; optional retry policy remains future work |
 | R4: release matrix | Four target build/signing/provenance/content-check lanes configured; platform ADR updated | Native installed and live acceptance on all supported targets/package forms, update with an active session, exact immutable artifact/log evidence. This is the shipping gate. |
 | R5: optional WASM graphics | Codec experiment only; production extraction deferred | Extract after shared session decompression/channel processing; preserve caches/fragments/surfaces/ACKs; golden pixels, resize/reactivation and lost-worker recovery; comparative performance on every target |
-| R6: additional capabilities | Deferred | Typed supplied transports first as needed; separately scope Kerberos/SSO, RD Gateway, UDP, multi-monitor, audio/microphone, RemoteApp, drive/printer/device/smart-card redirection, `.rdp` import and advanced codecs |
+| R6: additional capabilities | Managed SOCKS5 routes and `.rdp` imports implemented | Remaining: Kerberos/SSO, RD Gateway, UDP, multi-monitor, audio/microphone, RemoteApp, drive/printer/device/smart-card redirection and advanced codecs |
 
 A future WASM worker must be local and integrity checked, own a precisely defined
 graphics state, and keep credentials/TLS/NLA/native channel authority outside the

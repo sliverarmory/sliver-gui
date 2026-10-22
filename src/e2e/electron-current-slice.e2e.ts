@@ -1648,10 +1648,14 @@ async function verifyApplicationSettings(
   await sendNativeApplicationShortcut(electronApplication, page, "K");
   const commandPalette = page.getByRole("dialog", { name: "Command palette" });
   await commandPalette.waitFor({ timeout: 5_000 });
+  const paletteSnapshot = await rendererSnapshot(page);
+  const paletteTargets = [...paletteSnapshot.domains.sessions.items, ...paletteSnapshot.domains.beacons.items]
+    .filter((target) => paletteSnapshot.targetContext.selectableTargets
+      .some((ref) => ref.mode === target.mode && ref.id === target.id));
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    21,
-    "the connected workspace should expose the bounded app command catalog",
+    21 + paletteTargets.length,
+    "the connected workspace should expose app commands and the current selectable targets",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /^Go back\b/u }).waitFor();

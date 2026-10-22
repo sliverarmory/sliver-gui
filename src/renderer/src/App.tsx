@@ -56,6 +56,7 @@ import {
   type AppCommandPaletteCommand,
 } from "./components/AppCommandPalette";
 import { CommandPaletteShortcutKbd, isApplePlatform } from "./components/CommandPaletteShortcut";
+import { useSessionContextActions } from "./components/useSessionContextActions";
 import { SavedConfigSelector } from "./components/SavedConfigSelector";
 import { SidebarZoomControls } from "./components/SidebarZoomControls";
 import { useApplicationSettings } from "./components/ApplicationSettingsProvider";
@@ -668,6 +669,42 @@ export function App() {
 
   const historyShortcuts = navigationShortcuts(isApplePlatform(), settings);
   const consoleShortcut = resolveKeyboardShortcut("openConsole", settings, isApplePlatform());
+  const { actionsForTarget: targetPaletteActions, isBusy: isSelectingPaletteTarget } = useSessionContextActions({
+    snapshot,
+    onSnapshot: setSnapshot,
+    onOpenSession: openSessionWorkspace,
+    onOpenBeacon: openBeaconWorkspace,
+  });
+  const targetRefs = new Map(snapshot.targetContext.selectableTargets.map((target) => [
+    `${target.mode}:${target.id}`, target,
+  ]));
+  const targetCommands: AppCommandPaletteCommand[] = connected
+    ? [...snapshot.domains.sessions.items, ...snapshot.domains.beacons.items]
+      .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id))
+      .flatMap((target): AppCommandPaletteCommand[] => {
+        const ref = targetRefs.get(`${target.mode}:${target.id}`);
+        if (!ref || ref.backendEpoch !== snapshot.connection.epoch) return [];
+        const isSession = target.mode === "session";
+        return [{
+          id: `navigate-target-${target.mode}-${target.id}`,
+          group: isSession ? "Sessions" : "Beacons",
+          icon: isSession ? faComputer : faSatellite,
+          label: target.name || target.id,
+          description: [isSession ? "Session" : "Beacon", target.hostname, target.username, target.id]
+            .filter(Boolean).join(" · "),
+          keywords: [target.os, target.arch, target.remoteAddress],
+          isCurrent: isSession
+            ? view === "sessions" && sessionWorkspaceRoute?.sessionId === target.id &&
+              sessionWorkspaceRoute.targetFingerprint === ref.fingerprint
+            : view === "beacons" && beaconWorkspaceRoute?.target.id === target.id &&
+              beaconWorkspaceRoute.target.fingerprint === ref.fingerprint,
+          isDisabled: isSelectingPaletteTarget,
+          onAction: () => {
+            void targetPaletteActions(ref).find((action) => action.id === "target.interact")?.onAction();
+          },
+        }];
+      })
+    : [];
   const navigationCommands = [
     overviewNavItem,
     ...infrastructureNavItems,
@@ -686,6 +723,7 @@ export function App() {
   }));
   const commandPaletteCommands: readonly AppCommandPaletteCommand[] = [
     ...navigationCommands,
+    ...targetCommands,
     {
       id: "navigate-settings",
       group: "Navigate",
@@ -1045,6 +1083,7 @@ export function App() {
         />
         <AppCommandPalette
           commands={commandPaletteCommands}
+          hasMoreTargets={connected && (snapshot.domains.sessions.page.truncated || snapshot.domains.beacons.page.truncated)}
           isOpen={isCommandPaletteOpen}
           shortcut={settings.commandPaletteShortcut}
           onOpenChange={setIsCommandPaletteOpen}

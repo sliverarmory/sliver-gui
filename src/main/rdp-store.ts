@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { unlink } from "node:fs/promises";
-import { RDP_PREVIEW_MAX_DATA_URL_LENGTH, type RdpConnectionOptions, type RdpCredentialPersistence, type RdpPreview, type RdpProfile, type RdpSaveProfileInput } from "../shared/rdp-contracts.js";
+import { RDP_PREVIEW_MAX_DATA_URL_LENGTH, rdpNetworkingKey, type RdpConnectionOptions, type RdpCredentialPersistence, type RdpPreview, type RdpProfile, type RdpSaveProfileInput } from "../shared/rdp-contracts.js";
 import { parseRdpPreview, parseRdpProfile, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js";
@@ -8,7 +8,10 @@ import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js
 interface SavedProfile extends RdpSaveProfileInput { id: string; encryptedCredential?: string }
 interface SessionSecret { identity: string; bytes: Buffer }
 const MAX_PROFILES = 100;
-export function rdpEndpoint(options: Pick<RdpConnectionOptions, "host" | "port">): string { return `${options.host.toLowerCase()}:${options.port}`; }
+export function rdpEndpoint(options: Pick<RdpConnectionOptions, "host" | "port" | "networking">): string {
+  const endpoint = `${options.host.toLowerCase()}:${options.port}`;
+  return options.networking ? `${endpoint}|${rdpNetworkingKey(options.networking)}` : endpoint;
+}
 function credentialIdentity(options: RdpConnectionOptions): string {
   // Keep existing NLA credential envelopes/previews readable without migration.
   return JSON.stringify([rdpEndpoint(options), options.username, options.domain,
@@ -41,7 +44,7 @@ export class RdpStore {
         profiles.set(id, { ...profile, id, ...(record["encryptedCredential"] === undefined ? {} : { encryptedCredential: rdpString(record["encryptedCredential"], 32768) }) });
       }
       for (const raw of saved["pins"]) {
-        const record = rdpRecord(raw), endpoint = rdpString(record["endpoint"], 512), fingerprint = rdpString(record["fingerprint"], 64);
+        const record = rdpRecord(raw), endpoint = rdpString(record["endpoint"], 2048), fingerprint = rdpString(record["fingerprint"], 64);
         if (!/^[a-f0-9]{64}$/u.test(fingerprint)) throw new Error("Invalid RDP certificate pin");
         if (pins.has(endpoint)) throw new Error("Duplicate RDP certificate pin");
         pins.set(endpoint, fingerprint);

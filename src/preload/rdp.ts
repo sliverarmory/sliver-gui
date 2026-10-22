@@ -1,4 +1,5 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { parseSocks5ProxyId } from "../shared/network-forwarding-contracts.js";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import { parseApplicationSettingsState, parseApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
 import {
   APPLICATION_CONTEXT_MENU_IPC,
@@ -14,29 +15,46 @@ import {
   type RdpAttachment,
   type RdpCertificateReview,
   type RdpProfile,
+  type RdpImportResult,
+  type RdpSocks5Proxy,
+  type RdpSocks5Session,
   type RdpTab,
   type RdpWindowAPI,
   type RdpWindowState,
   type RdpFileTransferProgressEvent,
 } from "../shared/rdp-contracts.js";
-import { parseRdpConnect, parseRdpFileTransferProgress, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { parseRdpConnect, parseRdpFileTransferProgress, parseRdpOptions, parseRdpPreview, parseRdpProfile, parseRdpSavePreview, rdpBoolean, rdpInteger, rdpPassword, rdpProxyPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import type { OperationResult } from "../shared/contracts.js";
 
-const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard", "signInMode"];
+const OPTIONS = ["host", "port", "username", "domain", "width", "height", "clipboard", "signInMode", "networking"];
 const PROFILE = [...OPTIONS, "id", "label", "scaleMode"];
 const ID = /^[A-Za-z0-9_-]{43}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 const api: RdpWindowAPI = {
   getState: () => invokeValue(RDP_IPC.getState, parseState),
+  importProfiles: () => invokeValue(RDP_IPC.importProfiles, parseImportResult),
+  openNetworkManager: () => invokeEmpty(RDP_IPC.openNetworkManager),
+  startSessionProxy: (sessionId) => invokeValue(RDP_IPC.startSessionProxy, parseProxy, opaque(sessionId)),
+  importDroppedProfiles: (files) => {
+    if (!Array.isArray(files) || files.length < 1 || files.length > 32) throw new TypeError("Drop between 1 and 32 RDP files");
+    const paths = files.map((file) => {
+      const path = webUtils.getPathForFile(file);
+      if (!path || !/\.rdp$/iu.test(path)) throw new TypeError("Drop local .rdp files");
+      return rdpString(path, 4096);
+    });
+    return invokeValue(RDP_IPC.importDroppedProfiles, parseImportResult, paths);
+  },
   connect: (input) => {
-    keys(input, [...PROFILE.filter((key) => key !== "id"), "password", "profileId", "persistence", "temporaryId"]);
+    keys(input, [...PROFILE.filter((key) => key !== "id"), "password", "proxyPassword", "profileId", "persistence", "temporaryId"]);
     return invokeValue(RDP_IPC.connect, parseTab, parseRdpConnect(input));
   },
   cancelTemporary: (id) => invokeEmpty(RDP_IPC.cancelTemporary, identity(id)),
   reconnect: (input) => {
-    const item = keys(input, ["tabId", "password"]);
-    return invokeValue(RDP_IPC.reconnect, parseTab, { tabId: identity(item["tabId"]), ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }) });
+    const item = keys(input, ["tabId", "password", "proxyPassword"]);
+    return invokeValue(RDP_IPC.reconnect, parseTab, { tabId: identity(item["tabId"]),
+      ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }),
+      ...(item["proxyPassword"] === undefined ? {} : { proxyPassword: rdpProxyPassword(item["proxyPassword"]) }) });
   },
   disconnect: (id) => invokeEmpty(RDP_IPC.disconnect, identity(id)),
   closeTab: (id) => invokeEmpty(RDP_IPC.closeTab, identity(id)),
@@ -73,6 +91,7 @@ const api: RdpWindowAPI = {
   toggleFullscreen: () => invokeEmpty(RDP_IPC.toggleFullscreen),
   getApplicationSettings: async () => parseApplicationSettingsState(await ipcRenderer.invoke(RDP_IPC.getApplicationSettings)),
   updateApplicationSettings: (input) => invokeValue(RDP_IPC.updateApplicationSettings, parseApplicationSettingsState, parseApplicationSettingsUpdateInput(input)),
+  onProfilesImported: (listener) => subscribe(RDP_IPC.profilesImported, parseImportResult, listener),
   onStateChanged: (listener) => subscribe(RDP_IPC.stateChanged, parseState, listener),
   onFileTransferProgress: (listener) => subscribe(RDP_IPC.fileTransferProgress, parseTransferEvent, listener),
   onApplicationSettingsChanged: (listener) => subscribe(RDP_IPC.applicationSettingsChanged, parseApplicationSettingsState, listener),
@@ -112,8 +131,14 @@ function subscribe<T>(channel: string, parse: (value: unknown) => T, listener: (
 }
 
 function parseState(raw: unknown): RdpWindowState {
-  const value = keys(raw, ["tabs", "profiles", "activeTabId", "pendingConnection", "securePersistenceAvailable", "maxSessions"]);
+  const value = keys(raw, ["tabs", "profiles", "activeTabId", "pendingConnection", "socks5Proxies", "socks5Sessions", "securePersistenceAvailable", "maxSessions"]);
   if (!Array.isArray(value["tabs"]) || value["tabs"].length > 128 || !Array.isArray(value["profiles"]) || value["profiles"].length > 256) throw new TypeError("Invalid RDP state");
+  const proxies = value["socks5Proxies"];
+  if (proxies !== undefined && (!Array.isArray(proxies) || proxies.length > 1024)) throw new TypeError("Invalid RDP proxy inventory");
+  const sessions = value["socks5Sessions"];
+  if (sessions !== undefined && (!Array.isArray(sessions) || sessions.length > 1024)) throw new TypeError("Invalid RDP session inventory");
+  const parsedSessions = sessions === undefined ? undefined : Object.freeze((sessions as unknown[]).map(parseSocksSession));
+  if (parsedSessions && new Set(parsedSessions.map(({ id }) => id)).size !== parsedSessions.length) throw new TypeError("Duplicate RDP session identities");
   const tabs = value["tabs"].map(parseTab);
   const profiles = value["profiles"].map(parseProfile);
   if (new Set(tabs.map(({ id }) => id)).size !== tabs.length || new Set(profiles.map(({ id }) => id)).size !== profiles.length) throw new TypeError("Duplicate RDP identities");
@@ -122,6 +147,8 @@ function parseState(raw: unknown): RdpWindowState {
   const pending = value["pendingConnection"] === undefined ? undefined : keys(value["pendingConnection"], ["id", "label", "host", "port"]);
   if (pending && pending["host"] !== "127.0.0.1") throw new TypeError("Invalid temporary RDP endpoint");
   return Object.freeze({ tabs: Object.freeze(tabs), profiles: Object.freeze(profiles),
+    ...(proxies === undefined ? {} : { socks5Proxies: Object.freeze((proxies as unknown[]).map(parseProxy)) }),
+    ...(parsedSessions === undefined ? {} : { socks5Sessions: parsedSessions }),
     ...(pending === undefined ? {} : { pendingConnection: Object.freeze({ id: identity(pending["id"]), label: rdpString(pending["label"], 120), host: "127.0.0.1", port: rdpInteger(pending["port"], 1, 65535) }) }),
     ...(activeTabId === undefined ? {} : { activeTabId }), securePersistenceAvailable: rdpBoolean(value["securePersistenceAvailable"]),
     maxSessions: rdpInteger(value["maxSessions"], 1, RDP_MAX_SESSIONS) });
@@ -152,9 +179,32 @@ function parseProfile(raw: unknown): RdpProfile {
   const value = keys(raw, [...PROFILE, "hasCredential", "credentialPersistence", "preview"]);
   const persistence = value["credentialPersistence"];
   if (persistence !== "none" && persistence !== "session" && persistence !== "secure") throw new TypeError("Invalid RDP credential state");
-  return Object.freeze({ ...parseRdpOptions(value), id: identity(value["id"]), label: rdpString(value["label"], 120), scaleMode: scale(value["scaleMode"]),
+  return Object.freeze({ ...parseRdpOptions(value, true), id: identity(value["id"]), label: rdpString(value["label"], 120), scaleMode: scale(value["scaleMode"]),
     hasCredential: rdpBoolean(value["hasCredential"]), credentialPersistence: persistence,
     ...(value["preview"] === undefined ? {} : { preview: parseRdpPreview(value["preview"]) }) });
+}
+
+function parseProxy(raw: unknown): RdpSocks5Proxy {
+  const value = keys(raw, ["id", "viaSessionId", "label", "host", "port", "authentication", "available"]);
+  if (value["authentication"] !== "none" && value["authentication"] !== "username-password") throw new TypeError("Invalid SOCKS5 authentication");
+  return Object.freeze({ id: parseSocks5ProxyId(value["id"]), ...(value["viaSessionId"] === undefined ? {} : { viaSessionId: opaque(value["viaSessionId"]) }),
+    label: rdpString(value["label"], 256), host: rdpString(value["host"], 253),
+    port: rdpInteger(value["port"], 1, 65535), authentication: value["authentication"], available: rdpBoolean(value["available"]) });
+}
+function parseSocksSession(raw: unknown): RdpSocks5Session {
+  const value = keys(raw, ["id", "sessionId", "label", "hostname"]);
+  return Object.freeze({ id: opaque(value["id"]), sessionId: rdpString(value["sessionId"], 80), label: rdpString(value["label"], 256), hostname: rdpString(value["hostname"], 253, true) });
+}
+function parseImportResult(raw: unknown): RdpImportResult {
+  const value = keys(raw, ["canceled", "items"]);
+  if (!Array.isArray(value["items"]) || value["items"].length > 32) throw new TypeError("Invalid RDP import result");
+  return Object.freeze({ canceled: rdpBoolean(value["canceled"]), items: Object.freeze(value["items"].map((raw) => {
+    const item = keys(raw, ["name", "profile", "warnings", "error"]);
+    if (!Array.isArray(item["warnings"]) || item["warnings"].length > 64) throw new TypeError("Invalid RDP import warnings");
+    return Object.freeze({ name: rdpString(item["name"], 255), warnings: Object.freeze(item["warnings"].map((text) => rdpString(text, 512))),
+      ...(item["profile"] === undefined ? {} : { profile: parseProfile(item["profile"]) }),
+      ...(item["error"] === undefined ? {} : { error: rdpString(item["error"], 512) }) });
+  })) });
 }
 
 function parseCertificate(raw: unknown): RdpCertificateReview {

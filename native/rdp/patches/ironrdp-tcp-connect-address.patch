@@ -1,0 +1,93 @@
+diff --git a/crates/ironrdp-client/src/config.rs b/crates/ironrdp-client/src/config.rs
+index 840d840c..083d45bc 100644
+--- a/crates/ironrdp-client/src/config.rs
++++ b/crates/ironrdp-client/src/config.rs
+@@ -93,6 +93,7 @@ impl AudioQualityMode {
+ pub struct Config {
+     pub(crate) connector: ironrdp_connector::Config,
+     pub(crate) destination: Destination,
++    pub(crate) tcp_connect_address: Option<core::net::SocketAddr>,
+     pub(crate) transport: Transport,
+     #[cfg(feature = "udp")]
+     pub(crate) udp_transport_enabled: bool,
+@@ -160,6 +161,11 @@ impl Config {
+         &self.destination
+     }
+ 
++    /// Optional numeric TCP dial address. TLS and CredSSP still identify `destination`.
++    pub fn tcp_connect_address(&self) -> Option<core::net::SocketAddr> {
++        self.tcp_connect_address
++    }
++
+     /// Selected transport (Direct, Gateway, or RDCleanPath).
+     pub fn transport(&self) -> &Transport {
+         &self.transport
+@@ -761,6 +767,7 @@ pub struct ConfigBuilder {
+ 
+     // Optional (defaulted at build time).
+     domain: Option<String>,
++    tcp_connect_address: Option<core::net::SocketAddr>,
+     enable_tls: Option<bool>,
+     enable_credssp: Option<bool>,
+     certificate_validation: Option<ironrdp_tls::CertificateValidation>,
+@@ -834,6 +841,18 @@ impl ConfigBuilder {
+         Self::default()
+     }
+ 
++    /// Dial this numeric address instead of resolving the RDP destination.
++    ///
++    /// For an application-owned TCP tunnel. Only the Direct transport supports this
++    /// override. The original destination remains authoritative for TLS, certificate
++    /// policy, and CredSSP. A dial failure never falls back to the destination.
++    /// UDP is disabled so no traffic can bypass the tunnel.
++    #[must_use]
++    pub fn with_tcp_connect_address(mut self, address: core::net::SocketAddr) -> Self {
++        self.tcp_connect_address = Some(address);
++        self
++    }
++
+     #[must_use]
+     pub fn with_destination(mut self, destination: Destination) -> Self {
+         // Classify the host so the persisted `full address` follows TargetAddr's formatting rules
+@@ -2037,12 +2056,18 @@ impl ConfigBuilder {
+             properties.remove(&key);
+         });
+ 
++        anyhow::ensure!(
++            self.tcp_connect_address.is_none() || matches!(transport, Transport::Direct),
++            "TCP connect address requires the Direct transport"
++        );
++
+         Ok(Config {
+             connector,
+             destination: self.destination.context("server address is required")?,
++            tcp_connect_address: self.tcp_connect_address,
+             transport,
+             #[cfg(feature = "udp")]
+-            udp_transport_enabled: self.udp_transport_enabled,
++            udp_transport_enabled: self.udp_transport_enabled && self.tcp_connect_address.is_none(),
+             #[cfg(feature = "udp")]
+             udp_offer_version: self.udp_offer_version.unwrap_or(UdpVersion::V3),
+             certificate_validation,
+diff --git a/crates/ironrdp-client/src/rdp.rs b/crates/ironrdp-client/src/rdp.rs
+index 9b924304..b326d522 100644
+--- a/crates/ironrdp-client/src/rdp.rs
++++ b/crates/ironrdp-client/src/rdp.rs
+@@ -2177,10 +2177,13 @@ async fn connect_direct(
+     rdpdr_factory: RdpdrFactoryRef<'_>,
+     auto_reconnect_cookie: Option<&ServerAutoReconnect>,
+ ) -> ConnectorResult<ConnectOutput> {
+-    let dest = config.destination.to_string();
+-    let stream = TcpStream::connect(&dest)
+-        .await
+-        .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
++    // Never resolve or retry the logical destination when the caller owns the route.
++    // Certificate validation and CredSSP continue to use config.destination below.
++    let stream = match config.tcp_connect_address {
++        Some(address) => TcpStream::connect(address).await,
++        None => TcpStream::connect(config.destination.to_string()).await,
++    }
++    .map_err(|e| ironrdp_connector::custom_err!("TCP connect", e))?;
+     #[cfg(feature = "vmconnect")]
+     let pcb_deadline = tokio::time::Instant::now() + ironrdp_vmconnect::PCB_TRANSMIT_DEADLINE;
+     let client_addr = stream

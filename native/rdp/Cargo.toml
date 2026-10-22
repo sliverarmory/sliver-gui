@@ -7,14 +7,14 @@ publish = false
 license = "GPL-3.0-or-later"
 
 [dependencies]
-# Pin the reviewed commit on the fork's default branch (master).
-# Keep the exact revision and protocol/ironrdp-provenance.json in sync.
-ironrdp-client = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012", default-features = false, features = ["rustls", "clipboard-custom"] }
-ironrdp-pdu = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
-ironrdp-connector = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
-ironrdp-core = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
-ironrdp-tls = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012", features = ["rustls"] }
-ironrdp-cliprdr = { git = "https://github.com/sliverarmory/IronRDP", rev = "bfa5a8966fce80d659765c018895036ec775a012" }
+# Verified source staging pins the original commit and reviewed local patch.
+# Run npm run test:rdp:native or npm run build:rdp:host to prepare vendor/ironrdp.
+ironrdp-client = { path = "vendor/ironrdp/crates/ironrdp-client", default-features = false, features = ["rustls", "clipboard-custom"] }
+ironrdp-pdu = { path = "vendor/ironrdp/crates/ironrdp-pdu" }
+ironrdp-connector = { path = "vendor/ironrdp/crates/ironrdp-connector" }
+ironrdp-core = { path = "vendor/ironrdp/crates/ironrdp-core" }
+ironrdp-tls = { path = "vendor/ironrdp/crates/ironrdp-tls", features = ["rustls"] }
+ironrdp-cliprdr = { path = "vendor/ironrdp/crates/ironrdp-cliprdr" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

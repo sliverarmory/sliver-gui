@@ -50,7 +50,7 @@ export function useSessionContextActions({ snapshot, onSnapshot, onOpenSession, 
   onSnapshot: (snapshot: SliverSnapshot) => void;
   onOpenSession?: (session: SessionSummary, target: TargetRef) => void;
   onOpenBeacon?: (beacon: BeaconSummary, target: TargetRef) => void;
-}): { actionsForTarget: (target: TargetRef) => ApplicationContextMenuAction[]; dialogs: ReactNode } {
+}): { actionsForTarget: (target: TargetRef) => ApplicationContextMenuAction[]; isBusy: boolean; dialogs: ReactNode } {
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
   const onSnapshotRef = useRef(onSnapshot);
@@ -246,5 +246,5 @@ export function useSessionContextActions({ snapshot, onSnapshot, onOpenSession, 
       onConfirm={() => { if (current) void execute(current); }}
       onOpenChange={(open) => { if (!open) close(); }} />
   </>;
-  return { actionsForTarget, dialogs };
+  return { actionsForTarget, isBusy: busy, dialogs };
 }

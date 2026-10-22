@@ -30,6 +30,98 @@ const listening: LocalForwardState = {
 afterEach(() => vi.useRealTimers());
 
 describe("NetworkForwardingController", () => {
+  async function managedSocks(bind = { host: "127.0.0.1", port: 1080 }, authentication: { username: string; password: string } | null = { username: "private-proxy-user", password: "private-proxy-password" }) {
+    const state = new BehaviorSubject<LocalForwardState>(listening);
+    const proxy = { ...localSocksProxy(state), bind, get state() { return state.value; } };
+    const client = forwardingClient({ socks: proxy });
+    const controller = new NetworkForwardingController(client, Date.now, vi.fn());
+    await controller.startSocks5Proxy({ session, bind, ...(authentication ? { authentication } : {}),
+      connectTimeoutSeconds: 30, closeTimeoutSeconds: 5, maxConnections: 64, maxBufferedBytesPerConnection: 1_048_576 });
+    return { state, proxy, client, controller };
+  }
+
+  it("lends independent credential copies only inside main and wipes each released copy", async () => {
+    const { controller, proxy } = await managedSocks();
+    try {
+      const first = controller.leaseRdpProxy(proxy.id), second = controller.leaseRdpProxy(proxy.id);
+      expect(first.authentication?.username.toString()).toBe("private-proxy-user");
+      expect(first.authentication?.password.toString()).toBe("private-proxy-password");
+      expect(first.authentication?.password).not.toBe(second.authentication?.password);
+      const summaries = JSON.stringify({ rdp: controller.rdpProxies(), inventory: await controller.list({ reverseTargets: [] }) });
+      expect(summaries).not.toContain("private-proxy-user");
+      expect(summaries).not.toContain("private-proxy-password");
+      expect(summaries).not.toContain('"type":"Buffer"');
+      first.release(); first.release();
+      expect(first.authentication?.username.every((byte) => byte === 0)).toBe(true);
+      expect(first.authentication?.password.every((byte) => byte === 0)).toBe(true);
+      expect(second.authentication?.password.toString()).toBe("private-proxy-password");
+      expect(first.isActive()).toBe(true); // Releasing credentials must not close the shared proxy.
+      const third = controller.leaseRdpProxy(proxy.id);
+      expect(third.authentication?.password.toString()).toBe("private-proxy-password");
+      second.release(); third.release();
+    } finally { controller.dispose(); }
+  });
+
+  it.each(["stop", "closed", "failed", "complete", "dispose", "removed"] as const)("aborts borrowed routes and wipes credentials on %s", async (action) => {
+    const { controller, proxy, state, client } = await managedSocks();
+    const lease = controller.leaseRdpProxy(proxy.id), aborted = vi.fn();
+    lease.signal.addEventListener("abort", aborted);
+    try {
+      if (action === "stop") {
+        client.stopSocks5Proxy.mockImplementation(async () => { expect(lease.signal.aborted).toBe(true); });
+        await controller.stopSocks5Proxy(proxy.id);
+      } else if (action === "closed" || action === "failed") state.next({ ...listening, status: action });
+      else if (action === "complete") state.complete();
+      else if (action === "dispose") controller.dispose();
+      else { client.listSocks5Proxies.mockReturnValue([]); expect(controller.rdpProxies()).toEqual([]); }
+      expect(lease.signal.aborted).toBe(true);
+      expect(aborted).toHaveBeenCalledOnce();
+      expect(lease.isActive()).toBe(false);
+      expect(lease.authentication?.username.every((byte) => byte === 0)).toBe(true);
+      expect(lease.authentication?.password.every((byte) => byte === 0)).toBe(true);
+      expect(() => controller.leaseRdpProxy(proxy.id)).toThrow();
+      expect(controller.rdpProxies()).toEqual([]);
+    } finally { controller.dispose(); }
+    expect(aborted).toHaveBeenCalledOnce();
+  });
+
+  it.each([["0.0.0.0", "127.0.0.1"], ["::", "::1"], ["127.0.0.1", "127.0.0.1"], ["::1", "::1"]])("normalizes managed numeric bind %s to %s without DNS", async (host, expected) => {
+    const { controller, proxy } = await managedSocks({ host, port: 49152 }, null);
+    try {
+      const lease = controller.leaseRdpProxy(proxy.id);
+      expect(lease.host).toBe(expected); expect(lease.port).toBe(49152);
+      expect(lease.authentication).toBeUndefined();
+      lease.release();
+    } finally { controller.dispose(); }
+  });
+
+  it("rejects unowned proxies and hostnames even when they appear in inventory", async () => {
+    const proxy = localSocksProxy(new BehaviorSubject<LocalForwardState>(listening));
+    const controller = new NetworkForwardingController(forwardingClient({ socks: proxy }), Date.now, vi.fn());
+    try {
+      expect((await controller.list({ reverseTargets: [] })).socks5Proxies).toHaveLength(1);
+      expect(controller.rdpProxies()).toEqual([]);
+      expect(() => controller.leaseRdpProxy(proxy.id)).toThrow(/no longer available/u);
+    } finally { controller.dispose(); }
+    const managed = await managedSocks({ host: "localhost", port: 1080 });
+    try { expect(() => managed.controller.leaseRdpProxy(managed.proxy.id)).toThrow(/IP address/u); }
+    finally { managed.controller.dispose(); }
+  });
+
+  it("stops lending while a proxy closes and detects an obsolete handle", async () => {
+    const { controller, proxy, state, client } = await managedSocks();
+    try {
+      const lease = controller.leaseRdpProxy(proxy.id);
+      state.next({ ...listening, status: "closing" });
+      expect(lease.isActive()).toBe(false);
+      expect(() => controller.leaseRdpProxy(proxy.id)).toThrow(/no longer available/u);
+      state.next(listening);
+      client.listSocks5Proxies.mockReturnValue([{ ...proxy }]);
+      expect(lease.isActive()).toBe(false);
+      lease.release();
+    } finally { controller.dispose(); }
+  });
+
   it("keeps rc4 handles in main and exposes serializable summaries without SOCKS credentials", async () => {
     vi.useFakeTimers();
     const changed = vi.fn();

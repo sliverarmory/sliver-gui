@@ -1,7 +1,7 @@
 import { Button, Card, Tooltip } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faDesktop, faPen, faTrash } from "@fortawesome/free-solid-svg-icons";
-import type { RdpProfile, RdpTab } from "../../../../shared/rdp-contracts";
+import { rdpNetworkingKey, type RdpProfile, type RdpTab } from "../../../../shared/rdp-contracts";
 import { useApplicationContextMenuScope } from "../ApplicationContextMenu";
 
 interface RdpProfileGridProps {
@@ -23,6 +23,7 @@ export function RdpProfileGrid({ profiles, tabs, disabled, onConnect, onEdit, on
       const connected = tabs.some((tab) => tab.profileId === profile.id && tab.state === "active" &&
         tab.host.toLowerCase() === profile.host.toLowerCase() && tab.port === profile.port &&
         tab.username === profile.username && tab.domain === profile.domain &&
+        rdpNetworkingKey(tab.networking) === rdpNetworkingKey(profile.networking) &&
         (tab.signInMode ?? "nla") === (profile.signInMode ?? "nla"));
       return <RdpProfileCard key={profile.id} profile={profile} connected={connected} disabled={disabled} onConnect={onConnect} onEdit={onEdit} onDelete={onDelete} />;
     })}

@@ -1,4 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import type { RdpSocks5Proxy, RdpSocks5Session } from "../shared/rdp-contracts.js";
+import { rdpString } from "../shared/rdp-validation.js";
+import type { RdpSocksProxyLease } from "./rdp-socks-transport.js";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmod, lstat, realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, posix as posixPath, resolve, win32 as win32Path } from "node:path";
@@ -83,6 +86,7 @@ import {
   type TargetSummary,
 } from "../shared/target-contracts.js";
 import {
+  NETWORK_FORWARDING_DEFAULTS,
   NETWORK_FORWARDING_IPC_EVENTS,
   type ListNetworkForwardsInput,
   type NetworkAddress,
@@ -433,6 +437,13 @@ interface ActiveConfigReference {
   readonly requirePrivateMode: boolean;
 }
 
+interface RdpSocksSessionChoice {
+  readonly pool: BackendPool;
+  readonly target: TargetRef;
+  proxyId?: string;
+  pending?: Promise<RdpSocks5Proxy>;
+}
+
 /** Main-process-only copy of the currently connected profile. Callers own and must zeroize configBytes. */
 export interface ActiveConfigMaterial {
   readonly configName: string;
@@ -718,6 +729,8 @@ interface TargetCatalogSnapshot {
 export class ConnectionRegistry {
   private readonly windows = new Map<number, WindowContext>();
   private readonly pools = new Map<string, BackendPool>();
+  private readonly rdpSocksSessions = new Map<string, RdpSocksSessionChoice>();
+  private readonly rdpSocksViaSessions = new WeakMap<BackendPool, Map<string, string>>();
   private readonly websiteMutationTails = new WeakMap<BackendPool, Promise<void>>();
   private readonly remoteTextEditorBindings = new WeakSet<object>();
   private readonly websiteTextEditorBindings = new WeakSet<object>();
@@ -1419,6 +1432,115 @@ export class ConnectionRegistry {
     }
   }
 
+  /** Main-only inventory for the standalone RDP window. Credentials stay with their backend. */
+  listRdpSocksProxies(): readonly RdpSocks5Proxy[] {
+    return [...this.pools.values()].flatMap((pool) => {
+      const proxies = pool.networkForwarding.rdpProxies();
+      const existingIds = new Set(proxies.map((proxy) => proxy.id));
+      const provenance = this.rdpSocksViaSessions.get(pool);
+      if (provenance) for (const id of provenance.keys()) if (!existingIds.has(id)) provenance.delete(id);
+      return proxies.map((proxy) => this.rdpSocksProxySummary(pool, proxy));
+    }).slice(0, 1024);
+  }
+
+  private rdpSocksProxySummary(pool: BackendPool, proxy: NetworkSocks5ProxySummary): RdpSocks5Proxy {
+    const viaSessionId = this.rdpSocksViaSessions.get(pool)?.get(proxy.id);
+    return Object.freeze({
+      id: proxy.id,
+      ...(viaSessionId === undefined ? {} : { viaSessionId }),
+      label: `${pool.snapshot.connection.server ?? "Sliver"} · ${pool.targetStore.target("session", proxy.sessionId)?.hostname || proxy.sessionId}`.replace(/[\u0000-\u001f\u007f]/gu, "").slice(0, 256),
+      host: proxy.bind.host, port: proxy.bind.port, authentication: proxy.authentication,
+      available: ["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status) && proxy.state.status === "listening",
+    });
+  }
+
+  /** Opaque choices carry no renderer-supplied backend or target authority. */
+  listRdpSocksSessions(): readonly RdpSocks5Session[] {
+    for (const [id, choice] of this.rdpSocksSessions) {
+      const current = choice.pool.targetStore.revalidateTargetRef(choice.target, choice.pool.epoch);
+      if (this.pools.get(choice.pool.key) !== choice.pool || !current || current.target.mode !== "session" || current.target.liveness !== "active") this.rdpSocksSessions.delete(id);
+    }
+    const byTarget = new Map([...this.rdpSocksSessions].map(([id, choice]) => [JSON.stringify([choice.pool.epoch, choice.target.id, choice.target.fingerprint]), id]));
+    const choices: RdpSocks5Session[] = [];
+    for (const pool of this.pools.values()) {
+      if (!["connected", "degraded"].includes(pool.snapshot.connection.status) || !targetDomainAuthoritative(pool, "session")) continue;
+      for (const target of pool.targetStore.catalogPage("session", 0, Number.MAX_SAFE_INTEGER).items) {
+        if (target.mode !== "session" || target.liveness !== "active") continue;
+        // Preserve the exact target ID; an invalid display ID must not poison the snapshot.
+        let sessionId: string;
+        try { sessionId = rdpString(target.id, 80); } catch { continue; }
+        const ref = pool.targetStore.createTargetRef("session", target.id, pool.epoch);
+        if (!ref) continue;
+        const key = JSON.stringify([pool.epoch, ref.id, ref.fingerprint]);
+        let id = byTarget.get(key);
+        if (!id) {
+          if (this.rdpSocksSessions.size >= 1024) continue;
+          id = randomBytes(32).toString("base64url");
+          this.rdpSocksSessions.set(id, { pool, target: Object.freeze(ref) });
+          byTarget.set(key, id);
+        }
+        // TargetStore substitutes the ID for an absent session name.
+        const label = ((target.name !== target.id && target.name) || target.hostname || "Sliver session").replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, 256);
+        const hostname = target.hostname.replace(/[\u0000-\u001f\u007f]/gu, "").trim().slice(0, 253);
+        choices.push(Object.freeze({ id, sessionId, label: label || "Sliver session", hostname }));
+      }
+    }
+    return Object.freeze(choices);
+  }
+
+  async startRdpSocksProxyForSession(id: string): Promise<RdpSocks5Proxy> {
+    const choice = /^[A-Za-z0-9_-]{43}$/u.test(id) ? this.rdpSocksSessions.get(id) : undefined;
+    if (!choice) throw new Error("The selected Sliver session is no longer available. Select it again.");
+    const { pool, target } = choice;
+    const assertCurrent = (): void => {
+      if (this.rdpSocksSessions.get(id) !== choice || this.pools.get(pool.key) !== pool ||
+        !["connected", "degraded"].includes(pool.snapshot.connection.status)) throw new Error("The selected Sliver session is no longer available. Select it again.");
+      this.requireActiveNetworkSession(pool, target, false);
+    };
+    assertCurrent();
+    if (choice.pending) return choice.pending;
+    const existing = choice.proxyId && pool.networkForwarding.rdpProxies().find((proxy) => proxy.id === choice.proxyId && proxy.state.status === "listening");
+    if (existing) return this.rdpSocksProxySummary(pool, existing);
+    const pending = (async (): Promise<RdpSocks5Proxy> => {
+      const proxy = await pool.networkForwarding.startSocks5Proxy({
+        session: target, bind: { host: "127.0.0.1", port: 0 },
+        authentication: { username: randomBytes(24).toString("base64url"), password: randomBytes(32).toString("base64url") },
+        connectTimeoutSeconds: NETWORK_FORWARDING_DEFAULTS.connectTimeoutSeconds,
+        closeTimeoutSeconds: NETWORK_FORWARDING_DEFAULTS.closeTimeoutSeconds,
+        maxConnections: NETWORK_FORWARDING_DEFAULTS.socks5Connections,
+        maxBufferedBytesPerConnection: NETWORK_FORWARDING_DEFAULTS.socks5BufferBytes,
+      });
+      try {
+        assertCurrent();
+        if (proxy.state.status !== "listening") throw new Error("The session SOCKS5 proxy could not start.");
+        choice.proxyId = proxy.id;
+        let provenance = this.rdpSocksViaSessions.get(pool);
+        if (!provenance) { provenance = new Map(); this.rdpSocksViaSessions.set(pool, provenance); }
+        provenance.set(proxy.id, id);
+        return this.rdpSocksProxySummary(pool, proxy);
+      } catch (error) {
+        // Use the captured pool even if the workspace has switched backends.
+        try { await pool.networkForwarding.stopSocks5Proxy(proxy.id); }
+        catch { await pool.client.stopSocks5Proxy(proxy.id); }
+        throw error;
+      }
+    })();
+    choice.pending = pending;
+    try { return await pending; }
+    finally { if (choice.pending === pending) delete choice.pending; }
+  }
+
+  leaseRdpSocksProxy(id: string): RdpSocksProxyLease {
+    for (const pool of this.pools.values()) {
+      if (!pool.networkForwarding.rdpProxies().some((proxy) => proxy.id === id)) continue;
+      if (!["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status)) break;
+      const lease = pool.networkForwarding.leaseRdpProxy(id);
+      return { ...lease, isActive: () => this.pools.get(pool.key) === pool &&
+        ["connected", "degraded", "reconnecting"].includes(pool.snapshot.connection.status) && lease.isActive() };
+    }
+    throw new Error("The selected SOCKS5 proxy is no longer available. Start it in Networking and select it again.");
+  }
+
   async listNetworkForwards(
     contentsId: number,
     input: ListNetworkForwardsInput,
@@ -1495,7 +1617,9 @@ export class ConnectionRegistry {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       const session = this.requireActiveNetworkSession(pool, input.session, true);
       assertBinding();
-      return pool.networkForwarding.startSocks5Proxy({ ...input, session });
+      const proxy = await pool.networkForwarding.startSocks5Proxy({ ...input, session });
+      this.rdpSocksViaSessions.get(pool)?.delete(proxy.id);
+      return proxy;
     });
   }
 
@@ -8651,6 +8775,7 @@ export class ConnectionRegistry {
     pool.removeWindow(contentsId);
     if (pool.windowCount === 0) {
       this.pools.delete(poolKey);
+      for (const [id, choice] of this.rdpSocksSessions) if (choice.pool === pool) this.rdpSocksSessions.delete(id);
       for (const [key, bucket] of this.processExecutionHistories) {
         if (bucket.poolKey !== poolKey) continue;
         for (const entry of bucket.entries) this.releaseProcessExecutionRecord(entry.record);

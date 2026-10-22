@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RdpSaveProfileInput } from "../shared/rdp-contracts.js";
 import type { CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
-import { RdpStore } from "./rdp-store.js";
+import { RdpStore, rdpEndpoint } from "./rdp-store.js";
 import * as secureFile from "./secure-file.js";
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 
@@ -33,6 +33,54 @@ beforeEach(async () => { directory = await mkdtemp(join(tmpdir(), "sliver-rdp-st
 afterEach(async () => { for (const instance of stores.splice(0)) instance.dispose(); vi.restoreAllMocks(); await rm(directory, { recursive: true, force: true }); });
 
 describe("RdpStore credentials", () => {
+  it.each(["session", "secure"] as const)("scopes %s Windows credentials and previews to the full manual proxy identity", async (persistence) => {
+    const instance = store();
+    const manual = { ...options, networking: { kind: "socks5-manual" as const, host: "proxy.test", port: 1080, username: "proxy-user" } };
+    const profile = await instance.saveProfile({ ...manual, proxyPassword: "never-store-proxy-secret" } as typeof manual);
+    await instance.saveCredential(profile.id, manual, PASSWORD, persistence);
+    await instance.savePreview(profile.id, manual, RDP_PREVIEW_FIXTURE);
+    await instance.savePin(manual, "c".repeat(64));
+    for (const changed of [options, { ...manual, networking: { ...manual.networking, host: "other.test" } },
+      { ...manual, networking: { ...manual.networking, port: 1081 } }, { ...manual, networking: { ...manual.networking, username: "other-user" } }]) {
+      expect(instance.credential(profile.id, changed)).toBeUndefined();
+      expect(instance.pin(changed)).toBeUndefined();
+      expect(rdpEndpoint(changed)).not.toBe(rdpEndpoint(manual));
+    }
+    const reopened = store(); await reopened.load();
+    expect(reopened.pin(manual)).toBe("c".repeat(64));
+    expect(reopened.profile(profile.id)?.networking).toEqual(manual.networking);
+    expect(await readFile(path, "utf8")).not.toContain("never-store-proxy-secret");
+    const changed = await instance.saveProfile({ ...manual, id: profile.id, networking: { ...manual.networking, username: "other-user" } });
+    expect(changed.hasCredential).toBe(false); expect(changed.preview).toBeUndefined();
+  });
+  it("reloads bounded manual route pins with long endpoint and quoted username identities", async () => {
+    const instance = store();
+    const manual = { ...options, host: "a".repeat(253), networking: { kind: "socks5-manual" as const, host: "b".repeat(253), port: 1080, username: '"'.repeat(255) } };
+    await instance.savePin(manual, "d".repeat(64));
+    const reopened = store(); await reopened.load();
+    expect(reopened.pin(manual)).toBe("d".repeat(64));
+  });
+  it.each(["session", "secure"] as const)("scopes %s credentials, previews, and certificate pins to the proxy route", async (persistence) => {
+    const instance = store(), profile = await instance.saveProfile(options);
+    const proxy = { ...options, networking: { kind: "socks5" as const, proxyId: "socks5-11111111-1111-4111-8111-111111111111" } };
+    const other = { ...proxy, networking: { kind: "socks5" as const, proxyId: "socks5-22222222-2222-4222-8222-222222222222" } };
+    await instance.saveCredential(profile.id, options, PASSWORD, persistence);
+    await instance.savePreview(profile.id, options, RDP_PREVIEW_FIXTURE);
+    await instance.savePin(options, "a".repeat(64));
+    expect(instance.pin(proxy)).toBeUndefined();
+    expect(instance.credential(profile.id, proxy)).toBeUndefined();
+    const saved = await instance.saveProfile({ ...proxy, id: profile.id });
+    expect(saved.hasCredential).toBe(false); expect(saved.preview).toBeUndefined();
+    await instance.saveCredential(profile.id, proxy, PASSWORD, persistence);
+    await instance.savePin(proxy, "b".repeat(64));
+    expect(instance.credential(profile.id, other)).toBeUndefined();
+    expect(instance.pin(other)).toBeUndefined();
+    const reopened = store(); await reopened.load();
+    expect(reopened.pin(options)).toBe("a".repeat(64));
+    expect(reopened.pin(proxy)).toBe("b".repeat(64));
+    expect(reopened.profile(profile.id)?.networking).toEqual(proxy.networking);
+  });
+
   it.each(["session", "secure"] as const)("clears %s credentials and previews when switching to remote-screen sign-in", async (persistence) => {
     const instance = store(), profile = await instance.saveProfile(options);
     await instance.saveCredential(profile.id, options, PASSWORD, persistence);

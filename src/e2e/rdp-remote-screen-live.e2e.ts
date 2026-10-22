@@ -142,7 +142,9 @@ test("RDP remote-screen sign-in renders before credentials, then logs in or reje
     await dialog.getByLabel("Connection name", { exact: true }).fill(config.label);
     await dialog.getByLabel("Computer", { exact: true }).fill(config.host);
     await dialog.getByLabel("Port", { exact: true }).fill(String(config.port));
-    await dialog.getByLabel("Desktop resolution", { exact: true }).selectOption("custom");
+    await dialog.getByRole("button", { name: "Desktop resolution", exact: true }).click();
+    await page.getByRole("menuitemradio", { name: "Custom", exact: true }).click();
+    assert.equal(await dialog.getByRole("button", { name: "Desktop resolution", exact: true }).getAttribute("data-selected-value"), "custom");
     await dialog.getByLabel("Desktop width", { exact: true }).fill(String(config.width));
     await dialog.getByLabel("Desktop height", { exact: true }).fill(String(config.height));
     const clipboardSwitch = dialog.getByRole("switch", { name: "Clipboard", exact: true });

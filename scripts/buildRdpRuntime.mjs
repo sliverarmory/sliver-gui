@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { chmod, copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { prepareRdpSource, RDP_SOURCE_PATCH, RDP_STAGED_SOURCE, verifyStagedRdpSource } from "./rdpSourceOverlay.mjs";
 
 export const ROOT_DIRECTORY = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const RDP_SOURCE_MANIFEST = "protocol/ironrdp-provenance.json";
@@ -41,6 +42,10 @@ export function validateRdpSourceManifest(manifest) {
       !/^[a-f0-9]{40}$/u.test(manifest.source?.tree ?? "") ||
       manifest.source?.patchInventory !== "SLIVER_GUI_EMBEDDING.md" ||
       !/^[a-f0-9]{64}$/u.test(manifest.source?.patchInventorySha256 ?? "") ||
+      (manifest.source.localOverlay !== undefined && (
+        manifest.source.localOverlay.patch !== RDP_SOURCE_PATCH ||
+        !/^[a-f0-9]{64}$/u.test(manifest.source.localOverlay.sha256 ?? "") ||
+        !/^[a-f0-9]{40}$/u.test(manifest.source.localOverlay.tree ?? ""))) ||
       !/^\d+\.\d+\.\d+$/u.test(manifest.toolchain?.rust ?? "") ||
       manifest.build?.macosDeploymentTarget !== "13.0" ||
       manifest.build?.linuxGlibcBaseline !== "2.35" ||
@@ -56,7 +61,8 @@ export function validateRdpSourceManifest(manifest) {
 
 export async function rdpSourceInputs(projectDirectory = ROOT_DIRECTORY) {
   const paths = ["native/rdp/Cargo.toml", "native/rdp/Cargo.lock"];
-  for (const optional of ["native/rdp/build.rs", "native/rdp/rust-toolchain.toml", "native/rdp/.cargo/config.toml"]) {
+  for (const optional of ["native/rdp/build.rs", "native/rdp/rust-toolchain.toml", "native/rdp/.cargo/config.toml", RDP_SOURCE_PATCH,
+    "scripts/rdpSourceOverlay.mjs", "scripts/testRdpNative.mjs", "scripts/buildRdpRuntime.mjs", "scripts/verifyRdpRuntime.mjs"]) {
     if (await readFile(join(projectDirectory, optional)).catch((error) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -99,7 +105,7 @@ export function rdpBuildEnvironment(environment, manifest, target, projectDirect
 }
 
 /** Traverse the filtered Cargo resolve graph, omitting dev-only dependencies. */
-export function selectedCargoPackages(metadata, sourceManifest) {
+export function selectedCargoPackages(metadata, sourceManifest, projectDirectory = ROOT_DIRECTORY) {
   const packages = new Map(metadata.packages.map((entry) => [entry.id, entry]));
   const nodes = new Map(metadata.resolve.nodes.map((entry) => [entry.id, entry]));
   const selected = new Map();
@@ -118,7 +124,10 @@ export function selectedCargoPackages(metadata, sourceManifest) {
   if (ironrdp.length === 0) throw new Error("RDP helper has no pinned IronRDP dependencies");
   for (const dependency of ironrdp) {
     const expected = `git+${sourceManifest.source.repository}?rev=${sourceManifest.source.commit}#${sourceManifest.source.commit}`;
-    if (dependency.source !== expected) throw new Error(`Unpinned IronRDP dependency: ${dependency.name}`);
+    const valid = sourceManifest.source.localOverlay
+      ? dependency.source === null && resolve(dependency.manifest_path) === join(resolve(projectDirectory), RDP_STAGED_SOURCE, "crates", dependency.name, "Cargo.toml")
+      : dependency.source === expected;
+    if (!valid) throw new Error(`Unpinned IronRDP dependency: ${dependency.name}`);
   }
   const client = ironrdp.find(({ name }) => name === "ironrdp-client");
   if (!client || JSON.stringify(client.selectedFeatures) !== JSON.stringify([...sourceManifest.build.ironrdpClientFeatures].sort())) {
@@ -165,7 +174,7 @@ export async function cargoLicenseInventory(packages, projectDirectory = ROOT_DI
     const licenseFiles = new Map();
     let directory = dirname(entry.manifest_path);
     // IronRDP workspace crates share notices at their pinned checkout root.
-    const levels = entry.source?.startsWith("git+") ? 5 : 1;
+    const levels = entry.source?.startsWith("git+") || entry.name.startsWith("ironrdp-") ? 5 : 1;
     for (let depth = 0; depth < levels; depth += 1) {
       for (const item of await readdir(directory, { withFileTypes: true })) {
         if (item.isFile() && /^(?:licen[cs]e|copying|notice)(?:[._-].*)?$/iu.test(item.name)) {
@@ -199,7 +208,7 @@ export async function cargoLicenseInventory(packages, projectDirectory = ROOT_DI
         sharedFrom = `${sibling.entry.name}@${sibling.entry.version}`;
       }
     }
-    sections.push("=".repeat(80), `${entry.name}@${entry.version}`, `Source: ${entry.source ?? "Sliver GUI source"}`,
+    sections.push("=".repeat(80), `${entry.name}@${entry.version}`, `Source: ${entry.source ?? (entry.name.startsWith("ironrdp-") ? "Pinned IronRDP source with reviewed local overlay (see source-provenance.json)" : "Sliver GUI source")}`,
       `Declared license: ${entry.license ?? "see license_file"}`, `Features: ${entry.selectedFeatures.join(", ")}`, "");
     if (sharedFrom) sections.push(`Shared upstream license text from ${sharedFrom} (${entry.repository}).`, "");
     if (licenseFiles.size === 0) {
@@ -252,18 +261,21 @@ export async function buildRdpRuntime({ projectDirectory = ROOT_DIRECTORY, platf
   // Remove the success marker first so a failed rebuild cannot package stale output.
   await rm(join(outputDirectory, "provenance.json"), { force: true });
   await rm(join(projectDirectory, RDP_PACKAGED_RECORD), { force: true });
+  if (manifest.source.localOverlay) await prepareRdpSource({ projectDirectory, manifest, run, environment: commonEnvironment });
   const dependencies = new Map();
   const sliceRecords = [];
   for (const slice of slices) {
     const env = rdpBuildEnvironment(environment, manifest, slice, projectDirectory, buildIdentity);
     const metadata = JSON.parse((await run("cargo", ["metadata", "--format-version=1", "--locked", "--filter-platform", slice], { cwd: crateDirectory, env })).stdout);
-    const selected = selectedCargoPackages(metadata, manifest);
+    const selected = selectedCargoPackages(metadata, manifest, projectDirectory);
     const checkout = await verifyIronRdpPatchInventory(selected, manifest);
-    await verifyIronRdpCheckout(checkout, manifest, run, env);
+    if (manifest.source.localOverlay) await verifyStagedRdpSource(checkout, manifest, run, env);
+    else await verifyIronRdpCheckout(checkout, manifest, run, env);
     for (const entry of selected) dependencies.set(entry.id, {
       ...entry, selectedFeatures: [...new Set([...(dependencies.get(entry.id)?.selectedFeatures ?? []), ...entry.selectedFeatures])].sort(),
     });
     await run("cargo", ["build", "--release", "--locked", "--bin", "sliver-rdp", "--target", slice, "--target-dir", targetDirectory], { cwd: crateDirectory, env });
+    if (manifest.source.localOverlay) await verifyStagedRdpSource(checkout, manifest, run, env);
     const path = join(targetDirectory, slice, "release", rdpExecutableName(target));
     const bytes = await readFile(path);
     sliceRecords.push({ target: slice, sha256: sha256(bytes), size: bytes.length, path });
@@ -287,7 +299,9 @@ export async function buildRdpRuntime({ projectDirectory = ROOT_DIRECTORY, platf
     toolchain: { rust: rustVersion, cargo: cargoVersion },
     build: { target, macosDeploymentTarget: manifest.build.macosDeploymentTarget, windowsCrt: manifest.build.windowsCrt,
       slices: sliceRecords.map(({ path: _path, ...entry }) => entry) },
-    dependencies: [...dependencies.values()].map(({ name, version, source, license, selectedFeatures }) => ({ name, version, source, license, features: selectedFeatures })),
+    dependencies: [...dependencies.values()].map(({ name, version, source, license, selectedFeatures }) => ({ name, version,
+      source: source ?? (name.startsWith("ironrdp-") ? `git+${manifest.source.repository}#${manifest.source.commit};overlay-sha256=${manifest.source.localOverlay.sha256}` : null),
+      license, features: selectedFeatures })),
     artifact: { fileName: executableName, sha256: sha256(executable), size: executable.length },
     licenseInventorySha256: sha256(licenseInventory), projectLicenseSha256: sha256(await readFile(join(projectDirectory, "LICENSE"))),
   };

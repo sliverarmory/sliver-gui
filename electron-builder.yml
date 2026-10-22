@@ -132,3 +132,9 @@ nsis:
   artifactName: sliver-gui-${version}-windows-${arch}-setup.${ext}
 portable:
   artifactName: sliver-gui-${version}-windows-${arch}-portable.${ext}
+fileAssociations:
+  - ext: rdp
+    name: Remote Desktop profile
+    description: Remote Desktop connection settings
+    mimeType: application/x-rdp
+    role: Viewer

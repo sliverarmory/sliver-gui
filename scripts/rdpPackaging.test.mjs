@@ -24,5 +24,6 @@ test("electron-builder retains the immutable RDP archive anchor outside extraRes
   assert.equal(includedInArchive(RDP_PACKAGED_RECORD), true, "the internal trust anchor must survive the real builder exclusions");
   assert.equal(includedInArchive("native/rdp/bin/provenance.json"), false, "the external copy is excluded from ASAR by extraResources");
   assert.equal(includedInArchive("native/rdp/bin/sliver-rdp"), false, "the native executable stays outside ASAR");
+  assert.equal(includedInArchive("native/rdp/vendor/ironrdp/crates/ironrdp-client/src/rdp.rs"), false, "generated source staging must not enter the application archive");
   assert.ok(resources.some((matcher) => matcher.createFilter()(join(ROOT_DIRECTORY, "native/rdp/bin/provenance.json"), regularFile)));
 });

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
-import type { RdpConnectInput, RdpFileTransferProgressEvent, RdpProfile, RdpTab, RdpWindowAPI, RdpWindowState } from "../../shared/rdp-contracts";
+import type { RdpConnectInput, RdpFileTransferProgressEvent, RdpImportResult, RdpProfile, RdpSocks5Proxy, RdpTab, RdpWindowAPI, RdpWindowState } from "../../shared/rdp-contracts";
 import { renderWithApplicationContextMenu } from "./application-context-menu-test-utils";
 import { ApplicationSettingsProvider } from "./components/ApplicationSettingsProvider";
 
@@ -24,10 +24,12 @@ const firstTab: RdpTab = { id: "first", attempt: 1, label: "Office", host: "offi
   width: 1280, height: 800, clipboard: true, clipboardReady: true, clipboardAvailable: true, scaleMode: "fit", state: "active" };
 const profile: RdpProfile = { id: "saved", label: "Saved desktop", host: "saved.test", port: 3390, username: "admin", domain: "",
   width: 1920, height: 1080, clipboard: false, scaleMode: "fit", hasCredential: true, credentialPersistence: "secure" };
+const proxy: RdpSocks5Proxy = { id: "socks5-proxy-one", label: "Workstation", host: "127.0.0.1", port: 1080, authentication: "none", available: true };
 let state: RdpWindowState;
 let api: RdpWindowAPI;
 let listener: ((value: RdpWindowState) => void) | undefined;
 let progressListener: ((value: RdpFileTransferProgressEvent) => void) | undefined;
+let importListener: ((value: RdpImportResult) => void) | undefined;
 let connectedInput: RdpConnectInput | undefined;
 
 beforeEach(() => {
@@ -40,15 +42,20 @@ beforeEach(() => {
   connectedInput = undefined;
   listener = undefined;
   progressListener = undefined;
+  importListener = undefined;
   api = {
     getState: vi.fn(async () => ({ ok: true as const, value: state })),
-    connect: vi.fn(async (input) => { connectedInput = { ...input }; const tab = { ...firstTab, ...input, password: undefined, ...(input.temporaryId ? { temporary: true } : {}) }; const { pendingConnection: _pending, ...remaining } = state; state = { ...remaining, tabs: [tab], activeTabId: tab.id }; listener?.(state); return { ok: true as const, value: tab }; }),
+    openNetworkManager: vi.fn(async () => ({ ok: true as const })),
+    startSessionProxy: vi.fn(async () => ({ ok: true as const, value: proxy })),
+    connect: vi.fn(async (input) => { connectedInput = { ...input }; const { password: _password, proxyPassword: _proxyPassword, ...options } = input; const tab = { ...firstTab, ...options, ...(input.temporaryId ? { temporary: true } : {}) }; const { pendingConnection: _pending, ...remaining } = state; state = { ...remaining, tabs: [tab], activeTabId: tab.id }; listener?.(state); return { ok: true as const, value: tab }; }),
     cancelTemporary: vi.fn(async () => { const { pendingConnection: _pending, ...remaining } = state; state = remaining; listener?.(state); return { ok: true as const }; }),
     reconnect: vi.fn(async () => ({ ok: true as const, value: firstTab })),
     disconnect: vi.fn(async () => ({ ok: true as const })), closeTab: vi.fn(async () => ({ ok: true as const })),
     selectTab: vi.fn(async (tabId) => { state = { ...state, activeTabId: tabId }; listener?.(state); return { ok: true as const }; }),
     renameTab: vi.fn(async () => ({ ok: true as const })),
     saveProfile: vi.fn(async (input) => { const saved = { ...profile, ...input }; state = { ...state, profiles: [saved] }; listener?.(state); return { ok: true as const, value: saved }; }),
+    importProfiles: vi.fn(async () => ({ ok: true as const, value: { canceled: true, items: [] } })),
+    importDroppedProfiles: vi.fn(async () => ({ ok: true as const, value: { canceled: true, items: [] } })),
     deleteProfile: vi.fn(async () => ({ ok: true as const })), respondToCertificate: vi.fn(async () => ({ ok: true as const })),
     savePreview: vi.fn(async () => ({ ok: true as const })),
     attach: vi.fn(async () => ({ ok: true as const, value: { tabId: "first", attempt: 1, attachmentToken: "token" } })),
@@ -57,13 +64,240 @@ beforeEach(() => {
     updateApplicationSettings: vi.fn(async (input) => ({ ok: true as const, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } })),
     onStateChanged: vi.fn((next) => { listener = next; return () => { listener = undefined; }; }),
     onFileTransferProgress: vi.fn((next) => { progressListener = next; return () => { progressListener = undefined; }; }),
+    onProfilesImported: vi.fn((next) => { importListener = next; return () => { importListener = undefined; }; }),
     onApplicationSettingsChanged: vi.fn(() => () => undefined),
   };
   Object.defineProperty(window, "rdp", { configurable: true, value: api });
 });
 afterEach(() => { cleanup(); toast.clear(); delete window.rdp; Reflect.deleteProperty(Element.prototype, "getAnimations"); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+function dropProfiles(target: HTMLElement, files: File[]): void {
+  const dataTransfer = { dropEffect: "none", effectAllowed: "all", files, types: ["Files"],
+    items: files.map((file) => ({ kind: "file", type: file.type, getAsFile: () => file })),
+    getData: () => "", setData: () => undefined, clearData: () => undefined, setDragImage: () => undefined,
+  } as unknown as DataTransfer;
+  const area = target.closest<HTMLElement>(".drop-zone__area")!;
+  fireEvent.dragEnter(area, { dataTransfer }); fireEvent.drop(area, { dataTransfer });
+}
+
 describe("standalone remote desktop window", () => {
+  it("offers live Sliver sessions from window state and saves the created proxy route", async () => {
+    const session = { id: "live-session-one", sessionId: "11111111-1111-4111-8111-111111111111", label: "Workstation", hostname: "workstation.test" };
+    state = { ...state, socks5Sessions: [session], profiles: [{ ...profile, username: "", hasCredential: false, credentialPersistence: "none" }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    await user.click(screen.getByRole("button", { name: "Networking" }));
+    await user.click(screen.getByRole("button", { name: "Connection route" }));
+    await user.click(await screen.findByRole("menuitemradio", { name: (name) => name.startsWith(`Via ${session.label}`) }));
+    expect(api.startSessionProxy).toHaveBeenCalledExactlyOnceWith(session.id);
+    await waitFor(() => expect(screen.getByLabelText("Connection route")).toHaveAttribute("data-route-value", proxy.id));
+    await user.click(screen.getByRole("button", { name: "Save profile" }));
+    await waitFor(() => expect(api.saveProfile).toHaveBeenCalledWith(expect.objectContaining({ networking: { kind: "socks5", proxyId: proxy.id } })));
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it.each(["nla", "remote-screen"] as const)("asks for a fresh manual proxy password on a saved %s profile", async (signInMode) => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.test", port: 1080, username: "proxy-user" };
+    state = { ...state, profiles: [{ ...profile, signInMode, networking }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    const editor = await screen.findByRole("dialog", { name: "Edit Remote Desktop" });
+    expect(within(editor).getByLabelText("Proxy password")).toHaveValue("");
+    expect(api.connect).not.toHaveBeenCalled();
+    if (signInMode === "nla") expect(within(editor).getByLabelText("Password")).toHaveAttribute("placeholder", "Use saved credential");
+    else expect(within(editor).queryByLabelText("Password")).not.toBeInTheDocument();
+    await user.type(within(editor).getByLabelText("Proxy password"), "proxy-secret");
+    await user.click(within(editor).getByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ profileId: profile.id, networking, proxyPassword: "proxy-secret", persistence: signInMode === "nla" ? "secure" : "none" }));
+    expect(connectedInput).not.toHaveProperty("password");
+    expect(api.saveProfile).not.toHaveBeenCalled();
+  });
+
+  it("quick-connects a saved manual proxy with no proxy authentication", async () => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.test", port: 1080 };
+    state = { ...state, profiles: [{ ...profile, networking }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    await waitFor(() => expect(connectedInput).toMatchObject({ networking, persistence: "secure" }));
+    expect(connectedInput).not.toHaveProperty("password");
+    expect(connectedInput).not.toHaveProperty("proxyPassword");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it.each(["nla", "remote-screen"] as const)("reconnects %s through an authenticated manual proxy without resending remembered RDP credentials", async (signInMode) => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.test", port: 1080, username: "proxy-user" };
+    const tab = { ...firstTab, signInMode, networking, state: "disconnected" as const };
+    state = { ...state, tabs: [tab], activeTabId: tab.id };
+    let request: Parameters<RdpWindowAPI["reconnect"]>[0] | undefined;
+    vi.mocked(api.reconnect).mockImplementation(async (input) => { request = { ...input }; return { ok: false, error: "Proxy authentication failed." }; });
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Reconnect" }));
+    const dialog = await screen.findByRole("dialog", { name: "Reconnect to Remote Desktop" });
+    if (signInMode === "nla") expect(within(dialog).getByLabelText("Password")).toHaveValue("");
+    else expect(within(dialog).queryByLabelText("Password")).not.toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Reconnect" }));
+    expect(within(dialog).getByLabelText("Proxy password")).toHaveAttribute("aria-invalid", "true");
+    expect(api.reconnect).not.toHaveBeenCalled();
+    await user.type(within(dialog).getByLabelText("Proxy password"), "proxy-secret");
+    await user.click(within(dialog).getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(request).toEqual({ tabId: tab.id, proxyPassword: "proxy-secret" }));
+    expect(vi.mocked(api.reconnect).mock.calls[0]![0]).not.toHaveProperty("proxyPassword");
+    expect(within(dialog).getByLabelText("Proxy password")).toHaveValue("");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Proxy authentication failed.");
+  });
+
+  it("clears both reconnect drafts on cancel and sends newly supplied RDP and proxy passwords only once", async () => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.test", port: 1080, username: "proxy-user" };
+    state = { ...state, tabs: [{ ...firstTab, networking, state: "disconnected" }], activeTabId: firstTab.id };
+    let request: Parameters<RdpWindowAPI["reconnect"]>[0] | undefined;
+    vi.mocked(api.reconnect).mockImplementation(async (input) => { request = { ...input }; return { ok: true, value: firstTab }; });
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Reconnect" }));
+    let dialog = screen.getByRole("dialog", { name: "Reconnect to Remote Desktop" });
+    await user.type(within(dialog).getByLabelText("Password"), "discarded-rdp"); await user.type(within(dialog).getByLabelText("Proxy password"), "discarded-proxy");
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+    dialog = screen.getByRole("dialog", { name: "Reconnect to Remote Desktop" });
+    expect(within(dialog).getByLabelText("Password")).toHaveValue(""); expect(within(dialog).getByLabelText("Proxy password")).toHaveValue("");
+    await user.type(within(dialog).getByLabelText("Password"), "fresh-rdp"); await user.type(within(dialog).getByLabelText("Proxy password"), "fresh-proxy");
+    await user.click(within(dialog).getByRole("button", { name: "Reconnect" }));
+    await waitFor(() => expect(request).toEqual({ tabId: firstTab.id, password: "fresh-rdp", proxyPassword: "fresh-proxy" }));
+    expect(vi.mocked(api.reconnect).mock.calls[0]![0]).not.toHaveProperty("password");
+    expect(vi.mocked(api.reconnect).mock.calls[0]![0]).not.toHaveProperty("proxyPassword");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("subscribes before reading state and presents an OS-launch import only once", async () => {
+    const result: RdpImportResult = { canceled: false, items: [{ name: "opened.rdp", profile, warnings: ["Unsupported settings were ignored."] }] };
+    vi.mocked(api.getState).mockImplementationOnce(async () => {
+      expect(importListener).toBeDefined();
+      importListener?.(result);
+      state = { ...state, profiles: [profile] };
+      return { ok: true, value: state };
+    });
+    const user = userEvent.setup(); const view = renderWithApplicationContextMenu(<RdpWindowApp />);
+    const summary = await screen.findByRole("dialog", { name: "RDP import results" });
+    expect(summary).toHaveTextContent("opened.rdp");
+    expect(api.connect).not.toHaveBeenCalled();
+    await user.click(within(summary).getByRole("button", { name: "Done" }));
+    act(() => { listener?.(state); });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Connect to Saved desktop" })).toBeInTheDocument();
+    view.unmount();
+    expect(importListener).toBeUndefined();
+  });
+
+  it("defers OS import results until the connection editor closes", async () => {
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "New connection" }));
+    const editor = await screen.findByRole("dialog", { name: "New Remote Desktop" });
+    await user.type(within(editor).getByLabelText("Computer"), "draft.test");
+    act(() => { importListener?.({ canceled: false, items: [{ name: "opened.rdp", warnings: [], error: "Invalid RDP address." }] }); });
+    expect(screen.queryByRole("dialog", { name: "RDP import results" })).not.toBeInTheDocument();
+    expect(within(editor).getByLabelText("Computer")).toHaveValue("draft.test");
+    await user.click(within(editor).getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("dialog", { name: "RDP import results" })).toHaveTextContent("Invalid RDP address.");
+  });
+
+  it("imports native picker results into saved connections without connecting", async () => {
+    vi.mocked(api.importProfiles).mockImplementation(async () => {
+      state = { ...state, profiles: [profile] }; listener?.(state);
+      return { ok: true, value: { canceled: false, items: [{ name: "desktop.rdp", profile, warnings: [] }] } };
+    });
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Import .rdp" }));
+    await waitFor(() => expect(api.importProfiles).toHaveBeenCalledOnce());
+    expect(await screen.findByRole("button", { name: "Connect to Saved desktop" })).toBeInTheDocument();
+    expect(api.connect).not.toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith("1 profile imported");
+  });
+
+  it("leaves saved connections unchanged when the import picker is canceled", async () => {
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Import .rdp" }));
+    await waitFor(() => expect(api.importProfiles).toHaveBeenCalledOnce());
+    expect(screen.queryByRole("dialog", { name: "RDP import results" })).not.toBeInTheDocument();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("summarizes per-file import warnings and failures without connecting", async () => {
+    vi.mocked(api.importProfiles).mockResolvedValue({ ok: true, value: { canceled: false, items: [
+      { name: "desktop.rdp", profile, warnings: ["Unsupported settings were ignored."] },
+      { name: "invalid.rdp", warnings: [], error: "Invalid RDP address." },
+    ] } });
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Import .rdp" }));
+    const summary = await screen.findByRole("dialog", { name: "RDP import results" });
+    expect(summary).toHaveTextContent("1 of 2 profiles imported.");
+    expect(summary).toHaveTextContent("desktop.rdp");
+    expect(summary).toHaveTextContent("Unsupported settings were ignored.");
+    expect(summary).toHaveTextContent("Invalid RDP address.");
+    expect(api.connect).not.toHaveBeenCalled();
+    await user.click(within(summary).getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it.each([false, true])("passes native dropped files to preload on an %s populated grid", async (populated) => {
+    state = { ...state, profiles: populated ? [profile] : [] };
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import .rdp" })).toBeEnabled());
+    const file = new File(["full address:s:desktop.test"], "desktop.rdp");
+    const read = vi.fn(); Object.defineProperty(file, "text", { value: read });
+    dropProfiles(screen.getByLabelText("Import RDP profiles"), [file]);
+    await waitFor(() => expect(api.importDroppedProfiles).toHaveBeenCalledExactlyOnceWith([file]));
+    expect(read).not.toHaveBeenCalled();
+    expect(api.importProfiles).not.toHaveBeenCalled();
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("ignores another drop while importing and reports the first failure", async () => {
+    let finish!: (result: Awaited<ReturnType<RdpWindowAPI["importDroppedProfiles"]>>) => void;
+    vi.mocked(api.importDroppedProfiles).mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    renderWithApplicationContextMenu(<RdpWindowApp />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import .rdp" })).toBeEnabled());
+    const target = screen.getByLabelText("Import RDP profiles");
+    dropProfiles(target, [new File([], "one.rdp")]);
+    await waitFor(() => expect(api.importDroppedProfiles).toHaveBeenCalledOnce());
+    dropProfiles(target, [new File([], "two.rdp")]);
+    expect(api.importDroppedProfiles).toHaveBeenCalledOnce();
+    await act(async () => { finish({ ok: false, error: "The file could not be imported." }); });
+    expect(toast.danger).toHaveBeenCalledWith("Remote Desktop action failed", { description: "The file could not be imported." });
+  });
+
+  it("opens the full editor for an imported NLA profile without a username", async () => {
+    state = { ...state, profiles: [{ ...profile, username: "", hasCredential: false, credentialPersistence: "none" }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit Remote Desktop" });
+    expect(within(dialog).getByLabelText("Username")).toHaveValue("");
+    expect(within(dialog).getByLabelText("Computer")).toHaveValue(profile.host);
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "stopped"])("opens the editor when a saved profile's proxy is %s", async (availability) => {
+    state = { ...state, profiles: [{ ...profile, networking: { kind: "socks5", proxyId: proxy.id } }],
+      socks5Proxies: availability === "missing" ? [] : [{ ...proxy, available: false }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    await screen.findByRole("dialog", { name: "Edit Remote Desktop" });
+    expect(screen.getByLabelText("Connection route")).toHaveAttribute("data-route-value", proxy.id);
+    expect(api.connect).not.toHaveBeenCalled();
+  });
+
+  it("preserves the saved proxy during quick connect and delegates reconnect to the same tab", async () => {
+    const networking = { kind: "socks5" as const, proxyId: proxy.id };
+    state = { ...state, socks5Proxies: [proxy], profiles: [{ ...profile, networking }] };
+    const user = userEvent.setup(); renderWithApplicationContextMenu(<RdpWindowApp />);
+    await user.click(await screen.findByRole("button", { name: "Connect to Saved desktop" }));
+    await waitFor(() => expect(connectedInput).toHaveProperty("networking", networking));
+    act(() => { state = { ...state, tabs: state.tabs.map((tab) => ({ ...tab, state: "disconnected" })) }; listener?.(state); });
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+    await user.click(within(screen.getByRole("dialog", { name: "Reconnect to Remote Desktop" })).getByRole("button", { name: "Reconnect" }));
+    expect(api.reconnect).toHaveBeenCalledWith({ tabId: state.tabs[0]!.id });
+    expect(state.tabs[0]!.networking).toEqual(networking);
+  });
+
   it("opens a pending Overview connection and submits fresh credentials without saving a profile", async () => {
     state = { ...state, profiles: [profile], pendingConnection: { id: "temporary-one", label: "Windows workstation", host: "127.0.0.1", port: 42001 } };
     const user = userEvent.setup();
@@ -157,7 +391,8 @@ describe("standalone remote desktop window", () => {
     await user.type(screen.getByLabelText("Computer"), "desktop.test");
     await user.type(screen.getByLabelText("Username"), "operator");
     await user.type(screen.getByLabelText("Password"), "private-input");
-    fireEvent.change(screen.getByLabelText("Remember password"), { target: { value: "secure" } });
+    await user.click(screen.getByRole("button", { name: "Remember password" }));
+    await user.click(screen.getByRole("menuitemradio", { name: "Save securely on this device" }));
     await user.click(screen.getByRole("button", { name: "Connect" }));
     await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
     expect(api.saveProfile).toHaveBeenCalledWith(expect.objectContaining({ host: "desktop.test", username: "operator" }));
@@ -338,7 +573,9 @@ describe("standalone remote desktop window", () => {
     const user = userEvent.setup();
     renderWithApplicationContextMenu(<RdpWindowApp />);
     await user.click(await screen.findByRole("button", { name: "Connect to a computer" }));
-    expect(screen.getByRole("option", { name: "Save securely on this device" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Remember password" }));
+    expect(screen.getByRole("menuitemradio", { name: "Save securely on this device" })).toHaveAttribute("aria-disabled", "true");
+    await user.keyboard("{Escape}");
     await user.type(screen.getByLabelText("Computer"), "https://not-a-host");
     await user.type(screen.getByLabelText("Username"), "operator");
     await user.click(screen.getByRole("button", { name: "Connect" }));

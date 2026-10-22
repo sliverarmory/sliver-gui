@@ -153,7 +153,7 @@ jobs:
         run: node scripts/setupRdpToolchain.mjs
 
       - name: Exercise native adapter on Intel hardware
-        run: cargo +1.94.1 test --locked --manifest-path native/rdp/Cargo.toml
+        run: npm run test:rdp:native
 
       - name: Build and execute the universal helper on Intel hardware
         run: |

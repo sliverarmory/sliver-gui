@@ -252,6 +252,226 @@ function installSliverAPI(
   return api;
 }
 
+function paletteTargetSnapshot(): SliverSnapshot {
+  const snapshot = disconnectedSnapshot();
+  snapshot.connection = {
+    managedServer: null,
+    status: "connected",
+    server: "sliver.example.test:31337",
+    operator: "alice",
+    configName: "Palette test",
+    version: "1.7.6",
+    epoch: 7,
+    incarnation: 4,
+  };
+  const identity = {
+    hostname: "edge-linux",
+    hostId: "host-1",
+    username: "alice",
+    os: "linux",
+    arch: "amd64",
+    transport: "mtls" as const,
+    remoteAddress: "127.0.0.1:4444",
+    activeC2: "mtls://127.0.0.1:4444",
+    executable: "/tmp/agent",
+    version: "1.7.6",
+    locale: "en-US",
+    integrity: "High",
+    burned: false,
+  };
+  snapshot.sessions = [{ ...identity, mode: "session", id: "session-palette", name: "payments", liveness: "active" }];
+  snapshot.beacons = [{ ...identity, mode: "beacon", id: "beacon-palette", name: "warehouse", checkinStatus: "on-time" }];
+  snapshot.domains.sessions = {
+    status: "ready", revision: 3, items: snapshot.sessions,
+    page: { limit: 500, total: 1, truncated: false },
+  };
+  snapshot.domains.beacons = {
+    status: "ready", revision: 4, items: snapshot.beacons,
+    page: { limit: 500, total: 1, truncated: false },
+  };
+  snapshot.targetContext.selectableTargets = [
+    { mode: "session", id: "session-palette", backendEpoch: 7, domainRevision: 3, fingerprint: "a".repeat(64) },
+    { mode: "beacon", id: "beacon-palette", backendEpoch: 7, domainRevision: 4, fingerprint: "b".repeat(64) },
+  ];
+  return snapshot;
+}
+
+function selectPaletteTarget(snapshot: SliverSnapshot, target: TargetRef): SliverSnapshot {
+  const summary = [...snapshot.domains.sessions.items, ...snapshot.domains.beacons.items]
+    .find((candidate) => candidate.mode === target.mode && candidate.id === target.id)!;
+  return {
+    ...snapshot,
+    targetContext: {
+      ...snapshot.targetContext,
+      status: "selected",
+      activeTarget: target,
+      activeTargetSummary: summary,
+      capabilities: [{ id: "target.ping", available: true }],
+    },
+  };
+}
+
+describe("App command palette targets", () => {
+  it.each(["session", "beacon"] as const)("opens a %s workspace by searching its name", async (mode) => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    const target = initial.targetContext.selectableTargets.find((candidate) => candidate.mode === mode)!;
+    const name = mode === "session" ? "payments" : "warehouse";
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selectPaletteTarget(initial, target) });
+    vi.mocked(api.listTargetOperations).mockResolvedValue({
+      ok: true, value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+    vi.mocked(api.listBeaconTasks).mockResolvedValue({
+      ok: true, value: { items: [], page: { limit: 100, total: 0, truncated: false } },
+    });
+    render(<App />);
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.type(await screen.findByRole("searchbox", { name: "Search commands" }), name.toUpperCase());
+    const command = await screen.findByRole("menuitem", { name: new RegExp(`^${name}`, "u") });
+    if (mode === "session") await user.keyboard("{ArrowDown}{Enter}");
+    else await user.click(command);
+
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(target));
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
+    if (mode === "session") {
+      expect(await screen.findByRole("heading", { name })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Back to live sessions" })).toBeInTheDocument();
+    } else {
+      const breadcrumbs = await screen.findByRole("navigation", { name: "Beacon workspace breadcrumbs" });
+      expect(within(breadcrumbs).getByText(name)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Back to live beacons" })).toBeInTheDocument();
+    }
+  });
+
+  it("updates target additions, renames, and removals while the palette remains open", async () => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial, (listener) => { emitSnapshot = listener; });
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    expect(await screen.findByRole("menuitem", { name: /^payments/u })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^warehouse/u })).toBeInTheDocument();
+
+    const renamed = { ...initial.sessions[0]!, name: "billing" };
+    const added = { ...initial.sessions[0]!, id: "session-added", name: "fulfillment" };
+    const next: SliverSnapshot = {
+      ...initial,
+      sessions: [renamed, added],
+      beacons: [],
+      domains: {
+        ...initial.domains,
+        sessions: { ...initial.domains.sessions, revision: 5, items: [renamed, added], page: { limit: 500, total: 2, truncated: false } },
+        beacons: { ...initial.domains.beacons, revision: 5, items: [], page: { limit: 500, total: 0, truncated: false } },
+      },
+      targetContext: {
+        ...initial.targetContext,
+        selectableTargets: [
+          { ...initial.targetContext.selectableTargets[0]!, domainRevision: 5 },
+          { ...initial.targetContext.selectableTargets[0]!, id: added.id, domainRevision: 5, fingerprint: "c".repeat(64) },
+        ],
+      },
+    };
+    act(() => emitSnapshot?.(next));
+
+    expect(await screen.findByRole("menuitem", { name: /^billing/u })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /^fulfillment/u })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^payments/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^warehouse/u })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Command palette" })).toBeInTheDocument();
+    await user.type(screen.getByRole("searchbox", { name: "Search commands" }), "billing");
+    expect(screen.getByRole("menuitem", { name: /^billing/u })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^fulfillment/u })).not.toBeInTheDocument();
+  });
+
+  it.each(["sessions", "beacons"] as const)("keeps a full-inventory hint visible while searching truncated %s", async (domain) => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    initial.domains[domain].page = { limit: 500, total: 501, truncated: true };
+    let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+    installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial, (listener) => { emitSnapshot = listener; });
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    const hint = "More targets are available. Open Sessions or Beacons to search the full inventory.";
+    expect(await screen.findByText(hint)).toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: "Search commands" }), "absent-target-name");
+    expect(await screen.findByText("No commands found.")).toBeInTheDocument();
+    expect(screen.getByText(hint)).toBeInTheDocument();
+
+    act(() => emitSnapshot?.({
+      ...initial,
+      domains: {
+        ...initial.domains,
+        [domain]: { ...initial.domains[domain], page: { limit: 500, total: 1, truncated: false } },
+      },
+    }));
+    expect(screen.queryByText(hint)).not.toBeInTheDocument();
+    expect(screen.getByRole("searchbox", { name: "Search commands" })).toHaveValue("absent-target-name");
+  });
+
+  it.each(["session", "beacon"] as const)("selects the correct %s when session and beacon names and IDs overlap", async (mode) => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    initial.sessions[0]!.name = "shared-name";
+    initial.beacons[0]!.name = "shared-name";
+    initial.sessions[0]!.id = "shared-id";
+    initial.beacons[0]!.id = "shared-id";
+    initial.targetContext.selectableTargets = initial.targetContext.selectableTargets.map((target) => ({ ...target, id: "shared-id" }));
+    const target = initial.targetContext.selectableTargets.find((candidate) => candidate.mode === mode)!;
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    vi.mocked(api.selectTarget).mockResolvedValue({ ok: true, value: selectPaletteTarget(initial, target) });
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await user.type(await screen.findByRole("searchbox", { name: "Search commands" }), "shared-name");
+
+    const commands = screen.getAllByRole("menuitem", { name: /^shared-name/u });
+    expect(commands).toHaveLength(2);
+    const command = commands.find((item) => new RegExp(mode, "iu").test(item.textContent ?? ""))!;
+    expect(command).toBeDefined();
+    await user.click(command);
+    await waitFor(() => expect(api.selectTarget).toHaveBeenCalledExactlyOnceWith(target));
+  });
+
+  it("omits target entries without a current main-issued reference", async () => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    initial.targetContext.selectableTargets = [{ ...initial.targetContext.selectableTargets[0]!, backendEpoch: 6 }];
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial);
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    await screen.findByRole("dialog", { name: "Command palette" });
+
+    expect(screen.queryByRole("menuitem", { name: /^payments/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^warehouse/u })).not.toBeInTheDocument();
+    expect(api.selectTarget).not.toHaveBeenCalled();
+  });
+
+  it("removes target entries on disconnect even when the last inventory is retained", async () => {
+    const user = userEvent.setup();
+    const initial = paletteTargetSnapshot();
+    let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }), initial, (listener) => { emitSnapshot = listener; });
+    render(<App />);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+    await user.click(screen.getByRole("button", { name: "Open command palette" }));
+    expect(await screen.findByRole("menuitem", { name: /^payments/u })).toBeInTheDocument();
+
+    act(() => emitSnapshot?.({ ...initial, connection: { ...initial.connection, status: "disconnected" } }));
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("menuitem", { name: /^payments/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /^warehouse/u })).not.toBeInTheDocument();
+    expect(api.selectTarget).not.toHaveBeenCalled();
+  });
+});
+
 describe("App startup", () => {
   it("shares history between keyboard shortcuts and palette commands with matching boundaries", async () => {
     const user = userEvent.setup();

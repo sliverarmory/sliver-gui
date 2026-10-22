@@ -11,7 +11,7 @@ this private stream to its session/attempt; session IDs are not command fields.
 
 | Command `type` | Fields |
 | --- | --- |
-| `connect` | `host` (bare hostname/IP), `port`, `username`, `password`, optional `domain`, `width`, `height`, `clipboard`, optional `pinnedFingerprint` (64 hex SHA-256), optional `keyboardLayout` (Windows HKL) |
+| `connect` | `host` (bare hostname/IP), `port`, `username`, `password`, optional `domain`, optional `signInMode` (`nla` or `remote-screen`, defaults to NLA), optional `connectAddress` (`{host,port}` as described below), `width`, `height`, `clipboard`, optional `pinnedFingerprint` (64 hex SHA-256), optional `keyboardLayout` (Windows HKL) |
 | `trustDecision` | `requestId` (decimal string from challenge), `accept` |
 | `input` | `events` (up to 64) |
 | `releaseAll` | none |
@@ -26,6 +26,17 @@ this private stream to its session/attempt; session IDs are not command fields.
 | `snapshot` | none; aborts unsent old presentation and requests full current desktop/cursor |
 | `ack` | `seq` of a received frame tile |
 | `disconnect` | none |
+
+`remote-screen` requires empty username, password, and domain, negotiates TLS
+without CredSSP, and disables autologon. A server requiring NLA returns
+`state:failed` with `code:nla-required`; no mode changes or retries occur.
+
+`connectAddress` is a main-owned TCP dial override. Its host must be exactly
+`127.0.0.1` or `::1` and its port must be 1–65535; extra fields are rejected.
+The original `host` and `port` still identify the RDP server for TLS, certificate
+events, and CredSSP. The helper never resolves or falls back to that original
+host when an override is present, and does not enable UDP. Main owns proxy
+authentication, destination resolution through SOCKS, and route cancellation.
 
 Input event `kind` is `key` (`scanCode`: u8, `extended`, `down`), `unicode`
 (`codePoint`: Unicode scalar, `down`), or `mouse` (`x`, `y`, optional `button`:

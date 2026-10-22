@@ -34,9 +34,14 @@ export const RDP_PORT_MESSAGE = "sliver:rdp:stream";
 
 export const RDP_IPC = Object.freeze({
   getState: "sliver:rdp:state:get",
+  profilesImported: "sliver:rdp:profiles:imported",
+  importProfiles: "sliver:rdp:profiles:import",
+  importDroppedProfiles: "sliver:rdp:profiles:drop",
   stateChanged: "sliver:rdp:state:changed",
   fileTransferProgress: "sliver:rdp:file-transfer:progress",
   connect: "sliver:rdp:connect",
+  openNetworkManager: "sliver:rdp:network:open",
+  startSessionProxy: "sliver:rdp:network:session-proxy:start",
   cancelTemporary: "sliver:rdp:temporary:cancel",
   reconnect: "sliver:rdp:reconnect",
   disconnect: "sliver:rdp:disconnect",
@@ -62,7 +67,51 @@ export type RdpSessionPhase = "connecting" | "certificate-review" | "authenticat
 export type RdpScaleMode = "fit" | "actual";
 export type RdpSignInMode = "nla" | "remote-screen";
 
+export type RdpNetworking =
+  | { readonly kind: "socks5"; readonly proxyId: string }
+  | { readonly kind: "socks5-manual"; readonly host: string; readonly port: number; readonly username?: string };
+
+/** Stable route identity; passwords are deliberately excluded and never persisted. */
+export function rdpNetworkingKey(route?: RdpNetworking): string {
+  if (!route) return "";
+  return route.kind === "socks5" ? `socks5:${route.proxyId}`
+    : `socks5-manual:${JSON.stringify([route.host.toLowerCase(), route.port, route.username ?? ""])}`;
+}
+
+export interface RdpSocks5Proxy {
+  readonly id: string;
+  /** Opaque choice that auto-created this proxy; absent on independently managed proxies. */
+  readonly viaSessionId?: string;
+  readonly label: string;
+  readonly host: string;
+  readonly port: number;
+  readonly authentication: "none" | "username-password";
+  readonly available: boolean;
+}
+
+/** Main-issued selection bound to a live Sliver session and its backend. */
+export interface RdpSocks5Session {
+  readonly id: string;
+  /** Display-only Sliver session ID; never accepted as selection authority. */
+  readonly sessionId: string;
+  readonly label: string;
+  /** Sanitized display metadata; empty when the session has no hostname. */
+  readonly hostname: string;
+}
+
+export interface RdpImportResult {
+  readonly canceled: boolean;
+  readonly items: readonly {
+    readonly name: string;
+    readonly profile?: RdpProfile;
+    readonly warnings: readonly string[];
+    readonly error?: string;
+  }[];
+}
+
 export interface RdpConnectionOptions {
+  /** Absence means Direct. A missing managed proxy must never fall back to Direct. */
+  readonly networking?: RdpNetworking;
   /** Omitted on existing profiles/connections: use NLA. Never downgrade automatically. */
   readonly signInMode?: RdpSignInMode;
   readonly host: string;
@@ -99,6 +148,8 @@ export interface RdpSavePreviewInput {
 export interface RdpConnectInput extends RdpConnectionOptions {
   readonly label: string;
   readonly password?: string;
+  /** Manual SOCKS authentication, used for this attempt only. */
+  readonly proxyPassword?: string;
   readonly persistence: RdpCredentialPersistence;
   readonly profileId?: string;
   readonly temporaryId?: string;
@@ -150,6 +201,8 @@ export interface RdpPendingConnection {
 }
 
 export interface RdpWindowState {
+  readonly socks5Proxies?: readonly RdpSocks5Proxy[];
+  readonly socks5Sessions?: readonly RdpSocks5Session[];
   readonly tabs: readonly RdpTab[];
   readonly profiles: readonly RdpProfile[];
   readonly activeTabId?: string;
@@ -217,9 +270,13 @@ export type RdpHostMessage = RdpFrame | RdpCursorDelivery
 
 export interface RdpWindowAPI {
   getState(): Promise<OperationResult<RdpWindowState>>;
+  importProfiles(): Promise<OperationResult<RdpImportResult>>;
+  importDroppedProfiles(files: readonly File[]): Promise<OperationResult<RdpImportResult>>;
+  openNetworkManager(): Promise<OperationResult>;
+  startSessionProxy(sessionId: string): Promise<OperationResult<RdpSocks5Proxy>>;
   connect(input: RdpConnectInput): Promise<OperationResult<RdpTab>>;
   cancelTemporary(id: string): Promise<OperationResult>;
-  reconnect(input: { readonly tabId: string; readonly password?: string }): Promise<OperationResult<RdpTab>>;
+  reconnect(input: { readonly tabId: string; readonly password?: string; readonly proxyPassword?: string }): Promise<OperationResult<RdpTab>>;
   disconnect(tabId: string): Promise<OperationResult>;
   closeTab(tabId: string): Promise<OperationResult>;
   selectTab(tabId: string): Promise<OperationResult>;
@@ -235,6 +292,7 @@ export interface RdpWindowAPI {
   toggleFullscreen(): Promise<OperationResult>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   updateApplicationSettings(input: ApplicationSettingsUpdateInput): Promise<OperationResult<ApplicationSettingsState>>;
+  onProfilesImported?(listener: (result: RdpImportResult) => void): () => void;
   onStateChanged(listener: (state: RdpWindowState) => void): () => void;
   onFileTransferProgress(listener: (event: RdpFileTransferProgressEvent) => void): () => void;
   onApplicationSettingsChanged(listener: (state: ApplicationSettingsState) => void): () => void;

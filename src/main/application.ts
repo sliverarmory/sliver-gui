@@ -239,6 +239,7 @@ export interface ApplicationCloudDeploymentController
 }
 
 export interface ApplicationHandle {
+  openRdpFiles(paths: readonly string[]): Promise<void>;
   createWindow(inheritFromContentsId?: number): BrowserWindow;
   stop(): Promise<void>;
 }
@@ -386,6 +387,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const windows = new Set<BrowserWindow>();
   const nativeWindowSurfaces = new Map<BrowserWindow, NativeWindowSurface>();
   const windowsByContentsId = new Map<number, BrowserWindow>();
+  let lastFocusedWorkspace: BrowserWindow | undefined;
   const sessionShellWindowsByKey = new Map<string, SessionShellWindowRecord>();
   const sessionShellWindowsByContentsId = new Map<number, SessionShellWindowRecord>();
   const interactionWindowsByContentsId = new Map<number, InteractionWindowRecord>();
@@ -616,7 +618,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         }
       });
     }
-    window.on("focus", installMenu);
+    window.on("focus", () => {
+      if (surface === "workspace") lastFocusedWorkspace = window;
+      installMenu();
+    });
     window.on("blur", () => stopKeyboardShortcutRecording(window));
     window.webContents.on("did-start-navigation", (details) => {
       if (details.isMainFrame && !details.isSameDocument) stopKeyboardShortcutRecording(window);
@@ -714,6 +719,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       windows.delete(window);
       nativeWindowSurfaces.delete(window);
       windowsByContentsId.delete(contentsId);
+      if (lastFocusedWorkspace === window) lastFocusedWorkspace = undefined;
       zoomReadyWorkspaceContents.delete(contentsId);
       if (sessionShellRecord) {
         sessionShellWindowsByContentsId.delete(contentsId);
@@ -3061,6 +3067,18 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       rendererUrl: rdpRendererUrl,
       preloadPath: options.rdpPreloadPath ?? join(mainBundleDirectory, "../preload/rdp.cjs"),
       store: rdpStore,
+      listSocksProxies: () => registry.listRdpSocksProxies(),
+      listSocksSessions: () => registry.listRdpSocksSessions(),
+      startSessionProxy: (id) => registry.startRdpSocksProxyForSession(id),
+      leaseSocksProxy: (id) => registry.leaseRdpSocksProxy(id),
+      openNetworkManager: async () => {
+        const workspaces = [...nativeWindowSurfaces].filter(([window, surface]) =>
+          surface === "workspace" && !window.isDestroyed() && !window.webContents.isDestroyed());
+        const source = lastFocusedWorkspace ?? (workspaces.length === 1 ? workspaces[0]![0] : undefined);
+        if (!source) throw new Error("Focus a connected Sliver workspace, then return here to open the Network manager.");
+        const result = await openNetworkWindow("socks5", source);
+        if (!result.ok) throw new Error(result.error);
+      },
       resolveRuntime: options.rdpRuntime?.resolve ?? (() => resolveVerifiedRdpRuntime({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, developmentRoot: options.rdpRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../..") })),
       ...(options.rdpRuntime ? { createRuntime: options.rdpRuntime.create } : {}),
       getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
@@ -3307,6 +3325,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   return {
     createWindow,
+    async openRdpFiles(paths) {
+      if (!rdpWindows) throw new Error("Remote Desktop is unavailable");
+      await rdpWindows.openFiles(paths);
+    },
     async stop(): Promise<void> {
       captureWorkspaceZoom(BrowserWindow.getFocusedWindow());
       beginShutdown();

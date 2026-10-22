@@ -199,10 +199,28 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     assert.equal(await clipboard.isChecked(), true, "New connections enable clipboard by default");
     assert.equal(await connection.getByText("Connect directly to a Windows computer using Network Level Authentication.", { exact: true }).count(), 0);
     assert.equal(await connection.locator('svg[data-icon="windows"]').count(), 1);
-    const resolution = connection.getByLabel("Desktop resolution", { exact: true });
-    assert.equal(await resolution.inputValue(), "1280x800");
+    const resolution = connection.getByRole("button", { name: "Desktop resolution", exact: true });
+    assert.equal(await resolution.getAttribute("data-selected-value"), "1280x800");
     assert.equal(await connection.getByLabel("Desktop width", { exact: true }).count(), 0);
+    await connection.evaluate(async (element) => {
+      const view = element.ownerDocument.defaultView!;
+      await new Promise<void>((resolveFrame) => view.requestAnimationFrame(() => view.requestAnimationFrame(() => resolveFrame())));
+      const animations = new Set<{ finish(): void }>(element.getAnimations({ subtree: true }));
+      for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        for (const animation of ancestor.getAnimations()) animations.add(animation);
+      }
+      for (const animation of animations) { try { animation.finish(); } catch { /* Ignore infinite decorative animations. */ } }
+    });
+    assert.equal(await connection.evaluate((element) => (element as unknown as { offsetWidth: number }).offsetWidth), 640,
+      "The dialog has a 640px layout width independent of its parent entry transform");
+    await connection.locator('[data-scroll-shadow-mode="auto"]').evaluate((element) => { element.scrollTop = 0; });
     await rdp.screenshot({ path: join(artifacts, "rdp-connect-form.png"), animations: "disabled" });
+    await resolution.click();
+    const resolutionMenu = rdp.getByRole("menu", { name: "Desktop resolution", exact: true });
+    assert.equal(await resolutionMenu.getByRole("menuitemradio", { name: "1280 × 800", exact: true }).getAttribute("aria-checked"), "true");
+    await rdp.screenshot({ path: join(artifacts, "rdp-resolution-menu.png"), animations: "disabled" });
+    await rdp.keyboard.press("Escape");
+    await resolutionMenu.waitFor({ state: "hidden" });
     await clipboard.press("Space");
     await assertRdpPreference(temporary, "clipboard", false);
     await connection.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -211,12 +229,12 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await rdp.getByRole("heading", { name: "Remote Desktop", exact: true }).waitFor();
     await rdp.getByRole("button", { name: "New connection", exact: true }).click();
     assert.equal(await clipboard.isChecked(), false, "The clipboard preference survives Cancel and a renderer reload");
-    await resolution.selectOption("custom");
+    await selectConfigurationOption(rdp, resolution, "custom");
     await connection.getByLabel("Desktop width", { exact: true }).fill("199");
     await connection.getByLabel("Computer", { exact: true }).fill("https://rdp.invalid");
     await connection.getByLabel("Port", { exact: true }).fill("70000");
     await connection.getByRole("button", { name: "Save profile", exact: true }).click();
-    for (const label of ["Computer", "Port", "Username", "Desktop width"]) {
+    for (const label of ["Computer", "Port", "Desktop width"]) {
       assert.equal(await connection.getByLabel(label, { exact: true }).getAttribute("aria-invalid"), "true");
       assert.ok(await connection.getByLabel(label, { exact: true }).getAttribute("aria-describedby"));
     }
@@ -233,15 +251,25 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await scrollShadow.and(connection.locator('[data-top-scroll="true"][data-bottom-scroll="false"]')).waitFor();
     await rdp.screenshot({ path: join(artifacts, "rdp-custom-validation.png"), animations: "disabled" });
     await connection.getByLabel("Port", { exact: true }).fill("3389");
-    await resolution.selectOption("1920x1080");
+    await selectConfigurationOption(rdp, resolution, "1920x1080");
     assert.equal(await connection.getByLabel("Desktop width", { exact: true }).count(), 0);
+    await selectConfigurationOption(rdp, resolution, "custom");
+    assert.equal(await connection.getByLabel("Desktop width", { exact: true }).inputValue(), "199", "Switching to a preset preserves an edited custom width");
+    assert.equal(await connection.getByLabel("Desktop height", { exact: true }).inputValue(), "800", "Switching to a preset preserves the custom height");
+    await selectConfigurationOption(rdp, resolution, "1920x1080");
     assert.equal(await connection.getByLabel("Password", { exact: true }).inputValue(), "");
-    const remember = connection.getByLabel("Remember password", { exact: true });
-    assert.equal(await remember.inputValue(), "none");
-    assert.deepEqual(await remember.locator("option").allTextContents(), ["Do not save", "Until the app quits", "Save securely on this device"]);
-    assert.equal(await remember.locator('option[value="secure"]').isDisabled(), true);
+    const remember = connection.getByRole("button", { name: "Remember password", exact: true });
+    assert.equal(await remember.getAttribute("data-selected-value"), "none");
+    await remember.click();
+    const rememberMenu = rdp.getByRole("menu", { name: "Remember password", exact: true });
+    assert.deepEqual(await rememberMenu.getByRole("menuitemradio").allTextContents(), ["Do not save", "Until the app quits", "Save securely on this device"]);
+    assert.equal(await rememberMenu.getByRole("menuitemradio", { name: "Do not save", exact: true }).getAttribute("aria-checked"), "true");
+    assert.equal(await rememberMenu.getByRole("menuitemradio", { name: "Save securely on this device", exact: true }).isDisabled(), true);
+    await rdp.screenshot({ path: join(artifacts, "rdp-remember-password-menu.png"), animations: "disabled" });
+    await rememberMenu.getByRole("menuitemradio", { name: "Until the app quits", exact: true }).click();
+    await rememberMenu.waitFor({ state: "hidden" });
+    assert.equal(await remember.getAttribute("data-selected-value"), "session");
     await connection.getByText("Secure password storage is unavailable. Passwords can be remembered until the app quits.", { exact: true }).waitFor();
-    await remember.selectOption("session");
     await connection.getByLabel("Connection name", { exact: true }).fill("Offline RDP profile");
     await connection.getByLabel("Computer", { exact: true }).fill("rdp.invalid");
     await connection.getByLabel("Username", { exact: true }).fill("offline-operator");
@@ -278,7 +306,7 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     await profileMenu.getByRole("menuitem", { name: "Edit", exact: true }).click();
     const editor = rdp.getByRole("dialog", { name: "Edit Remote Desktop", exact: true });
     assert.equal(await editor.getByLabel("Computer", { exact: true }).inputValue(), "rdp.invalid");
-    assert.equal(await editor.getByLabel("Desktop resolution", { exact: true }).inputValue(), "1920x1080");
+    assert.equal(await editor.getByRole("button", { name: "Desktop resolution", exact: true }).getAttribute("data-selected-value"), "1920x1080");
     assert.equal(await editor.getByRole("switch", { name: "Clipboard", exact: true }).isChecked(), false);
     assert.equal(await editor.getByLabel("Password", { exact: true }).inputValue(), "");
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -318,9 +346,13 @@ test("standalone RDP window saves profiles offline behind its isolated renderer 
     const secureDialog = rdp.getByRole("dialog", { name: "New Remote Desktop", exact: true });
     assert.equal(await secureDialog.getByRole("switch", { name: "Clipboard", exact: true }).isChecked(), true,
       "The clipboard preference survives closing and reopening the standalone window");
-    const secureRemember = secureDialog.getByLabel("Remember password", { exact: true });
-    assert.equal(await secureRemember.locator('option[value="secure"]').isDisabled(), false);
-    await secureRemember.selectOption("secure");
+    const secureRemember = secureDialog.getByRole("button", { name: "Remember password", exact: true });
+    await secureRemember.click();
+    const secureOption = rdp.getByRole("menu", { name: "Remember password", exact: true }).getByRole("menuitemradio", { name: "Save securely on this device", exact: true });
+    assert.equal(await secureOption.isDisabled(), false);
+    await secureOption.click();
+    await secureOption.waitFor({ state: "hidden" });
+    assert.equal(await secureRemember.getAttribute("data-selected-value"), "secure");
     assert.equal(await secureDialog.getByLabel("Password", { exact: true }).inputValue(), "");
     await secureDialog.getByRole("button", { name: "Cancel", exact: true }).click();
     assert.deepEqual((await readState(rdp)).tabs, []);
@@ -519,7 +551,7 @@ test("remote-screen sign-in starts without credentials through the main-owned mo
     await dialog.getByLabel("Username", { exact: true }).fill("discarded-fixture-user");
     await dialog.getByLabel("Domain", { exact: true }).fill("DISCARDED");
     await dialog.getByLabel("Password", { exact: true }).fill("inert-discarded-fixture-password");
-    await dialog.getByLabel("Remember password", { exact: true }).selectOption("session");
+    await selectConfigurationOption(rdp, dialog.getByRole("button", { name: "Remember password", exact: true }), "session");
     await remoteScreen.press("Space");
     for (const label of ["Username", "Domain", "Password", "Remember password"]) {
       assert.equal(await dialog.getByLabel(label, { exact: true }).count(), 0, "Remote-screen sign-in hides initial credential controls");
@@ -527,7 +559,7 @@ test("remote-screen sign-in starts without credentials through the main-owned mo
     await dialog.getByText("Requires a server that allows connections without NLA.", { exact: true }).waitFor();
     await remoteScreen.press("Space");
     for (const label of ["Username", "Domain", "Password"]) assert.equal(await dialog.getByLabel(label, { exact: true }).inputValue(), "");
-    assert.equal(await dialog.getByLabel("Remember password", { exact: true }).inputValue(), "none");
+    assert.equal(await dialog.getByRole("button", { name: "Remember password", exact: true }).getAttribute("data-selected-value"), "none");
     await remoteScreen.press("Space");
     await rdp.screenshot({ path: join(artifacts, "rdp-remote-screen-connect.png"), animations: "disabled" });
     await dialog.getByRole("button", { name: "Connect", exact: true }).click();
@@ -1126,6 +1158,14 @@ async function openRdpWindow(application: ElectronApplication, errors: string[],
   return page;
 }
 
+async function selectConfigurationOption(page: Page, trigger: Locator, value: string): Promise<void> {
+  await trigger.click();
+  const item = page.locator(`[role="menuitemradio"][data-selected-value=${JSON.stringify(value)}]`);
+  await item.click();
+  await item.waitFor({ state: "hidden" });
+  assert.equal(await trigger.getAttribute("data-selected-value"), value);
+}
+
 async function readState(page: Page): Promise<RdpWindowState> {
   return page.evaluate(async () => {
     const result = await (globalThis as unknown as { rdp: RdpWindowAPI }).rdp.getState();
@@ -1160,8 +1200,8 @@ async function assertRdpBoundary(application: ElectronApplication, page: Page): 
   });
   assert.equal(bridge.frozen, true);
   assert.deepEqual(bridge.unavailable, Array(6).fill("undefined"));
-  assert.deepEqual(bridge.keys, ["attach", "cancelTemporary", "clipboard", "closeTab", "connect", "deleteProfile", "disconnect", "getApplicationSettings", "getState",
-    "onApplicationSettingsChanged", "onFileTransferProgress", "onStateChanged", "openRdpStream", "reconnect", "renameTab", "respondToCertificate", "savePreview", "saveProfile", "selectTab", "setInputCapture", "toggleFullscreen", "updateApplicationSettings"]);
+  assert.deepEqual(bridge.keys, ["attach", "cancelTemporary", "clipboard", "closeTab", "connect", "deleteProfile", "disconnect", "getApplicationSettings", "getState", "importDroppedProfiles", "importProfiles",
+    "onApplicationSettingsChanged", "onFileTransferProgress", "onProfilesImported", "onStateChanged", "openNetworkManager", "openRdpStream", "reconnect", "renameTab", "respondToCertificate", "savePreview", "saveProfile", "selectTab", "setInputCapture", "startSessionProxy", "toggleFullscreen", "updateApplicationSettings"]);
   assert.equal(bridge.contextMenuFrozen, true);
   assert.deepEqual(bridge.contextMenuKeys, ["executeAction", "onMenuRequested", "setOpen"]);
   const native = await (await application.browserWindow(page)).evaluate((window) => {

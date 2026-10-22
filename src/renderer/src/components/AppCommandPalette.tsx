@@ -7,7 +7,7 @@ import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
 import { CommandPaletteShortcutKbd } from "./CommandPaletteShortcut";
 
-export type AppCommandGroup = "Navigate" | "Server" | "Windows";
+export type AppCommandGroup = "Navigate" | "Sessions" | "Beacons" | "Server" | "Windows";
 
 export interface AppCommandPaletteCommand {
   readonly id: string;
@@ -24,15 +24,17 @@ export interface AppCommandPaletteCommand {
 
 export interface AppCommandPaletteProps {
   readonly commands: readonly AppCommandPaletteCommand[];
+  readonly hasMoreTargets?: boolean;
   readonly isOpen: boolean;
   readonly shortcut: string;
   readonly onOpenChange: (isOpen: boolean) => void;
 }
 
-const COMMAND_GROUPS: readonly AppCommandGroup[] = ["Navigate", "Server", "Windows"];
+const COMMAND_GROUPS: readonly AppCommandGroup[] = ["Navigate", "Sessions", "Beacons", "Server", "Windows"];
 
 export function AppCommandPalette({
   commands,
+  hasMoreTargets = false,
   isOpen,
   shortcut,
   onOpenChange,
@@ -66,7 +68,7 @@ export function AppCommandPalette({
               </Command.InputGroup.Prefix>
               <Command.InputGroup.Input
                 aria-label="Search commands"
-                placeholder="Search pages and commands…"
+                placeholder="Search commands, sessions, and beacons…"
               />
               <Command.InputGroup.ClearButton />
               <Command.InputGroup.Suffix>
@@ -75,6 +77,11 @@ export function AppCommandPalette({
                 </Kbd>
               </Command.InputGroup.Suffix>
             </Command.InputGroup>
+            {hasMoreTargets ? (
+              <p className="text-muted px-4 py-2 text-xs">
+                More targets are available. Open Sessions or Beacons to search the full inventory.
+              </p>
+            ) : null}
             <Command.List
               aria-label="Application commands"
               renderEmptyState={() => (

@@ -6,9 +6,10 @@ import { DEFAULT_APPLICATION_SETTINGS_STATE, DEFAULT_APPLICATION_SETTINGS_VALUES
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 
 const mocks = vi.hoisted(() => ({
+  pathForFile: vi.fn(),
   expose: vi.fn(), invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>(), on: vi.fn(), removeListener: vi.fn(), postMessage: vi.fn(), send: vi.fn(),
 }));
-vi.mock("electron", () => ({ contextBridge: { exposeInMainWorld: mocks.expose }, ipcRenderer: { invoke: mocks.invoke, on: mocks.on, removeListener: mocks.removeListener, postMessage: mocks.postMessage, send: mocks.send } }));
+vi.mock("electron", () => ({ webUtils: { getPathForFile: mocks.pathForFile }, contextBridge: { exposeInMainWorld: mocks.expose }, ipcRenderer: { invoke: mocks.invoke, on: mocks.on, removeListener: mocks.removeListener, postMessage: mocks.postMessage, send: mocks.send } }));
 await import("./rdp.js");
 const bridge = (): RdpWindowAPI => mocks.expose.mock.calls.find(([name]) => name === "rdp")![1] as RdpWindowAPI;
 const contextMenu = (): ApplicationContextMenuAPI => mocks.expose.mock.calls.find(([name]) => name === "applicationContextMenu")![1] as ApplicationContextMenuAPI;
@@ -30,6 +31,98 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("RDP sandbox preload", () => {
+  it("validates opaque session choices and returns only a sanitized managed proxy", async () => {
+    const proxy = { id: "socks5-11111111-1111-4111-8111-111111111111", viaSessionId: token, label: "Via lab", host: "127.0.0.1", port: 45123, authentication: "username-password", available: true };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: proxy });
+    const started = await bridge().startSessionProxy(token);
+    expect(started).toEqual({ ok: true, value: proxy });
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.startSessionProxy, token);
+    if (started.ok) expect(Object.isFrozen(started.value)).toBe(true);
+    expect(() => bridge().startSessionProxy("raw-session-id")).toThrow();
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...proxy, password: "private" } });
+    await expect(bridge().startSessionProxy(token)).rejects.toThrow();
+    const choice = { id: token, sessionId: "real-session-id", label: "lab", hostname: "LAB-HOST" };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Sessions: [choice] } });
+    const parsed = await bridge().getState();
+    expect(parsed).toMatchObject({ ok: true, value: { socks5Sessions: [choice] } });
+    if (parsed.ok) {
+      expect(Object.isFrozen(parsed.value.socks5Sessions)).toBe(true);
+      expect(Object.isFrozen(parsed.value.socks5Sessions![0])).toBe(true);
+    }
+    expect(() => bridge().startSessionProxy(choice.sessionId)).toThrow();
+    for (const choices of [[{ ...choice, backendId: "private" }], [choice, choice], [{ ...choice, id: "raw-session-id" }], Array(1025).fill(choice),
+      ...[undefined, "", "x".repeat(81), "session\n", "session\0"].map((sessionId) => [{ ...choice, sessionId }]),
+      ...[undefined, 42, "h".repeat(254), "host\n", "host\0"].map((hostname) => [{ ...choice, hostname }])]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Sessions: choices } });
+      await expect(bridge().getState()).rejects.toThrow();
+    }
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Sessions: [{ ...choice, sessionId: "x".repeat(80) }] } });
+    expect(await bridge().getState()).toMatchObject({ ok: true, value: { socks5Sessions: [{ sessionId: "x".repeat(80) }] } });
+    for (const hostname of ["", "h".repeat(253)]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Sessions: [{ ...choice, hostname }], socks5Proxies: [proxy] } });
+      expect(await bridge().getState()).toMatchObject({ ok: true, value: { socks5Sessions: [{ hostname }], socks5Proxies: [{ viaSessionId: token }] } });
+    }
+    for (const viaSessionId of ["", "real-session-id", "a".repeat(44), null, "a".repeat(42) + "!"]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...proxy, viaSessionId } });
+      await expect(bridge().startSessionProxy(token)).rejects.toThrow();
+    }
+    const { viaSessionId: _viaSessionId, ...independent } = proxy;
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Proxies: [independent] } });
+    expect(await bridge().getState()).toMatchObject({ ok: true, value: { socks5Proxies: [independent] } });
+  });
+  it("opens the Network manager through its dedicated zero-argument IPC", async () => {
+    expect(await bridge().openNetworkManager()).toEqual({ ok: true });
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.openNetworkManager);
+    mocks.invoke.mockResolvedValueOnce({ ok: false, error: "Connect to a Sliver server before opening Network" });
+    expect(await bridge().openNetworkManager()).toMatchObject({ ok: false });
+  });
+  it("passes manual proxy secrets only on connect or reconnect and rejects snapshot or profile leaks", async () => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.test", port: 1080, username: "proxy-user" };
+    const input: RdpConnectInput = { host: tab.host, port: tab.port, username: tab.username, domain: tab.domain,
+      width: tab.width, height: tab.height, clipboard: false, label: tab.label, scaleMode: "fit",
+      password: "windows-secret", persistence: "none", networking, proxyPassword: "proxy-secret" };
+    await bridge().connect(input);
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.connect, input);
+    await bridge().reconnect({ tabId: tab.id, proxyPassword: "proxy-secret" });
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.reconnect, { tabId: tab.id, proxyPassword: "proxy-secret" });
+    expect(() => bridge().reconnect({ tabId: tab.id, proxyPassword: "é".repeat(128) })).toThrow();
+    expect(() => bridge().connect({ ...input, networking: { kind: "socks5-manual", host: "proxy.test", port: 1080 } })).toThrow();
+    const { password: _password, proxyPassword: _proxyPassword, persistence: _persistence, ...profile } = input;
+    expect(() => bridge().saveProfile({ ...profile, proxyPassword: "proxy-secret" } as typeof profile)).toThrow();
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, tabs: [{ ...tab, networking }] } });
+    const parsed = await bridge().getState();
+    expect(parsed).toMatchObject({ ok: true, value: { tabs: [{ networking }] } });
+    if (parsed.ok) expect(Object.isFrozen(parsed.value.tabs[0]!.networking)).toBe(true);
+    for (const patch of [{ proxyPassword: "proxy-secret" }, { networking: { ...networking, password: "proxy-secret" } }]) {
+      mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, tabs: [{ ...tab, networking, ...patch }] } });
+      await expect(bridge().getState()).rejects.toThrow();
+    }
+  });
+  it("imports picker and native dropped files without exposing a path resolver", async () => {
+    const result = { canceled: false, items: [{ name: "desktop.rdp", warnings: [] }] };
+    mocks.invoke.mockResolvedValue({ ok: true, value: result });
+    expect(await bridge().importProfiles()).toEqual({ ok: true, value: result });
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.importProfiles);
+    const file = new File(["full address:s:desktop.test"], "desktop.rdp");
+    mocks.pathForFile.mockReturnValue("/tmp/desktop.rdp");
+    expect(await bridge().importDroppedProfiles([file])).toEqual({ ok: true, value: result });
+    expect(mocks.pathForFile).toHaveBeenCalledWith(file);
+    expect(mocks.invoke).toHaveBeenLastCalledWith(RDP_IPC.importDroppedProfiles, ["/tmp/desktop.rdp"]);
+    mocks.pathForFile.mockReturnValue("");
+    expect(() => bridge().importDroppedProfiles([file])).toThrow();
+    expect(() => bridge().importDroppedProfiles([])).toThrow();
+    expect(() => bridge().importDroppedProfiles(Array(33).fill(file))).toThrow();
+    expect(bridge()).not.toHaveProperty("getPathForFile");
+  });
+  it("accepts imported draft profiles and rejects secrets in proxy summaries", async () => {
+    const profile = { host: tab.host, port: tab.port, username: "", domain: "", width: 1280, height: 800, clipboard: false,
+      id: "draft", label: "Desktop", scaleMode: "fit", hasCredential: false, credentialPersistence: "none" };
+    const proxy = { id: "socks5-11111111-1111-4111-8111-111111111111", label: "LAB", host: "127.0.0.1", port: 1080, authentication: "username-password", available: true };
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, profiles: [profile], socks5Proxies: [proxy] } });
+    expect(await bridge().getState()).toMatchObject({ ok: true, value: { profiles: [profile], socks5Proxies: [proxy] } });
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, socks5Proxies: [{ ...proxy, password: "secret" }] } });
+    await expect(bridge().getState()).rejects.toThrow();
+  });
   it("validates remote-screen options across requests and snapshots", async () => {
     const remoteTab = { ...tab, signInMode: "remote-screen" as const, username: "", domain: "" };
     mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...state, tabs: [remoteTab] } });

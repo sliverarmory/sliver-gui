@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
+import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 
 import { app } from "electron";
@@ -81,7 +82,11 @@ interface FakeMainState {
   methods: string[];
   portForwards: Array<{ id: string; sessionId: string; requestedBind: { host: string; port: number }; bind: { host: string; port: number };
     target: { host: string; port: number }; closed: boolean }>;
-  rdpConnections: Array<{ host: string; port: number; username: string; domain?: string; signInMode?: string; passwordSupplied: boolean }>;
+  socks5Starts: Array<{ id: string; sessionId: string; requestedBind: { host: string; port: number }; bind: { host: string; port: number };
+    authentication: "none" | "username-password"; usernameBytes: number; passwordBytes: number; closed: boolean }>;
+  rdpConnections: Array<{ host: string; port: number; username: string; domain?: string; signInMode?: string; passwordSupplied: boolean;
+    connectAddress?: { host: string; port: number }; proxyPasswordForwarded?: boolean; networkingForwarded?: boolean }>;
+  rdpRelayEchoes: number;
   rdpRuntimeStops: number;
   uploads: Array<{
     path: string;
@@ -223,7 +228,9 @@ const state: FakeMainState = {
   dialogCalls: 0,
   methods: [],
   portForwards: [],
+  socks5Starts: [],
   rdpConnections: [],
+  rdpRelayEchoes: 0,
   rdpRuntimeStops: 0,
   uploads: [],
   disconnects: 0,
@@ -290,6 +297,7 @@ const overviewPivotFixture = process.argv.includes("--overview-pivot-fixture");
 const overviewEgressFixture = process.argv.includes("--overview-egress-fixture");
 const overviewSoftwareFixture = process.argv.includes("--overview-software-fixture");
 const overviewRdpFixture = process.argv.includes("--overview-rdp-fixture");
+const manualSocksRdpFixture = process.argv.includes("--rdp-manual-socks-fixture");
 const registryLayoutFixture = process.argv.includes("--registry-layout-fixture");
 const bofExecutionFixture = process.argv.includes("--bof-execution-fixture");
 const filesLayoutFixture = process.argv.includes("--files-layout-fixture");
@@ -650,9 +658,11 @@ void startApplication({
   textEditorPreloadPath: `${repositoryRoot}/dist/preload/text-editor.cjs`,
   rdpPreloadPath: `${repositoryRoot}/dist/preload/rdp.cjs`,
   rdpRuntimeRootDirectory: repositoryRoot,
-  ...(overviewRdpFixture ? { rdpRuntime: { resolve: async () => "fake-rdp-runtime", create: createFakeRdpRuntime } } : {}),
+  ...(overviewRdpFixture || manualSocksRdpFixture ? { rdpRuntime: { resolve: async () => "fake-rdp-runtime", create: createFakeRdpRuntime } } : {}),
   armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
+}).then((handle) => {
+  (globalThis as typeof globalThis & { __SLIVER_GUI_E2E_OPEN_RDP_FILES__?: (paths: readonly string[]) => Promise<void> }).__SLIVER_GUI_E2E_OPEN_RDP_FILES__ = (paths) => handle.openRdpFiles(paths);
 }).catch((error: unknown) => {
   process.stderr.write(`E2E application failed: ${errorMessage(error)}\n`);
   app.exit(1);
@@ -660,6 +670,7 @@ void startApplication({
 
 function createFakeRdpRuntime(_executable: string, receive: (event: RdpRuntimeEvent) => void, exited: (code: string) => void) {
   let stopped = false;
+  let relay: Socket | undefined;
   // Keep the real RdpWindows lifecycle, including its private-pipe handshake,
   // without launching a native process or opening an RDP connection.
   setImmediate(() => { if (!stopped) receive({ type: "ready", protocol: 1 }); });
@@ -667,14 +678,41 @@ function createFakeRdpRuntime(_executable: string, receive: (event: RdpRuntimeEv
     send(command: object): void {
       const input = command as Record<string, unknown>;
       if (stopped || input["type"] !== "connect") return;
+      const address = input["connectAddress"] as { host?: unknown; port?: unknown } | undefined;
       state.rdpConnections.push({ host: String(input["host"]), port: Number(input["port"]), username: String(input["username"]),
         ...(input["signInMode"] === undefined ? {} : { signInMode: String(input["signInMode"]) }),
-        ...(input["domain"] === undefined ? {} : { domain: String(input["domain"]) }), passwordSupplied: typeof input["password"] === "string" && input["password"].length > 0 });
+        ...(input["domain"] === undefined ? {} : { domain: String(input["domain"]) }), passwordSupplied: typeof input["password"] === "string" && input["password"].length > 0,
+        ...(manualSocksRdpFixture ? {
+          ...(address ? { connectAddress: { host: String(address.host), port: Number(address.port) } } : {}),
+          proxyPasswordForwarded: Object.hasOwn(input, "proxyPassword"), networkingForwarded: Object.hasOwn(input, "networking"),
+        } : {}) });
+      if (manualSocksRdpFixture) {
+        // Only the native endpoint is faked: production main must negotiate the
+        // real loopback SOCKS peer and pass its private relay address here.
+        if (address?.host !== "127.0.0.1" || !Number.isInteger(address.port) || Number(address.port) < 1 || Number(address.port) > 65535) {
+          receive({ type: "state", state: "failed", code: "connection-failed" }); return;
+        }
+        const payload = Buffer.from("SLIVER_GUI_RDP_PROXY_FIXTURE");
+        let received = Buffer.alloc(0), active = false;
+        relay = createConnection({ host: address.host, port: Number(address.port) });
+        relay.on("connect", () => relay?.write(payload));
+        relay.on("data", (data: Buffer) => {
+          if (stopped || active) return;
+          received = Buffer.concat([received, data]);
+          if (received.length > payload.length || !payload.subarray(0, received.length).equals(received)) {
+            receive({ type: "state", state: "failed", code: "transport-failed" }); return;
+          }
+          if (received.length === payload.length) { active = true; state.rdpRelayEchoes++; receive({ type: "state", state: "active" }); }
+        });
+        relay.on("error", () => { if (!stopped) receive({ type: "state", state: "failed", code: "transport-failed" }); });
+        return;
+      }
       receive({ type: "state", state: "active" });
     },
     stop(): void {
       if (stopped) return;
       stopped = true;
+      relay?.destroy();
       state.rdpRuntimeStops++;
       setImmediate(() => exited("disconnected"));
     },
@@ -1257,16 +1295,23 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
       const connection = new Subject<never>();
       let current = state.value;
       const subscription = state.subscribe((next) => { current = next; });
+      const audit: FakeMainState["socks5Starts"][number] = { id, sessionId, requestedBind: { ...options.bind },
+        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port },
+        authentication: options.authentication ? "username-password" : "none",
+        usernameBytes: Buffer.byteLength(options.authentication?.username ?? ""),
+        passwordBytes: Buffer.byteLength(options.authentication?.password ?? ""), closed: false };
+      testState.socks5Starts.push(audit);
       const proxy: Socks5Proxy = {
         id,
         sessionId,
-        bind: { ...options.bind, port: options.bind.port === 0 ? nextEphemeralPort++ : options.bind.port },
+        bind: audit.bind,
         get state() { return current; },
         state$: state.asObservable(),
         connection$: connection.asObservable(),
         async close() {
           if (!socks5Proxies.has(id)) return;
           record("stopSocks5Proxy");
+          audit.closed = true;
           current = localForwardState("closed", "requested");
           state.next(current);
           state.complete();

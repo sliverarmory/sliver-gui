@@ -1,3 +1,5 @@
+import { isIP } from "node:net";
+import type { RdpSocksProxyLease } from "./rdp-socks-transport.js";
 import type {
   ForwardingAddress,
   LocalForwardState,
@@ -33,6 +35,8 @@ const REVERSE_INVENTORY_CONCURRENCY = 8;
 export class NetworkForwardingController {
   private readonly createdAtById = new Map<string, string>();
   private readonly socksAuthenticationById = new Map<string, "none" | "username-password">();
+  private readonly socksSecrets = new Map<string, { username: Buffer; password: Buffer }>();
+  private readonly socksLifetimes = new Map<string, AbortController>();
   private readonly subscriptions = new Map<string, Subscription>();
   private changeTimer?: NodeJS.Timeout;
   private disposed = false;
@@ -139,6 +143,11 @@ export class NetworkForwardingController {
       },
       { timeoutSeconds: CONTROL_OPERATION_TIMEOUT_SECONDS },
     );
+    if (this.disposed) { await proxy.close(); throw new Error("Networking is shutting down"); }
+    this.socksLifetimes.set(proxy.id, new AbortController());
+    if (input.authentication) this.socksSecrets.set(proxy.id, {
+      username: Buffer.from(input.authentication.username), password: Buffer.from(input.authentication.password),
+    });
     this.createdAtById.set(proxy.id, new Date(this.now()).toISOString());
     this.socksAuthenticationById.set(
       proxy.id,
@@ -154,8 +163,40 @@ export class NetworkForwardingController {
     if (!this.client.listSocks5Proxies().some((proxy) => proxy.id === id)) {
       throw new Error("The SOCKS5 proxy is no longer active");
     }
+    this.invalidateSocks(id);
     await this.client.stopSocks5Proxy(id);
     this.notifySoon();
+  }
+
+  /** Only proxies started by this controller can lend their private authentication. */
+  rdpProxies(): readonly NetworkSocks5ProxySummary[] {
+    if (this.disposed) return [];
+    const proxies = this.client.listSocks5Proxies();
+    const ids = new Set(proxies.map((proxy) => proxy.id));
+    for (const id of this.socksLifetimes.keys()) if (!ids.has(id)) this.invalidateSocks(id);
+    return proxies.filter((proxy) => this.socksLifetimes.has(proxy.id)).map((proxy) => this.socksSummary(proxy));
+  }
+
+  leaseRdpProxy(id: string): RdpSocksProxyLease {
+    this.assertAvailable();
+    const proxy = this.client.listSocks5Proxies().find((candidate) => candidate.id === id);
+    const lifetime = this.socksLifetimes.get(id);
+    if (!proxy || !lifetime || lifetime.signal.aborted || proxy.state.status !== "listening") throw new Error("The selected SOCKS5 proxy is no longer available");
+    const host = proxy.bind.host === "0.0.0.0" ? "127.0.0.1" : proxy.bind.host === "::" ? "::1" : proxy.bind.host;
+    // The managed listener's numeric bind avoids accidentally resolving a different local endpoint.
+    if (!isIP(host)) throw new Error("The SOCKS5 proxy must listen on an IP address");
+    const secret = this.socksSecrets.get(id);
+    const authentication = secret ? { username: Buffer.from(secret.username), password: Buffer.from(secret.password) } : undefined;
+    const release = (): void => { authentication?.username.fill(0); authentication?.password.fill(0); lifetime.signal.removeEventListener("abort", release); };
+    lifetime.signal.addEventListener("abort", release, { once: true });
+    return Object.freeze({ host, port: proxy.bind.port, ...(authentication ? { authentication } : {}), signal: lifetime.signal,
+      isActive: () => !this.disposed && !lifetime.signal.aborted && proxy.state.status === "listening" && this.client.listSocks5Proxies().includes(proxy), release });
+  }
+
+  private invalidateSocks(id: string): void {
+    this.socksLifetimes.get(id)?.abort(); this.socksLifetimes.delete(id);
+    const secret = this.socksSecrets.get(id);
+    secret?.username.fill(0); secret?.password.fill(0); this.socksSecrets.delete(id);
   }
 
   async startReversePortForward(
@@ -195,6 +236,7 @@ export class NetworkForwardingController {
     this.subscriptions.clear();
     this.createdAtById.clear();
     this.socksAuthenticationById.clear();
+    for (const id of this.socksLifetimes.keys()) this.invalidateSocks(id);
   }
 
   private portSummary(forward: PortForward): NetworkPortForwardSummary {
@@ -249,7 +291,7 @@ export class NetworkForwardingController {
       if (!liveIds.has(id)) this.createdAtById.delete(id);
     }
     for (const id of this.socksAuthenticationById.keys()) {
-      if (!liveIds.has(id)) this.socksAuthenticationById.delete(id);
+      if (!liveIds.has(id)) { this.socksAuthenticationById.delete(id); this.invalidateSocks(id); }
     }
   }
 
@@ -265,9 +307,10 @@ export class NetworkForwardingController {
         if (state.status === "closed" || state.status === "failed") {
           this.createdAtById.delete(id);
           this.socksAuthenticationById.delete(id);
+          this.invalidateSocks(id);
         }
       },
-      complete: () => this.subscriptions.delete(key),
+      complete: () => { this.subscriptions.delete(key); if (key.startsWith("socks:")) this.invalidateSocks(id); },
     });
     this.subscriptions.set(key, subscription);
   }

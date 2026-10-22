@@ -5,8 +5,14 @@ communicates over private pipes using [protocol version 1](protocol.md). The
 helper contains the credentials and protocol/graphics state; the renderer
 receives bounded RGBA frames, cursor updates and explicit clipboard results.
 
-The Cargo lockfile and source manifest pin an exact commit on the Sliver Armory
-IronRDP fork's default branch, `master`. Builds use that immutable revision; the
+The source manifest pins an exact commit on the Sliver Armory IronRDP fork's
+default branch, `master`, plus the digest and resulting Git tree of the tracked
+patch in `patches/`. Build and test wrappers prepare the ignored `vendor/ironrdp`
+checkout without modifying Cargo's global cache. They verify its base commit,
+patch, index tree, and file contents before using its Cargo path dependencies.
+Changed or extra staged files fail verification; remove the generated
+`native/rdp/vendor/ironrdp` directory to recreate it after updating the reviewed
+patch. The Cargo lockfile pins the remaining dependencies. The
 branch name in provenance records where reviewed updates are taken from. Its
 embedding changes supply an all-certificate policy hook, typed overridable
 validation errors, a custom clipboard feature without native OS clipboard
@@ -26,9 +32,9 @@ codec state retain IronRDP's independent limits; the frame/presentation limits
 are not a global process memory quota.
 
 ```sh
-cargo +1.94.1 test --locked --manifest-path native/rdp/Cargo.toml
-cargo +1.94.1 build --locked --manifest-path native/rdp/Cargo.toml
-native/rdp/target/debug/sliver-rdp --self-test
+npm run test:rdp:native
+npm run build:rdp:host
+native/rdp/bin/sliver-rdp --self-test
 ```
 
 Use the repository RDP build/provenance scripts for distributable binaries.
@@ -57,6 +63,12 @@ are still checked on every certificate; hard verification errors cannot be
 overridden. Changed pins require a new decision even for CA-valid certificates.
 Private command buffers and retained clipboard strings are zeroized where owned
 by this crate; upstream credential copies are not promised to be zeroized.
+
+An optional `connectAddress` dials only a numeric loopback endpoint owned by main.
+The logical host and port remain the TLS certificate and CredSSP identity. The
+tracked overlay disables UDP for an override and never retries the logical
+destination if the loopback connection fails. Proxy credentials and SOCKS
+negotiation remain in main; the helper receives no proxy credentials.
 
 An isolated [graphics WASM experiment](experiments/graphics-codec/README.md)
 records the measured alternative. It is not shipped or loaded by the helper.

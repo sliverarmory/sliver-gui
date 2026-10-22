@@ -41,6 +41,7 @@ Font Awesome.
 - A Cloud Deployment DNS manager for Route 53 and Azure DNS, with zone and
   all-zones record views and record editing.
 - Configurable keyboard shortcuts, application appearance, and update controls.
+- Command palette navigation to live sessions and beacons by name, with host, user, and ID details to distinguish matching names.
 
 The GUI does not implement every upstream command or option. Operator
 connections use mTLS; WireGuard operator configurations are recognized but

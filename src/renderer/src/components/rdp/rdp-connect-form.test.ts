@@ -7,6 +7,26 @@ const valid: RdpConnectFormValues = {
 };
 
 describe("RDP form field validation", () => {
+  it("validates manual proxy endpoints and requires authentication only on Connect", () => {
+    const proxy = { ...valid, manualProxy: true, proxyHost: "proxy.test", proxyPort: "1080", proxyUsername: "", proxyPassword: "" };
+    expect(validateRdpConnectForm(proxy, true)).toEqual({});
+    expect(validateRdpConnectForm({ ...proxy, proxyHost: "socks5://proxy.test", proxyPort: "0" }, true))
+      .toMatchObject({ proxyHost: expect.any(String), proxyPort: expect.any(String) });
+    expect(validateRdpConnectForm({ ...proxy, proxyUsername: "proxy-user" }, true)).toHaveProperty("proxyPassword");
+    expect(validateRdpConnectForm({ ...proxy, proxyUsername: "proxy-user" }, false, false)).toEqual({});
+    expect(validateRdpConnectForm({ ...proxy, proxyUsername: "proxy-user", signInMode: "remote-screen" }, true)).toHaveProperty("proxyPassword");
+    expect(validateRdpConnectForm({ ...proxy, manualProxy: false, proxyHost: "invalid/path" }, true)).toEqual({});
+  });
+
+  it("enforces proxy credential limits in UTF-8 bytes without silently truncating", () => {
+    const proxy = { ...valid, manualProxy: true, proxyHost: "::1", proxyPort: "1080", proxyUsername: "é".repeat(127) + "a", proxyPassword: "é".repeat(127) + "a" };
+    expect(validateRdpConnectForm(proxy, true)).toEqual({});
+    expect(validateRdpConnectForm({ ...proxy, proxyUsername: "é".repeat(128), proxyPassword: "é".repeat(128) }, true))
+      .toMatchObject({ proxyUsername: expect.any(String), proxyPassword: expect.any(String) });
+    expect(validateRdpConnectForm({ ...proxy, proxyUsername: "user\u0000", proxyPassword: "pass\u0000" }, true))
+      .toMatchObject({ proxyUsername: expect.any(String), proxyPassword: expect.any(String) });
+  });
+
   it("requires credentials by default but validates only the endpoint and display for remote-screen sign-in", () => {
     const emptyAccount = { ...valid, username: "", domain: "", password: "" };
     expect(validateRdpConnectForm(emptyAccount, true)).toMatchObject({ username: expect.any(String), password: expect.any(String) });

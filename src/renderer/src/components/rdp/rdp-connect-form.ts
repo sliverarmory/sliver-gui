@@ -1,5 +1,5 @@
 import { RDP_MAX_PIXELS, type RdpConnectionOptions } from "../../../../shared/rdp-contracts";
-import { rdpPassword, rdpString } from "../../../../shared/rdp-validation";
+import { rdpPassword, rdpProxyPassword, rdpString } from "../../../../shared/rdp-validation";
 
 export const RDP_RESOLUTIONS = ([
   [1024, 768], [1280, 720], [1280, 800], [1366, 768], [1440, 900],
@@ -16,20 +16,25 @@ export interface RdpConnectFormValues {
   width: string;
   height: string;
   signInMode?: RdpConnectionOptions["signInMode"];
+  manualProxy?: boolean;
+  proxyHost?: string;
+  proxyPort?: string;
+  proxyUsername?: string;
+  proxyPassword?: string;
 }
 
-export type RdpConnectFormField = Exclude<keyof RdpConnectFormValues, "signInMode">;
+export type RdpConnectFormField = Exclude<keyof RdpConnectFormValues, "signInMode" | "manualProxy">;
 export type RdpConnectFormErrors = Partial<Record<RdpConnectFormField, string>>;
 
-export function validateRdpConnectForm(values: RdpConnectFormValues, requirePassword: boolean): RdpConnectFormErrors {
+export function validateRdpConnectForm(values: RdpConnectFormValues, requirePassword: boolean, requireUsername = true): RdpConnectFormErrors {
   const errors: RdpConnectFormErrors = {};
   if (!validText(values.label, 120, true)) errors.label = "Use at most 120 characters without control characters.";
   if (!values.host.trim()) errors.host = "Enter a hostname or IP address.";
   else if (!validHost(values.host.trim())) errors.host = "Enter a valid hostname or IP address without a scheme, path, or port.";
   if (!decimalInRange(values.port, 1, 65535)) errors.port = "Enter a whole number from 1 to 65535.";
   if (values.signInMode !== "remote-screen") {
-    if (!values.username.trim()) errors.username = "Enter the Windows username.";
-    else if (!validText(values.username, 256)) errors.username = "Use at most 256 characters without control characters.";
+    if (requireUsername && !values.username.trim()) errors.username = "Enter the Windows username.";
+    else if (!validText(values.username, 256, !requireUsername)) errors.username = "Use at most 256 characters without control characters.";
     if (!validText(values.domain, 256, true)) errors.domain = "Use at most 256 characters without control characters.";
     if (requirePassword && values.password.length === 0) errors.password = "Enter the Windows account password.";
     else {
@@ -41,6 +46,18 @@ export function validateRdpConnectForm(values: RdpConnectFormValues, requirePass
   if (!decimalInRange(values.height, 200, 8192)) errors.height = "Enter a whole number from 200 to 8192 pixels.";
   if (!errors.width && !errors.height && Number(values.width) * Number(values.height) > RDP_MAX_PIXELS) {
     errors.width = errors.height = "Width × height must not exceed 16,777,216 pixels.";
+  }
+  if (values.manualProxy) {
+    const host = values.proxyHost?.trim() ?? "", username = values.proxyUsername?.trim() ?? "";
+    if (!validHost(host)) errors.proxyHost = "Enter a valid proxy hostname or IP address without a scheme, path, or port.";
+    if (!decimalInRange(values.proxyPort ?? "", 1, 65535)) errors.proxyPort = "Enter a whole number from 1 to 65535.";
+    if (!validText(values.proxyUsername ?? "", 255, true) || new TextEncoder().encode(values.proxyUsername ?? "").length > 255) {
+      errors.proxyUsername = "Use at most 255 UTF-8 bytes without control characters.";
+    }
+    if (username && (requireUsername || values.proxyPassword)) {
+      try { rdpProxyPassword(values.proxyPassword); }
+      catch { errors.proxyPassword = "Enter a proxy password from 1 to 255 UTF-8 bytes without NUL characters."; }
+    }
   }
   return errors;
 }

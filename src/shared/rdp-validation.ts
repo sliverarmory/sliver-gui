@@ -1,3 +1,4 @@
+import { parseSocks5ProxyId } from "./network-forwarding-contracts.js";
 import { RDP_MAX_CLIPBOARD_FILES, RDP_MAX_CLIPBOARD_FILE_BYTES, RDP_MAX_PIXELS, RDP_PREVIEW_MAX_DATA_URL_LENGTH, RDP_PREVIEW_MAX_HEIGHT, RDP_PREVIEW_MAX_WIDTH, type RdpFileTransferProgress, type RdpConnectInput, type RdpConnectionOptions, type RdpPreview, type RdpSavePreviewInput, type RdpSaveProfileInput, type RdpViewerMessage } from "./rdp-contracts.js";
 
 /** Only bounded counters and sanitized status cross into the desktop renderer. */
@@ -85,16 +86,37 @@ export function rdpDimensions(width: unknown, height: unknown): { width: number;
   return size;
 }
 
-export function parseRdpOptions(value: unknown): RdpConnectionOptions {
+export function parseRdpOptions(value: unknown, allowMissingUsername = false): RdpConnectionOptions {
   const item = rdpRecord(value);
   const mode = item["signInMode"] === undefined ? "nla" : item["signInMode"];
   if (mode !== "nla" && mode !== "remote-screen") throw new Error("Invalid RDP sign-in mode");
   const remoteScreen = mode === "remote-screen";
-  const username = rdpString(item["username"], 256, remoteScreen), domain = rdpString(item["domain"], 256, true);
+  const username = rdpString(item["username"], 256, remoteScreen || allowMissingUsername), domain = rdpString(item["domain"], 256, true);
   if (remoteScreen && (username !== "" || domain !== "")) throw new Error("Enter credentials on the remote screen for this sign-in mode");
   const host = rdpString(item["host"], 253).trim().toLowerCase();
   if (!/^[a-z0-9.:%_-]+$/iu.test(host) || host.startsWith("-") || host.includes("%")) throw new Error("Enter a hostname or IP address without a URL or port");
-  return { host, port: rdpInteger(item["port"], 1, 65535), username, domain,
+  let networking: RdpConnectionOptions["networking"];
+  if (item["networking"] !== undefined) {
+    const route = rdpRecord(item["networking"]);
+    if (route["kind"] === "socks5") {
+      if (Object.keys(route).some((key) => key !== "kind" && key !== "proxyId")) throw new Error("Invalid RDP networking route");
+      networking = Object.freeze({ kind: "socks5", proxyId: parseSocks5ProxyId(route["proxyId"]) });
+    } else if (route["kind"] === "socks5-manual") {
+      if (Object.keys(route).some((key) => !["kind", "host", "port", "username"].includes(key))) throw new Error("Invalid RDP networking route");
+      const proxyHost = rdpString(route["host"], 253).trim().toLowerCase();
+      if (!/^[a-z0-9._:-]+$/iu.test(proxyHost) || proxyHost.startsWith("-")) throw new Error("Enter a SOCKS proxy hostname or IP address without a URL or port");
+      // A colon is only valid in an IPv6 literal, never a hostname:port pair.
+      if (proxyHost.includes(":")) {
+        try { if (new URL(`http://[${proxyHost}]/`).hostname.length < 3) throw new Error(); }
+        catch { throw new Error("Enter a valid SOCKS proxy IPv6 address without brackets or a port"); }
+      }
+      const proxyUsername = route["username"] === undefined ? undefined : rdpString(route["username"], 255);
+      if (proxyUsername !== undefined && new TextEncoder().encode(proxyUsername).length > 255) throw new Error("SOCKS username must contain between 1 and 255 UTF-8 bytes");
+      networking = Object.freeze({ kind: "socks5-manual", host: proxyHost, port: rdpInteger(route["port"], 1, 65535),
+        ...(proxyUsername === undefined ? {} : { username: proxyUsername }) });
+    } else throw new Error("Invalid RDP networking route");
+  }
+  return { ...(networking ? { networking } : {}), host, port: rdpInteger(item["port"], 1, 65535), username, domain,
     ...(remoteScreen ? { signInMode: "remote-screen" as const } : {}),
     ...rdpDimensions(item["width"], item["height"]), clipboard: rdpBoolean(item["clipboard"]) };
 }
@@ -102,7 +124,7 @@ export function parseRdpOptions(value: unknown): RdpConnectionOptions {
 export function parseRdpProfile(value: unknown): RdpSaveProfileInput {
   const item = rdpRecord(value);
   if (item["scaleMode"] !== "fit" && item["scaleMode"] !== "actual") throw new Error("Invalid RDP scale mode");
-  return { ...parseRdpOptions(value), label: rdpString(item["label"], 120), scaleMode: item["scaleMode"],
+  return { ...parseRdpOptions(value, true), label: rdpString(item["label"], 120), scaleMode: item["scaleMode"],
     ...(item["id"] === undefined ? {} : { id: rdpString(item["id"], 80) }) };
 }
 
@@ -111,12 +133,28 @@ export function rdpPassword(value: unknown): string {
   return value;
 }
 
+export function rdpProxyPassword(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0 || value.includes("\0") || new TextEncoder().encode(value).length > 255) {
+    throw new Error("Enter a SOCKS proxy password between 1 and 255 UTF-8 bytes");
+  }
+  return value;
+}
+
+export function parseRdpProxyPassword(value: unknown, networking: RdpConnectionOptions["networking"]): string | undefined {
+  if (networking?.kind === "socks5-manual" && networking.username !== undefined) return rdpProxyPassword(value);
+  if (value !== undefined) throw new Error("A proxy password requires a manual SOCKS username");
+  return undefined;
+}
+
 export function parseRdpConnect(value: unknown): RdpConnectInput {
   const item = rdpRecord(value);
   const { id: _id, ...profile } = parseRdpProfile(value);
+  parseRdpOptions(value);
   if (item["persistence"] !== "none" && item["persistence"] !== "session" && item["persistence"] !== "secure") throw new Error("Invalid RDP credential preference");
   if (profile.signInMode === "remote-screen" && (item["persistence"] !== "none" || (item["password"] !== undefined && item["password"] !== ""))) throw new Error("Remote-screen sign-in does not accept or remember a password");
+  const proxyPassword = parseRdpProxyPassword(item["proxyPassword"], profile.networking);
   return { ...profile, persistence: item["persistence"],
+    ...(proxyPassword === undefined ? {} : { proxyPassword }),
     ...(item["temporaryId"] === undefined ? {} : { temporaryId: rdpString(item["temporaryId"], 80) }),
     ...(item["password"] === undefined ? {} : { password: rdpPassword(item["password"]) }),
     ...(item["profileId"] === undefined ? {} : { profileId: rdpString(item["profileId"], 80) }) };

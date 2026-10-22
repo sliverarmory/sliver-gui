@@ -11,7 +11,12 @@
     "upstreamCommit": "1f69e124e6bf85608efce3495c12eaf5f6b5a95d",
     "license": "MIT OR Apache-2.0",
     "patchInventory": "SLIVER_GUI_EMBEDDING.md",
-    "patchInventorySha256": "5d86d893a8d0e8ea9d5a2e0da5ed537e5211b005abd4e5eb0c760b3fe6cd5bbc"
+    "patchInventorySha256": "5d86d893a8d0e8ea9d5a2e0da5ed537e5211b005abd4e5eb0c760b3fe6cd5bbc",
+    "localOverlay": {
+      "patch": "native/rdp/patches/ironrdp-tcp-connect-address.patch",
+      "sha256": "1a9c539b01cdd1b59a79570b118f2b49b9636e844dd40bdd843a976d1594f2d5",
+      "tree": "468597b478c61bdae1f8d02cd01a65daea7e15bd"
+    }
   },
   "toolchain": {
     "rust": "1.94.1"

@@ -1,9 +1,11 @@
+import { createRdpSocksTransport, type RdpSocksTransport, type RdpSocksProxyLease } from "./rdp-socks-transport.js";
+import { importRdpProfiles, rdpImportPaths } from "./rdp-profile-importer.js";
 import { createHash, randomBytes, randomUUID, X509Certificate } from "node:crypto";
-import { BrowserWindow, clipboard, ipcMain, nativeTheme, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
+import { BrowserWindow, clipboard, dialog, ipcMain, nativeTheme, type IpcMainEvent, type IpcMainInvokeEvent, type MessagePortMain } from "electron";
 import { parseApplicationSettingsUpdateInput, type ApplicationSettingsState, type ApplicationSettingsUpdateInput } from "../shared/application-settings-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
-import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpFileTransferProgress, type RdpPendingConnection, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
-import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpSavePreview, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
+import { RDP_IPC, RDP_MAX_CLIPBOARD_BYTES, RDP_MAX_CONTROL_BYTES, RDP_MAX_DISPLAY_CREDIT_BYTES, RDP_MAX_SESSIONS, type RdpImportResult, type RdpSocks5Proxy, type RdpSocks5Session, type RdpAttachment, type RdpConnectInput, type RdpCursor, type RdpCursorDelivery, type RdpFileTransferProgress, type RdpPendingConnection, type RdpTab, type RdpWindowState } from "../shared/rdp-contracts.js";
+import { parseRdpConnect, parseRdpOptions, parseRdpProfile, parseRdpProxyPassword, parseRdpSavePreview, parseRdpViewerMessage, rdpBoolean, rdpPassword, rdpRecord, rdpString } from "../shared/rdp-validation.js";
 import { normalizeRdpPreview } from "./rdp-preview.js";
 import { readRdpClipboardFiles, type RdpLocalClipboardFiles, type RdpClipboardStaging } from "./rdp-file-clipboard.js";
 import { RdpFileTransfer } from "./rdp-file-transfer.js";
@@ -23,6 +25,11 @@ interface RdpWindowsOptions {
   preloadPath: string;
   icon?: string;
   store: RdpStore;
+  listSocksProxies?: () => readonly RdpSocks5Proxy[];
+  listSocksSessions?: () => readonly RdpSocks5Session[];
+  startSessionProxy?: (sessionId: string) => Promise<RdpSocks5Proxy>;
+  leaseSocksProxy?: (id: string) => RdpSocksProxyLease;
+  openNetworkManager?: () => void | Promise<void>;
   resolveRuntime: () => Promise<string>;
   createRuntime?: RdpRuntimeFactory["create"];
   getApplicationSettings: () => ApplicationSettingsState;
@@ -36,6 +43,8 @@ interface Session {
   localFiles?: boolean;
   runtime?: Pick<RdpRuntime, "send" | "stop">;
   route?: RdpTemporaryRoute;
+  socksRoute?: RdpSocksTransport;
+  socksAbort?: AbortController;
   routeClose?: Promise<void>;
   port?: MessagePortMain;
   captured: boolean;
@@ -53,7 +62,7 @@ interface Session {
   connectTimer?: ReturnType<typeof setTimeout>;
 }
 interface AttachmentTicket extends RdpAttachment { expires: number; frameToken: string; contentsId: number }
-const channels = Object.values(RDP_IPC).filter((channel) => channel !== RDP_IPC.stateChanged && channel !== RDP_IPC.fileTransferProgress && channel !== RDP_IPC.applicationSettingsChanged && channel !== RDP_IPC.openStream);
+const channels = Object.values(RDP_IPC).filter((channel) => channel !== RDP_IPC.profilesImported && channel !== RDP_IPC.stateChanged && channel !== RDP_IPC.fileTransferProgress && channel !== RDP_IPC.applicationSettingsChanged && channel !== RDP_IPC.openStream);
 const overridableCertificateReasons = new Set(["unknownIssuer", "expired", "notValidYet", "nameMismatch", "pinMismatch"]);
 const certificateReasons: Record<string, string> = {
   unknownIssuer: "The server certificate is self-signed or its issuer is not trusted.",
@@ -84,6 +93,12 @@ export class RdpWindows {
   #activeTabId: string | undefined;
   #disposed = false;
   #connectBusy = false;
+  #importBusy = false;
+  #sessionProxyBusy = false;
+  #rendererReady = false;
+  readonly #importResults: RdpImportResult[] = [];
+  #networkTimer: ReturnType<typeof setInterval> | undefined;
+  #networkSnapshot = "";
   #temporaryOpening = false;
   #temporaryPreparation: Promise<void> | undefined;
   #routeGeneration = 0;
@@ -97,6 +112,15 @@ export class RdpWindows {
 
   constructor(options: RdpWindowsOptions) {
     this.#options = options;
+    if (options.listSocksProxies || options.listSocksSessions) {
+      const networkSnapshot = (): string => JSON.stringify([options.listSocksProxies?.() ?? [], options.listSocksSessions?.() ?? []]);
+      this.#networkSnapshot = networkSnapshot();
+      this.#networkTimer = setInterval(() => {
+        const inventory = networkSnapshot();
+        if (inventory !== this.#networkSnapshot) { this.#networkSnapshot = inventory; this.#publish(); }
+      }, 1000);
+      this.#networkTimer.unref();
+    }
     for (const channel of channels) ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       try {
         this.#requireSender(event);
@@ -122,7 +146,7 @@ export class RdpWindows {
     if (this.#window && !this.#window.isDestroyed()) { this.#window.show(); this.#window.focus(); return; }
     const window = new BrowserWindow(rdpWindowOptions(this.#options.preloadPath, process.platform, this.#options.icon, nativeTheme.shouldUseDarkColors));
     let loaded = false;
-    this.#window = window;
+    this.#window = window; this.#rendererReady = false;
     this.#options.prepareWindow(window);
     window.on("blur", () => this.#releaseInputs());
     window.on("minimize", () => this.#releaseInputs());
@@ -133,7 +157,7 @@ export class RdpWindows {
       event.preventDefault(); this.#detachAll(); window.hide();
     });
     window.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
-      if (loaded && !isInPlace && isMainFrame) this.#detachAll();
+      if (loaded && !isInPlace && isMainFrame) { this.#rendererReady = false; this.#detachAll(); }
     });
     window.webContents.on("render-process-gone", () => this.#detachAll());
     window.webContents.on("before-input-event", (_event, input) => {
@@ -142,9 +166,36 @@ export class RdpWindows {
       if (escapeCapture) this.#releaseInputs();
       window.webContents.setIgnoreMenuShortcuts(!escapeCapture && [...this.#sessions.values()].some((session) => session.captured));
     });
-    window.once("closed", () => { this.#detachAll(); if (this.#window === window) this.#window = undefined; });
+    window.once("closed", () => {
+      this.#detachAll();
+      for (const session of this.#sessions.values()) if (session.tab.state === "connecting" && !session.runtime) this.#disconnect(session);
+      if (this.#window === window) this.#window = undefined;
+    });
     window.once("ready-to-show", () => window.show());
     try { await window.loadURL(this.#options.rendererUrl); loaded = true; } catch (error) { window.destroy(); throw error; }
+  }
+
+  async openFiles(paths: readonly string[]): Promise<void> {
+    const selected = rdpImportPaths(paths);
+    await this.open();
+    const result = await this.#importFiles(selected, () => { if (this.#disposed) throw new Error("RDP is shutting down"); });
+    this.#importResults.push(result);
+    this.#flushImports();
+  }
+
+  #flushImports(): void {
+    const window = this.#window;
+    if (!this.#rendererReady || !window || window.isDestroyed() || window.webContents.isDestroyed()) return;
+    for (const result of this.#importResults.splice(0)) window.webContents.send(RDP_IPC.profilesImported, result);
+  }
+
+  async #importFiles(paths: readonly string[], assertCurrent: () => void): Promise<RdpImportResult> {
+    if (this.#importBusy) throw new Error("An RDP import is already in progress");
+    this.#importBusy = true;
+    try {
+      const result = await importRdpProfiles(paths, this.#options.store, assertCurrent);
+      this.#publish(); return result;
+    } finally { this.#importBusy = false; }
   }
 
   restoreRetainedWindow(): boolean {
@@ -183,18 +234,48 @@ export class RdpWindows {
   }
 
   state(): RdpWindowState {
-    return { tabs: [...this.#sessions.values()].map((session) => session.tab), profiles: this.#options.store.profiles(),
+    return { socks5Proxies: this.#options.listSocksProxies?.() ?? [], socks5Sessions: this.#options.listSocksSessions?.() ?? [],
+      tabs: [...this.#sessions.values()].map((session) => session.tab), profiles: this.#options.store.profiles(),
       ...(this.#activeTabId === undefined ? {} : { activeTabId: this.#activeTabId }),
       ...(this.#pendingConnection === undefined ? {} : { pendingConnection: this.#pendingConnection.connection }),
       maxSessions: RDP_MAX_SESSIONS, securePersistenceAvailable: this.#options.store.securePersistenceAvailable() };
   }
 
   async #invoke(channel: string, event: IpcMainInvokeEvent, args: unknown[]): Promise<unknown> {
-    const noArgs = channel === RDP_IPC.getState || channel === RDP_IPC.toggleFullscreen;
+    const noArgs = channel === RDP_IPC.getState || channel === RDP_IPC.toggleFullscreen || channel === RDP_IPC.importProfiles || channel === RDP_IPC.openNetworkManager;
     if (args.length !== (noArgs ? 0 : 1)) throw new Error("Invalid RDP request");
     const raw = args[0];
     switch (channel) {
-      case RDP_IPC.getState: return this.state();
+      case RDP_IPC.getState: this.#rendererReady = true; setImmediate(() => this.#flushImports()); return this.state();
+      case RDP_IPC.openNetworkManager:
+        if (!this.#options.openNetworkManager) throw new Error("Connect an operator workspace to open Networking");
+        this.#releaseInputs();
+        await this.#options.openNetworkManager(); return undefined;
+      case RDP_IPC.startSessionProxy: {
+        if (typeof raw !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(raw)) throw new Error("Invalid RDP session selection");
+        if (!this.#options.startSessionProxy) throw new Error("Connect a Sliver workspace to use a session proxy");
+        if (this.#sessionProxyBusy) throw new Error("A session proxy is already being prepared");
+        this.#sessionProxyBusy = true;
+        try {
+          const proxy = await this.#options.startSessionProxy(raw);
+          this.#requireSender(event);
+          this.#publish(); return proxy;
+        } finally { this.#sessionProxyBusy = false; }
+      }
+      case RDP_IPC.importProfiles: {
+        if (this.#importBusy) throw new Error("An RDP import is already in progress");
+        this.#importBusy = true;
+        try {
+          const selected = await dialog.showOpenDialog(this.#requireSender(event), {
+            title: "Import RDP profiles", filters: [{ name: "Remote Desktop", extensions: ["rdp"] }], properties: ["openFile", "multiSelections"],
+          });
+          this.#requireSender(event);
+          if (selected.canceled) return { canceled: true, items: [] };
+          const result = await importRdpProfiles(selected.filePaths, this.#options.store, () => { this.#requireSender(event); });
+          this.#publish(); return result;
+        } finally { this.#importBusy = false; }
+      }
+      case RDP_IPC.importDroppedProfiles: return this.#importFiles(rdpImportPaths(raw), () => { this.#requireSender(event); });
       case RDP_IPC.connect: return this.#connect(parseRdpConnect(raw), event);
       case RDP_IPC.cancelTemporary: {
         const id = rdpString(raw, 80), pending = this.#pendingConnection;
@@ -208,7 +289,8 @@ export class RdpWindows {
         if (session.runtime) throw new Error("Disconnect this RDP session before reconnecting");
         const password = input["password"] === undefined ? undefined : rdpPassword(input["password"]);
         if (session.tab.signInMode === "remote-screen" && password !== undefined && password !== "") throw new Error("Enter the password on the remote screen");
-        return this.#start(session, password, event);
+        const proxyPassword = parseRdpProxyPassword(input["proxyPassword"], session.tab.networking);
+        return this.#start(session, password, event, proxyPassword);
       }
       case RDP_IPC.disconnect: {
         const session = this.#session(raw); this.#disconnect(session); await session.routeClose; return undefined;
@@ -293,7 +375,7 @@ export class RdpWindows {
     const pending = input.temporaryId === undefined ? undefined : this.#pendingConnection;
     if (input.temporaryId === undefined && this.#ownsTemporaryEndpoint(input)) throw new Error("Use the pending temporary RDP connection to connect to this endpoint");
     if (input.temporaryId !== undefined && (!pending || pending.connection.id !== input.temporaryId || !pending.route.isActive())) throw new Error("The temporary RDP connection has expired");
-    if (pending && (input.host !== pending.connection.host || input.port !== pending.connection.port || input.profileId !== undefined || input.persistence !== "none")) throw new Error("Temporary RDP connections cannot change destination or save credentials");
+    if (pending && (input.host !== pending.connection.host || input.port !== pending.connection.port || input.profileId !== undefined || input.persistence !== "none" || input.networking !== undefined)) throw new Error("Temporary RDP connections cannot change destination or save credentials");
     if (this.#sessions.size + (!pending && this.#pendingConnection ? 1 : 0) >= RDP_MAX_SESSIONS) throw new Error("Close an RDP tab before opening another connection");
     this.#connectBusy = true;
     try {
@@ -328,7 +410,7 @@ export class RdpWindows {
       }
       this.#sessions.set(id, session); this.#activeTabId = id;
       const initialAttempt = session.tab.attempt + 1;
-      try { return await this.#start(session, input.password, event); }
+      try { return await this.#start(session, input.password, event, input.proxyPassword); }
       catch (error) {
         // Credential lookup may fail before the first attempt increments.
         // Preserve a newer reconnect if its earlier startup completes later.
@@ -342,8 +424,10 @@ export class RdpWindows {
     } finally { this.#connectBusy = false; }
   }
 
-  async #start(session: Session, suppliedPassword: string | undefined, event: IpcMainInvokeEvent): Promise<RdpTab> {
+  async #start(session: Session, suppliedPassword: string | undefined, event: IpcMainInvokeEvent, suppliedProxyPassword?: string): Promise<RdpTab> {
     if (session.runtime || session.tab.state === "connecting") throw new Error("RDP connection is already starting");
+    let proxyPassword = parseRdpProxyPassword(suppliedProxyPassword, session.tab.networking);
+    suppliedProxyPassword = undefined;
     let password = session.tab.signInMode === "remote-screen" ? "" : suppliedPassword ?? this.#options.store.credential(session.tab.profileId ?? session.tab.id, session.tab);
     if (password === undefined) throw new Error("Enter the password to connect");
     this.#detach(session);
@@ -355,18 +439,50 @@ export class RdpWindows {
     session.tab = { ...previous, ...session.reconnectSize, attempt: previous.attempt + 1, state: "connecting", clipboardReady: false, clipboardAvailable: false, clipboardFilesAvailable: false, clipboardFilesSupported: false };
     this.#publish();
     const attempt = session.tab.attempt;
+    let proxyLease: RdpSocksProxyLease | undefined;
     try {
       const executable = await this.#options.resolveRuntime();
       this.#requireSender(event);
       if (this.#disposed || !this.#sessions.has(session.tab.id) || session.tab.attempt !== attempt || session.tab.state !== "connecting") throw new Error("RDP connection was canceled");
       if (session.route && !session.route.isActive()) throw new Error("The Windows session is no longer available");
+      if (session.tab.networking) {
+        const networking = session.tab.networking;
+        const abort = new AbortController(); session.socksAbort = abort;
+        if (networking.kind === "socks5") proxyLease = this.#options.leaseSocksProxy?.(networking.proxyId);
+        else {
+          const authentication = networking.username === undefined ? undefined
+            : { username: Buffer.from(networking.username, "utf8"), password: Buffer.from(proxyPassword!, "utf8") };
+          proxyLease = { host: networking.host, port: networking.port, ...(authentication ? { authentication } : {}),
+            signal: abort.signal, isActive: () => !abort.signal.aborted,
+            release: () => { authentication?.username.fill(0); authentication?.password.fill(0); } };
+        }
+        proxyPassword = undefined;
+        const lease = proxyLease;
+        if (!lease) throw new Error("The selected SOCKS5 proxy is no longer available");
+        const preparation = createRdpSocksTransport({ ...lease, signal: AbortSignal.any([lease.signal, abort.signal]) }, session.tab, (message) => {
+          if (session.tab.attempt === attempt) this.#disconnect(session, message);
+        });
+        const settled = preparation.then(() => undefined, () => undefined);
+        this.#routeCleanup.add(settled);
+        void settled.then(() => this.#routeCleanup.delete(settled));
+        let route: RdpSocksTransport;
+        try { route = await preparation; } finally { lease.release(); proxyLease = undefined; }
+        try {
+          this.#requireSender(event);
+          if (this.#disposed || this.#sessions.get(session.tab.id) !== session || session.tab.attempt !== attempt || session.tab.state !== "connecting" || !route.isActive()) throw new Error("RDP connection was canceled");
+          session.socksRoute = route;
+        } catch (error) { await this.#closeRoute(route); throw error; }
+      }
       const createRuntime = this.#options.createRuntime ?? ((...args: ConstructorParameters<typeof RdpRuntime>) => new RdpRuntime(...args));
       const runtime = createRuntime(executable, (message) => {
         if (session.tab.attempt !== attempt || session.runtime !== runtime) return;
         if (message.type === "ready") {
           if (session.route && !session.route.isActive()) { password = undefined; this.#disconnect(session, "The Windows session is no longer available"); return; }
+          if (session.socksRoute && !session.socksRoute.isActive()) { password = undefined; this.#disconnect(session, "The SOCKS5 proxy is no longer available"); return; }
+          const { networking: _networking, ...options } = parseRdpOptions(session.tab);
           const pinnedFingerprint = session.tab.temporary ? undefined : this.#options.store.pin(session.tab);
-          runtime.send({ type: "connect", ...parseRdpOptions(session.tab), password,
+          runtime.send({ type: "connect", ...options, password,
+            ...(session.socksRoute ? { connectAddress: { host: session.socksRoute.host, port: session.socksRoute.port } } : {}),
             ...(pinnedFingerprint === undefined ? {} : { pinnedFingerprint }) });
           password = undefined;
           return;
@@ -388,9 +504,12 @@ export class RdpWindows {
     } catch (error) {
       password = undefined;
       if (session.tab.attempt === attempt && session.tab.state === "connecting") {
-        session.tab = { ...session.tab, state: "failed", error: "RDP runtime could not start" }; this.#publish();
+        this.#finish(session, error instanceof Error ? error.message : "RDP runtime could not start");
       }
       throw error;
+    } finally {
+      proxyPassword = undefined;
+      proxyLease?.release();
     }
   }
 
@@ -634,6 +753,8 @@ export class RdpWindows {
     this.#finish(session, error ?? "disconnected");
   }
   #finish(session: Session, code: string): void {
+    session.socksAbort?.abort(); delete session.socksAbort;
+    if (session.socksRoute) { session.routeClose = this.#closeRoute(session.socksRoute); delete session.socksRoute; }
     if (session.route) {
       session.routeClose = this.#closeRoute(session.route); delete session.route;
     }
@@ -646,7 +767,7 @@ export class RdpWindows {
       ...(code === "disconnected" ? {} : { error: code.startsWith("runtime-") ? runtimeError(code) : code }) };
     this.#publish();
   }
-  #closeRoute(route: RdpTemporaryRoute): Promise<void> {
+  #closeRoute(route: Pick<RdpTemporaryRoute, "close">): Promise<void> {
     // Track cleanup even after the tab/window disappears so shutdown can await it.
     const cleanup = route.close();
     this.#routeCleanup.add(cleanup);
@@ -866,6 +987,7 @@ export class RdpWindows {
   dispose(): Promise<void> {
     if (this.#disposed) return this.#cleanup ?? Promise.resolve();
     this.#disposed = true;
+    clearInterval(this.#networkTimer);
     clearInterval(this.#routeTimer); this.#routeTimer = undefined;
     this.#closeTemporaryConnections();
     for (const channel of channels) ipcMain.removeHandler(channel);

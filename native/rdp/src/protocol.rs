@@ -11,6 +11,31 @@ pub const MAX_CLIPBOARD_FILES: usize = 64;
 pub const MAX_CLIPBOARD_FILE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_PIXELS: usize = 16_000_000;
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectAddress {
+    host: LoopbackHost,
+    port: std::num::NonZeroU16,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+enum LoopbackHost {
+    #[serde(rename = "127.0.0.1")]
+    Ipv4,
+    #[serde(rename = "::1")]
+    Ipv6,
+}
+
+impl ConnectAddress {
+    pub fn socket_address(self) -> std::net::SocketAddr {
+        let ip = match self.host {
+            LoopbackHost::Ipv4 => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            LoopbackHost::Ipv6 => std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+        };
+        std::net::SocketAddr::new(ip, self.port.get())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SignInMode {
@@ -47,6 +72,7 @@ pub enum Command {
         domain: Option<String>,
         #[serde(default)]
         sign_in_mode: SignInMode,
+        connect_address: Option<ConnectAddress>,
         width: u16,
         height: u16,
         clipboard: bool,
@@ -216,6 +242,26 @@ pub fn valid_dimensions(width: u16, height: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connect_address_allows_only_numeric_loopback_and_nonzero_port() {
+        for host in ["127.0.0.1", "::1"] {
+            let address: ConnectAddress =
+                serde_json::from_value(serde_json::json!({"host":host,"port":40000})).unwrap();
+            assert!(address.socket_address().ip().is_loopback());
+            assert_eq!(address.socket_address().port(), 40000);
+        }
+        for invalid in [
+            serde_json::json!({"host":"localhost","port":3389}),
+            serde_json::json!({"host":"192.0.2.1","port":3389}),
+            serde_json::json!({"host":"127.0.0.2","port":3389}),
+            serde_json::json!({"host":"127.0.0.1","port":0}),
+            serde_json::json!({"host":"::1","port":65536}),
+            serde_json::json!({"host":"127.0.0.1","port":3389,"password":"secret"}),
+        ] {
+            assert!(serde_json::from_value::<ConnectAddress>(invalid).is_err());
+        }
+    }
 
     #[test]
     fn connect_sign_in_mode_defaults_to_nla_and_rejects_unknown_modes() {

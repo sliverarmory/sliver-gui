@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import type { MessagePortMain, WebContents } from "electron";
 import { BehaviorSubject, Subject } from "rxjs";
-import { clientpb, sliverpb, type LocalForwardState, type PortForward, type SliverEventStreamState } from "sliver-script";
+import { clientpb, sliverpb, type LocalForwardState, type PortForward, type Socks5Proxy, type SliverEventStreamState } from "sliver-script";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cloneGenerateInput, defaultGenerateInput } from "../shared/generate-defaults.js";
@@ -110,6 +110,212 @@ afterEach(async () => {
     await registry.unregisterWindow(3);
   }
   await rm(root, { recursive: true, force: true });
+});
+
+describe("RDP managed SOCKS inventory", () => {
+  async function setupSessionChoices() {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [session("rdp-pivot", "Pivot name")];
+    const proxies = new Map<string, Socks5Proxy>();
+    const createProxy = (sessionId = "rdp-pivot"): Socks5Proxy => {
+      const state: LocalForwardState = { status: "listening", activeConnections: 0, totalConnections: 0, bytesToTarget: 0, bytesFromTarget: 0 };
+      const id = `socks5-${randomUUID()}`;
+      const proxy: Socks5Proxy = { id, sessionId, bind: { host: "127.0.0.1", port: 41080 }, state,
+        state$: new BehaviorSubject(state), connection$: new Subject(), close: vi.fn(async () => { proxies.delete(id); }) };
+      proxies.set(id, proxy);
+      return proxy;
+    };
+    const start = vi.fn<SliverClientAdapter["startSocks5Proxy"]>(async (sessionId) => createProxy(sessionId));
+    const stop = vi.fn<SliverClientAdapter["stopSocks5Proxy"]>(async (id) => { await proxies.get(id)?.close(); });
+    Object.assign(client.adapter, { startSocks5Proxy: start, listSocks5Proxies: () => [...proxies.values()], stopSocks5Proxy: stop, listPortForwards: () => [] });
+    const registry = createRegistry(() => client.adapter); registry.registerWindow(1); await connectSaved(registry, 1);
+    return { client, registry, start, stop, proxies, createProxy };
+  }
+
+  it("issues stable opaque choices only for active sessions with authoritative connected inventory", async () => {
+    const { client, registry, start } = await setupSessionChoices();
+    client.sessionState.Sessions.push(clientpb.Session.create({ ...session("unnamed", "unused"), Name: "", Hostname: "Fallback host" }),
+      clientpb.Session.create({ ...session("dead", "Dead"), IsDead: true }), session("x".repeat(81), "Oversized ID"));
+    client.beaconState.Beacons = [beacon("beacon-only", "Beacon")];
+    await registry.refresh(1);
+    registry.registerWindow(2); registry.inheritConnection(1, 2);
+    const choices = registry.listRdpSocksSessions();
+    expect(choices.map(({ label }) => label).sort()).toEqual(["Fallback host", "Pivot name"]);
+    expect(choices.every(({ id }) => /^[A-Za-z0-9_-]{43}$/u.test(id))).toBe(true);
+    expect(Object.isFrozen(choices)).toBe(true); expect(Object.isFrozen(choices[0])).toBe(true);
+    expect(registry.listRdpSocksSessions()).toEqual(choices);
+    expect(choices.map(({ sessionId }) => sessionId).sort()).toEqual(["rdp-pivot", "unnamed"]);
+    expect(choices.every(({ id, sessionId }) => id !== sessionId)).toBe(true);
+    const selected = choices.find(({ label }) => label === "Pivot name")!;
+    expect(selected.hostname).toBe("Pivot name-host");
+    expect(choices.find(({ sessionId }) => sessionId === "unnamed")?.hostname).toBe("Fallback host");
+    for (const invalid of ["rdp-pivot", "x".repeat(43)]) await expect(registry.startRdpSocksProxyForSession(invalid)).rejects.toThrow(/session/u);
+    client.streamStates.next({ status: "retrying", attempt: 1 });
+    expect(registry.listRdpSocksSessions()).toEqual([]);
+    await expect(registry.startRdpSocksProxyForSession(selected.id)).rejects.toThrow(/session/u);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("creates a loopback ephemeral authenticated proxy, exposes no secrets, and reuses it", async () => {
+    const { registry, start, stop } = await setupSessionChoices();
+    const choice = registry.listRdpSocksSessions()[0]!;
+    const proxy = await registry.startRdpSocksProxyForSession(choice.id);
+    expect(start).toHaveBeenCalledExactlyOnceWith("rdp-pivot", expect.objectContaining({
+      bind: { host: "127.0.0.1", port: 0 },
+      authentication: { username: expect.stringMatching(/^[A-Za-z0-9_-]{32}$/u), password: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u) },
+    }), { timeoutSeconds: 30 });
+    expect(proxy).toMatchObject({ host: "127.0.0.1", port: 41080, authentication: "username-password", available: true, viaSessionId: choice.id });
+    expect(registry.listRdpSocksProxies()).toEqual([proxy]);
+    const network = await registry.listNetworkForwards(1, {});
+    expect(network).toMatchObject({ ok: true, value: { socks5Proxies: [{ id: proxy.id, sessionId: "rdp-pivot" }] } });
+    const credentials = start.mock.calls[0]![1].authentication!;
+    expect(JSON.stringify([choice, proxy, network, registry.snapshot(1)])).not.toContain(credentials.password);
+    expect(JSON.stringify([choice, proxy, network, registry.snapshot(1)])).not.toContain(credentials.username);
+    const lease = registry.leaseRdpSocksProxy(proxy.id);
+    expect(lease.authentication?.username.toString()).toBe(credentials.username);
+    expect(lease.authentication?.password.toString()).toBe(credentials.password);
+    lease.release(); expect(lease.authentication?.password.every((byte) => byte === 0)).toBe(true);
+    expect(lease.isActive()).toBe(true);
+    expect(await registry.startRdpSocksProxyForSession(choice.id)).toEqual(proxy);
+    expect(start).toHaveBeenCalledOnce();
+    expect(await registry.stopNetworkSocks5Proxy(1, proxy.id)).toEqual({ ok: true });
+    expect(stop).toHaveBeenCalledWith(proxy.id);
+    const replacement = await registry.startRdpSocksProxyForSession(choice.id);
+    expect(replacement.id).not.toBe(proxy.id); expect(start).toHaveBeenCalledTimes(2);
+    expect(replacement.viaSessionId).toBe(choice.id);
+  });
+
+  it("bounds and sanitizes display hostnames while allowing an absent hostname", async () => {
+    const { client, registry } = await setupSessionChoices();
+    client.sessionState.Sessions = [clientpb.Session.create({ ...session("display", "Display"), Hostname: "\u0000LAB-HOST\u0007" }),
+      clientpb.Session.create({ ...session("absent", "Absent"), Hostname: "" }),
+      clientpb.Session.create({ ...session("long", "Long"), Hostname: "a".repeat(256) })];
+    await registry.refresh(1);
+    expect(registry.listRdpSocksSessions()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionId: "display", hostname: "LAB-HOST" }),
+      expect.objectContaining({ sessionId: "absent", hostname: "" }),
+      expect.objectContaining({ sessionId: "long", hostname: "a".repeat(253) }),
+    ]));
+  });
+
+  it("keeps Via provenance after the session disappears without tagging independently managed proxies", async () => {
+    const { client, registry } = await setupSessionChoices();
+    const originalSession = client.sessionState.Sessions[0]!;
+    const choice = registry.listRdpSocksSessions()[0]!;
+    const via = await registry.startRdpSocksProxyForSession(choice.id);
+    client.sessionState.Sessions = []; await registry.refresh(1);
+    expect(registry.listRdpSocksSessions()).toEqual([]);
+    expect(registry.listRdpSocksProxies()).toEqual([expect.objectContaining({ id: via.id, viaSessionId: choice.id })]);
+    await expect(registry.startRdpSocksProxyForSession(choice.id)).rejects.toThrow(/session/u);
+    client.sessionState.Sessions = [originalSession]; await registry.refresh(1);
+    const nextChoice = registry.listRdpSocksSessions()[0]!;
+    expect(nextChoice.id).not.toBe(choice.id);
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === originalSession.ID)!;
+    const managed = await registry.startNetworkSocks5Proxy(1, { session: target, bind: { host: "127.0.0.1", port: 0 },
+      connectTimeoutSeconds: 30, closeTimeoutSeconds: 5, maxConnections: 16, maxBufferedBytesPerConnection: 262144 });
+    expect(managed.ok).toBe(true); if (!managed.ok) throw new Error(managed.error);
+    const listed = registry.listRdpSocksProxies();
+    expect(listed.find(({ id }) => id === via.id)?.viaSessionId).toBe(choice.id);
+    expect(listed.find(({ id }) => id === managed.value.id)).not.toHaveProperty("viaSessionId");
+    expect(await registry.stopNetworkSocks5Proxy(1, via.id)).toEqual({ ok: true });
+    expect(registry.listRdpSocksProxies()).toHaveLength(1);
+    const nextVia = await registry.startRdpSocksProxyForSession(nextChoice.id);
+    expect(nextVia.viaSessionId).toBe(nextChoice.id); expect(nextVia.id).not.toBe(via.id);
+    expect(registry.listRdpSocksProxies().find(({ id }) => id === managed.value.id)).not.toHaveProperty("viaSessionId");
+  });
+
+  it("requires authoritative session inventory and permits retry after failed creation", async () => {
+    const { client, registry, start } = await setupSessionChoices();
+    const choice = registry.listRdpSocksSessions()[0]!;
+    client.getSessions.mockRejectedValueOnce(new Error("Session inventory unavailable"));
+    await registry.refresh(1);
+    expect(registry.listRdpSocksSessions()).toEqual([]);
+    await expect(registry.startRdpSocksProxyForSession(choice.id)).rejects.toThrow(/inventory/u);
+    expect(start).not.toHaveBeenCalled();
+    await registry.refresh(1);
+    expect(registry.listRdpSocksSessions()).toEqual([choice]);
+    start.mockRejectedValueOnce(new Error("Proxy start failed"));
+    const outcomes = await Promise.allSettled([registry.startRdpSocksProxyForSession(choice.id), registry.startRdpSocksProxyForSession(choice.id)]);
+    expect(outcomes.map(({ status }) => status)).toEqual(["rejected", "rejected"]);
+    expect(start).toHaveBeenCalledOnce();
+    expect(await registry.startRdpSocksProxyForSession(choice.id)).toMatchObject({ available: true });
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
+  it("deduplicates simultaneous creation and preserves choices through unrelated catalog changes", async () => {
+    const { client, registry, start, createProxy } = await setupSessionChoices();
+    let finish!: () => void;
+    start.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { finish = resolve; }); return createProxy(); });
+    const choice = registry.listRdpSocksSessions()[0]!;
+    const first = registry.startRdpSocksProxyForSession(choice.id), second = registry.startRdpSocksProxyForSession(choice.id);
+    expect(start).toHaveBeenCalledOnce();
+    client.sessionState.Sessions.push(session("unrelated", "Other")); await registry.refresh(1);
+    expect(registry.listRdpSocksSessions()).toContainEqual(choice);
+    finish();
+    expect(await first).toEqual(await second);
+    expect(start).toHaveBeenCalledOnce();
+  });
+
+  it("rejects replaced targets and tokens from a previous backend instance before starting", async () => {
+    const { client, registry, start } = await setupSessionChoices();
+    const old = registry.listRdpSocksSessions()[0]!;
+    client.sessionState.Sessions[0]!.UUID = "different-host"; await registry.refresh(1);
+    await expect(registry.startRdpSocksProxyForSession(old.id)).rejects.toThrow(/session/u);
+    const replacement = registry.listRdpSocksSessions()[0]!;
+    expect(replacement.id).not.toBe(old.id);
+    await registry.disconnect(1); await connectSaved(registry, 1);
+    await expect(registry.startRdpSocksProxyForSession(replacement.id)).rejects.toThrow(/session/u);
+    expect(registry.listRdpSocksSessions()[0]!.id).not.toBe(replacement.id);
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it.each(["removed", "replaced"] as const)("closes its own late proxy when the target is %s", async (change) => {
+    const { client, registry, start, stop, proxies, createProxy } = await setupSessionChoices();
+    let finish!: () => void;
+    start.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { finish = resolve; }); return createProxy(); });
+    const pending = registry.startRdpSocksProxyForSession(registry.listRdpSocksSessions()[0]!.id);
+    const rejection = expect(pending).rejects.toThrow(/session/u);
+    if (change === "removed") client.sessionState.Sessions = [];
+    else client.sessionState.Sessions[0]!.UUID = "changed-during-start";
+    await registry.refresh(1); finish(); await rejection;
+    expect(stop).toHaveBeenCalledOnce(); expect(proxies.size).toBe(0);
+    expect(registry.listRdpSocksProxies()).toEqual([]);
+  });
+
+  it("closes a proxy completing after its captured backend disconnects", async () => {
+    const { registry, start, proxies, createProxy } = await setupSessionChoices();
+    let finish!: () => void, late: Socks5Proxy | undefined;
+    start.mockImplementationOnce(async () => { await new Promise<void>((resolve) => { finish = resolve; }); late = createProxy(); return late; });
+    const pending = registry.startRdpSocksProxyForSession(registry.listRdpSocksSessions()[0]!.id);
+    const rejection = expect(pending).rejects.toThrow(/shutting down/u);
+    await registry.disconnect(1); finish(); await rejection;
+    expect(late?.close).toHaveBeenCalledOnce(); expect(proxies.size).toBe(0);
+    expect(registry.listRdpSocksSessions()).toEqual([]);
+  });
+
+  it("leases only the selected backend proxy and invalidates it when that backend closes", async () => {
+    const client = new FakeSliverClient();
+    client.sessionState.Sessions = [clientpb.Session.create({ ...session("rdp-windows", "desktop"), OS: "windows" })];
+    const state: LocalForwardState = { status: "listening", activeConnections: 0, totalConnections: 0, bytesToTarget: 0, bytesFromTarget: 0 };
+    const state$ = new BehaviorSubject(state);
+    const proxy: Socks5Proxy = { id: "socks5-11111111-1111-4111-8111-111111111111", sessionId: "rdp-windows", bind: { host: "0.0.0.0", port: 41080 }, state, state$, connection$: new Subject(), close: async () => undefined };
+    let started = false;
+    Object.assign(client.adapter, { startSocks5Proxy: vi.fn(async () => { started = true; return proxy; }), listSocks5Proxies: () => started ? [proxy] : [] });
+    const registry = createRegistry(() => client.adapter); registry.registerWindow(1); await connectSaved(registry, 1);
+    expect(registry.listRdpSocksProxies()).toEqual([]);
+    expect(() => registry.leaseRdpSocksProxy(proxy.id)).toThrow();
+    const target = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === proxy.sessionId)!;
+    expect(await registry.startNetworkSocks5Proxy(1, { session: target, bind: { host: "0.0.0.0", port: 41080 }, authentication: { username: "proxy-user", password: "private-proxy-password" }, connectTimeoutSeconds: 30, closeTimeoutSeconds: 5, maxConnections: 16, maxBufferedBytesPerConnection: 262144 })).toMatchObject({ ok: true });
+    expect(registry.listRdpSocksProxies()).toMatchObject([{ id: proxy.id, available: true, authentication: "username-password" }]);
+    expect(registry.listRdpSocksProxies()[0]).not.toHaveProperty("viaSessionId");
+    expect(JSON.stringify(registry.listRdpSocksProxies())).not.toContain("private-proxy-password");
+    const lease = registry.leaseRdpSocksProxy(proxy.id);
+    expect(lease.host).toBe("127.0.0.1"); expect(lease.isActive()).toBe(true);
+    await registry.unregisterWindow(1);
+    expect(lease.isActive()).toBe(false); expect(lease.signal.aborted).toBe(true);
+    expect(lease.authentication?.password.every((byte) => byte === 0)).toBe(true);
+    expect(registry.listRdpSocksProxies()).toEqual([]);
+  });
 });
 
 describe("temporary RDP forwarding", () => {

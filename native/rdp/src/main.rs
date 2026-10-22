@@ -150,7 +150,7 @@ async fn run(
                 let Some(command)=command else{break;};
                 let command=match command{Ok(command)=>command,Err(code)=>{emit(&output,json!({"type":"error","code":code})).await;break;}};
                 match command {
-                    Command::Connect{host,port,username,mut password,domain,sign_in_mode,width,height,clipboard,pinned_fingerprint,keyboard_layout}=>{
+                    Command::Connect{host,port,username,mut password,domain,sign_in_mode,connect_address,width,height,clipboard,pinned_fingerprint,keyboard_layout}=>{
                         if input.is_some()||!valid_endpoint(&host,port)||!sign_in_mode.valid_credentials(&username,&password,domain.as_deref())
                             ||!protocol::valid_dimensions(width,height)
                             ||pinned_fingerprint.as_ref().is_some_and(|pin|pin.len()!=64||!pin.bytes().all(|b|b.is_ascii_hexdigit())) {
@@ -170,6 +170,7 @@ async fn run(
                             .with_graphics_pipeline(true)
                             .with_clipboard(if clipboard{ClipboardType::Enable}else{ClipboardType::Disable});
                         if let Some(domain)=domain{builder=builder.with_domain(domain);}
+                        if let Some(address)=connect_address{builder=builder.with_tcp_connect_address(address.socket_address());}
                         let config=match builder.build(){Ok(config)=>config,Err(_)=>{emit(&output,json!({"type":"state","state":"failed","code":"invalid-config"})).await;break;}};
                         let (events,receiver)=output_channel(4);
                         let mut client=RdpClient::new(config,events).with_desktop_updates().with_desktop_limits(8192,8192,protocol::MAX_PIXELS).with_display_resize_reconnect(false);
@@ -566,7 +567,7 @@ mod tests {
     };
     use ironrdp_pdu::x224::X224;
 
-    fn sign_in_config(mode: SignInMode) -> ironrdp_client::config::Config {
+    fn sign_in_builder(mode: SignInMode) -> ConfigBuilder {
         let (username, password) = if mode == SignInMode::Nla {
             ("operator", "test-password")
         } else {
@@ -580,8 +581,59 @@ mod tests {
             .with_client_name("Sliver GUI")
             .with_client_dir("C:\\Windows\\System32\\mstscax.dll")
             .with_platform(MajorPlatformType::UNSPECIFIED)
+    }
+
+    fn sign_in_config(mode: SignInMode) -> ironrdp_client::config::Config {
+        sign_in_builder(mode).build().unwrap()
+    }
+
+    #[test]
+    fn tcp_dial_override_preserves_destination_and_certificate_policy() {
+        for mode in [SignInMode::Nla, SignInMode::RemoteScreen] {
+            let address = "127.0.0.1:40000".parse().unwrap();
+            let config = sign_in_builder(mode)
+                .with_tcp_connect_address(address)
+                .build()
+                .unwrap();
+            assert_eq!(config.tcp_connect_address(), Some(address));
+            assert_eq!(config.destination().name(), "host.example");
+            assert_eq!(config.destination().port(), 3389);
+            assert!(matches!(
+                config.certificate_validation(),
+                CertificateValidation::Strict
+            ));
+            assert_eq!(config.connector().enable_credssp, mode == SignInMode::Nla);
+        }
+        assert_eq!(sign_in_config(SignInMode::Nla).tcp_connect_address(), None);
+    }
+
+    #[tokio::test]
+    async fn tcp_dial_override_failure_never_retries_the_logical_destination() {
+        let original = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        original.set_nonblocking(true).unwrap();
+        let unavailable = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = unavailable.local_addr().unwrap();
+        drop(unavailable);
+        let config = sign_in_builder(SignInMode::Nla)
+            .with_destination(Destination::from_parts(
+                "127.0.0.1",
+                original.local_addr().unwrap().port(),
+            ))
+            .with_tcp_connect_address(address)
             .build()
-            .unwrap()
+            .unwrap();
+        let (events, mut receiver) = output_channel(4);
+        tokio::time::timeout(Duration::from_secs(3), RdpClient::new(config, events).run())
+            .await
+            .unwrap();
+        assert!(matches!(
+            receiver.recv().await,
+            Some(RdpOutputEvent::ConnectionFailure(_))
+        ));
+        assert_eq!(
+            original.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     fn begin_negotiation(mode: SignInMode) -> (ClientConnector, ConnectionRequest) {

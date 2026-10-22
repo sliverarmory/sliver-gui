@@ -9,6 +9,7 @@ import {
 } from "./buildRdpRuntime.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 import { verifyWindowsSigningChanges } from "./verifyWindowsSigningChanges.mjs";
+import { RDP_STAGED_SOURCE, verifyRdpOverlayPatch, verifyStagedRdpSource } from "./rdpSourceOverlay.mjs";
 
 /** Read native headers without trusting the provenance's architecture claims. */
 export function rdpBinaryArchitectures(bytes) {
@@ -101,6 +102,10 @@ export async function verifyPreparedRdpRuntime({ projectDirectory = ROOT_DIRECTO
   architecture = process.arch, hostOnly = false, run = runRdpCommand } = {}) {
   const sourceBytes = await readFile(join(projectDirectory, RDP_SOURCE_MANIFEST));
   const manifest = validateRdpSourceManifest(JSON.parse(sourceBytes));
+  if (manifest.source.localOverlay) {
+    await verifyRdpOverlayPatch(projectDirectory, manifest);
+    await verifyStagedRdpSource(join(projectDirectory, RDP_STAGED_SOURCE), manifest, run);
+  }
   const directory = join(projectDirectory, RDP_OUTPUT_DIRECTORY);
   const recordBytes = await readFile(join(directory, "provenance.json"));
   if (!recordBytes.equals(await readFile(join(projectDirectory, RDP_PACKAGED_RECORD)))) {

@@ -43,6 +43,59 @@ field. The default mode requires a compatible password-based NLA account and ser
 policy. Legacy Standard RDP Security, Kerberos/SSO and RD Gateway are not offered.
 Certificate review expires after 60 seconds; cancel or review again after reconnect.
 
+## Networking
+
+Expand **Networking**, below **Clipboard**, in a connection or profile to choose
+**Direct**, **Manual SOCKS5**, **Via <session name> · <hostname>**, or a running SOCKS5 proxy
+created in the Network manager. The dropdown shows the full session ID beneath each **Via** option
+to distinguish sessions with the same name. Selecting **Via** creates an authenticated SOCKS5
+listener on `127.0.0.1` with an OS-assigned ephemeral port and selects it as the
+RDP route. The RDP computer remains the destination reached through that session.
+Only active interactive sessions are offered. Selecting the same session again
+reuses its active automatically created proxy. The selected field shows the server,
+hostname, and listener address while the menu keeps the original **Via** entry checked;
+automatically created proxies do not add separate menu options. These proxies remain visible in
+the Network manager for reuse or stopping, including after the RDP form closes.
+If a session becomes unavailable during setup, select another route before
+connecting; the app never silently changes to Direct.
+
+For a manual proxy, enter its hostname or IP address and port (1080 by default).
+Add a proxy username and password if the proxy requires authentication. Profiles
+save the address, port, and username; the proxy password must be entered again
+when connecting or reconnecting. The Windows account's **Remember password**
+setting does not save the proxy password.
+
+**Open Network manager** opens the SOCKS5 tab for the most recently focused
+Sliver workspace while preserving the RDP form. Connect that workspace to a
+Sliver server first, create a proxy there, then return to RDP and select its
+listener. Managed proxy credentials stay in main and are reused automatically.
+Manual proxies work independently of a Sliver connection.
+
+The destination hostname is resolved through the proxy. TLS certificate checks
+and Windows authentication still identify the destination computer. A failed
+proxy connection never falls back to Direct. Managed profiles remember the
+proxy's identity: stopping it or closing its backend stops RDP, and restarting
+it creates a new identity that must be selected again. Manual profiles identify
+the proxy by address, port, and username. Changing routes clears remembered
+Windows credentials and previews; certificate pins are scoped to the route and
+destination. Temporary Overview connections keep their existing Sliver session
+route.
+
+## Import .rdp files
+
+Use **Import .rdp**, drag local `.rdp` files onto the saved profiles or
+**Saved Connections** picker, or open a `.rdp` file with the installed app.
+Imports create saved profiles for review and never start a connection. Select up
+to 32 files at once, each at most 256 KiB. UTF-8 and Windows UTF-16LE files are
+supported, including computer/port, account/domain, resolution, clipboard and NLA
+settings. A missing username is requested when connecting.
+
+Passwords and certificate-bypass settings are not imported. Warnings identify
+ignored settings; unsupported RD Gateway, RemoteApp, broker routing, and security
+requirements produce per-file errors instead of changing the intended route.
+Imported profiles use Direct; select a managed or manual SOCKS5 proxy under
+Networking if needed. File associations take effect when installing the packaged application.
+
 ## Connect from Overview
 
 Right-click a live Windows session in **Overview** and select **RDP**. The app
@@ -127,7 +180,7 @@ trash button also deletes the connection after confirmation.
 For saved connections, the viewer saves the first complete frame, refreshes the
 preview every 15 seconds when the desktop changes, and saves the latest complete
 frame when disconnecting or closing its tab. Previews survive closing the app.
-Changing the computer, port, username, domain or sign-in mode clears
+Changing the computer, port, username, domain, networking route or sign-in mode clears
 the old preview; deleting a profile removes its preview and remembered credential.
 Endpoint certificate pins are independent of profiles; deleting a profile does
 not erase its pin. A pin-management UI is not yet available. There is no automatic
@@ -175,7 +228,7 @@ to Windows Explorer and back, including byte hashes and progress toasts; see
 [file-transfer acceptance](rdp-file-transfer-acceptance.md). Windows and Linux
 local clients and pasting received files through Finder's UI remain unverified.
 Audio/microphone, multiple monitors, RemoteApp,
-device/drive/printer redirection, smart cards, UDP, `.rdp` import and advanced multimedia codecs are
+device/drive/printer redirection, smart cards, UDP and advanced multimedia codecs are
 outside the current feature set. Overview connections use a main-owned loopback
 TCP forward; the native helper connects to that listener. Arbitrary supplied
 streams and custom native transports are not implemented.
@@ -283,6 +336,107 @@ explicit rejection without sending credentials. The harness does not change
 server policy. Restore any authorized temporary lab-policy changes separately.
 The existing NLA test accepts `SLIVER_RDP_E2E_ARTIFACT_PREFIX` for separate evidence
 per host. See [GOAD sign-in acceptance](rdp-sign-in-acceptance.md) for measured results.
+
+### SOCKS5 interoperability
+
+The [SOCKS5 live harness](../src/e2e/rdp-socks-live.e2e.ts) launches the production
+`dist/main/index.js` application and native helper with temporary HOME, client and
+user-data directories. It connects a private operator profile, verifies the exact
+live Sliver session ID and hostname, and creates a test-owned managed SOCKS5 proxy
+through the Networking bridge. The session may be a separate pivot that can reach
+the disposable Windows RDP destination.
+
+Extend the private NLA JSON configuration above with these fields:
+
+```json
+{
+  "operatorConfigPath": "/absolute/private/disposable-operator.cfg",
+  "sessionId": "11111111-1111-4111-8111-111111111111",
+  "sessionHostname": "disposable-pivot",
+  "rdpHostname": "disposable-windows",
+  "proxyAuthentication": true,
+  "routeMode": "managed"
+}
+```
+
+Both configuration files must be private regular files outside the repository.
+`rdpHostname` is optional evidence metadata; `host` remains the actual RDP
+destination. `proxyAuthentication` defaults to `true` and uses generated test-only
+credentials; set it to `false` to exercise a proxy without authentication.
+`routeMode` defaults to `"managed"`; `"manual"` enters the test-owned listener
+address and optional credentials through the manual RDP form instead.
+`"session"` selects **Via <session name>** in the form, allowing the application
+to create the proxy and its private credentials. The harness verifies the
+resulting listener belongs to the exact authorized session before connecting.
+Keep `clipboard: true`, `persistence: "none"` and the independently verified
+certificate fingerprint. Do not supply an existing proxy ID: the test owns the
+proxy it creates and stops.
+
+```sh
+npm run build:rdp:host
+SLIVER_RDP_SOCKS_E2E_CONFIG_FILE=/absolute/private/rdp-socks-test.json \
+SLIVER_RDP_SOCKS_E2E_ARTIFACT_PREFIX=rdp-socks-disposable-auth \
+npm run test:e2e:rdp-socks-live
+```
+
+Without the configuration variable, the test skips. Run one at a time in an
+interactive desktop session and keep its window focused: it uses the system
+clipboard and the disposable Windows user's desktop. It does not change NLA or
+other server policies.
+
+The test selects and saves the configured route in the RDP dialog, checks the exact
+certificate and its original destination/route pin, verifies fresh proxy traffic
+in both directions during interaction, renders the desktop, checks keyboard text and a Unicode
+clipboard round-trip, and reloads the renderer without reconnecting. It then stops
+the proxy, checks that RDP fails without a direct reconnect, and verifies that the
+stale saved route is rejected by both the dialog and main process.
+
+Screenshots and sanitized results use the chosen prefix under `artifacts/e2e/`.
+A success result is written only after the test proxy and profile are removed,
+the local clipboard is restored, Electron closes, and the temporary directories
+are removed. The result records the original destination, proxy authentication
+mode and traffic counters, certificate identity, and native helper provenance.
+
+On 2026-10-21, all five GOAD destinations passed this production-app scenario on
+macOS arm64 with Electron 44.5.1, using Kingslanding as the Sliver pivot:
+
+| RDP destination | SOCKS5 authentication | Result |
+| --- | --- | --- |
+| Kingslanding (hostname resolved through proxy) | Username/password | PASS |
+| Winterfell | None | PASS |
+| Meereen | Username/password | PASS |
+| Castelblack | Username/password | PASS |
+| Braavos | None | PASS |
+
+The [aggregate evidence](../artifacts/e2e/rdp-socks-goad-acceptance.json) records
+each destination's independently verified certificate, native helper identity,
+fresh bidirectional traffic during keyboard/clipboard interaction, all behavior
+checks, and completed cleanup. Per-host logs and desktop screenshots are beside
+it. The test allows Windows time to finish attaching the user's desktop after
+the RDP protocol becomes active. No server policies were changed, and the private
+credential fixtures were removed. This verifies the macOS client; local Windows
+and Linux clients remain untested for this SOCKS5 scenario.
+Harness availability alone is not evidence of a successful live run.
+
+Manual SOCKS5 also passed on the macOS arm64 client on 2026-10-21: Kingslanding
+with username/password proxy authentication and hostname resolution through the
+proxy, and Braavos without proxy authentication. Both runs entered the listener
+address in the form, saved the manual profile, completed NLA sign-in, keyboard
+input and Unicode clipboard transfer, and reattached the viewer after a reload.
+Stopping the proxy failed each desktop; both the saved-profile UI and main
+process rejected a later attempt without a direct fallback. The
+[manual-route evidence](../artifacts/e2e/rdp-manual-socks-goad-acceptance.json)
+includes fresh bidirectional traffic and completed cleanup. Private fixtures
+were removed. These runs do not establish manual proxy interoperability for
+Windows or Linux clients.
+
+The **Via <session name>** flow passed on the same macOS arm64 client on
+2026-10-21: selecting Kingslanding created an authenticated loopback listener on
+an ephemeral port, and the RDP client connected to Braavos through that proxy.
+The [session-route evidence](../artifacts/e2e/rdp-via-session-braavos-result.json)
+records the exact pivot session, generated listener, desktop rendering, keyboard
+and Unicode clipboard interaction, viewer reload, and failure without a direct
+fallback after the proxy stopped. Test resources were cleaned up afterward.
 
 For file interoperability, the SSH alias must reach the same disposable Windows
 host, with public-key access and permission to create a temporary test directory

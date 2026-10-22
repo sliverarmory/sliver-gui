@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { EventEmitter } from "node:events";
 import { X509Certificate } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IpcMainInvokeEvent } from "electron";
@@ -13,11 +13,14 @@ import { RdpStore } from "./rdp-store.js";
 import { RdpWindows } from "./rdp-windows.js";
 import type { RdpRuntimeEvent } from "./rdp-runtime.js";
 import type { RdpTemporaryRoute } from "./rdp-temporary-route.js";
+import type { RdpSocksProxyLease } from "./rdp-socks-transport.js";
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 import * as secureFile from "./secure-file.js";
 import type { RdpLocalClipboardFiles } from "./rdp-file-clipboard.js";
 
 const mocks = vi.hoisted(() => ({
+  dialog: { showOpenDialog: vi.fn() },
+  leaseProxy: vi.fn(), socksTransport: vi.fn(), openNetworkManager: vi.fn(), startSessionProxy: vi.fn(),
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => Promise<unknown>>(),
   listeners: new Map<string, (event: unknown, raw: unknown) => void>(),
   windows: [] as MockWindow[], runtimes: [] as MockRuntime[],
@@ -26,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   fileClipboard: { read: vi.fn<() => Promise<RdpLocalClipboardFiles | undefined>>(async () => undefined),
     write: vi.fn(async () => undefined), publish: vi.fn(async () => "download-signature"), dispose: vi.fn(async (): Promise<void> => undefined) },
 }));
+vi.mock("./rdp-socks-transport.js", () => ({ createRdpSocksTransport: mocks.socksTransport }));
 vi.mock("./rdp-file-clipboard.js", () => ({ readRdpClipboardFiles: mocks.fileClipboard.read,
   createRdpClipboardStaging: vi.fn(async () => ({ write: mocks.fileClipboard.write, publish: mocks.fileClipboard.publish, dispose: mocks.fileClipboard.dispose })) }));
 interface MockWindow extends EventEmitter {
@@ -36,6 +40,7 @@ interface MockRuntime { send: ReturnType<typeof vi.fn>; stop: ReturnType<typeof 
 vi.mock("electron", async () => {
   const { EventEmitter } = await import("node:events");
   return {
+    dialog: mocks.dialog,
     BrowserWindow: class extends EventEmitter {
       focused = true; visible = true; destroyed = false;
       webContents = Object.assign(new EventEmitter(), { id: 1, mainFrame: { processId: 10, frameToken: "main", url: "", isDestroyed: () => false },
@@ -94,6 +99,7 @@ async function connect(): Promise<RdpTab> {
 }
 beforeEach(async () => {
   mocks.windows.length = 0; mocks.runtimes.length = 0; vi.clearAllMocks();
+  mocks.startSessionProxy.mockReset();
   applicationSettings = DEFAULT_APPLICATION_SETTINGS_STATE;
   mocks.clipboard.readText.mockResolvedValue("local text");
   mocks.clipboard.writeText.mockResolvedValue(undefined);
@@ -109,12 +115,178 @@ beforeEach(async () => {
   updateApplicationSettings = vi.fn(async (input) => ({ ok: true, value: { ...DEFAULT_APPLICATION_SETTINGS_STATE, ...input.settings, revision: input.expectedRevision + 1 } }));
   store = new RdpStore(join(temporary, "rdp.json"), { isEncryptionAvailable: () => false, getSelectedStorageBackend: () => "basic_text", encryptString: () => { throw new Error("unavailable"); }, decryptString: () => { throw new Error("unavailable"); } });
   manager = new RdpWindows({ rendererUrl: "sliver://app/index.html?surface=rdp", preloadPath: "/trusted/rdp.cjs", store, resolveRuntime,
+    leaseSocksProxy: mocks.leaseProxy, openNetworkManager: mocks.openNetworkManager, startSessionProxy: mocks.startSessionProxy,
     getApplicationSettings: () => applicationSettings, updateApplicationSettings, prepareWindow: () => undefined });
   await manager.open();
 });
 afterEach(async () => { await manager.dispose(); vi.useRealTimers(); vi.restoreAllMocks(); await rm(temporary, { recursive: true, force: true }); });
 
 describe("RDP main authority", () => {
+  it("creates session proxies only from authorized opaque selections and serializes setup", async () => {
+    const selection = "a".repeat(43);
+    const proxy = { id: "socks5-11111111-1111-4111-8111-111111111111", label: "Via lab", host: "127.0.0.1", port: 45123, authentication: "username-password", available: true };
+    for (const args of [[], ["raw-session-id"], [selection, "extra"], [{ id: selection }]]) {
+      expect(await invoke(RDP_IPC.startSessionProxy, ...args)).toMatchObject({ ok: false });
+    }
+    const forged = { ...sender(), senderFrame: { ...sender().senderFrame, frameToken: "other-frame" } };
+    expect(await mocks.handlers.get(RDP_IPC.startSessionProxy)!(forged as IpcMainInvokeEvent, selection)).toMatchObject({ ok: false });
+    expect(mocks.startSessionProxy).not.toHaveBeenCalled();
+    let resolve!: (value: typeof proxy) => void;
+    mocks.startSessionProxy.mockImplementationOnce(() => new Promise((done) => { resolve = done; }));
+    const pending = invoke(RDP_IPC.startSessionProxy, selection);
+    expect(await invoke(RDP_IPC.startSessionProxy, selection)).toMatchObject({ ok: false, error: expect.stringContaining("already") });
+    resolve(proxy);
+    expect(await pending).toEqual({ ok: true, value: proxy });
+    expect(mocks.startSessionProxy).toHaveBeenCalledExactlyOnceWith(selection);
+    mocks.startSessionProxy.mockRejectedValueOnce(new Error("The session is no longer available"));
+    expect(await invoke(RDP_IPC.startSessionProxy, selection)).toMatchObject({ ok: false, error: expect.stringContaining("no longer") });
+    mocks.startSessionProxy.mockResolvedValueOnce(proxy);
+    expect(await invoke(RDP_IPC.startSessionProxy, selection)).toEqual({ ok: true, value: proxy });
+    expect(mocks.runtimes).toHaveLength(0);
+  });
+  it("opens Networking only for the authorized renderer with no arguments", async () => {
+    expect(await invoke(RDP_IPC.openNetworkManager)).toEqual({ ok: true });
+    expect(mocks.openNetworkManager).toHaveBeenCalledOnce();
+    expect((await invoke(RDP_IPC.openNetworkManager, { backendId: "untrusted" })).ok).toBe(false);
+    const forged = { ...sender(), senderFrame: { ...sender().senderFrame, frameToken: "other-frame" } };
+    expect(await mocks.handlers.get(RDP_IPC.openNetworkManager)!(forged as IpcMainInvokeEvent)).toMatchObject({ ok: false });
+    expect(mocks.openNetworkManager).toHaveBeenCalledOnce();
+  });
+  it("uses manual SOCKS credentials for one attempt without publishing or persisting them", async () => {
+    const networking = { kind: "socks5-manual" as const, host: "proxy.example.test", port: 1080, username: "proxy-user" };
+    const profile = await store.saveProfile({ ...connection, networking, scaleMode: "fit" });
+    let received!: RdpSocksProxyLease;
+    const route = { host: "127.0.0.1", port: 45124, isActive: () => true, close: vi.fn(async () => undefined) };
+    mocks.socksTransport.mockImplementationOnce(async (lease: RdpSocksProxyLease) => {
+      received = lease;
+      expect(lease.host).toBe(networking.host); expect(lease.port).toBe(1080);
+      expect(lease.authentication?.username.toString()).toBe("proxy-user");
+      expect(lease.authentication?.password.toString()).toBe("attempt-only-secret");
+      return route;
+    });
+    const result = await invoke(RDP_IPC.connect, { ...connection, networking, profileId: profile.id, proxyPassword: "attempt-only-secret" });
+    expect(result.ok).toBe(true); expect(mocks.leaseProxy).not.toHaveBeenCalled();
+    expect(received.authentication?.username.every((value) => value === 0)).toBe(true);
+    expect(received.authentication?.password.every((value) => value === 0)).toBe(true);
+    expect(received.isActive()).toBe(true);
+    expect(JSON.stringify(manager.state())).not.toContain("attempt-only-secret");
+    expect(await readFile(join(temporary, "rdp.json"), "utf8")).not.toContain("attempt-only-secret");
+    mocks.runtimes[0]!.receive({ type: "ready", protocol: 1 });
+    const command = mocks.runtimes[0]!.send.mock.calls[0]![0];
+    expect(command).toMatchObject({ host: connection.host, port: 3389, connectAddress: { host: "127.0.0.1", port: 45124 } });
+    expect(command).not.toHaveProperty("networking"); expect(command).not.toHaveProperty("proxyPassword");
+    expect(JSON.stringify(command)).not.toContain("proxy-user");
+    const tab = result.value as RdpTab;
+    await invoke(RDP_IPC.disconnect, tab.id);
+    expect(received.signal.aborted).toBe(true); expect(received.isActive()).toBe(false);
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id })).error).toMatch(/proxy password/);
+    expect(manager.state().tabs[0]!.attempt).toBe(1);
+    mocks.socksTransport.mockResolvedValueOnce(route);
+    expect((await invoke(RDP_IPC.reconnect, { tabId: tab.id, proxyPassword: "new-attempt-secret" })).ok).toBe(true);
+    expect(manager.state().tabs[0]!.attempt).toBe(2);
+  });
+  it("allows no-auth manual SOCKS and rejects unexpected credentials before opening a socket", async () => {
+    const networking = { kind: "socks5-manual", host: "::1", port: 1080 };
+    expect((await invoke(RDP_IPC.connect, { ...connection, networking, proxyPassword: "unexpected" })).ok).toBe(false);
+    expect(mocks.socksTransport).not.toHaveBeenCalled();
+    mocks.socksTransport.mockImplementationOnce(async (lease: RdpSocksProxyLease) => {
+      expect(lease.authentication).toBeUndefined(); expect(lease.host).toBe("::1");
+      return { host: "127.0.0.1", port: 45125, isActive: () => true, close: async () => undefined };
+    });
+    expect((await invoke(RDP_IPC.connect, { ...connection, networking })).ok).toBe(true);
+  });
+  it("keeps manual proxy authentication separate from remote-screen Windows credentials", async () => {
+    const lookup = vi.spyOn(store, "credential"), save = vi.spyOn(store, "saveCredential");
+    mocks.socksTransport.mockImplementationOnce(async (lease: RdpSocksProxyLease) => {
+      expect(lease.authentication?.password.toString()).toBe("proxy-auth-only");
+      return { host: "127.0.0.1", port: 45126, isActive: () => true, close: async () => undefined };
+    });
+    const { password: _password, ...base } = connection;
+    const result = await invoke(RDP_IPC.connect, { ...base, username: "", domain: "", signInMode: "remote-screen", persistence: "none",
+      networking: { kind: "socks5-manual", host: "proxy.test", port: 1080, username: "proxy-user" }, proxyPassword: "proxy-auth-only" });
+    expect(result.ok).toBe(true); expect(result.value).not.toHaveProperty("proxyPassword");
+    mocks.runtimes[0]!.receive({ type: "ready", protocol: 1 });
+    const command = mocks.runtimes[0]!.send.mock.calls[0]![0];
+    expect(command).toMatchObject({ signInMode: "remote-screen", username: "", domain: "", password: "" });
+    expect(command).not.toHaveProperty("proxyPassword"); expect(command).not.toHaveProperty("networking");
+    expect(lookup).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+    expect(JSON.stringify(manager.state())).not.toContain("proxy-auth-only");
+  });
+  it("aborts a canceled manual proxy preparation, wipes its credentials and closes the late transport", async () => {
+    let received!: RdpSocksProxyLease, finish!: (value: unknown) => void;
+    const route = { host: "127.0.0.1", port: 45127, isActive: () => true, close: vi.fn(async () => undefined) };
+    mocks.socksTransport.mockImplementationOnce((lease: RdpSocksProxyLease) => { received = lease; return new Promise((resolve) => { finish = resolve; }); });
+    const connecting = invoke(RDP_IPC.connect, { ...connection,
+      networking: { kind: "socks5-manual", host: "proxy.test", port: 1080, username: "proxy-user" }, proxyPassword: "canceled-secret" });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await invoke(RDP_IPC.closeTab, manager.state().tabs[0]!.id);
+    expect(received.signal.aborted).toBe(true); expect(received.isActive()).toBe(false);
+    finish(route); expect((await connecting).ok).toBe(false);
+    expect(received.authentication?.password.every((value) => value === 0)).toBe(true);
+    expect(route.close).toHaveBeenCalledOnce(); expect(mocks.runtimes).toHaveLength(0);
+  });
+  it("wipes rejected manual credentials and never falls back to a direct runtime", async () => {
+    let received!: RdpSocksProxyLease;
+    mocks.socksTransport.mockImplementationOnce(async (lease: RdpSocksProxyLease) => { received = lease; throw new Error("The SOCKS proxy rejected authentication."); });
+    const result = await invoke(RDP_IPC.connect, { ...connection, networking: { kind: "socks5-manual", host: "proxy.test", port: 1080, username: "proxy-user" }, proxyPassword: "not-retained" });
+    expect(result).toMatchObject({ ok: false, error: "The SOCKS proxy rejected authentication." });
+    expect(received.authentication?.password.every((value) => value === 0)).toBe(true);
+    expect(received.signal.aborted).toBe(true);
+    expect(mocks.runtimes).toHaveLength(0); expect(manager.state().tabs).toHaveLength(0);
+  });
+  it("imports selected and dropped .rdp files as profiles without connecting", async () => {
+    const file = join(temporary, "desktop.rdp"); await writeFile(file, "full address:s:import.test\r\n");
+    mocks.dialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [file] });
+    expect(await invoke(RDP_IPC.importProfiles)).toMatchObject({ ok: true, value: { canceled: false, items: [{ profile: { host: "import.test", username: "" } }] } });
+    expect(manager.state().profiles).toHaveLength(1);
+    expect(await invoke(RDP_IPC.importDroppedProfiles, [file])).toMatchObject({ ok: true });
+    expect(manager.state().profiles).toHaveLength(2);
+    expect(manager.state().tabs).toHaveLength(0); expect(resolveRuntime).not.toHaveBeenCalled();
+    mocks.dialog.showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] });
+    expect(await invoke(RDP_IPC.importProfiles)).toEqual({ ok: true, value: { canceled: true, items: [] } });
+  });
+  it("queues OS-open import reports until the RDP renderer initializes", async () => {
+    const file = join(temporary, "os.rdp"); await writeFile(file, "full address:s:os.test");
+    await manager.openFiles([file]);
+    expect(mocks.windows[0]!.webContents.send).not.toHaveBeenCalledWith(RDP_IPC.profilesImported, expect.anything());
+    await invoke(RDP_IPC.getState); await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(mocks.windows[0]!.webContents.send).toHaveBeenCalledWith(RDP_IPC.profilesImported, expect.objectContaining({ items: [expect.objectContaining({ profile: expect.objectContaining({ host: "os.test" }) })] }));
+  });
+  it("dials a managed SOCKS route while preserving certificate and authentication identity", async () => {
+    const networking = { kind: "socks5", proxyId: "socks5-11111111-1111-4111-8111-111111111111" };
+    const lease = { signal: new AbortController().signal, host: "127.0.0.1", port: 1080, isActive: () => true, release: vi.fn() };
+    const route = { host: "127.0.0.1", port: 45123, isActive: vi.fn(() => true), close: vi.fn(async () => undefined) };
+    mocks.leaseProxy.mockReturnValueOnce(lease); mocks.socksTransport.mockResolvedValueOnce(route);
+    const result = await invoke(RDP_IPC.connect, { ...connection, networking });
+    expect(result.ok).toBe(true);
+    expect(mocks.leaseProxy).toHaveBeenCalledWith(networking.proxyId);
+    mocks.runtimes[0]!.receive({ type: "ready", protocol: 1 });
+    const command = mocks.runtimes[0]!.send.mock.calls[0]![0];
+    expect(command).toMatchObject({ type: "connect", host: connection.host, port: 3389, connectAddress: { host: "127.0.0.1", port: 45123 } });
+    expect(command).not.toHaveProperty("networking");
+    await invoke(RDP_IPC.disconnect, (result.value as RdpTab).id);
+    expect(route.close).toHaveBeenCalledOnce();
+    expect(mocks.socksTransport.mock.calls.at(-1)![0].signal.aborted).toBe(true);
+  });
+  it("never creates a direct runtime when the selected proxy has expired", async () => {
+    mocks.leaseProxy.mockImplementationOnce(() => { throw new Error("Selected proxy expired"); });
+    expect(await invoke(RDP_IPC.connect, { ...connection, networking: { kind: "socks5", proxyId: "socks5-11111111-1111-4111-8111-111111111111" } })).toMatchObject({ ok: false, error: "Selected proxy expired" });
+    expect(mocks.runtimes).toHaveLength(0);
+  });
+  it("closes a proxy transport when its starting tab is canceled", async () => {
+    const lease = { signal: new AbortController().signal, host: "127.0.0.1", port: 1080, isActive: () => true, release: vi.fn() };
+    const route = { host: "127.0.0.1", port: 45123, isActive: () => true, close: vi.fn(async () => undefined) };
+    let finish!: (value: typeof route) => void;
+    mocks.leaseProxy.mockReturnValueOnce(lease);
+    mocks.socksTransport.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const connecting = invoke(RDP_IPC.connect, { ...connection, networking: { kind: "socks5", proxyId: "socks5-11111111-1111-4111-8111-111111111111" } });
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await invoke(RDP_IPC.closeTab, manager.state().tabs[0]!.id);
+    finish(route);
+    expect(await connecting).toMatchObject({ ok: false });
+    expect(route.close).toHaveBeenCalledOnce(); expect(mocks.runtimes).toHaveLength(0);
+  });
+
   it("connects and reconnects remote-screen sessions without looking up or saving passwords", async () => {
     const lookup = vi.spyOn(store, "credential"), save = vi.spyOn(store, "saveCredential");
     const { password: _password, ...base } = connection;
