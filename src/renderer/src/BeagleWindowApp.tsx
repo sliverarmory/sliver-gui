@@ -6,18 +6,22 @@ import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
   faArrowRight, faArrowsRotate, faBookBookmark, faCircleNodes, faCode, faDownload,
-  faFolderOpen, faMagnifyingGlass, faPlay, faPlus, faRoute, faSave, faSliders,
+  faFolderOpen, faMagnifyingGlass, faPlay, faPlus, faSave, faSliders,
   faTrash, faUpload, faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import type {
-  BeagleAPI, BeagleEdge, BeagleJsonObject, BeagleMutationResult, BeagleNode,
+  BeagleAPI, BeagleEdge, BeagleJsonObject, BeagleMutationResult, BeagleNeighborhoodResult, BeagleNode,
   BeagleQueryResult, BeagleSavedQuery, BeagleSearchResult, BeagleState,
 } from "../../shared/beagle-contracts";
 import { BEAGLE_RESULT_LIMITS } from "../../shared/beagle-contracts";
 import type { OperationResult } from "../../shared/contracts";
 import { AuxiliaryWindowFrame } from "./components/AuxiliaryWindowFrame";
 import { BeagleGraph, NodeIcon } from "./beagle/BeagleGraph";
+import { BeagleNeighborhoodControls } from "./beagle/BeagleNeighborhoodControls";
+import { BeaglePathControls } from "./beagle/BeaglePathControls";
+import { BeagleAnalysisWarnings } from "./beagle/BeagleAnalysisWarnings";
+import { BEAGLE_DRILLDOWNS } from "../../shared/beagle-investigations";
 import {
   displayValue, initialParameters, nodeKind, nodeName, nodeTagged, parseParameters,
   readCustomQueries, saveCustomQueries, type BeagleSelection, type CustomQuery,
@@ -61,13 +65,18 @@ export function BeagleWindowApp(): React.JSX.Element {
   const [selection, setSelection] = useState<BeagleSelection>(null);
   const [pathSource, setPathSource] = useState("");
   const [pathTarget, setPathTarget] = useState("");
-  const [allPaths, setAllPaths] = useState(false);
-  const [maxHops, setMaxHops] = useState("12");
+  const [neighborhood, setNeighborhood] = useState<BeagleNeighborhoodResult>();
+  const [neighborhoodBusy, setNeighborhoodBusy] = useState(false);
   const [report, setReport] = useState<BeagleMutationResult["report"]>();
   const [reportOpen, setReportOpen] = useState(false);
   const generation = useRef(0);
   const querySequence = useRef(0);
   const searchSequence = useRef(0);
+  const neighborhoodSequence = useRef(0);
+  const selectionRef = useRef(selection);
+  selectionRef.current = selection;
+  const resultRef = useRef(result);
+  resultRef.current = result;
   const mutationPending = useRef(false);
   const projectRef = useRef("");
   const mounted = useRef(true);
@@ -87,12 +96,14 @@ export function BeagleWindowApp(): React.JSX.Element {
   }, [api]);
 
   useEffect(() => { setCustomQueries(state ? readCustomQueries(state.selectedProjectId) : []); }, [state?.selectedProjectId]);
+  useEffect(() => { neighborhoodSequence.current++; setNeighborhood(undefined); setNeighborhoodBusy(false); }, [selection?.kind, selection?.id]);
 
   const resetProjectView = useCallback(() => {
-    generation.current++; querySequence.current++; searchSequence.current++;
+    generation.current++; querySequence.current++; searchSequence.current++; neighborhoodSequence.current++;
     setResult(undefined); setSelection(null); setSearch(""); setSearchResults([]); setSearchPage(undefined); setSearched(false); setSearchError(undefined);
     setQueryBusy(undefined); setSearchBusy(false); setError(undefined); setNotice(undefined);
     setPathSource(""); setPathTarget(""); setReport(undefined); setReportOpen(false);
+    setNeighborhood(undefined); setNeighborhoodBusy(false);
     setCypher(DEFAULT_QUERY); setParameters("{}"); setSelectedSavedId(undefined); setQueryName("");
   }, []);
 
@@ -119,10 +130,11 @@ export function BeagleWindowApp(): React.JSX.Element {
     finally { mutationPending.current = false; if (mounted.current) setBusy(undefined); }
   }
 
-  async function mutate(label: string, action: () => Promise<OperationResult<BeagleMutationResult>>) {
+  async function mutate(label: string, action: () => Promise<OperationResult<BeagleMutationResult>>, refreshOnFailure = false) {
     if (mutationPending.current) return;
     mutationPending.current = true;
     const epoch = generation.current;
+    const projectId = projectRef.current;
     setBusy(label); setError(undefined); setNotice(undefined);
     try {
       const response = await action();
@@ -131,7 +143,24 @@ export function BeagleWindowApp(): React.JSX.Element {
       setState(response.value.state); setReport(response.value.report);
       setNotice(`${label} finished.`);
       return response.value;
-    } catch (cause) { if (mounted.current && epoch === generation.current) setError(errorText(cause)); }
+    } catch (cause) {
+      if (!mounted.current || epoch !== generation.current || projectId !== projectRef.current) return;
+      setError(errorText(cause));
+      if (refreshOnFailure && api) {
+        setReport(undefined); setReportOpen(false);
+        // A failed native operation may already have changed the graph or invalidated its diagnostics.
+        // Do not keep displaying an old clean report while recovering the authoritative state.
+        setState((previous) => previous?.selectedProjectId === projectId ? { ...previous, diagnostics: {
+          version: 1, localGroupAmbiguities: [], errors: ["The latest import or analysis did not complete. Run Analyze to verify this project."],
+        } } : previous);
+        try {
+          const refreshed = await api.getState();
+          if (mounted.current && epoch === generation.current && projectId === projectRef.current && refreshed.ok && refreshed.value.selectedProjectId === projectId) {
+            setState(refreshed.value);
+          }
+        } catch { /* Preserve the operation error and uncertainty notice when refreshing also fails. */ }
+      }
+    }
     finally { mutationPending.current = false; if (mounted.current) setBusy(undefined); }
     return undefined;
   }
@@ -139,6 +168,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   async function runQuery(label: string, action: QueryAction, merge = false) {
     const epoch = generation.current;
     const sequence = ++querySequence.current;
+    neighborhoodSequence.current++; setNeighborhood(undefined); setNeighborhoodBusy(false);
     setQueryBusy(label); setError(undefined); setNotice(undefined);
     try {
       const response = await action();
@@ -151,6 +181,26 @@ export function BeagleWindowApp(): React.JSX.Element {
       setResultTab(response.value.graph.nodes.length ? "graph" : "table");
     } catch (cause) { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setError(errorText(cause)); }
     finally { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setQueryBusy(undefined); }
+  }
+
+  async function loadNeighborhood(node: BeagleNode, view: string, offset: number) {
+    if (!api || busy) return;
+    const epoch = generation.current;
+    const sequence = ++neighborhoodSequence.current;
+    const query = ++querySequence.current;
+    setNeighborhoodBusy(true); setError(undefined); setNotice(undefined);
+    try {
+      const response = await api.neighborhood({ objectid: node.objectid, view, offset });
+      if (!mounted.current || epoch !== generation.current || sequence !== neighborhoodSequence.current || query !== querySequence.current ||
+        selectionRef.current?.kind !== "node" || selectionRef.current.id !== node.objectid) return;
+      if (!response.ok) throw new Error(response.error);
+      if (response.value.projectId !== projectRef.current || response.value.objectid !== node.objectid || response.value.view !== view) return;
+      setNeighborhood(response.value);
+      setResult((previous) => previous ? mergeResults(previous, response.value) : response.value);
+      setResultTitle(`${BEAGLE_DRILLDOWNS.find((item) => item.id === view)?.label ?? "Relationships"} of ${nodeName(node)}`);
+      setResultTab("graph");
+    } catch (cause) { if (mounted.current && epoch === generation.current && sequence === neighborhoodSequence.current && query === querySequence.current) setError(errorText(cause)); }
+    finally { if (mounted.current && epoch === generation.current && sequence === neighborhoodSequence.current) setNeighborhoodBusy(false); }
   }
 
   function executeEditor() {
@@ -188,8 +238,9 @@ export function BeagleWindowApp(): React.JSX.Element {
 
   function inspectSearchNode(node: BeagleNode) {
     if (!state) return;
-    if (result?.projectId === state.selectedProjectId && result.graph.nodes.length >= BEAGLE_RESULT_LIMITS.nodes &&
-      !result.graph.nodes.some((entry) => entry.objectid === node.objectid)) {
+    const current = resultRef.current;
+    if (current?.projectId === state.selectedProjectId && current.graph.nodes.length >= BEAGLE_RESULT_LIMITS.nodes &&
+      !current.graph.nodes.some((entry) => entry.objectid === node.objectid)) {
       setError(`The graph display limit is ${BEAGLE_RESULT_LIMITS.nodes.toLocaleString()} objects. Run a narrower query before adding another object.`);
       return;
     }
@@ -200,6 +251,24 @@ export function BeagleWindowApp(): React.JSX.Element {
         : [...previous.graph.nodes, node].slice(0, BEAGLE_RESULT_LIMITS.nodes) },
     } : emptyResult(state.selectedProjectId, [node]));
     setSelection({ kind: "node", id: node.objectid }); setResultTab("graph");
+  }
+
+  async function inspectDiagnosticObject(objectid: string) {
+    if (!api || busy) return;
+    const epoch = generation.current;
+    const sequence = ++querySequence.current;
+    neighborhoodSequence.current++; setNeighborhoodBusy(false); setNeighborhood(undefined);
+    setQueryBusy("Opening object"); setError(undefined);
+    try {
+      const response = await api.entity({ objectid });
+      if (!mounted.current || epoch !== generation.current || sequence !== querySequence.current) return;
+      if (!response.ok) throw new Error(response.error);
+      if (response.value.projectId !== projectRef.current) return;
+      const node = response.value.graph.nodes.find((item) => item.objectid === objectid);
+      if (!node) throw new Error("This object is no longer in the project.");
+      inspectSearchNode(node);
+    } catch (cause) { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setError(errorText(cause)); }
+    finally { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setQueryBusy(undefined); }
   }
 
   function saveQuery() {
@@ -260,8 +329,8 @@ export function BeagleWindowApp(): React.JSX.Element {
         </NativeSelect.Trigger></NativeSelect>
         <IconButton label="New project" icon={faPlus} disabled={Boolean(busy) || loading} onPress={() => setNewProjectOpen((open) => !open)} />
         <div className="beagle-toolbar__actions">
-          <Button size="sm" variant="secondary" isDisabled={disabled} onPress={() => { void mutate("Import", () => api.importFiles()); }}><FontAwesomeIcon icon={faUpload} />Import data</Button>
-          <Button size="sm" variant="secondary" isDisabled={disabled || !state?.stats?.nodes} onPress={() => { void mutate("Analysis", () => api.analyze()); }}><FontAwesomeIcon icon={faCircleNodes} />Analyze</Button>
+          <Button size="sm" variant="secondary" isDisabled={disabled} onPress={() => { void mutate("Import", () => api.importFiles(), true); }}><FontAwesomeIcon icon={faUpload} />Import data</Button>
+          <Button size="sm" variant="secondary" isDisabled={disabled || !state?.stats?.nodes} onPress={() => { void mutate("Analysis", () => api.analyze(), true); }}><FontAwesomeIcon icon={faCircleNodes} />Analyze</Button>
           <Button size="sm" variant="tertiary" isDisabled={disabled || !state?.stats?.nodes} onPress={() => {
             if (mutationPending.current) return;
             mutationPending.current = true; setBusy("Exporting graph"); setError(undefined);
@@ -293,6 +362,8 @@ export function BeagleWindowApp(): React.JSX.Element {
     {notice ? <div className="beagle-message" role="status"><span>{notice}</span>{report !== undefined ? <Button size="sm" variant="tertiary" onPress={() => setReportOpen((open) => !open)}>{reportOpen ? "Hide report" : "View report"}</Button> : null}
       <IconButton label="Dismiss notification" icon={faXmark} onPress={() => setNotice(undefined)} /></div> : null}
     {reportOpen && report !== undefined ? <pre className="beagle-operation-report" aria-label="Operation report">{JSON.stringify(report, null, 2)}</pre> : null}
+    {ready && Boolean(state?.stats?.nodes || state?.diagnostics?.errors.length || state?.diagnostics?.localGroupAmbiguities.length) ? <div className="beagle-analysis-diagnostics"><BeagleAnalysisWarnings diagnostics={state?.diagnostics}
+      disabled={disabled || Boolean(queryBusy)} onInspectObject={(objectid) => { void inspectDiagnosticObject(objectid); }} /></div> : null}
     <div className="beagle-body">
       <aside className="beagle-sidebar" aria-label="Directory exploration">
         <Tabs selectedKey={sidebarTab} onSelectionChange={(key) => setSidebarTab(String(key) as SidebarTab)} className="beagle-sidebar-tabs">
@@ -328,19 +399,10 @@ export function BeagleWindowApp(): React.JSX.Element {
             }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small>{query.parameters.length ? <em>Parameters: {query.parameters.join(", ")}</em> : null}</span></Button>)}</div>
             {!visibleQueries.length ? <p className="beagle-muted">No queries match this filter.</p> : null}
           </Tabs.Panel>
-          <Tabs.Panel id="paths" className="beagle-sidebar-panel">
-            <p className="beagle-muted">Choose source and target objects from the inspector, or enter their object IDs.</p>
-            <TextField value={pathSource} onChange={setPathSource} isDisabled={disabled}><Label>Source object ID</Label><Input placeholder="S-1-5-21-…" /></TextField>
-            <TextField value={pathTarget} onChange={setPathTarget} isDisabled={disabled}><Label>Target object ID</Label><Input placeholder="S-1-5-21-…" /></TextField>
-            <NativeSelect variant="secondary"><Label>Path mode</Label><NativeSelect.Trigger aria-label="Path mode" value={allPaths ? "all" : "shortest"} disabled={disabled} onChange={(event) => setAllPaths(event.target.value === "all")}>
-              <NativeSelect.Option value="shortest">Shortest path</NativeSelect.Option><NativeSelect.Option value="all">All shortest paths</NativeSelect.Option><NativeSelect.Indicator />
-            </NativeSelect.Trigger></NativeSelect>
-            <TextField value={maxHops} onChange={setMaxHops} isDisabled={disabled}><Label>Maximum hops</Label><Input type="number" min={1} max={64} /></TextField>
-            <Button size="sm" isDisabled={disabled || !pathSource.trim() || !pathTarget.trim() || Boolean(queryBusy)} onPress={() => {
-              const hops = Number(maxHops);
-              if (!Number.isInteger(hops) || hops < 1 || hops > 64) { setError("Maximum hops must be a whole number between 1 and 64."); return; }
-              void runQuery(allPaths ? "All shortest paths" : "Shortest path", () => api.paths({ source: pathSource.trim(), target: pathTarget.trim(), all: allPaths, maxHops: hops }));
-            }}><FontAwesomeIcon icon={faRoute} />Find paths</Button>
+          <Tabs.Panel id="paths" className="beagle-sidebar-panel" shouldForceMount>
+            <BeaglePathControls key={state?.selectedProjectId} api={api} projectId={state?.selectedProjectId ?? ""} source={pathSource} target={pathTarget}
+              onSourceChange={setPathSource} onTargetChange={setPathTarget} disabled={disabled || Boolean(queryBusy)} loading={Boolean(queryBusy)}
+              onRun={(input) => { void runQuery(input.all ? "All shortest paths" : "Shortest path", () => api.paths(input)); }} />
           </Tabs.Panel>
         </Tabs>
       </aside>
@@ -365,7 +427,7 @@ export function BeagleWindowApp(): React.JSX.Element {
             <Tabs.Panel id="objects" className="beagle-objects-panel">{result.graph.nodes.length ? result.graph.nodes.map((node) => <ObjectButton key={node.objectid} node={node} onPress={() => setSelection({ kind: "node", id: node.objectid })} />) : <Empty title="No objects" description="No directory objects were returned by this query." />}</Tabs.Panel>
           </Tabs> : <Empty title={loading ? "Opening directory workspace" : state?.stats?.nodes ? "Explore your directory" : "Import Active Directory data"}
             description={loading ? "Loading Beagle and your projects…" : state?.stats?.nodes ? "Search for an object, choose a BloodHound query, or run your own Cypher." : "Import a BloodHound collection ZIP or JSON files, then analyze the graph to derive relationships."}
-            action={!loading && ready && !state?.stats?.nodes ? <Button variant="secondary" isDisabled={Boolean(busy)} onPress={() => { void mutate("Import", () => api.importFiles()); }}><FontAwesomeIcon icon={faUpload} />Import collection</Button> : undefined} />}
+            action={!loading && ready && !state?.stats?.nodes ? <Button variant="secondary" isDisabled={Boolean(busy)} onPress={() => { void mutate("Import", () => api.importFiles(), true); }}><FontAwesomeIcon icon={faUpload} />Import collection</Button> : undefined} />}
           {queryBusy && !result ? <div className="beagle-query-progress" role="status"><Spinner size="sm" />{queryBusy}…</div> : null}
         </div>
       </section>
@@ -382,12 +444,11 @@ export function BeagleWindowApp(): React.JSX.Element {
               <CellSwitch.Trigger><CellSwitch.Label>Tier Zero</CellSwitch.Label><CellSwitch.Control className="ml-auto shrink-0" /></CellSwitch.Trigger>
             </CellSwitch>
           </div>
-          <div className="beagle-inspector-actions"><Button size="sm" variant="secondary" onPress={() => { setPathSource(selectedNode.objectid); setSidebarTab("paths"); }}>Set source</Button>
-            <Button size="sm" variant="secondary" onPress={() => { setPathTarget(selectedNode.objectid); setSidebarTab("paths"); }}>Set target</Button>
-            <Button size="sm" variant="secondary" isDisabled={disabled || Boolean(queryBusy)} onPress={() => { void runQuery(`Relationships of ${nodeName(selectedNode)}`, () => api.query({
-              cypher: "MATCH (n {objectid: $objectid}) OPTIONAL MATCH (n)-[r]-(m) RETURN n,r,m LIMIT 250", parameters: { objectid: selectedNode.objectid },
-            }), true); }}><FontAwesomeIcon icon={faCircleNodes} />Expand relationships</Button>
+          <div className="beagle-inspector-actions"><Button size="sm" variant="secondary" isDisabled={disabled || Boolean(queryBusy)} onPress={() => { setPathSource(selectedNode.objectid); setSidebarTab("paths"); }}>Set source</Button>
+            <Button size="sm" variant="secondary" isDisabled={disabled || Boolean(queryBusy)} onPress={() => { setPathTarget(selectedNode.objectid); setSidebarTab("paths"); }}>Set target</Button>
           </div>
+          <BeagleNeighborhoodControls key={`${state?.selectedProjectId}:${selectedNode.objectid}`} node={selectedNode} result={neighborhood} loading={neighborhoodBusy}
+            disabled={disabled || Boolean(queryBusy)} onLoad={(view, offset) => { void loadNeighborhood(selectedNode, view, offset); }} />
           <h3 className="beagle-section-label">Properties</h3><Properties values={selectedNode.properties} />
         </> : selectedEdge && result ? <EdgeInspector key={`${result.projectId}:${selectedEdge.id}`} edge={selectedEdge} result={result} api={api} disabled={disabled}
           onOpen={(composition) => { setResult(composition); setSelection(null); setResultTitle(`${selectedEdge.kind} composition`); setResultTab("graph"); }} /> : null}

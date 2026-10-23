@@ -4,16 +4,19 @@ import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import {
-  BEAGLE_PROJECT_ID, BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, parseBeagleComposeInput, parseBeagleCreateProjectInput,
-  parseBeagleEntityInput, parseBeagleJson, parseBeaglePathsInput, parseBeagleQueryInput,
+  BEAGLE_PROJECT_ID, BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, BEAGLE_NEIGHBORHOOD_PAGE_SIZE, parseBeagleComposeInput, parseBeagleCreateProjectInput,
+  parseBeagleEntityInput, parseBeagleJson, parseBeagleNeighborhoodInput, parseBeaglePathsInput, parseBeagleQueryInput,
   parseBeagleSavedQueryInput, parseBeagleSearchInput, parseBeagleSelectProjectInput, parseBeagleTagInput,
   type BeagleComposeInput, type BeagleCreateProjectInput, type BeagleEdge, type BeagleEntityInput,
   type BeagleGraph, type BeagleJsonObject, type BeagleJsonValue, type BeagleMutationResult,
-  type BeagleNode, type BeaglePathsInput, type BeagleProject, type BeagleQueryInput,
+  type BeagleNode, type BeagleNeighborhoodInput, type BeagleNeighborhoodResult, type BeaglePathsInput, type BeagleProject, type BeagleQueryInput,
   type BeagleQueryResult, type BeagleSavedQuery, type BeagleSavedQueryInput, type BeagleSearchInput, type BeagleSearchResult,
   type BeagleSelectProjectInput, type BeagleState, type BeagleStats, type BeagleTagInput,
 } from "../shared/beagle-contracts.js";
 import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js";
+import { buildBeagleNeighborhoodQuery, isBeagleTraversalInvestigation, runBeagleTraversalInvestigation } from "./beagle-investigations.js";
+import { normalizeBeagleAnalysisDiagnostics, parseBeagleAnalysisDiagnostics } from "./beagle-analysis-diagnostics.js";
+import { BEAGLE_PATH_EDGE_KINDS } from "../shared/beagle-investigations.js";
 
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const QUERY_TIMEOUT_MS = 40_000;
@@ -212,12 +215,61 @@ export class BeagleService {
     return this.serial(() => this.queryCommand(["entity", "--", input.objectid]));
   }
 
+  neighborhood(value: BeagleNeighborhoodInput): Promise<BeagleNeighborhoodResult> {
+    const input = parseBeagleNeighborhoodInput(value);
+    const view = input.view ?? "relationships";
+    const offset = input.offset ?? 0;
+    return this.serial(async () => {
+      const startedAt = performance.now();
+      if (isBeagleTraversalInvestigation(view)) {
+        let projectId = "";
+        const result = await runBeagleTraversalInvestigation(view, input.objectid, offset, BEAGLE_NEIGHBORHOOD_PAGE_SIZE, async (cypher, parameters) => {
+          const batch = await this.queryCommand(["query", "--params", JSON.stringify(parameters), "--", cypher]);
+          projectId = batch.projectId;
+          if (batch.truncated) throw new Error("Beagle traversal page was truncated; no partial result was returned");
+          return batch.rows;
+        });
+        const page = normalizeBeagleQueryResult({ columns: ["target", "nodes", "edges"], rows: result.rows }, projectId);
+        return { ...page, elapsedMs: Math.round(performance.now() - startedAt), objectid: input.objectid, view,
+          page: { offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE, total: result.total, hasMore: result.hasMore } };
+      }
+      const { countCypher, pageCypher } = buildBeagleNeighborhoodQuery(view);
+      const count = await this.queryCommand(["query", "--params", JSON.stringify({ objectid: input.objectid }), "--", countCypher]);
+      const total = count.rows[0]?.["total"];
+      if (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0) throw new Error("Invalid relationship count returned by Beagle");
+      const result = await this.queryCommand(["query", "--params", JSON.stringify({ objectid: input.objectid, offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE + 1 }), "--", pageCypher]);
+      const page = normalizeBeagleQueryResult({ columns: result.columns, rows: result.rows.slice(0, BEAGLE_NEIGHBORHOOD_PAGE_SIZE) }, result.projectId);
+      return {
+        ...page, elapsedMs: Math.round(performance.now() - startedAt), objectid: input.objectid, view,
+        page: { offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE, total, hasMore: result.totalRows > BEAGLE_NEIGHBORHOOD_PAGE_SIZE },
+      };
+    });
+  }
+
   paths(value: BeaglePathsInput): Promise<BeagleQueryResult> {
     const input = parseBeaglePathsInput(value);
-    return this.serial(() => this.queryCommand([
-      "paths", `--source=${input.source}`, `--target=${input.target}`,
-      ...(input.all ? ["--all"] : []), "--max-hops", String(input.maxHops ?? 12),
-    ]));
+    return this.serial(async () => {
+      const startedAt = performance.now();
+      const endpoints = [input.source, ...input.via ?? [], input.target];
+      // The native AD_ATTACK_PATHS alias differs from CE's selectable set.
+      // Omitted filters and all-selected filters must describe the same search.
+      const kinds = (input.relationshipKinds ?? BEAGLE_PATH_EDGE_KINDS).join("|");
+      const cypher = `MATCH p=${input.all ? "allShortestPaths" : "shortestPath"}((s {objectid:$source})-[:${kinds}*1..${input.maxHops ?? 12}]->(t {objectid:$target})) RETURN p`;
+      const rows: BeagleJsonObject[] = [];
+      let projectId = "";
+      let truncated = false;
+      // Each ordered leg must exist. Combine their real path evidence without a
+      // Cartesian product of alternatives or a misleading partial itinerary.
+      for (let index = 0; index < endpoints.length - 1; index++) {
+        const leg = await this.queryCommand(["query", "--params", JSON.stringify({ source: endpoints[index], target: endpoints[index + 1] }), "--", cypher]);
+        projectId = leg.projectId;
+        if (!leg.rows.length) return { ...leg, elapsedMs: Math.round(performance.now() - startedAt) };
+        rows.push(...leg.rows);
+        truncated ||= leg.truncated;
+      }
+      const result = normalizeBeagleQueryResult({ columns: ["p"], rows }, projectId);
+      return { ...result, truncated: result.truncated || truncated, elapsedMs: Math.round(performance.now() - startedAt) };
+    });
   }
 
   tag(value: BeagleTagInput): Promise<BeagleMutationResult> {
@@ -292,21 +344,40 @@ export class BeagleService {
       ...(this.options.resourcesPath ? [{ path: join(this.options.resourcesPath, "beagle", executable), source: "Bundled runtime" }] : []),
       { path: executable, source: "PATH" },
     ];
+    let incompatibility: string | undefined;
     for (const candidate of candidates) {
       try {
         const version = await this.inspectBinary(candidate.path);
         this.binary = candidate.path;
         this.runtime = { available: true, version, source: candidate.source };
         return;
-      } catch { /* Discovery tests each configured source without leaking native paths to the renderer. */ }
+      } catch (error) {
+        // Only expose our interface diagnostics; native spawn errors may contain private paths.
+        if (error instanceof Error && /^(Unsupported|Incompatible) Beagle runtime/u.test(error.message)) incompatibility ??= error.message;
+      }
     }
-    this.runtime = { available: false, version: null, source: null, error: "Beagle was not found or could not run. Choose a Beagle executable." };
+    this.runtime = { available: false, version: null, source: null, error: incompatibility ?? "Beagle was not found or could not run. Choose a Beagle executable." };
   }
 
   private async inspectBinary(binary: string): Promise<string> {
     const result = await this.run(binary, ["--version"], VERSION_TIMEOUT_MS);
     const version = result.stdout.trim();
     if (!/^beagle\s+[^\r\n]+$/iu.test(version) || version.length > 256) throw new Error("The selected executable is not a Beagle runtime");
+    if (!/^beagle 0\.1\.\d+$/u.test(version)) throw new Error("Unsupported Beagle runtime. AD Explorer currently supports the Beagle 0.1.x interface; choose a compatible executable.");
+    const help = await this.run(binary, ["--help"], VERSION_TIMEOUT_MS);
+    const commands = ["ingest", "analyze", "query", "queries", "stats", "entity", "paths", "compose", "tag", "export"];
+    if (commands.some((command) => !new RegExp(`^\\s+${command}\\s`, "mu").test(help.stdout)) ||
+        !help.stdout.includes("--db") || !help.stdout.includes("--query-timeout")) {
+      throw new Error("Incompatible Beagle runtime: required AD Explorer commands are missing. Choose a current Beagle 0.1.x executable.");
+    }
+    // Probe only an ephemeral in-memory database before touching an operator project.
+    const probe = object(decode((await this.run(binary, ["--db", ":memory:", "--query-timeout", "3", "stats"], VERSION_TIMEOUT_MS)).stdout), "runtime capabilities");
+    const capabilities = object(probe["capabilities"], "runtime capabilities");
+    const features = object(capabilities["features"], "runtime query features");
+    if (capabilities["schema_version"] !== 1 || ["parameters", "shortest_path", "variable_length_paths", "named_paths", "optional_match", "with_where", "call_subquery", "union", "existential_subquery_full", "list_comprehension", "quantifiers"]
+      .some((feature) => features[feature] !== true)) {
+      throw new Error("Incompatible Beagle runtime: required graph query capabilities are unavailable. Choose a current Beagle 0.1.x executable.");
+    }
     return version;
   }
 
@@ -349,11 +420,33 @@ export class BeagleService {
     const configuration = await this.load();
     await this.discover();
     const stats = this.binary ? normalizeStats(await this.execute(["stats"])) : null;
-    return { runtime: { ...this.runtime }, projects: configuration.projects.map((project) => ({ ...project })), selectedProjectId: configuration.selectedProjectId, stats };
+    let diagnostics: BeagleState["diagnostics"];
+    try {
+      const file = await readBoundedRegularFile(join(this.rootPath, configuration.selectedProjectId, "analysis-diagnostics.json"), { label: "Analysis diagnostics", maxBytes: 1024 * 1024 });
+      diagnostics = parseBeagleAnalysisDiagnostics(JSON.parse(file.data.toString("utf8")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") diagnostics = { version: 1, localGroupAmbiguities: [], errors: ["Saved analysis diagnostics could not be read. Analyze this project again to check ambiguous privileges."] };
+    }
+    return { runtime: { ...this.runtime }, projects: configuration.projects.map((project) => ({ ...project })), selectedProjectId: configuration.selectedProjectId, stats,
+      ...(diagnostics === undefined ? {} : { diagnostics }) };
   }
 
   private async mutate(args: string[]): Promise<BeagleMutationResult> {
+    const recordsAnalysis = args[0] === "ingest" || args[0] === "analyze";
+    const configuration = await this.load();
+    const diagnosticsPath = join(this.rootPath, configuration.selectedProjectId, "analysis-diagnostics.json");
+    if (recordsAnalysis) {
+      await this.database();
+      // A child can commit before its output is lost or rejected. Never retain an
+      // older clean report when completion of the latest analysis is uncertain.
+      await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify({ version: 1, localGroupAmbiguities: [],
+        errors: ["The latest analysis has not completed with verified diagnostics. Run Analyze again before relying on local-group privilege choices."] })));
+    }
     const report = await this.execute(args, WORKFLOW_TIMEOUT_MS);
+    if (recordsAnalysis) {
+      const diagnostics = normalizeBeagleAnalysisDiagnostics(report);
+      await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify(diagnostics)));
+    }
     return { report, state: await this.state() };
   }
 

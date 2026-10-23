@@ -24,7 +24,7 @@ function event(): IpcMainInvokeEvent {
 function services(): BeagleIpcServices {
   return { manager: Object.fromEntries([
     "getState", "createProject", "selectProject", "configureBinary", "importFiles", "analyze", "query", "getQueries",
-    "runSavedQuery", "search", "entity", "paths", "tag", "compose", "exportGraph",
+    "runSavedQuery", "search", "entity", "neighborhood", "paths", "tag", "compose", "exportGraph",
   ].map((name) => [name, vi.fn().mockResolvedValue({ marker: name })])) as unknown as BeagleIpcServices["manager"],
   getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE };
 }
@@ -94,6 +94,18 @@ describe("Beagle IPC", () => {
       await expect(invoke(BEAGLE_IPC_INVOKE.search, event(), invalid)).resolves.toMatchObject({ ok: false });
     }
     expect(service.manager.search).toHaveBeenCalledTimes(1);
+  });
+  it("authorizes neighborhood pages and validates actual traversal filters", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    const input = { objectid: "G", view: "group-members", offset: 250 };
+    await expect(invoke(BEAGLE_IPC_INVOKE.neighborhood, event(), input)).resolves.toMatchObject({ ok: true });
+    expect(service.manager.neighborhood).toHaveBeenCalledExactlyOnceWith(input);
+    await expect(invoke(BEAGLE_IPC_INVOKE.neighborhood, event(), { ...input, limit: 9000 })).resolves.toMatchObject({ ok: false });
+    const path = { source: "U", via: ["G"], target: "C", relationshipKinds: ["MemberOf", "AdminTo"] };
+    await expect(invoke(BEAGLE_IPC_INVOKE.paths, event(), path)).resolves.toMatchObject({ ok: true });
+    expect(service.manager.paths).toHaveBeenCalledExactlyOnceWith(path);
+    await expect(invoke(BEAGLE_IPC_INVOKE.paths, event(), { ...path, relationshipKinds: ["NotAnAttackPathKind"] })).resolves.toMatchObject({ ok: false });
   });
   it("handles import cancellation without writing and never accepts renderer file paths", async () => {
     const service = services();

@@ -1,9 +1,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, type BeagleAPI, type BeagleNode, type BeagleQueryResult, type BeagleSearchResult, type BeagleState } from "../../../shared/beagle-contracts";
+import { BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, type BeagleAPI, type BeagleNeighborhoodResult, type BeagleNode, type BeagleQueryResult, type BeagleSearchResult, type BeagleState } from "../../../shared/beagle-contracts";
 import type { OperationResult } from "../../../shared/contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import { BEAGLE_PATH_EDGE_KINDS } from "../../../shared/beagle-investigations";
 import { BeagleWindowApp } from "../BeagleWindowApp";
 import { queryStorageKey, type BeagleSelection } from "./beagle-model";
 
@@ -32,19 +33,23 @@ function searchResult(nodes: BeagleNode[] = [userNode, groupNode], offset = 0, h
   return { ...graphResult(projectId), graph: { nodes, edges: [] }, totalRows: nodes.length,
     page: { offset, limit: BEAGLE_SEARCH_PAGE_SIZE, hasMore } };
 }
+function neighborhoodResult(value = graphResult(), offset = 0, total = value.totalRows, view = "relationships"): BeagleNeighborhoodResult {
+  return { ...value, objectid: userNode.objectid, view, page: { offset, limit: 250, total, hasMore: offset + value.totalRows < total } };
+}
 function createAPI() {
   return {
-    getState: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    getState: vi.fn<BeagleAPI["getState"]>(async () => ({ ok: true as const, value: currentState })),
     createProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
     selectProject: vi.fn(async ({ id }: { id: string }) => ({ ok: true as const, value: { ...currentState, selectedProjectId: id } })),
     chooseBinary: vi.fn(async () => ({ ok: true as const, value: currentState })),
-    importFiles: vi.fn(async () => ({ ok: true as const, value: { state: currentState, report: { imported: 100 } } })),
-    analyze: vi.fn(async () => ({ ok: true as const, value: { state: currentState, report: { derived: 25 } } })),
+    importFiles: vi.fn<BeagleAPI["importFiles"]>(async () => ({ ok: true as const, value: { state: currentState, report: { imported: 100 } } })),
+    analyze: vi.fn<BeagleAPI["analyze"]>(async () => ({ ok: true as const, value: { state: currentState, report: { derived: 25 } } })),
     query: vi.fn<BeagleAPI["query"]>(async () => ({ ok: true as const, value: graphResult() })),
     getQueries: vi.fn<BeagleAPI["getQueries"]>(async () => ({ ok: true as const, value: [{ id: "tier-zero", name: "Tier Zero principals", description: "Find privileged directory objects.", category: "Active Directory", cypher: "MATCH (n) WHERE n.name = $name RETURN n", parameters: ["name"] }] })),
     runSavedQuery: vi.fn<BeagleAPI["runSavedQuery"]>(async () => ({ ok: true as const, value: graphResult() })),
     search: vi.fn<BeagleAPI["search"]>(async () => ({ ok: true as const, value: searchResult() })),
     entity: vi.fn<BeagleAPI["entity"]>(async () => ({ ok: true as const, value: graphResult() })),
+    neighborhood: vi.fn<BeagleAPI["neighborhood"]>(async () => ({ ok: true as const, value: neighborhoodResult() })),
     paths: vi.fn<BeagleAPI["paths"]>(async () => ({ ok: true as const, value: graphResult() })),
     tag: vi.fn<BeagleAPI["tag"]>(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
     compose: vi.fn<BeagleAPI["compose"]>(async () => ({ ok: true as const, value: graphResult() })),
@@ -133,11 +138,11 @@ describe("BeagleWindowApp", () => {
     await userEvent.click(screen.getByRole("switch", { name: "Owned" }));
     await waitFor(() => expect(api.tag).toHaveBeenCalledWith({ objectid: userNode.objectid, tag: "owned", enabled: true }));
     await userEvent.click(screen.getByRole("button", { name: "Set source" }));
-    expect(screen.getByLabelText("Source object ID")).toHaveValue(userNode.objectid);
-    fireEvent.change(screen.getByLabelText("Target object ID"), { target: { value: groupNode.objectid } });
+    expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue(userNode.objectid);
+    fireEvent.change(screen.getByRole("combobox", { name: "Target object ID" }), { target: { value: groupNode.objectid } });
     fireEvent.change(screen.getByRole("combobox", { name: "Path mode" }), { target: { value: "all" } });
     await userEvent.click(screen.getByRole("button", { name: "Find paths" }));
-    await waitFor(() => expect(api.paths).toHaveBeenCalledWith({ source: userNode.objectid, target: groupNode.objectid, all: true, maxHops: 12 }));
+    await waitFor(() => expect(api.paths).toHaveBeenCalledWith({ source: userNode.objectid, target: groupNode.objectid, all: true, maxHops: 12, relationshipKinds: [...BEAGLE_PATH_EDGE_KINDS] }));
   });
 
   it("discards query results that finish after a project switch", async () => {
@@ -263,10 +268,10 @@ describe("BeagleWindowApp", () => {
     const retained: BeagleNode = { objectid: "retained-neighbor", labels: ["Group"], properties: { name: "Retained neighbor" } };
     const omitted: BeagleNode = { objectid: "omitted-neighbor", labels: ["Group"], properties: { name: "Omitted neighbor" } };
     api.query.mockResolvedValueOnce({ ok: true, value: { ...graphResult(), graph: { nodes, edges: [] } } });
-    api.query.mockResolvedValueOnce({ ok: true, value: { ...graphResult(), graph: { nodes: [userNode, retained, omitted], edges: [
+    api.neighborhood.mockResolvedValueOnce({ ok: true, value: neighborhoodResult({ ...graphResult(), graph: { nodes: [userNode, retained, omitted], edges: [
       { id: "retained-edge", source: userNode.objectid, target: retained.objectid, kind: "MemberOf", properties: {}, derived: null },
       { id: "omitted-edge", source: userNode.objectid, target: omitted.objectid, kind: "GenericAll", properties: {}, derived: null },
-    ] } } });
+    ] } }) });
     await mount();
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
     await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
@@ -288,6 +293,194 @@ describe("BeagleWindowApp", () => {
     expect(screen.queryByRole("table", { name: "Cypher results" })).not.toBeInTheDocument();
   });
 
+  it("pages a complete neighborhood on demand and merges each bounded page", async () => {
+    const nextNode: BeagleNode = { objectid: "next-neighbor", labels: ["Group"], properties: { name: "Next neighbor" } };
+    const first = neighborhoodResult({ ...graphResult(), totalRows: 250 }, 0, 251);
+    const last = neighborhoodResult({ ...graphResult(), graph: { nodes: [userNode, nextNode], edges: [] } }, 250, 251);
+    api.neighborhood.mockImplementation(async ({ offset = 0 }) => ({ ok: true, value: offset ? last : first }));
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
+    expect(api.neighborhood).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Expand relationships" }));
+    expect(await screen.findByText("Relationships 1–250 of 251 · More available")).toBeVisible();
+    expect(api.neighborhood).toHaveBeenCalledTimes(1);
+    expect(api.neighborhood).toHaveBeenCalledWith({ objectid: userNode.objectid, view: "relationships", offset: 0 });
+    expect(screen.getByRole("button", { name: "Previous investigation results" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Next investigation results" }));
+    expect(await screen.findByText("Relationships 251–251 of 251 · End of results")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Next investigation results" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Graph Next neighbor" })).toBeVisible();
+    expect(screen.getByRole("button", { name: `Graph ${groupNode.properties["name"]}` })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Previous investigation results" }));
+    expect(await screen.findByText("Relationships 1–250 of 251 · More available")).toBeVisible();
+    expect(api.neighborhood).toHaveBeenCalledTimes(3);
+  });
+
+  it("offers kind-specific investigations and fetches only the chosen view", async () => {
+    api.neighborhood.mockResolvedValue({ ok: true, value: neighborhoodResult(graphResult(), 0, 1, "user-member_of") });
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
+    const selector = screen.getByRole("combobox", { name: "Investigation" });
+    expect(within(selector).getByRole("option", { name: "Member Of" })).toBeInTheDocument();
+    expect(within(selector).queryByRole("option", { name: "Local Admins" })).not.toBeInTheDocument();
+    fireEvent.change(selector, { target: { value: "user-member_of" } });
+    expect(api.neighborhood).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Show member of" }));
+    expect(await screen.findByText("Objects 1–1 of 1 · End of results")).toBeVisible();
+    expect(api.neighborhood).toHaveBeenCalledWith({ objectid: userNode.objectid, view: "user-member_of", offset: 0 });
+    fireEvent.change(selector, { target: { value: "relationships" } });
+    expect(screen.queryByRole("navigation", { name: "Investigation pages" })).not.toBeInTheDocument();
+  });
+
+  it("shows an empty page when the investigation total shrinks below the requested offset", async () => {
+    api.neighborhood.mockResolvedValueOnce({ ok: true, value: neighborhoodResult({ ...graphResult(), totalRows: 250 }, 0, 251) });
+    api.neighborhood.mockResolvedValueOnce({ ok: true, value: neighborhoodResult({ ...graphResult(), totalRows: 0, rows: [], graph: { nodes: [], edges: [] } }, 250, 200) });
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Expand relationships" }));
+    await screen.findByText("Relationships 1–250 of 251 · More available");
+    await userEvent.click(screen.getByRole("button", { name: "Next investigation results" }));
+    expect(await screen.findByText("No results on this page · 200 relationships total · End of results")).toBeVisible();
+    expect(screen.queryByText(/251–200/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Previous investigation results" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Next investigation results" })).toBeDisabled();
+  });
+
+  it.each(["selection", "project", "query"] as const)("discards a neighborhood response after a newer %s", async (change) => {
+    let resolvePage!: (result: OperationResult<BeagleNeighborhoodResult>) => void;
+    api.neighborhood.mockReturnValue(new Promise((resolve) => { resolvePage = resolve; }));
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Expand relationships" }));
+    if (change === "selection") await userEvent.click(screen.getByRole("button", { name: `Graph ${groupNode.properties["name"]}` }));
+    else if (change === "project") {
+      fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    } else {
+      api.query.mockResolvedValue({ ok: true, value: scalarResult(123456) });
+      await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+      await screen.findByText("123456");
+    }
+    const late: BeagleNode = { objectid: "late", labels: ["Group"], properties: { name: "Outdated neighbor" } };
+    await act(async () => resolvePage({ ok: true, value: neighborhoodResult({ ...graphResult(), graph: { nodes: [userNode, late], edges: [] } }) }));
+    expect(screen.queryByRole("button", { name: "Graph Outdated neighbor" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("navigation", { name: "Investigation pages" })).not.toBeInTheDocument();
+    if (change === "query") expect(screen.getByText("123456")).toBeVisible();
+  });
+
+  it("sends ordered waypoints and selected edge types to traversal", async () => {
+    await mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Source object ID" }), { target: { value: "source-id" } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target object ID" }), { target: { value: "target-id" } });
+    await userEvent.click(screen.getByRole("button", { name: "Add waypoint" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Via 1 object ID" }), { target: { value: "first-via" } });
+    await userEvent.click(screen.getByRole("button", { name: "Add waypoint" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Via 2 object ID" }), { target: { value: "second-via" } });
+    expect(screen.getByRole("button", { name: "Add waypoint" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Move Via 2 object ID up" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Relationship types/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear types" }));
+    expect(screen.getByRole("button", { name: "Find paths" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox", { name: "MemberOf" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    expect(screen.getByRole("combobox", { name: "Via 1 object ID" })).toHaveValue("second-via");
+    expect(screen.getByRole("checkbox", { name: "MemberOf" })).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Find paths" }));
+    expect(api.paths).toHaveBeenLastCalledWith({ source: "source-id", target: "target-id", via: ["second-via", "first-via"], relationshipKinds: ["MemberOf"], all: false, maxHops: 12 });
+    await userEvent.click(screen.getByRole("button", { name: "Reverse route" }));
+    expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue("target-id");
+    expect(screen.getByRole("combobox", { name: "Via 1 object ID" })).toHaveValue("first-via");
+    await userEvent.click(screen.getByRole("button", { name: "Remove via 2" }));
+    await userEvent.click(screen.getByRole("button", { name: "Find paths" }));
+    expect(api.paths).toHaveBeenLastCalledWith({ source: "target-id", target: "source-id", via: ["first-via"], relationshipKinds: ["MemberOf"], all: false, maxHops: 12 });
+    await userEvent.click(screen.getByRole("button", { name: "Select all types" }));
+    await userEvent.click(screen.getByRole("button", { name: "Find paths" }));
+    expect(api.paths).toHaveBeenLastCalledWith({ source: "target-id", target: "source-id", via: ["first-via"], relationshipKinds: [...BEAGLE_PATH_EDGE_KINDS], all: false, maxHops: 12 });
+    expect(api.paths.mock.lastCall?.[0].relationshipKinds).toHaveLength(62);
+    expect(api.paths.mock.lastCall?.[0].relationshipKinds).toContain("ProtectAdminGroups");
+    expect(api.paths.mock.lastCall?.[0].relationshipKinds).not.toContain("CanApplyGPO");
+  });
+
+  it("autocompletes path endpoints with explicit additional search pages", async () => {
+    const first = Array.from({ length: 100 }, (_, index): BeagleNode => ({ objectid: `endpoint-${index}`, labels: ["User"], properties: { name: `Endpoint user ${index}` } }));
+    api.search.mockImplementation(async ({ offset = 0 }) => ({ ok: true, value: offset ? searchResult([userNode], 100) : searchResult(first, 0, true) }));
+    await mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    const source = screen.getByRole("combobox", { name: "Source object ID" });
+    await userEvent.type(source, "user");
+    await screen.findByRole("option", { name: /Endpoint user 0/ });
+    expect(api.search).toHaveBeenCalledTimes(1);
+    expect(api.search).toHaveBeenCalledWith({ term: "user", offset: 0 });
+    await userEvent.click(screen.getByRole("button", { name: "Load more source object id matches" }));
+    await waitFor(() => expect(api.search).toHaveBeenLastCalledWith({ term: "user", offset: 100 }));
+    await userEvent.click(source);
+    await userEvent.keyboard("{ArrowDown}");
+    await userEvent.click(await screen.findByRole("option", { name: new RegExp(String(userNode.properties["name"]).replaceAll(".", "\\.")) }));
+    expect(source).toHaveValue(userNode.objectid);
+    fireEvent.change(screen.getByRole("combobox", { name: "Target object ID" }), { target: { value: groupNode.objectid } });
+    await userEvent.click(screen.getByRole("button", { name: "Find paths" }));
+    expect(api.paths).toHaveBeenCalledWith({ source: userNode.objectid, target: groupNode.objectid, all: false, maxHops: 12, relationshipKinds: [...BEAGLE_PATH_EDGE_KINDS] });
+  });
+
+  it("drops stale endpoint autocomplete after a new term and project switch", async () => {
+    let resolveOld!: (result: OperationResult<BeagleSearchResult>) => void;
+    api.search.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+    api.search.mockResolvedValue({ ok: true, value: searchResult([groupNode]) });
+    await mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    const source = screen.getByRole("combobox", { name: "Source object ID" });
+    await userEvent.type(source, "arya");
+    await waitFor(() => expect(api.search).toHaveBeenCalledTimes(1));
+    await userEvent.clear(source);
+    await userEvent.type(source, "admins");
+    await screen.findByRole("option", { name: /DOMAIN ADMINS/ });
+    await act(async () => resolveOld({ ok: true, value: searchResult([userNode]) }));
+    expect(screen.queryByRole("option", { name: /ARYA/ })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue("");
+    expect(screen.queryByRole("option", { name: /DOMAIN ADMINS/ })).not.toBeInTheDocument();
+  });
+
+  it("ignores an endpoint search that completes after switching projects", async () => {
+    let resolveSearch!: (result: OperationResult<BeagleSearchResult>) => void;
+    api.search.mockReturnValue(new Promise((resolve) => { resolveSearch = resolve; }));
+    await mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    await userEvent.type(screen.getByRole("combobox", { name: "Source object ID" }), "arya");
+    await waitFor(() => expect(api.search).toHaveBeenCalledTimes(1));
+    await userEvent.keyboard("{Escape}");
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    await act(async () => resolveSearch({ ok: true, value: searchResult([userNode]) }));
+    expect(screen.queryByRole("option", { name: /ARYA/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue("");
+  });
+
+  it("keeps analysis choices visible through queries and opens the affected object", async () => {
+    currentState = { ...currentState, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [{
+      computer: userNode.objectid, suffix: "-544", relationshipKind: "AdminTo", selectedGroup: groupNode.objectid,
+      candidateGroups: [{ objectid: groupNode.objectid, directMembers: [userNode.objectid] }, { objectid: "other-group", directMembers: [] }],
+    }] } };
+    await mount();
+    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` });
+    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: `AdminTo on ${userNode.objectid}` }));
+    await userEvent.click(screen.getByRole("button", { name: "Inspect affected computer" }));
+    await waitFor(() => expect(api.entity).toHaveBeenCalledWith({ objectid: userNode.objectid }));
+    expect(await screen.findByRole("heading", { name: "Object details" })).toBeVisible();
+    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
+  });
+
   it("uses the native import/export bridges and shows the import report", async () => {
     await mount();
     await userEvent.click(screen.getByRole("button", { name: "Import data" }));
@@ -296,6 +489,52 @@ describe("BeagleWindowApp", () => {
     expect(screen.getByLabelText("Operation report")).toHaveTextContent('"imported": 100');
     await userEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(api.exportGraph).toHaveBeenCalledTimes(1));
+  });
+
+  it.each(["Analyze", "Import data"] as const)("refreshes persisted uncertainty after failed %s and retains the operation error", async (button) => {
+    currentState = { ...currentState, diagnostics: { version: 1, localGroupAmbiguities: [], errors: [] } };
+    await mount();
+    expect(screen.queryByLabelText("Analysis diagnostics")).not.toBeInTheDocument();
+    const action = button === "Analyze" ? api.analyze : api.importFiles;
+    action.mockImplementationOnce(async () => {
+      currentState = { ...currentState, diagnostics: { version: 1, localGroupAmbiguities: [], errors: ["Analysis failed after replacing derived edges."] } };
+      return { ok: false, error: "Native analysis process exited with code 1" };
+    });
+    await userEvent.click(screen.getByRole("button", { name: button }));
+    await waitFor(() => expect(api.getState).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Analysis failed after replacing derived edges.")).toBeVisible();
+    expect(screen.getByText("Native analysis process exited with code 1")).toBeVisible();
+    expect(screen.queryByText(/finished\./)).not.toBeInTheDocument();
+  });
+
+  it.each(["failure", "other-project"] as const)("keeps uncertainty and the original failure when recovery returns %s", async (recovery) => {
+    currentState = { ...currentState, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [{
+      computer: userNode.objectid, suffix: "-544", relationshipKind: "AdminTo", selectedGroup: groupNode.objectid,
+      candidateGroups: [{ objectid: groupNode.objectid, directMembers: [] }, { objectid: "old-candidate", directMembers: [] }],
+    }] } };
+    await mount();
+    expect(screen.getByText("1 ambiguous local-group choice")).toBeVisible();
+    api.analyze.mockRejectedValueOnce(new Error("Original analysis error"));
+    if (recovery === "failure") api.getState.mockRejectedValueOnce(new Error("Refresh also failed"));
+    else api.getState.mockResolvedValueOnce({ ok: true, value: { ...currentState, selectedProjectId: projectB, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [] } } });
+    await userEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
+    expect(screen.getByText("Original analysis error")).toBeVisible();
+    expect(screen.getByText("The latest import or analysis did not complete. Run Analyze to verify this project.")).toBeVisible();
+    expect(screen.queryByText("1 ambiguous local-group choice")).not.toBeInTheDocument();
+    expect(screen.queryByText("Refresh also failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectA);
+  });
+
+  it("shows failed import uncertainty even when the project was previously empty", async () => {
+    currentState = { ...currentState, stats: { nodes: 0, edges: 0, labels: {}, relationships: {} }, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [] } };
+    await mount();
+    api.importFiles.mockResolvedValueOnce({ ok: false, error: "Import failed" });
+    api.getState.mockResolvedValueOnce({ ok: false, error: "Could not refresh project" });
+    await userEvent.click(screen.getByRole("button", { name: "Import collection" }));
+    expect(await screen.findByText("The latest import or analysis did not complete. Run Analyze to verify this project.")).toBeVisible();
+    expect(screen.getByText("Import failed")).toBeVisible();
+    expect(screen.queryByText("Could not refresh project")).not.toBeInTheDocument();
   });
 
   it("clears an old operation report when a saved-query notice replaces it", async () => {

@@ -17,6 +17,15 @@ const snapshot = {
   edges: [{ source: "U", target: "G", kind: "MemberOf", derived: true, properties: { isacl: false } }],
 };
 function response(value: BeagleJsonValue): { stdout: string; stderr: string } { return { stdout: JSON.stringify(value), stderr: "" }; }
+const capabilityProbe = { ...statistics, capabilities: { schema_version: 1, features: Object.fromEntries(["parameters", "shortest_path", "variable_length_paths", "named_paths", "optional_match", "with_where", "call_subquery", "union", "existential_subquery_full", "list_comprehension", "quantifiers"].map((key) => [key, true])) } };
+const runtimeHelp = "Commands:\n" + ["ingest", "analyze", "query", "queries", "stats", "entity", "paths", "compose", "tag", "export"].map((command) => `  ${command} help`).join("\n") + "\n --db --query-timeout";
+function runtimeResponse(args: readonly string[]): { stdout: string; stderr: string } | undefined {
+  if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+  if (args[0] === "--help") return { stdout: runtimeHelp, stderr: "" };
+  if (args[1] === ":memory:") return response(capabilityProbe);
+  return undefined;
+}
+
 
 describe("Beagle graph query boundary", () => {
   it.each([
@@ -118,7 +127,7 @@ describe("Beagle service", () => {
   beforeEach(async () => {
     root = await mkdtemp(join(tmpdir(), "beagle-service-test-"));
     runner = vi.fn<BeagleCommandRunner>(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0\n", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       if (args[4] === "stats") return response(statistics);
       if (args[4] === "export" || args[4] === "compose") return response(snapshot);
       if (args[4] === "ingest" || args[4] === "analyze" || args[4] === "tag") return response({ complete: true });
@@ -156,7 +165,10 @@ describe("Beagle service", () => {
       expect.stringContaining("ORDER BY n.name, n.objectid SKIP $offset LIMIT $limit"),
     ]);
     await service.paths({ source: "--db=escape", target: "$(id)", all: true, maxHops: 3 });
-    expect(runner.mock.calls.at(-1)?.[1].slice(4)).toEqual(["paths", "--source=--db=escape", "--target=$(id)", "--all", "--max-hops", "3"]);
+    expect(runner.mock.calls.at(-1)?.[1].slice(4)).toEqual([
+      "query", "--params", '{"source":"--db=escape","target":"$(id)"}', "--",
+      expect.stringMatching(/^MATCH p=allShortestPaths\(.+\*1\.\.3\]/u),
+    ]);
     await service.importFiles(["/tmp/collection;$(id).zip"]);
     expect(runner.mock.calls.find((call) => call[1][4] === "ingest")?.[1].slice(4)).toEqual(["ingest", "--analyze", "--", "/tmp/collection;$(id).zip"]);
   });
@@ -167,7 +179,7 @@ describe("Beagle service", () => {
     }));
     const pages = [nodes, nodes.slice(100)];
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       return response({ columns: ["n"], rows: pages.shift()!.map((n) => ({ n })) });
     });
     const first = await service.search({ term: "same" });
@@ -184,10 +196,86 @@ describe("Beagle service", () => {
       { term: "same", offset: 0, limit: 101 }, { term: "same", offset: 100, limit: 101 },
     ]);
   });
+  it("pages neighborhoods with a count while keeping the lookahead out of the displayed graph", async () => {
+    const rows = Array.from({ length: 251 }, (_, index) => ({ n: user, m: { ...group, id: index + 100, properties: { objectid: `G${index}`, name: "Same" } },
+      r: { ...relationship, id: index + 1000, endNode: index + 100 } }));
+    runner.mockImplementation(async (_binary, args) => {
+      const probe = runtimeResponse(args); if (probe) return probe;
+      if (args.at(-1)?.includes(" AS total")) return response({ columns: ["total"], rows: [{ total: 1727 }] });
+      return response({ columns: ["n", "r", "m"], rows });
+    });
+    const result = await service.neighborhood({ objectid: "U", offset: 250 });
+    expect(result.page).toEqual({ offset: 250, limit: 250, total: 1727, hasMore: true });
+    expect(result.rows).toHaveLength(250);
+    expect(result.graph.edges).toHaveLength(250);
+    expect(result.graph.nodes.some((node) => node.objectid === "G250")).toBe(false);
+    expect(result.truncated).toBe(false);
+    const queries = runner.mock.calls.filter((call) => call[1][4] === "query");
+    expect(queries).toHaveLength(2);
+    expect(JSON.parse(queries[1]![1][6]!)).toEqual({ objectid: "U", offset: 250, limit: 251 });
+  });
+  it("applies typed path filters to every ordered leg and returns no misleading partial route", async () => {
+    let calls = 0;
+    runner.mockImplementation(async (_binary, args) => {
+      const probe = runtimeResponse(args); if (probe) return probe;
+      calls++;
+      return response({ columns: ["p"], rows: calls === 1 ? [{ p: { nodes: [user, group], relationships: [relationship] } }] : [] });
+    });
+    const result = await service.paths({ source: "U", via: ["G"], target: "C", relationshipKinds: ["MemberOf", "AdminTo"], maxHops: 5 });
+    expect(result.graph).toEqual({ nodes: [], edges: [] });
+    const queries = runner.mock.calls.filter((call) => call[1][4] === "query");
+    expect(queries.map((call) => JSON.parse(call[1][6]!))).toEqual([{ source: "U", target: "G" }, { source: "G", target: "C" }]);
+    expect(queries.every((call) => call[1].at(-1)?.includes("[:MemberOf|AdminTo*1..5]"))).toBe(true);
+  });
+  it("runs foreign-principal adjacency traversal and returns counted object pages", async () => {
+    const computer = { id: 99, labels: ["Base", "Computer"], properties: { objectid: "C", name: "Computer" } };
+    const admin = { id: 91, startNode: 7, endNode: 99, type: "AdminTo", properties: {} };
+    runner.mockImplementation(async (_binary, args) => {
+      const probe = runtimeResponse(args); if (probe) return probe;
+      const parameters = JSON.parse(args[6]!) as { current?: string };
+      const rows = parameters.current === undefined ? [{ source: group, edge: admin, target: computer, traverse: true, foreign: false }]
+        : parameters.current === "G" ? [{ source: user, edge: relationship, target: group }] : [];
+      return response({ columns: ["source", "edge", "target", "traverse", "foreign"], rows });
+    });
+    const result = await service.neighborhood({ objectid: "D", view: "domain-foreign_admins" });
+    expect(result.page).toEqual({ offset: 0, limit: 250, total: 1, hasMore: false });
+    expect(result.rows).toHaveLength(1);
+    expect(result.graph.nodes.map((node) => node.objectid).sort()).toEqual(["C", "G", "U"]);
+    expect(result.graph.edges.map((edge) => edge.kind).sort()).toEqual(["AdminTo", "MemberOf"]);
+  });
+  it("uses the selectable CE relationship set when path filters are omitted", async () => {
+    await service.paths({ source: "U", target: "G" });
+    const cypher = runner.mock.calls.at(-1)![1].at(-1)!;
+    expect(cypher).toContain("ProtectAdminGroups");
+    expect(cypher).toContain("WriteDacl");
+    expect(cypher).not.toMatch(/AD_ATTACK_PATHS|WriteDACL|CanApplyGPO|ContainsIdentity|GPOAppliesTo|PropagatesACEsTo/u);
+  });
+  it("persists analysis ambiguity warnings per project and retains them across unrelated operations", async () => {
+    const first = await service.getState();
+    runner.mockImplementation(async (_binary, args) => {
+      if (args[4] === "stats") return response(statistics);
+      if (args[4] === "analyze") return response({ local_group_ambiguities: [{ computer: "C", suffix: "-544", relationship_kind: "AdminTo", selected_group: "C-544", candidate_groups: { "C-544": ["U"], "D-544": ["OTHER"] } }] });
+      return response({ complete: true });
+    });
+    const analyzed = await service.analyze();
+    expect(analyzed.state.diagnostics?.localGroupAmbiguities[0]).toMatchObject({ computer: "C", relationshipKind: "AdminTo", selectedGroup: "C-544" });
+    expect(analyzed.state.diagnostics?.errors).toEqual([]);
+    expect((await service.tag({ objectid: "U", tag: "owned", enabled: true })).state.diagnostics).toEqual(analyzed.state.diagnostics);
+    expect((await service.createProject({ name: "Other" })).diagnostics).toBeUndefined();
+    expect((await service.selectProject({ id: first.selectedProjectId })).diagnostics).toEqual(analyzed.state.diagnostics);
+    runner.mockImplementation(async (_binary, args) => {
+      if (args[4] === "analyze") throw new Error("output lost after native operation");
+      return response(statistics);
+    });
+    await expect(service.analyze()).rejects.toThrow("output lost");
+    expect((await service.getState()).diagnostics?.errors[0]).toContain("not completed with verified diagnostics");
+    await writeFile(join(root, "beagle", first.selectedProjectId, "analysis-diagnostics.json"), "invalid json");
+    expect((await service.getState()).diagnostics?.errors).toHaveLength(1);
+  });
 
   it.each([0, 100])("marks a complete search page of %s rows as having no next page", async (count) => {
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       return response({ columns: ["n"], rows: Array.from({ length: count }, (_, id) => ({
         n: { id, labels: ["User"], properties: { objectid: `U-${id}` } },
       })) });
@@ -203,7 +291,7 @@ describe("Beagle service", () => {
     expect(() => service.query({ cypher: "LOAD CSV FROM $file AS row RETURN row", parameters: { file: "/tmp/private" } })).toThrow("File access");
     expect(runner).not.toHaveBeenCalled();
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       return response({ parameterized_query: "CALL apoc.periodic.iterate($producer, $action, {})" });
     });
     await expect(service.runSavedQuery({ id: "unsafe", parameters: { producer: "LOAD CSV FROM '/tmp/private' AS row RETURN row", action: "RETURN row" } })).rejects.toThrow("File access");
@@ -212,7 +300,7 @@ describe("Beagle service", () => {
 
   it("checks current saved query source while preserving native bound-parameter execution", async () => {
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       if (args[4] === "queries") return response({ parameterized_query: "RETURN $name AS name" });
       return response({ columns: ["name"], rows: [{ name: "LOAD CSV" }] });
     });
@@ -246,7 +334,7 @@ describe("Beagle service", () => {
 
   it("hydrates relationship-only query results within the same database operation", async () => {
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       if (args.at(-1) === "MATCH (n) WHERE id(n) IN $ids RETURN n") return response({ columns: ["n"], rows: [{ n: user }, { n: group }] });
       return response({ columns: ["r"], rows: [{ r: relationship }] });
     });
@@ -261,7 +349,7 @@ describe("Beagle service", () => {
     const raw = { guid: "template", name: "Computer template", query: "MATCH (n) WHERE n.name = 'HOSTNAME' RETURN n" };
     const enriched = { ...raw, parameterized_query: "MATCH (n) WHERE n.name = $hostname RETURN n", parameters: { hostname: "string" } };
     runner.mockImplementation(async (_binary, args) => {
-      if (args[0] === "--version") return { stdout: "beagle 0.1.0", stderr: "" };
+      const probe = runtimeResponse(args); if (probe) return probe;
       if (args[4] === "stats") return response(statistics);
       return response(args[5] === "--" ? enriched : [raw]);
     });
@@ -279,7 +367,7 @@ describe("Beagle service", () => {
 
   it("keeps export complete even when display limits apply", async () => {
     const nodes = Array.from({ length: BEAGLE_RESULT_LIMITS.nodes + 1 }, (_, index) => ({ objectid: String(index), labels: ["User"], properties: {} }));
-    runner.mockImplementation(async (_binary, args) => args[0] === "--version" ? { stdout: "beagle 0.1.0", stderr: "" } : response({ nodes, edges: [] }));
+    runner.mockImplementation(async (_binary, args) => runtimeResponse(args) ?? response({ nodes, edges: [] }));
     expect((await service.exportGraph()).nodes).toHaveLength(nodes.length);
   });
 
@@ -289,12 +377,25 @@ describe("Beagle service", () => {
     await expect(service.query({ cypher: "RETURN 1" })).rejects.toThrow("Choose a Beagle executable");
     runner.mockImplementation(async (binary, args) => {
       if (binary !== "/native/beagle") throw new Error("not found");
-      return args[0] === "--version" ? { stdout: "beagle 0.1.0", stderr: "" } : response(statistics);
+      return runtimeResponse(args) ?? response(statistics);
     });
     expect((await service.configureBinary("/native/beagle")).runtime).toEqual({ available: true, version: "beagle 0.1.0", source: "Selected executable" });
     const saved: unknown = JSON.parse(await readFile(join(root, "beagle", "projects.json"), "utf8"));
     expect(saved).toMatchObject({ binaryPath: "/native/beagle" });
     expect(() => service.configureBinary("relative-path")).toThrow("absolute path");
+  });
+  it("rejects unsupported runtime versions and missing query capabilities before opening a project", async () => {
+    runner.mockImplementation(async () => ({ stdout: "beagle 9.0.0", stderr: "" }));
+    await expect(service.configureBinary("/native/future-beagle")).rejects.toThrow("supports the Beagle 0.1.x interface");
+    expect(runner.mock.calls.every((call) => call[1][0] === "--version")).toBe(true);
+    runner.mockClear();
+    runner.mockImplementation(async (_binary, args) => args[1] === ":memory:"
+      ? response({ ...capabilityProbe, capabilities: { schema_version: 1, features: { parameters: true } } })
+      : runtimeResponse(args)!);
+    await expect(service.configureBinary("/native/incomplete-beagle")).rejects.toThrow("query capabilities");
+    expect(runner.mock.calls.filter((call) => call[1][0] === "--db").every((call) => call[1][1] === ":memory:")).toBe(true);
+    runner.mockImplementation(async (_binary, args) => args[0] === "--help" ? { stdout: "no commands", stderr: "" } : runtimeResponse(args)!);
+    await expect(service.configureBinary("/native/missing-commands")).rejects.toThrow("commands are missing");
   });
 
   it("discovers packaged runtime without a developer-specific path", async () => {

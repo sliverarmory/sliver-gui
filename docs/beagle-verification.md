@@ -128,6 +128,37 @@ For the expansion check, use `LIMIT 1498`, select the real KINGSLANDING computer
 
 Validation passed `npm run build:e2e-app` (including both TypeScript projects and nine sandboxed preload bundles) and the full `npm test` suite: 5,870 passed, three skipped, across 285 passed and two skipped files. Automated regressions cover page boundaries, stale responses, page failure recovery, search insertion at the cap, and expansion endpoint filtering. Private native/UI evidence is retained under the ignored `artifacts/beagle-pagination-20261023T054657Z/` directory. The normal domain/DC graph was restored and left open with the second search page visible.
 
+## P1 local acceptance
+
+On October 23, 2026, the P1 roadmap was implemented and tested locally against the fresh sliver-range collection (`8a13419e1fd550e27beddf57ebfdb2f95ad25c827f67eaadeed35aa24541b80a`). This is a point-in-time result; no CI compatibility job or release gate was added.
+
+The GUI baseline was `237470f6b2991a780c0a65d3d41374373146f071` plus this roadmap's working-tree changes. The executed Beagle binary and 177-query catalog hashes remain those recorded above. Current Beagle source was `3a89bba4645b5b235ef12028ad9cdb0534043015`, with no Rust source changes relative to the previous source pin. The independent oracle used CE 9.8.0 at `1759e1638435595def27eb3ff3c5a6fc32832ddc` and the pinned container images above.
+
+| Local acceptance | Result |
+| --- | --- |
+| Fresh independent CE ingestion | All 15 files accepted; zero failed or partially failed files |
+| Fresh analyzed graph comparison | 814 nodes / 8,889 edges; zero normalized differences, using the operational-field exclusions described above; no ambiguity exception |
+| All 71 contextual actions versus official CE endpoints | Exact target identities and counts: 55 nonempty, 16 empty; bounded pages and stable page slicing passed for all 71 |
+| Generic relationship pagination | All 1,727 incident relationships returned across seven 250-row pages; no duplicate or omitted edge identities versus the canonical graph |
+| Production Electron paging | Correct first/second ranges and total; Next/Previous; four-target group membership drilldown with supporting paths |
+| Production Electron path controls | Endpoint search loaded 100 then 110 matches; second-page selection worked. Four ordered endpoints yielded three `MemberOf` edges; a `HasSession`-only filter yielded no route |
+| Production Electron graph limit | 1,498 read-only display aliases plus a real computer; expansion stopped at 1,500 objects, retained a valid edge and showed the display-limit warning |
+| Positive ambiguity fixtures | Two candidate-selection cases, four privilege kinds each, and 16 selected/alternate downstream path assertions; reanalysis stable |
+| Diagnostic persistence and recovery | Private mode-0600 per-project file; service restart, tagging and project isolation passed. Native warnings survived reload and inspected the selected group. A malformed import retained 18 nodes / 23 edges and visibly invalidated old diagnostics; Analyze restored the four warnings |
+| Runtime interface | The selected Beagle 0.1.0 executable passed command and capability checks. Actual child-process negative probes rejected an unsupported version and missing capabilities while retaining the compatible runtime; regressions also cover missing commands |
+
+The contextual comparison uses the CE actions' actual API routes, including their direction and terminal-node semantics. It compares target identities/counts, not every possible supporting path. Each page carries real native nodes and edges. Empty cases remain empty evidence; they are not positive algorithm coverage. Separate native synthetic cases exercise nested membership, local privileges, one-edge object control (including `WriteDacl`), sessions, SQL traversal and enforced/blocking GPO inheritance.
+
+Path relationship names are the actual CE schema string values. Selecting all 62 types sends that explicit set, including `ProtectAdminGroups` and `WriteDacl`; it does not substitute the different native `AD_ATTACK_PATHS` alias. The same set is used when a typed caller omits filters. Each ordered leg must exist, and hop limits apply per leg.
+
+The 29 terminal-node actions, Foreign Admins and Foreign GPO Controllers use 100-row adjacency reads and CE's visited-node/terminal rules instead of enumerating every cyclic path. Native regression fixtures cover convergent branches and a cycle returning to the original root. Only the requested result page is returned. Traversal has explicit node, edge, evidence-record, depth and elapsed-time bounds; reaching one fails the request without a partial total. Parent links avoid copying complete paths for every queued branch. These are correctness safeguards, not a large-directory performance certification.
+
+The ambiguity tests validate the native deterministic selection and its downstream effects. They do not establish that CE's unordered selection will choose the same candidate in every database. Warnings expose that compatibility boundary; candidate privileges are not combined. Missing, malformed or oversized diagnostic data produces an explicit incomplete status. Before native import/analysis, previous diagnostics are invalidated; failed operations also refresh the open renderer's state.
+
+Private evidence is retained under ignored `artifacts/beagle-p1-20261023/`, `artifacts/beagle-investigations-20261023/` and `artifacts/beagle-local-ambiguity-20261023T152445Z/`. The full 177-query oracle classification earlier in this document was not rerun for this implementation; this run separately verifies the fresh analyzed graph and all 71 contextual actions.
+
+Final validation passed `npm run build:e2e-app`, including both TypeScript projects and all nine sandboxed preload checks. `SLIVER_BEAGLE_BINARY=/path/to/beagle npm test` passed **5,919 tests across 289 files**, with three tests skipped in two files; the native investigation fixture ran and passed. These are local commands, not additions to CI. The disposable oracle was stopped and its owned containers, volumes and temporary credentials were removed; cleanup verified zero remaining owned resources.
+
 ## Evidence boundaries
 
 This verifies the pinned backend, recorded AD dataset/query corpus and native macOS desktop integration. It does not prove unrestricted Cypher, every BloodHound CE feature, or positive algorithms whose queries returned no data. Distribution packaging and native execution on other operating systems were not exercised. Beagle remains an external executable selected by the operator or supplied through `SLIVER_BEAGLE_BINARY`; this change does not bundle a cross-platform Beagle release. This run's disposable containers, volumes and credentials were removed after verification; private databases and reports were retained outside the source tree.

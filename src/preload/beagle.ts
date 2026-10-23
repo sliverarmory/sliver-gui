@@ -65,6 +65,7 @@ const api: BeagleAPI = {
   runSavedQuery: (input) => ipcRenderer.invoke("sliver:beagle:query:saved", input),
   search: (input) => ipcRenderer.invoke("sliver:beagle:search", input),
   entity: (input) => ipcRenderer.invoke("sliver:beagle:entity", input),
+  neighborhood: (input) => ipcRenderer.invoke("sliver:beagle:neighborhood", input),
   paths: (input) => ipcRenderer.invoke("sliver:beagle:paths", input),
   tag: (input) => ipcRenderer.invoke("sliver:beagle:tag", input),
   compose: (input) => ipcRenderer.invoke("sliver:beagle:compose", input),

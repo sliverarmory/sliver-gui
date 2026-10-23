@@ -12,6 +12,7 @@ import {
   parseBeagleSavedQueryInput,
   parseBeagleSearchInput,
   parseBeagleEntityInput,
+  parseBeagleNeighborhoodInput,
   parseBeaglePathsInput,
   parseBeagleTagInput,
   parseBeagleComposeInput,
@@ -23,7 +24,7 @@ import { isSameRendererDocument } from "./security.js";
 export interface BeagleIpcServices {
   readonly manager: Pick<BeagleService, "getState" | "createProject" | "selectProject" | "configureBinary" |
     "importFiles" | "analyze" | "query" | "getQueries" | "runSavedQuery" | "search" | "entity" |
-    "paths" | "tag" | "compose" | "exportGraph">;
+    "neighborhood" | "paths" | "tag" | "compose" | "exportGraph">;
   readonly getApplicationSettings: () => ApplicationSettingsState;
 }
 
@@ -76,6 +77,7 @@ export function registerBeagleIpcHandlers(
   handle(BEAGLE_IPC_INVOKE.runSavedQuery, one(parseBeagleSavedQueryInput), (input) => manager.runSavedQuery(input), false);
   handle(BEAGLE_IPC_INVOKE.search, one(parseBeagleSearchInput), (input) => manager.search(input), false);
   handle(BEAGLE_IPC_INVOKE.entity, one(parseBeagleEntityInput), (input) => manager.entity(input), false);
+  handle(BEAGLE_IPC_INVOKE.neighborhood, one(parseBeagleNeighborhoodInput), (input) => manager.neighborhood(input), false);
   handle(BEAGLE_IPC_INVOKE.paths, one(parseBeaglePathsInput), (input) => manager.paths(input), false);
   handle(BEAGLE_IPC_INVOKE.tag, one(parseBeagleTagInput), (input) => manager.tag(input));
   handle(BEAGLE_IPC_INVOKE.compose, one(parseBeagleComposeInput), (input) => manager.compose(input), false);

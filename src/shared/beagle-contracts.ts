@@ -1,5 +1,7 @@
 import type { ApplicationSettingsState } from "./application-settings-contracts.js";
 import type { OperationResult } from "./contracts.js";
+import type { BeagleAnalysisDiagnostics } from "./beagle-diagnostics.js";
+import { BEAGLE_DRILLDOWNS, BEAGLE_PATH_EDGE_KINDS } from "./beagle-investigations.js";
 
 export type BeagleJsonValue = null | boolean | number | string | BeagleJsonValue[] | BeagleJsonObject;
 export interface BeagleJsonObject { [key: string]: BeagleJsonValue }
@@ -31,6 +33,8 @@ export interface BeagleState {
   projects: BeagleProject[];
   selectedProjectId: string;
   stats: BeagleStats | null;
+  /** Absent until this project has a recorded analysis diagnostic result. */
+  diagnostics?: BeagleAnalysisDiagnostics;
 }
 export interface BeagleQueryResult {
   projectId: string;
@@ -45,6 +49,12 @@ export interface BeagleQueryResult {
 export interface BeagleSearchResult extends BeagleQueryResult {
   /** Search reads one bounded page; totalRows describes this page, not all matches. */
   page: { offset: number; limit: number; hasMore: boolean };
+}
+export interface BeagleNeighborhoodResult extends BeagleQueryResult {
+  objectid: string;
+  view: string;
+  /** Relationships for the generic view; distinct target objects for contextual views. */
+  page: { offset: number; limit: number; hasMore: boolean; total: number };
 }
 export interface BeagleMutationResult { state: BeagleState; report: BeagleJsonValue }
 export interface BeagleSavedQuery {
@@ -62,7 +72,8 @@ export interface BeagleQueryInput { cypher: string; parameters?: BeagleJsonObjec
 export interface BeagleSavedQueryInput { id: string; parameters?: BeagleJsonObject }
 export interface BeagleSearchInput { term: string; offset?: number }
 export interface BeagleEntityInput { objectid: string }
-export interface BeaglePathsInput { source: string; target: string; all?: boolean; maxHops?: number }
+export interface BeagleNeighborhoodInput { objectid: string; view?: string; offset?: number }
+export interface BeaglePathsInput { source: string; target: string; via?: string[]; relationshipKinds?: string[]; all?: boolean; maxHops?: number }
 export interface BeagleTagInput { objectid: string; tag: "owned" | "admin_tier_0"; enabled: boolean }
 export interface BeagleComposeInput { source: string; target: string; kind: string }
 
@@ -79,6 +90,7 @@ export interface BeagleAPI {
   runSavedQuery(input: BeagleSavedQueryInput): Promise<OperationResult<BeagleQueryResult>>;
   search(input: BeagleSearchInput): Promise<OperationResult<BeagleSearchResult>>;
   entity(input: BeagleEntityInput): Promise<OperationResult<BeagleQueryResult>>;
+  neighborhood(input: BeagleNeighborhoodInput): Promise<OperationResult<BeagleNeighborhoodResult>>;
   paths(input: BeaglePathsInput): Promise<OperationResult<BeagleQueryResult>>;
   tag(input: BeagleTagInput): Promise<OperationResult<BeagleMutationResult>>;
   compose(input: BeagleComposeInput): Promise<OperationResult<BeagleQueryResult>>;
@@ -99,6 +111,7 @@ export const BEAGLE_IPC_INVOKE = Object.freeze({
   runSavedQuery: "sliver:beagle:query:saved",
   search: "sliver:beagle:search",
   entity: "sliver:beagle:entity",
+  neighborhood: "sliver:beagle:neighborhood",
   paths: "sliver:beagle:paths",
   tag: "sliver:beagle:tag",
   compose: "sliver:beagle:compose",
@@ -108,6 +121,7 @@ export const BEAGLE_IPC_INVOKE = Object.freeze({
 
 export const BEAGLE_RESULT_LIMITS = Object.freeze({ rows: 5_000, nodes: 1_500, edges: 3_000 });
 export const BEAGLE_SEARCH_PAGE_SIZE = 100;
+export const BEAGLE_NEIGHBORHOOD_PAGE_SIZE = 250;
 export const BEAGLE_PROJECT_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
 
 function request(value: unknown, fields: string[]): Record<string, unknown> {
@@ -188,16 +202,39 @@ export function parseBeagleEntityInput(value: unknown): BeagleEntityInput {
   const input = request(value, ["objectid"]);
   return { objectid: text(input["objectid"]) };
 }
+export function parseBeagleNeighborhoodInput(value: unknown): BeagleNeighborhoodInput {
+  const input = request(value, ["objectid", "view", "offset"]);
+  const view = input["view"];
+  if (view !== undefined && (typeof view !== "string" || !BEAGLE_DRILLDOWNS.some((item) => item.id === view))) {
+    throw new TypeError("Unknown AD relationship view");
+  }
+  const offset = input["offset"];
+  if (offset !== undefined && (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0)) {
+    throw new TypeError("Relationship offset must be a nonnegative safe integer");
+  }
+  return { objectid: text(input["objectid"]), ...(view === undefined ? {} : { view }), ...(offset === undefined ? {} : { offset }) };
+}
 export function parseBeaglePathsInput(value: unknown): BeaglePathsInput {
-  const input = request(value, ["source", "target", "all", "maxHops"]);
+  const input = request(value, ["source", "target", "via", "relationshipKinds", "all", "maxHops"]);
   const all = input["all"];
   const maxHops = input["maxHops"];
   if (all !== undefined && typeof all !== "boolean") throw new TypeError("Invalid Beagle path selection");
   if (maxHops !== undefined && (typeof maxHops !== "number" || !Number.isInteger(maxHops) || maxHops < 1 || maxHops > 64)) {
     throw new TypeError("Beagle max hops must be between 1 and 64");
   }
+  const via = input["via"];
+  if (via !== undefined && (!Array.isArray(via) || via.length > 2)) throw new TypeError("Choose at most two intermediate objects");
+  const intermediate = via === undefined ? undefined : (via as unknown[]).map((id) => text(id));
+  const relationshipKinds = input["relationshipKinds"];
+  if (relationshipKinds !== undefined && (!Array.isArray(relationshipKinds) || relationshipKinds.length < 1 ||
+      relationshipKinds.length > BEAGLE_PATH_EDGE_KINDS.length || relationshipKinds.some((kind) =>
+        typeof kind !== "string" || !BEAGLE_PATH_EDGE_KINDS.includes(kind)) || new Set(relationshipKinds).size !== relationshipKinds.length)) {
+    throw new TypeError("Select one or more distinct supported attack-path relationships");
+  }
   return {
     source: text(input["source"]), target: text(input["target"]),
+    ...(intermediate === undefined ? {} : { via: intermediate }),
+    ...(relationshipKinds === undefined ? {} : { relationshipKinds: [...relationshipKinds as string[]] }),
     ...(all === undefined ? {} : { all }), ...(maxHops === undefined ? {} : { maxHops }),
   };
 }

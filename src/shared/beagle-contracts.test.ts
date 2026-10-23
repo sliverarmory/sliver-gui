@@ -2,11 +2,25 @@ import { describe, expect, it } from "vitest";
 
 import {
   BEAGLE_IPC_INVOKE, parseBeagleComposeInput, parseBeagleCreateProjectInput, parseBeagleEntityInput,
-  parseBeagleJson, parseBeaglePathsInput, parseBeagleQueryInput, parseBeagleSavedQueryInput,
+  parseBeagleJson, parseBeagleNeighborhoodInput, parseBeaglePathsInput, parseBeagleQueryInput, parseBeagleSavedQueryInput,
   parseBeagleSearchInput, parseBeagleSelectProjectInput, parseBeagleTagInput,
 } from "./beagle-contracts.js";
 
 describe("Beagle IPC contracts", () => {
+  it("bounds neighborhood pages and accepts only the pinned contextual views", () => {
+    expect(parseBeagleNeighborhoodInput({ objectid: "U", view: "user-member_of", offset: 250 })).toEqual({ objectid: "U", view: "user-member_of", offset: 250 });
+    for (const extra of [{ view: "MATCH (n) RETURN n" }, { offset: -1 }, { offset: 1.5 }, { offset: Infinity }, { limit: 99999 }]) {
+      expect(() => parseBeagleNeighborhoodInput({ objectid: "U", ...extra })).toThrow(TypeError);
+    }
+  });
+  it("validates ordered endpoints and traversal relationships without accepting Cypher identifiers", () => {
+    const input = { source: "U", via: ["G1", "G2"], target: "C", relationshipKinds: ["MemberOf", "AdminTo"] };
+    expect(parseBeaglePathsInput(input)).toEqual(input);
+    for (const extra of [{ via: ["G", "G", "G"] }, { via: [null] }, { relationshipKinds: [] },
+      { relationshipKinds: ["MemberOf", "MemberOf"] }, { relationshipKinds: ["MemberOf]->(n) DELETE n //"] }, { relationshipKinds: ["NotAnAttackPathKind"] }]) {
+      expect(() => parseBeaglePathsInput({ source: "U", target: "C", ...extra })).toThrow(TypeError);
+    }
+  });
   it("uses unique isolated channels and provides no renderer filesystem or process access", () => {
     const channels = Object.values(BEAGLE_IPC_INVOKE);
     expect(new Set(channels).size).toBe(channels.length);
