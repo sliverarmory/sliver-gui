@@ -41,6 +41,7 @@ interface TestNode {
 }
 
 describe.each([
+  { name: "Beagle", bridge: "beagle", load: () => import("./beagle.js") },
   { name: "Armory", bridge: "armory", load: () => import("./armory.js") },
   { name: "Network", bridge: "network", load: () => import("./network.js") },
   { name: "Cloud Deployment", bridge: "cloudDeployment", load: () => import("./cloud-deployment.js") },

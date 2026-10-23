@@ -1,4 +1,5 @@
 import type { GhosttySettingsAPI } from "../../shared/ghostty-settings-contracts";
+import type { BeagleAPI } from "../../shared/beagle-contracts";
 import type { ArmoryAPI } from "../../shared/armory-contracts";
 import type { CloudDeploymentAPI } from "../../shared/cloud-deployment-ipc";
 import type { ApplicationContextMenuAPI } from "../../shared/application-context-menu-contracts";
@@ -19,6 +20,7 @@ declare global {
     textEditor?: TextEditorAPI;
     rdp?: RdpWindowAPI;
     armory?: ArmoryAPI;
+    beagle?: BeagleAPI;
     sliver: SliverDesktopAPI;
     ssh?: SshWindowAPI;
   }

@@ -82,7 +82,9 @@
     "test:e2e:rdp-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/rdp-live.e2e.js",
     "test:e2e:rdp-files-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/rdp-files-live.e2e.js",
     "test:e2e:rdp-remote-screen-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/rdp-remote-screen-live.e2e.js",
-    "test:e2e:rdp-socks-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/rdp-socks-live.e2e.js"
+    "test:e2e:rdp-socks-live": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/rdp-socks-live.e2e.js",
+    "test:beagle:compatibility": "python3 ./scripts/verifyBeagleCompatibility.py",
+    "test:e2e:beagle": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/beagle-window.e2e.js"
   },
   "devDependencies": {
     "@electron/asar": "4.3.1",

@@ -219,3 +219,42 @@ Sliver GUI is licensed under [GPL-3.0-or-later](LICENSE). Third-party components
 including HeroUI Pro, retain their own terms. See the
 [licensing notes](LICENSES/LICENSING.md) for attribution and distribution
 constraints.
+
+
+### Active Directory Explorer (Beagle)
+
+Open **View → AD Explorer** for a standalone local AD workspace. Create a project,
+choose **Import data** to load SharpHound ZIP/JSON collections, then search entities,
+run parameterized Cypher or a built-in BloodHound query, and inspect the React Flow
+graph or table results. Object details support owned/tier-zero tags, relationship
+expansion and path endpoints; relationship details expose Beagle's composition
+workflow. Custom queries are saved per project, and **Export graph** writes the
+complete canonical graph through a native save dialog.
+
+Install a standalone [Beagle](https://github.com/sliverarmory/Beagle) executable,
+then choose it in the window's runtime settings. A selected executable is remembered.
+The application also discovers `SLIVER_BEAGLE_BINARY`, a runtime staged at
+`resources/beagle/beagle` (`beagle.exe` on Windows), or `beagle` on `PATH`.
+The runtime is an external prerequisite; this change does not download or bundle
+an unverified executable. Beagle 0.1.0 at commit
+`6dc34300f67d025dccd4c7fef36cf31210c46a42` is the validated backend.
+
+Project databases live under Electron's user-data directory in `beagle/`; imports
+merge into the selected project and run analysis. Use a new project for a separate
+dataset. Cypher is read-only; the desktop bridge also blocks file-loading and
+dynamic-query functions so queries cannot bypass native file selection. Queries have a 30-second backend timeout and a
+40-second process deadline; imports/analysis have a five-minute deadline. Display
+limits are 5,000 rows, 1,500 nodes and 3,000 relationships, with visible truncation.
+The backend output ceiling is 32 MiB, including exports.
+
+Run focused native validation with an existing private GOAD collection:
+
+```sh
+SLIVER_BEAGLE_E2E_BINARY=/absolute/path/to/beagle \
+SLIVER_BEAGLE_E2E_COLLECTION=/absolute/path/to/goad.zip \
+npm run test:e2e:beagle
+```
+
+See [the implementation plan](docs/beagle-implementation-plan.md) and
+[compatibility evidence and reproduction instructions](docs/beagle-verification.md).
+The private lab collection and generated databases are excluded from version control.

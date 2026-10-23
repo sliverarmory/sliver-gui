@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   ARMORY_SESSION_PARTITION,
   armoryWindowOptions,
+  BEAGLE_SESSION_PARTITION,
+  beagleWindowOptions,
   CLOUD_DEPLOYMENT_SESSION_PARTITION,
   NETWORK_SESSION_PARTITION,
   cloudDeploymentWindowOptions,
@@ -491,5 +493,17 @@ describe("terminal native glass", () => {
         expect(fallback.backgroundColor).toBe("#09090b");
       }
     }
+  });
+});
+
+
+describe("AD Explorer window", () => {
+  it.each(["darwin", "linux", "win32"] as const)("isolates its backend on %s", (platform) => {
+    const options = beagleWindowOptions("/beagle.cjs", platform, "/icon.png");
+    expect(options).toMatchObject({ title: "AD Explorer", show: false, minWidth: 1000, minHeight: 700,
+      webPreferences: { preload: "/beagle.cjs", partition: BEAGLE_SESSION_PARTITION,
+        sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
+    expect(options).not.toHaveProperty("parent");
+    expect(BEAGLE_SESSION_PARTITION).toBe("persist:sliver-beagle");
   });
 });

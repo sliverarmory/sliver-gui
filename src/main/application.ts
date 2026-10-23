@@ -1,6 +1,9 @@
 import { GhosttyConfigStore } from "./ghostty-config.js";
 import { registerGhosttySettingsIpc } from "./ghostty-settings-ipc.js";
 import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
+import { BeagleService } from "./beagle-service.js";
+import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers } from "./beagle-ipc.js";
+import { BEAGLE_SESSION_PARTITION, beagleWindowOptions } from "./window-options.js";
 import { ArmoryService } from "./armory-service.js";
 import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers } from "./armory-ipc.js";
 import { ARMORY_SESSION_PARTITION, armoryWindowOptions } from "./window-options.js";
@@ -190,6 +193,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 type NativeWindowSurface =
+  | "beagle"
   | "armory"
   | "workspace"
   | "cloud-deployment"
@@ -209,6 +213,7 @@ export interface StartApplicationOptions {
   cloudDeploymentPreloadPath?: string;
   networkPreloadPath?: string;
   armoryPreloadPath?: string;
+  beaglePreloadPath?: string;
   sshPreloadPath?: string;
   textEditorPreloadPath?: string;
   rdpPreloadPath?: string;
@@ -345,6 +350,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
   );
+  const beaglePreloadPath = options.beaglePreloadPath ?? join(mainBundleDirectory, "../preload/beagle.cjs");
   const armoryPreloadPath = options.armoryPreloadPath ?? join(mainBundleDirectory, "../preload/armory.cjs");
   const networkPreloadPath = options.networkPreloadPath ?? join(
     mainBundleDirectory,
@@ -375,6 +381,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let workspaceZoomSettings: WorkspaceZoomSettings | undefined;
   const zoomReadyWorkspaceContents = new Set<number>();
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
+  const beagleRendererUrl = rendererUrlForSurface(rendererUrl, "beagle");
+  const beagleService = new BeagleService({ userDataPath: app.getPath("userData"), resourcesPath: process.resourcesPath });
+  let beagleWindow: BrowserWindow | undefined;
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
   let armoryWindow: BrowserWindow | undefined;
@@ -485,7 +494,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh",
+    surface?: "beagle" | "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -529,7 +538,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     hardenWindow(
       window,
       rendererUrl,
-      surface === "armory"
+      surface === "beagle"
+        ? beagleRendererUrl
+        : surface === "armory"
         ? armoryRendererUrl
         : surface === "cloud-deployment"
         ? cloudDeploymentRendererUrl
@@ -782,6 +793,32 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     });
     void loadRenderer(window);
     return window;
+  }
+
+  async function openBeagleWindow(): Promise<void> {
+    if (shutdown.isStopping) return;
+    if (beagleWindow && !beagleWindow.isDestroyed() && !beagleWindow.webContents.isDestroyed()) {
+      if (beagleWindow.isMinimized()) beagleWindow.restore();
+      beagleWindow.show();
+      beagleWindow.focus();
+      return;
+    }
+    let createdWindow: BrowserWindow | undefined;
+    try {
+      const window = new BrowserWindow(beagleWindowOptions(
+        beaglePreloadPath, process.platform, applicationIcons.getIconPath(), nativeTheme.shouldUseDarkColors,
+      ));
+      createdWindow = beagleWindow = window;
+      window.on("closed", () => { if (beagleWindow === window) beagleWindow = undefined; });
+      window.webContents.on("did-finish-load", () => { if (!window.isDestroyed()) window.setTitle("AD Explorer"); });
+      window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
+      trackWindow(window, undefined, undefined, undefined, undefined, "beagle", false);
+      await loadRenderer(window, "beagle");
+    } catch {
+      if (beagleWindow === createdWindow) beagleWindow = undefined;
+      if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      if (!shutdown.isStopping) dialog.showErrorBox("AD Explorer unavailable", "The AD Explorer window could not be opened");
+    }
   }
 
   function publishArmoryChanged(): void {
@@ -2385,6 +2422,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           });
         },
         openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
+        openBeagle: () => void openBeagleWindow(),
         openArmory: (tab) => void openArmoryWindow(tab),
         openNetwork: (tab, sourceWindow) => {
           void openNetworkWindow(
@@ -2499,6 +2537,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const rdpCleanup = rdpWindows?.dispose();
       if (rdpCleanup) trackPendingCleanup(rdpCleanup);
       armoryService.dispose();
+      beagleService.dispose();
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
         const cleanup = sshCleanup.finally(disposeCloudDeployment);
@@ -3047,13 +3086,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   configureSessionSecurity(cloudDeploymentSession);
   const networkSession = session.fromPartition(NETWORK_SESSION_PARTITION);
   configureSessionSecurity(networkSession);
+  const beagleSession = session.fromPartition(BEAGLE_SESSION_PARTITION);
+  configureSessionSecurity(beagleSession);
   const armorySession = session.fromPartition(ARMORY_SESSION_PARTITION);
   configureSessionSecurity(armorySession);
   const textEditorSession = session.fromPartition(TEXT_EDITOR_SESSION_PARTITION);
   configureSessionSecurity(textEditorSession, undefined, textEditorRendererUrl);
   const rdpSession = session.fromPartition(RDP_SESSION_PARTITION);
   configureSessionSecurity(rdpSession, undefined, rdpRendererUrl);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, textEditorSession, rdpSession]);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, beagleSession, textEditorSession, rdpSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
@@ -3246,6 +3287,13 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       approveHostKey: approveManagedSshHostKey,
     },
   );
+  registerBeagleIpcHandlers({
+    manager: beagleService,
+    getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+  }, beagleRendererUrl, (identity, window) =>
+    !shutdown.isStopping && beagleWindow === window && nativeWindowSurfaces.get(window) === "beagle" &&
+    sameWindowIdentity(identity, identityForWindow(window)),
+  );
   registerArmoryIpcHandlers({
     manager: armoryService,
     writeClipboardText: (text) => clipboard.writeText(text),
@@ -3351,6 +3399,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterCloudDeploymentIpcHandlers();
       unregisterNetworkForwardingIpcHandlers();
       unregisterArmoryIpcHandlers();
+      unregisterBeagleIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
       await rdpWindows?.dispose();
@@ -3404,7 +3453,7 @@ function readLinuxPackageType(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor" | "rdp",
+  surface: "beagle" | "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor" | "rdp",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);
