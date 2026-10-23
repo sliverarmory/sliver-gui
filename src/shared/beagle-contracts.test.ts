@@ -49,6 +49,19 @@ describe("Beagle IPC contracts", () => {
     expect(() => parseBeagleJson(nested)).toThrow(TypeError);
   });
 
+  it("bounds query and saved-query parameters by serialized UTF-8 bytes, including object keys", () => {
+    const exact = { value: `${"界".repeat(21_841)}x` };
+    expect(new TextEncoder().encode(JSON.stringify(exact))).toHaveLength(65_536);
+    expect(parseBeagleQueryInput({ cypher: "RETURN $value", parameters: exact }).parameters).toEqual(exact);
+    expect(parseBeagleSavedQueryInput({ id: "official-query", parameters: exact }).parameters).toEqual(exact);
+    for (const parameters of [{ value: `${exact.value}x` }, { value: "界".repeat(30_000) }, { ["界".repeat(30_000)]: true }]) {
+      // Each input fits the former UTF-16 character check but exceeds the native byte cap.
+      expect(JSON.stringify(parameters).length).toBeLessThan(65_536);
+      expect(() => parseBeagleQueryInput({ cypher: "RETURN $value", parameters })).toThrow(/64 KiB/u);
+      expect(() => parseBeagleSavedQueryInput({ id: "official-query", parameters })).toThrow(/64 KiB/u);
+    }
+  });
+
   it("preserves valid Cypher map keys without prototype pollution", () => {
     const input: unknown = JSON.parse('{"__proto__":{"polluted":true},"constructor":"value","prototype":1}');
     const result = parseBeagleJson(input);

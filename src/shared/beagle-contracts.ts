@@ -167,7 +167,7 @@ export function parseBeagleJson(value: unknown, maxEntries = 100_000): BeagleJso
 function parameters(value: unknown): { parameters?: BeagleJsonObject } {
   if (value === undefined) return {};
   const parsed = parseBeagleJson(value);
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || JSON.stringify(parsed).length > 65_536) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || new TextEncoder().encode(JSON.stringify(parsed)).byteLength > 65_536) {
     throw new TypeError("Beagle parameters must be a JSON object of at most 64 KiB");
   }
   return { parameters: parsed };

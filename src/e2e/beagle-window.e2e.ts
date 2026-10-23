@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { _electron as electron, type ElectronApplication, type Page } from "playwright-core";
 import type { BeagleAPI } from "../shared/beagle-contracts.js";
+import { captureBeagleExecutable } from "../main/beagle-runtime-loader.js";
 
 interface BeagleBrowser {
   beagle: BeagleAPI;
@@ -31,13 +32,14 @@ test("AD Explorer imports real GOAD, executes Cypher and renders an isolated gra
   let application: ElectronApplication | undefined;
   let explorer: Page | undefined;
   try {
+    const identity = await captureBeagleExecutable(binary!);
     for (const name of ["saved", "managed", "user-data", "client"]) await mkdir(join(root, name));
     application = await electron.launch({
       args: ["--enable-sandbox", join(repositoryRoot, ".e2e-dist/src/e2e/fake-main.js"),
         `--repository-root=${repositoryRoot}`, `--saved-config-directory=${join(root, "saved")}`,
         `--managed-config-directory=${join(root, "managed")}`, `--user-data-directory=${join(root, "user-data")}`,
         `--console-client-root-directory=${join(root, "client")}`],
-      env: { ...process.env, SLIVER_BEAGLE_BINARY: binary! },
+      env: { ...process.env, SLIVER_BEAGLE_BINARY: identity.path, SLIVER_BEAGLE_SHA256: identity.sha256 },
       cwd: repositoryRoot, bypassCSP: false, chromiumSandbox: true,
     } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
     const workspace = await application.firstWindow();

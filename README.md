@@ -232,20 +232,31 @@ workflow. Custom queries are saved per project, and **Export graph** writes the
 complete canonical graph through a native save dialog.
 
 Install a standalone [Beagle](https://github.com/sliverarmory/Beagle) executable,
-then choose it in the window's runtime settings. A selected executable is remembered.
-The application also discovers `SLIVER_BEAGLE_BINARY`, a runtime staged at
-`resources/beagle/beagle` (`beagle.exe` on Windows), or `beagle` on `PATH`.
-The runtime is an external prerequisite; this change does not download or bundle
-an unverified executable. Beagle 0.1.0 at commit
-`6dc34300f67d025dccd4c7fef36cf31210c46a42` is the validated backend.
+with the `helper-stdio` subcommand, then choose it in the window's runtime settings.
+The selection pins its SHA-256, which is checked again before every helper launch.
+Select the executable again after intentionally upgrading it; existing installations
+with an unpinned saved path also need one new selection. Alternatively, configure
+both `SLIVER_BEAGLE_BINARY` (an absolute path) and `SLIVER_BEAGLE_SHA256` (the expected
+SHA-256). Automatic PATH and staged-runtime discovery are disabled. Beagle remains
+an external prerequisite; the GUI does not download it.
 
 Project databases live under Electron's user-data directory in `beagle/`; imports
 merge into the selected project and run analysis. Use a new project for a separate
 dataset. Cypher is read-only; the desktop bridge also blocks file-loading and
 dynamic-query functions so queries cannot bypass native file selection. Queries have a 30-second backend timeout and a
-40-second process deadline; imports/analysis have a five-minute deadline. Display
+40-second request deadline; imports/analysis have a five-minute deadline. One
+persistent helper holds the selected project's database and receives typed JSON
+requests over stdin. Project changes stop the previous helper before opening the
+next database. A deadline or protocol failure terminates the helper; interrupted
+mutations are never automatically replayed. Display
 limits are 5,000 rows, 1,500 nodes and 3,000 relationships, with visible truncation.
-The backend output ceiling is 32 MiB, including exports.
+The backend response ceiling is 32 MiB, including exports.
+
+Run the real helper integration test with synthetic collection data:
+
+```sh
+SLIVER_BEAGLE_E2E_BINARY=/absolute/path/to/beagle npm run test:beagle:helper
+```
 
 Run focused native validation with an existing private GOAD collection:
 
@@ -257,4 +268,6 @@ npm run test:e2e:beagle
 
 See [the implementation plan](docs/beagle-implementation-plan.md) and
 [compatibility evidence and reproduction instructions](docs/beagle-verification.md).
+The [persistent helper architecture](docs/beagle-helper.md) describes its protocol,
+executable trust, environment and lifecycle.
 The private lab collection and generated databases are excluded from version control.

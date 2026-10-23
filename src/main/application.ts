@@ -382,7 +382,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const zoomReadyWorkspaceContents = new Set<number>();
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const beagleRendererUrl = rendererUrlForSurface(rendererUrl, "beagle");
-  const beagleService = new BeagleService({ userDataPath: app.getPath("userData"), resourcesPath: process.resourcesPath });
+  const beagleService = new BeagleService({ userDataPath: app.getPath("userData") });
   let beagleWindow: BrowserWindow | undefined;
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
@@ -2537,7 +2537,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const rdpCleanup = rdpWindows?.dispose();
       if (rdpCleanup) trackPendingCleanup(rdpCleanup);
       armoryService.dispose();
-      beagleService.dispose();
+      trackPendingCleanup(beagleService.dispose());
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
         const cleanup = sshCleanup.finally(disposeCloudDeployment);

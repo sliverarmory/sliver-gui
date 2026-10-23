@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
@@ -17,65 +16,41 @@ import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js
 import { buildBeagleNeighborhoodQuery, isBeagleTraversalInvestigation, runBeagleTraversalInvestigation } from "./beagle-investigations.js";
 import { normalizeBeagleAnalysisDiagnostics, parseBeagleAnalysisDiagnostics } from "./beagle-analysis-diagnostics.js";
 import { BEAGLE_PATH_EDGE_KINDS } from "../shared/beagle-investigations.js";
+import type { BeagleRuntimeCommand } from "../shared/beagle-runtime-contracts.js";
+import { createBeagleRuntime, type BeagleRuntimeClient } from "./beagle-runtime.js";
+import { beagleExecutableVerifier, beagleRuntimeEnvironment, type BeagleExecutableIdentity, type BeagleExecutableVerifier } from "./beagle-runtime-loader.js";
 
-const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const QUERY_TIMEOUT_MS = 40_000;
 const WORKFLOW_TIMEOUT_MS = 5 * 60_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const MAX_PROJECTS = 100;
 interface ProjectConfiguration {
-  version: 1;
+  version: 2;
   binaryPath: string | null;
+  binarySha256: string | null;
   selectedProjectId: string;
   projects: BeagleProject[];
 }
-export interface BeagleCommandOptions {
-  timeout: number;
-  maxBuffer: number;
-  signal: AbortSignal;
-  cwd: string;
-  env: NodeJS.ProcessEnv;
-}
-export type BeagleCommandRunner = (
-  binary: string, args: readonly string[], options: BeagleCommandOptions,
-) => Promise<{ stdout: string; stderr: string }>;
 export interface BeagleServiceOptions {
   userDataPath: string;
-  resourcesPath?: string;
   environment?: NodeJS.ProcessEnv;
-  runner?: BeagleCommandRunner;
+  createRuntime?: typeof createBeagleRuntime;
+  verifier?: BeagleExecutableVerifier;
 }
-
-/** Arguments remain distinct OS arguments. Neither Cypher nor file names are interpreted by a shell. */
-const runCommand: BeagleCommandRunner = (binary, args, options) => new Promise((resolve, reject) => {
-  execFile(binary, [...args], {
-    ...options, encoding: "utf8", windowsHide: true, shell: false, killSignal: "SIGKILL",
-  }, (error, stdout, stderr) => {
-    if (error) {
-      let reason = stderr.trim();
-      try {
-        const diagnostic: unknown = JSON.parse(reason);
-        if (typeof diagnostic === "object" && diagnostic !== null && "error" in diagnostic && typeof diagnostic.error === "string") {
-          reason = diagnostic.error;
-        }
-      } catch { /* stderr may contain native process diagnostics. */ }
-      if (error.killed) reason = `Beagle exceeded its ${Math.round(options.timeout / 1_000)} second deadline`;
-      if (error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") reason = "Beagle output exceeds the 32 MiB limit; narrow the query";
-      reject(new Error((reason || error.message).slice(0, 4_096)));
-    } else resolve({ stdout, stderr });
-  });
-});
 
 /** One serialized owner for every project's database, including reads and project switches. */
 export class BeagleService {
-  private readonly options: BeagleServiceOptions;
   private readonly rootPath: string;
   private readonly configurationPath: string;
   private readonly environment: NodeJS.ProcessEnv;
-  private readonly runner: BeagleCommandRunner;
+  private readonly createRuntime: typeof createBeagleRuntime;
+  private readonly verifier: BeagleExecutableVerifier;
   private configuration: ProjectConfiguration | null = null;
   private catalog: BeagleSavedQuery[] | null = null;
-  private binary: string | null = null;
+  private binary: BeagleExecutableIdentity | null = null;
+  private client: BeagleRuntimeClient | undefined;
+  private clientDatabase: string | undefined;
+  private readonly clients = new Set<BeagleRuntimeClient>();
   private runtime: BeagleState["runtime"] = { available: false, version: null, source: null };
   private pending: Promise<unknown> = Promise.resolve();
   private controller: AbortController | null = null;
@@ -83,16 +58,18 @@ export class BeagleService {
 
   constructor(options: BeagleServiceOptions) {
     if (!isAbsolute(options.userDataPath)) throw new TypeError("Beagle user data path must be absolute");
-    this.options = options;
     this.rootPath = join(options.userDataPath, "beagle");
     this.configurationPath = join(this.rootPath, "projects.json");
     this.environment = { ...process.env, ...options.environment };
-    this.runner = options.runner ?? runCommand;
+    this.createRuntime = options.createRuntime ?? createBeagleRuntime;
+    this.verifier = options.verifier ?? beagleExecutableVerifier;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposed = true;
     this.controller?.abort();
+    await Promise.all([...this.clients].map((client) => client.stop()));
+    this.clients.clear();
   }
 
   getState(): Promise<BeagleState> { return this.serial(() => this.state()); }
@@ -126,9 +103,13 @@ export class BeagleService {
     validateAbsolutePath(path);
     return this.serial(async () => {
       const configuration = await this.load();
-      const version = await this.inspectBinary(path);
-      await this.save({ ...configuration, binaryPath: path });
-      this.binary = path;
+      // A native file selection grants initial trust. Record the bytes before
+      // executing, then verify that pin again before every helper launch.
+      const identity = await this.verifier.capture(path);
+      const version = await this.inspectBinary(identity);
+      await this.closeClient();
+      await this.save({ ...configuration, binaryPath: identity.path, binarySha256: identity.sha256 });
+      this.binary = identity;
       this.catalog = null;
       this.runtime = { available: true, version, source: "Selected executable" };
       return this.state();
@@ -139,15 +120,15 @@ export class BeagleService {
   importFiles(paths: readonly string[]): Promise<BeagleMutationResult> {
     if (paths.length === 0 || paths.length > 100) throw new TypeError("Select between 1 and 100 collection files");
     paths.forEach(validateAbsolutePath);
-    return this.serial(() => this.mutate(["ingest", "--analyze", "--", ...paths]));
+    return this.serial(() => this.mutate({ type: "ingest", paths: [...paths], analyze: true }));
   }
 
-  analyze(): Promise<BeagleMutationResult> { return this.serial(() => this.mutate(["analyze"])); }
+  analyze(): Promise<BeagleMutationResult> { return this.serial(() => this.mutate({ type: "analyze" })); }
 
   query(value: BeagleQueryInput): Promise<BeagleQueryResult> {
     const input = parseBeagleQueryInput(value);
     assertBeagleGraphQuery(input.cypher);
-    return this.serial(() => this.queryCommand(["query", "--params", JSON.stringify(input.parameters ?? {}), "--", input.cypher]));
+    return this.serial(() => this.queryCommand({ type: "query", cypher: input.cypher, parameters: input.parameters ?? {} }));
   }
 
   runSavedQuery(value: BeagleSavedQueryInput): Promise<BeagleQueryResult> {
@@ -155,27 +136,22 @@ export class BeagleService {
     return this.serial(async () => {
       // Validate the current runtime's authoritative source on every execution, including
       // when the UI has not loaded the catalog. Parameter values remain bound JSON data.
-      const query = object(await this.execute(["queries", "--", input.id], VERSION_TIMEOUT_MS), "saved query metadata");
+      const query = object(await this.execute({ type: "savedQueryInfo", id: input.id }, VERSION_TIMEOUT_MS), "saved query metadata");
       assertBeagleGraphQuery(requiredString(query["parameterized_query"], "parameterized saved query source"));
-      return this.queryCommand(["query", `--saved=${input.id}`, "--params", JSON.stringify(input.parameters ?? {})]);
+      return this.queryCommand({ type: "savedQuery", id: input.id, parameters: input.parameters ?? {} });
     });
   }
 
   getQueries(): Promise<BeagleSavedQuery[]> {
     return this.serial(async () => {
       if (this.catalog) return structuredClone(this.catalog);
-      const startedAt = performance.now();
-      const value = await this.execute(["queries"]);
+      const value = await this.execute({ type: "catalog" });
       if (!Array.isArray(value) || value.length > 1_000) throw new Error("Invalid Beagle saved query catalog");
       const catalog: BeagleSavedQuery[] = [];
       for (const entry of value) {
-        const id = requiredString(object(entry, "saved query")["guid"], "saved query ID");
-        const remaining = QUERY_TIMEOUT_MS - (performance.now() - startedAt);
-        if (remaining <= 0) throw new Error("Beagle saved query catalog exceeded its deadline");
-        // The raw catalog contains literal templates. Only this backend endpoint supplies
-        // authoritative parameter names and the Cypher actually used by query --saved.
-        const query = object(await this.execute(["queries", "--", id], Math.max(1, Math.floor(Math.min(VERSION_TIMEOUT_MS, remaining)))), "saved query metadata");
-        if (query["guid"] !== id) throw new Error("Beagle saved query metadata identity mismatch");
+        // The helper returns authoritative bound-template metadata in one reply.
+        const query = object(entry, "saved query metadata");
+        const id = requiredString(query["guid"], "saved query ID");
         const cypher = requiredString(query["parameterized_query"], "parameterized saved query source");
         const parameters = object(query["parameters"], "saved query parameter schema");
         catalog.push({
@@ -198,10 +174,8 @@ export class BeagleService {
     return this.serial(async () => {
       // The pinned CLI's search command has no offset. Keep its matching semantics,
       // with an identity tie-break and one extra row to detect the next page.
-      const result = await this.queryCommand([
-        "query", "--params", JSON.stringify({ term: input.term, offset, limit: BEAGLE_SEARCH_PAGE_SIZE + 1 }), "--",
-        "MATCH (n) WHERE toUpper(n.name) CONTAINS toUpper($term) OR toUpper(n.objectid) CONTAINS toUpper($term) RETURN n ORDER BY n.name, n.objectid SKIP $offset LIMIT $limit",
-      ]);
+      const result = await this.queryCommand({ type: "query", parameters: { term: input.term, offset, limit: BEAGLE_SEARCH_PAGE_SIZE + 1 },
+        cypher: "MATCH (n) WHERE toUpper(n.name) CONTAINS toUpper($term) OR toUpper(n.objectid) CONTAINS toUpper($term) RETURN n ORDER BY n.name, n.objectid SKIP $offset LIMIT $limit" });
       const page = normalizeBeagleQueryResult({ columns: result.columns, rows: result.rows.slice(0, BEAGLE_SEARCH_PAGE_SIZE) }, result.projectId);
       return {
         ...page, elapsedMs: result.elapsedMs,
@@ -212,7 +186,7 @@ export class BeagleService {
 
   entity(value: BeagleEntityInput): Promise<BeagleQueryResult> {
     const input = parseBeagleEntityInput(value);
-    return this.serial(() => this.queryCommand(["entity", "--", input.objectid]));
+    return this.serial(() => this.queryCommand({ type: "entity", objectid: input.objectid }));
   }
 
   neighborhood(value: BeagleNeighborhoodInput): Promise<BeagleNeighborhoodResult> {
@@ -224,7 +198,7 @@ export class BeagleService {
       if (isBeagleTraversalInvestigation(view)) {
         let projectId = "";
         const result = await runBeagleTraversalInvestigation(view, input.objectid, offset, BEAGLE_NEIGHBORHOOD_PAGE_SIZE, async (cypher, parameters) => {
-          const batch = await this.queryCommand(["query", "--params", JSON.stringify(parameters), "--", cypher]);
+          const batch = await this.queryCommand({ type: "query", parameters, cypher });
           projectId = batch.projectId;
           if (batch.truncated) throw new Error("Beagle traversal page was truncated; no partial result was returned");
           return batch.rows;
@@ -234,10 +208,10 @@ export class BeagleService {
           page: { offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE, total: result.total, hasMore: result.hasMore } };
       }
       const { countCypher, pageCypher } = buildBeagleNeighborhoodQuery(view);
-      const count = await this.queryCommand(["query", "--params", JSON.stringify({ objectid: input.objectid }), "--", countCypher]);
+      const count = await this.queryCommand({ type: "query", parameters: { objectid: input.objectid }, cypher: countCypher });
       const total = count.rows[0]?.["total"];
       if (typeof total !== "number" || !Number.isSafeInteger(total) || total < 0) throw new Error("Invalid relationship count returned by Beagle");
-      const result = await this.queryCommand(["query", "--params", JSON.stringify({ objectid: input.objectid, offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE + 1 }), "--", pageCypher]);
+      const result = await this.queryCommand({ type: "query", parameters: { objectid: input.objectid, offset, limit: BEAGLE_NEIGHBORHOOD_PAGE_SIZE + 1 }, cypher: pageCypher });
       const page = normalizeBeagleQueryResult({ columns: result.columns, rows: result.rows.slice(0, BEAGLE_NEIGHBORHOOD_PAGE_SIZE) }, result.projectId);
       return {
         ...page, elapsedMs: Math.round(performance.now() - startedAt), objectid: input.objectid, view,
@@ -261,7 +235,7 @@ export class BeagleService {
       // Each ordered leg must exist. Combine their real path evidence without a
       // Cartesian product of alternatives or a misleading partial itinerary.
       for (let index = 0; index < endpoints.length - 1; index++) {
-        const leg = await this.queryCommand(["query", "--params", JSON.stringify({ source: endpoints[index], target: endpoints[index + 1] }), "--", cypher]);
+        const leg = await this.queryCommand({ type: "query", parameters: { source: endpoints[index]!, target: endpoints[index + 1]! }, cypher });
         projectId = leg.projectId;
         if (!leg.rows.length) return { ...leg, elapsedMs: Math.round(performance.now() - startedAt) };
         rows.push(...leg.rows);
@@ -274,17 +248,17 @@ export class BeagleService {
 
   tag(value: BeagleTagInput): Promise<BeagleMutationResult> {
     const input = parseBeagleTagInput(value);
-    return this.serial(() => this.mutate(["tag", ...(input.enabled ? [] : ["--remove"]), "--", input.objectid, input.tag]));
+    return this.serial(() => this.mutate({ type: "tag", objectid: input.objectid, tag: input.tag, enabled: input.enabled }));
   }
 
   compose(value: BeagleComposeInput): Promise<BeagleQueryResult> {
     const input = parseBeagleComposeInput(value);
-    return this.serial(() => this.queryCommand(["compose", `--source=${input.source}`, `--target=${input.target}`, `--kind=${input.kind}`]));
+    return this.serial(() => this.queryCommand({ type: "compose", ...input }));
   }
 
   /** Complete canonical snapshot for native export; graph display limits do not apply. */
   exportGraph(): Promise<BeagleGraph> {
-    return this.serial(async () => normalizeBeagleSnapshot(await this.execute(["export"])));
+    return this.serial(async () => normalizeBeagleSnapshot(await this.execute({ type: "export" })));
   }
 
   private serial<T>(operation: () => Promise<T>): Promise<T> {
@@ -302,7 +276,7 @@ export class BeagleService {
     try {
       const file = await readBoundedRegularFile(this.configurationPath, { label: "Beagle projects", maxBytes: 1024 * 1024 });
       const value = object(decode(file.data.toString("utf8")), "project configuration");
-      if (value["version"] !== 1 || !Array.isArray(value["projects"]) || value["projects"].length === 0 || value["projects"].length > MAX_PROJECTS) {
+      if ((value["version"] !== 1 && value["version"] !== 2) || !Array.isArray(value["projects"]) || value["projects"].length === 0 || value["projects"].length > MAX_PROJECTS) {
         throw new Error("Invalid Beagle project configuration");
       }
       const projects = value["projects"].map((entry): BeagleProject => {
@@ -319,12 +293,14 @@ export class BeagleService {
       }
       const binaryPath = value["binaryPath"];
       if (binaryPath !== null) validateAbsolutePath(binaryPath);
-      this.configuration = { version: 1, binaryPath, selectedProjectId, projects };
+      const binarySha256 = value["version"] === 1 ? null : value["binarySha256"];
+      if (binarySha256 !== null && (typeof binarySha256 !== "string" || !/^[a-f0-9]{64}$/u.test(binarySha256))) throw new Error("Invalid Beagle executable pin");
+      this.configuration = { version: 2, binaryPath, binarySha256, selectedProjectId, projects };
       return this.configuration;
     } catch (error) {
       if (!isNotFound(error)) throw error;
       const project = { id: randomUUID(), name: "Default", createdAt: new Date().toISOString() };
-      const configuration: ProjectConfiguration = { version: 1, binaryPath: null, selectedProjectId: project.id, projects: [project] };
+      const configuration: ProjectConfiguration = { version: 2, binaryPath: null, binarySha256: null, selectedProjectId: project.id, projects: [project] };
       await this.save(configuration);
       return configuration;
     }
@@ -338,57 +314,67 @@ export class BeagleService {
   private async discover(): Promise<void> {
     if (this.binary) return;
     const configuration = await this.load();
-    const executable = process.platform === "win32" ? "beagle.exe" : "beagle";
-    const candidates = configuration.binaryPath ? [{ path: configuration.binaryPath, source: "Selected executable" }] : [
-      ...(this.environment["SLIVER_BEAGLE_BINARY"] ? [{ path: this.environment["SLIVER_BEAGLE_BINARY"]!, source: "SLIVER_BEAGLE_BINARY" }] : []),
-      ...(this.options.resourcesPath ? [{ path: join(this.options.resourcesPath, "beagle", executable), source: "Bundled runtime" }] : []),
-      { path: executable, source: "PATH" },
-    ];
-    let incompatibility: string | undefined;
-    for (const candidate of candidates) {
-      try {
-        const version = await this.inspectBinary(candidate.path);
-        this.binary = candidate.path;
-        this.runtime = { available: true, version, source: candidate.source };
-        return;
-      } catch (error) {
-        // Only expose our interface diagnostics; native spawn errors may contain private paths.
-        if (error instanceof Error && /^(Unsupported|Incompatible) Beagle runtime/u.test(error.message)) incompatibility ??= error.message;
+    const path = configuration.binaryPath ?? this.environment["SLIVER_BEAGLE_BINARY"];
+    const sha256 = configuration.binaryPath ? configuration.binarySha256 : this.environment["SLIVER_BEAGLE_SHA256"];
+    if (!path || !sha256) {
+      this.runtime = { available: false, version: null, source: null,
+        error: "Beagle requires a verified executable. Choose a Beagle executable to pin it, or configure SLIVER_BEAGLE_BINARY and SLIVER_BEAGLE_SHA256." };
+      return;
+    }
+    try {
+      const identity = await this.verifier.verify(path, sha256);
+      const version = await this.inspectBinary(identity);
+      if (this.disposed) throw new Error("Beagle service is closed");
+      this.binary = identity;
+      this.runtime = { available: true, version, source: configuration.binaryPath ? "Selected executable" : "SLIVER_BEAGLE_BINARY" };
+    } catch (error) {
+      const compatibility = error instanceof Error && /^(Unsupported|Incompatible) Beagle runtime/u.test(error.message) ? error.message : undefined;
+      this.runtime = { available: false, version: null, source: null,
+        error: compatibility ?? "Beagle executable verification or startup failed. Choose a Beagle executable to verify it again." };
+    }
+  }
+
+  private async inspectBinary(identity: BeagleExecutableIdentity): Promise<string> {
+    const client = await this.startClient(identity);
+    try {
+      const ready = await client.ready;
+      // Probe an ephemeral database before any operator project is opened.
+      await this.request(client, { type: "open", database: ":memory:", queryTimeoutMs: 3_000 }, VERSION_TIMEOUT_MS);
+      const probe = object(await this.request(client, { type: "stats" }, VERSION_TIMEOUT_MS), "runtime capabilities");
+      const capabilities = object(probe["capabilities"], "runtime capabilities");
+      const features = object(capabilities["features"], "runtime query features");
+      if (capabilities["schema_version"] !== 1 || ["parameters", "shortest_path", "variable_length_paths", "named_paths", "optional_match", "with_where", "call_subquery", "union", "existential_subquery_full", "list_comprehension", "quantifiers"]
+        .some((feature) => features[feature] !== true)) {
+        throw new Error("Incompatible Beagle runtime: required graph query capabilities are unavailable. Choose a current Beagle 0.1.x executable.");
       }
+      return `beagle ${ready.version}`;
+    } finally {
+      await client.stop(); this.clients.delete(client);
     }
-    this.runtime = { available: false, version: null, source: null, error: incompatibility ?? "Beagle was not found or could not run. Choose a Beagle executable." };
   }
 
-  private async inspectBinary(binary: string): Promise<string> {
-    const result = await this.run(binary, ["--version"], VERSION_TIMEOUT_MS);
-    const version = result.stdout.trim();
-    if (!/^beagle\s+[^\r\n]+$/iu.test(version) || version.length > 256) throw new Error("The selected executable is not a Beagle runtime");
-    if (!/^beagle 0\.1\.\d+$/u.test(version)) throw new Error("Unsupported Beagle runtime. AD Explorer currently supports the Beagle 0.1.x interface; choose a compatible executable.");
-    const help = await this.run(binary, ["--help"], VERSION_TIMEOUT_MS);
-    const commands = ["ingest", "analyze", "query", "queries", "stats", "entity", "paths", "compose", "tag", "export"];
-    if (commands.some((command) => !new RegExp(`^\\s+${command}\\s`, "mu").test(help.stdout)) ||
-        !help.stdout.includes("--db") || !help.stdout.includes("--query-timeout")) {
-      throw new Error("Incompatible Beagle runtime: required AD Explorer commands are missing. Choose a current Beagle 0.1.x executable.");
-    }
-    // Probe only an ephemeral in-memory database before touching an operator project.
-    const probe = object(decode((await this.run(binary, ["--db", ":memory:", "--query-timeout", "3", "stats"], VERSION_TIMEOUT_MS)).stdout), "runtime capabilities");
-    const capabilities = object(probe["capabilities"], "runtime capabilities");
-    const features = object(capabilities["features"], "runtime query features");
-    if (capabilities["schema_version"] !== 1 || ["parameters", "shortest_path", "variable_length_paths", "named_paths", "optional_match", "with_where", "call_subquery", "union", "existential_subquery_full", "list_comprehension", "quantifiers"]
-      .some((feature) => features[feature] !== true)) {
-      throw new Error("Incompatible Beagle runtime: required graph query capabilities are unavailable. Choose a current Beagle 0.1.x executable.");
-    }
-    return version;
+  private async startClient(identity: BeagleExecutableIdentity): Promise<BeagleRuntimeClient> {
+    if (this.disposed) throw new Error("Beagle service is closed");
+    const verified = await this.verifier.verify(identity.path, identity.sha256);
+    if (this.disposed) throw new Error("Beagle service is closed");
+    const client = this.createRuntime(verified.path, { cwd: this.rootPath, env: beagleRuntimeEnvironment(this.environment) });
+    this.clients.add(client);
+    try { await client.ready; return client; }
+    catch (error) { await client.stop(); this.clients.delete(client); throw error; }
   }
 
-  private async run(binary: string, args: readonly string[], timeout: number): Promise<{ stdout: string; stderr: string }> {
+  private async closeClient(): Promise<void> {
+    const client = this.client;
+    this.client = undefined; this.clientDatabase = undefined;
+    if (client) { await client.stop(); this.clients.delete(client); }
+  }
+
+  private async request(client: BeagleRuntimeClient, command: BeagleRuntimeCommand, timeout: number): Promise<BeagleJsonValue> {
     if (this.disposed) throw new Error("Beagle service is closed");
     const controller = new AbortController();
     this.controller = controller;
     try {
-      const result = await this.runner(binary, args, { timeout, maxBuffer: MAX_OUTPUT_BYTES, signal: controller.signal, cwd: this.rootPath, env: this.environment });
-      if (Buffer.byteLength(result.stdout) > MAX_OUTPUT_BYTES) throw new Error("Beagle output exceeds the 32 MiB limit; narrow the query");
-      return result;
+      return parseBeagleJson(await client.request(command, { timeout, signal: controller.signal }), 2_000_000);
     } finally { this.controller = null; }
   }
 
@@ -406,20 +392,27 @@ export class BeagleService {
     return path;
   }
 
-  private async execute(args: string[], timeout = QUERY_TIMEOUT_MS): Promise<BeagleJsonValue> {
+  private async execute(command: BeagleRuntimeCommand, timeout = QUERY_TIMEOUT_MS): Promise<BeagleJsonValue> {
     await this.discover();
     if (!this.binary) throw new Error(this.runtime.error ?? "Beagle runtime is unavailable");
     const path = await this.database();
-    const result = await this.run(this.binary, ["--db", path, "--query-timeout", "30", ...args], timeout);
-    const value = decode(result.stdout);
-    if (isObject(value) && typeof value["error"] === "string") throw new Error(value["error"].slice(0, 4_096));
-    return value;
+    if (this.client?.closed || this.clientDatabase !== path) await this.closeClient();
+    if (!this.client) {
+      const client = await this.startClient(this.binary);
+      try { await this.request(client, { type: "open", database: path, queryTimeoutMs: 30_000 }, VERSION_TIMEOUT_MS); }
+      catch (error) { await client.stop(); this.clients.delete(client); throw error; }
+      this.client = client; this.clientDatabase = path;
+    }
+    // A failed mutation is never replayed. A later explicit request can start a
+    // fresh verified helper if the previous process exited or was terminated.
+    try { return await this.request(this.client, command, timeout); }
+    finally { if (this.client?.closed) await this.closeClient(); }
   }
 
   private async state(): Promise<BeagleState> {
     const configuration = await this.load();
     await this.discover();
-    const stats = this.binary ? normalizeStats(await this.execute(["stats"])) : null;
+    const stats = this.binary ? normalizeStats(await this.execute({ type: "stats" })) : null;
     let diagnostics: BeagleState["diagnostics"];
     try {
       const file = await readBoundedRegularFile(join(this.rootPath, configuration.selectedProjectId, "analysis-diagnostics.json"), { label: "Analysis diagnostics", maxBytes: 1024 * 1024 });
@@ -431,8 +424,8 @@ export class BeagleService {
       ...(diagnostics === undefined ? {} : { diagnostics }) };
   }
 
-  private async mutate(args: string[]): Promise<BeagleMutationResult> {
-    const recordsAnalysis = args[0] === "ingest" || args[0] === "analyze";
+  private async mutate(command: BeagleRuntimeCommand): Promise<BeagleMutationResult> {
+    const recordsAnalysis = command.type === "ingest" || command.type === "analyze";
     const configuration = await this.load();
     const diagnosticsPath = join(this.rootPath, configuration.selectedProjectId, "analysis-diagnostics.json");
     if (recordsAnalysis) {
@@ -442,7 +435,7 @@ export class BeagleService {
       await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify({ version: 1, localGroupAmbiguities: [],
         errors: ["The latest analysis has not completed with verified diagnostics. Run Analyze again before relying on local-group privilege choices."] })));
     }
-    const report = await this.execute(args, WORKFLOW_TIMEOUT_MS);
+    const report = await this.execute(command, WORKFLOW_TIMEOUT_MS);
     if (recordsAnalysis) {
       const diagnostics = normalizeBeagleAnalysisDiagnostics(report);
       await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify(diagnostics)));
@@ -450,16 +443,16 @@ export class BeagleService {
     return { report, state: await this.state() };
   }
 
-  private async queryCommand(args: string[]): Promise<BeagleQueryResult> {
+  private async queryCommand(command: BeagleRuntimeCommand): Promise<BeagleQueryResult> {
     const configuration = await this.load();
     const startedAt = performance.now();
-    const value = await this.execute(args);
+    const value = await this.execute(command);
     const result = normalizeBeagleQueryResult(value, configuration.selectedProjectId);
     const missing = collectGraph(result.rows).missingNodeIds.slice(0, BEAGLE_RESULT_LIMITS.nodes);
     if (missing.length > 0) {
       // Relationship-only results use engine-local IDs. Resolve them inside this same serialized
       // project operation, so graph identities always remain BloodHound object IDs.
-      const nodes = await this.execute(["query", "--params", JSON.stringify({ ids: missing }), "--", "MATCH (n) WHERE id(n) IN $ids RETURN n"]);
+      const nodes = await this.execute({ type: "query", parameters: { ids: missing }, cypher: "MATCH (n) WHERE id(n) IN $ids RETURN n" });
       const hydrated = collectGraph([result.rows, nodes]);
       const limited = limitGraph(hydrated.graph);
       result.graph = limited.graph;

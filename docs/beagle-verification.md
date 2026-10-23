@@ -162,3 +162,38 @@ Final validation passed `npm run build:e2e-app`, including both TypeScript proje
 ## Evidence boundaries
 
 This verifies the pinned backend, recorded AD dataset/query corpus and native macOS desktop integration. It does not prove unrestricted Cypher, every BloodHound CE feature, or positive algorithms whose queries returned no data. Distribution packaging and native execution on other operating systems were not exercised. Beagle remains an external executable selected by the operator or supplied through `SLIVER_BEAGLE_BINARY`; this change does not bundle a cross-platform Beagle release. This run's disposable containers, volumes and credentials were removed after verification; private databases and reports were retained outside the source tree.
+
+## Persistent helper acceptance (October 23, 2026)
+
+Beagle commit `e6a0b04b94bba1375ad6cf1683efcb29b16a849d` adds `helper-stdio` while
+preserving the ordinary CLI and legacy `serve-stdio` protocol. The GUI now requires
+that protocol and pins the selected executable's SHA-256. Environment launches
+require both `SLIVER_BEAGLE_BINARY` and `SLIVER_BEAGLE_SHA256`; prior PATH/staged
+discovery and unpinned saved-path execution are replaced by explicit verification.
+See [the helper architecture](beagle-helper.md) for migration and trust details.
+
+Local macOS validation passed:
+
+- The release Beagle executable against `npm run test:beagle:helper`, using only
+  synthetic collections in a temporary directory. All workflows reuse one project
+  helper; project changes wait for exit, and stored data survives restart. The
+  177-query catalog is fetched once. Bound strings, rejected queries, environment
+  filtering and disposal also passed.
+- `npm test`: 5,984 passed, four skipped. The subsequent UTF-8 parameter-limit
+  regression passed in a 50-test focused run. `npm run typecheck`, `npm run build`
+  and all nine sandboxed preload checks passed.
+- Beagle formatting, strict Clippy for all features and library-only builds,
+  100 all-feature tests and 85 library-only tests, release compilation and the
+  independent library consumer. Each Rust configuration retained six existing
+  ignored oracle tests. Helper coverage includes malformed/oversized frames,
+  operation-error recovery, process restart, all workflows and legacy CLI behavior.
+
+[Beagle CI run 39986894974](https://github.com/sliverarmory/Beagle/actions/runs/39986894974)
+completed successfully for that exact commit on Linux x64, macOS ARM64, macOS x64
+and Windows x64 GNU. Each job passed formatting, both Clippy/test configurations,
+release compilation and the independent library consumer. This establishes native
+helper portability; the GUI helper integration above was executed locally on macOS.
+
+This transport validation does not rerun the earlier private GOAD/CE comparison or
+the Electron GOAD scenario. Those results above remain evidence for their recorded
+source/binary pins. IronRDP was unchanged.
