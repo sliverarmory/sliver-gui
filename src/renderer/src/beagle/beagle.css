@@ -1,12 +1,14 @@
 .beagle-workspace { display: flex; flex-direction: column; color: var(--color-foreground); overflow: hidden; }
-.beagle-header { flex: none; padding: 20px 24px 12px; }
-.beagle-heading { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; }
-.beagle-heading > svg { width: 22px; height: 22px; }
-.beagle-heading h1 { font-size: 20px; font-weight: 650; margin-right: 4px; }
-.beagle-toolbar { display: flex; align-items: center; gap: 6px; }
-.beagle-project-select { width: min(270px, 30%); min-width: 160px; }
+.beagle-header { flex: none; padding: 8px 16px; }
+.beagle-heading { display: flex; gap: 8px; align-items: center; flex: none; }
+.beagle-heading > svg { width: 18px; height: 18px; }
+.beagle-heading h1 { font-size: 16px; line-height: 24px; font-weight: 650; }
+.beagle-toolbar { display: flex; align-items: center; gap: 12px; }
+.beagle-project-picker { display: flex; align-items: center; gap: 6px; width: clamp(180px, 24vw, 270px); flex: none; }
+.beagle-project-select { flex: 1; min-width: 0; }
 .beagle-toolbar__actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
-.beagle-summary { display: flex; gap: 24px; color: var(--color-muted); align-items: center; font-size: 12px; margin-top: 12px; min-height: 24px; font-variant-numeric: tabular-nums; }
+.beagle-summary { display: flex; gap: 16px; color: var(--color-muted); align-items: center; font-size: 12px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.beagle-summary > span { white-space: nowrap; }
 .beagle-summary strong { font-weight: 600; color: var(--color-foreground); }
 .beagle-summary__actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 .beagle-project-tools-panel[data-inert] { display: none; }
@@ -54,11 +56,13 @@
 .beagle-custom-query { display: flex; align-items: center; gap: 4px; }
 .beagle-custom-query > button:first-child { flex: 1; text-align: left; justify-content: start; white-space: normal; font-size: 12px; }
 .beagle-center { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-.beagle-query-editor { flex: none; padding: 12px 16px; border-bottom: 1px solid var(--color-separator); }
-.beagle-editor-heading { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.beagle-query-editor { flex: none; padding: 8px 16px; border-bottom: 1px solid var(--color-separator); }
+.beagle-editor-heading { display: flex; align-items: center; gap: 8px; }
 .beagle-editor-heading h2 { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.beagle-editor-heading h2 > button { font-size: inherit; font-weight: inherit; }
 .beagle-editor-heading h2 svg { color: var(--color-muted); }
 .beagle-editor-heading > span { margin-left: auto; font-size: 10px; color: var(--color-muted); }
+.beagle-editor-content { padding-top: 10px; }
 .beagle-editor-fields { display: flex; gap: 12px; }
 .beagle-cypher-field { flex: 1; min-width: 0; }
 .beagle-parameters-field { width: 210px; min-width: 140px; }
@@ -144,7 +148,8 @@
 .beagle-query-progress { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--color-muted); }
 .beagle-limit-warning { flex: none; padding: 8px 16px; font-size: 11px; color: var(--color-warning); background: color-mix(in srgb, var(--color-warning) 8%, var(--color-background)); }
 @media (max-width: 1100px) {
-  .beagle-header { padding: 16px 16px 10px; }
+  .beagle-header { padding-inline: 12px; }
+  .beagle-summary { gap: 12px; }
   .beagle-sidebar { width: 245px; min-width: 225px; }
   .beagle-inspector { width: 270px; padding: 12px; }
   .beagle-editor-fields { flex-direction: column; gap: 6px; }
@@ -157,6 +162,7 @@
 @media (max-width: 900px) {
   .beagle-toolbar { flex-wrap: wrap; }
   .beagle-toolbar__actions { margin-left: 0; }
+  .beagle-summary { flex-wrap: wrap; }
   .beagle-inspector { position: absolute; right: 0; top: 0; bottom: 0; z-index: 10; background: var(--color-background); box-shadow: var(--shadow-overlay); width: min(330px, 85vw); }
   .beagle-body { position: relative; }
   .beagle-result-heading { padding-inline: 8px; }

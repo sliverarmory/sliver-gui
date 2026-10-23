@@ -1,8 +1,8 @@
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { disconnectedSnapshot, type OperationResult, type SliverSnapshot } from "../../../shared/contracts";
-import { RUSTHOUND_ARMORY_COLLECTOR_ID, type AdCollectorSummary } from "../../../shared/ad-explorer-contracts";
+import { RUSTHOUND_ARMORY_COLLECTOR_ID, type AdCollectorSummary, type AdCollectionSummary } from "../../../shared/ad-explorer-contracts";
 import type { BeaconSummary, SessionSummary, TargetCatalogEntry, TargetCatalogPage, TargetRef } from "../../../shared/target-contracts";
 import { ADExplorerPage } from "./ADExplorerPage";
 
@@ -36,6 +36,11 @@ const rustHound: AdCollectorSummary = {
   collectionMethods: ["LdapOnly", "DCOnly", "All"], available: true,
 };
 
+const collections: AdCollectionSummary[] = [
+  { id: "11111111-1111-4111-8111-111111111111", name: "AD north.example", createdAt: "2026-10-22T12:00:00.000Z" },
+  { id: "22222222-2222-4222-8222-222222222222", name: "AD south.example", createdAt: "2026-10-23T12:00:00.000Z" },
+];
+
 function snapshot(): SliverSnapshot {
   const value = disconnectedSnapshot();
   value.connection = { managedServer: null, status: "connected", epoch: 7, incarnation: 1,
@@ -57,13 +62,15 @@ function installAPI() {
     state: "imported" as const, collectorId: collector.id, targetId: session.id,
     domain: "corp.example.com", message: "Collection imported into AD Explorer.", projectId: "project-one",
   } }));
-  const openBeagleWindow = vi.fn(async () => ({ ok: true as const }));
-  Object.defineProperty(window, "sliver", { configurable: true, value: { listTargets, listAdCollectors, runAdCollector, openBeagleWindow } });
-  return { listTargets, listAdCollectors, runAdCollector, openBeagleWindow };
+  const listAdCollections = vi.fn(async (): Promise<OperationResult<AdCollectionSummary[]>> => ({ ok: true, value: collections }));
+  const openBeagleWindow = vi.fn(async (_input?: { projectId: string }): Promise<OperationResult> => ({ ok: true }));
+  Object.defineProperty(window, "sliver", { configurable: true, value: { listTargets, listAdCollectors, runAdCollector, listAdCollections, openBeagleWindow } });
+  return { listTargets, listAdCollectors, runAdCollector, listAdCollections, openBeagleWindow };
 }
 
 beforeEach(() => {
   window.localStorage.clear();
+  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
   vi.stubGlobal("ResizeObserver", class ResizeObserver {
     observe() {}
     unobserve() {}
@@ -73,10 +80,121 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  Reflect.deleteProperty(Element.prototype, "getAnimations");
   vi.unstubAllGlobals();
 });
 
 describe("ADExplorerPage", () => {
+  it("shows the matching subtitle and opens the clicked collection by its project ID", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    expect(screen.getByText("Active Directory")).toHaveClass("eyebrow");
+    expect(screen.getByRole("tab", { name: "Windows Targets" })).toHaveAttribute("aria-selected", "true");
+    expect(api.listAdCollections).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    expect(screen.queryByRole("button", { name: /Select session/u })).not.toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Open collection AD south.example" }));
+    expect(api.openBeagleWindow).toHaveBeenCalledExactlyOnceWith({ projectId: collections[1]!.id });
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("keeps the selected target and draft when switching between tabs", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "draft.example.com");
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    await screen.findByRole("button", { name: "Open collection AD north.example" });
+    await user.click(screen.getByRole("tab", { name: "Windows Targets" }));
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("draft.example.com");
+    expect(screen.getByRole("navigation", { name: "AD Explorer navigation" })).toHaveTextContent("workstation-1");
+  });
+
+  it("provides a target-selection path when there are no saved collections", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollections.mockResolvedValue({ ok: true, value: [] });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    expect(await screen.findByText("No collections yet")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "View Windows Targets" }));
+    expect(screen.getByRole("tab", { name: "Windows Targets" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("reports collection loading failures and retries without showing a false empty state", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollections.mockResolvedValueOnce({ ok: false, error: "Collection storage is unavailable." });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Collection storage is unavailable.");
+    expect(screen.queryByText("No collections yet")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Refresh collections" }));
+    expect(await screen.findByRole("button", { name: "Open collection AD north.example" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("refreshes collections when returning from an Explorer window", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollections.mockResolvedValueOnce({ ok: true, value: [collections[0]!] });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    await screen.findByRole("button", { name: "Open collection AD north.example" });
+    expect(screen.queryByRole("button", { name: "Open collection AD south.example" })).not.toBeInTheDocument();
+    fireEvent.focus(window);
+    expect(await screen.findByRole("button", { name: "Open collection AD south.example" })).toBeInTheDocument();
+  });
+
+  it("shows an open failure and keeps the collection available to retry", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.openBeagleWindow.mockResolvedValueOnce({ ok: false, error: "This collection is no longer available." });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    const collection = await screen.findByRole("button", { name: "Open collection AD north.example" });
+    await user.click(collection);
+    expect(await screen.findByRole("alert")).toHaveTextContent("This collection is no longer available.");
+    expect(collection).toBeEnabled();
+  });
+
+  it("drills into a target with breadcrumbs and clears its draft and credentials when returning", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [rustHound, collector] },
+    }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+
+    expect(screen.queryByRole("textbox", { name: "Windows domain" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    const back = screen.getByRole("link", { name: "Windows targets" });
+    const breadcrumbs = screen.getByRole("navigation", { name: "AD Explorer navigation" });
+    expect(within(breadcrumbs).getByText("workstation-1")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Domain Unknown domain" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Select beacon server-1 (beacon-one)" })).not.toBeInTheDocument();
+
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "unsaved.example.com");
+    await user.type(await screen.findByRole("textbox", { name: "LDAP server FQDN (optional)" }), "dc.example.com");
+    await user.click(screen.getByRole("switch", { name: "Use LDAPS" }));
+    await user.type(screen.getByRole("textbox", { name: "AD user" }), "alice@example.com");
+    await user.type(screen.getByLabelText("AD password"), "discard-this-secret");
+    await user.click(back);
+
+    expect(screen.getByRole("region", { name: "Domain Unknown domain" })).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Windows domain" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("");
+    expect(await screen.findByRole("textbox", { name: "LDAP server FQDN (optional)" })).toHaveValue("");
+    expect(screen.getByRole("switch", { name: "Use LDAPS" })).not.toBeChecked();
+    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("");
+    expect(screen.getByLabelText("AD password")).toHaveValue("");
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+    expect(api.openBeagleWindow).not.toHaveBeenCalled();
+  });
+
   it("groups Windows targets under an honest unknown domain until an operator assigns one", async () => {
     const user = userEvent.setup();
     installAPI();
@@ -84,20 +202,21 @@ describe("ADExplorerPage", () => {
     const view = render(<ADExplorerPage snapshot={current} />);
 
     const unknown = screen.getByRole("region", { name: "Domain Unknown domain" });
-    expect(within(unknown).getByRole("button", { name: "Select session workstation (session-one)" })).toBeInTheDocument();
-    expect(within(unknown).getByRole("button", { name: "Select beacon server (beacon-one)" })).toBeInTheDocument();
-    await user.click(within(unknown).getByRole("button", { name: "Select session workstation (session-one)" }));
+    expect(within(unknown).getByRole("button", { name: "Select session workstation-1 (session-one)" })).toBeInTheDocument();
+    expect(within(unknown).getByRole("button", { name: "Select beacon server-1 (beacon-one)" })).toBeInTheDocument();
+    await user.click(within(unknown).getByRole("button", { name: "Select session workstation-1 (session-one)" }));
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.click(screen.getByRole("button", { name: "Assign domain" }));
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
 
     expect(within(screen.getByRole("region", { name: "Domain corp.example.com" }))
-      .getByRole("button", { name: "Select session workstation (session-one)" })).toBeInTheDocument();
+      .getByRole("button", { name: "Select session workstation-1 (session-one)" })).toBeInTheDocument();
     expect(within(screen.getByRole("region", { name: "Domain Unknown domain" }))
-      .getByRole("button", { name: "Select beacon server (beacon-one)" })).toBeInTheDocument();
+      .getByRole("button", { name: "Select beacon server-1 (beacon-one)" })).toBeInTheDocument();
     view.unmount();
     render(<ADExplorerPage snapshot={current} />);
     expect(within(screen.getByRole("region", { name: "Domain corp.example.com" }))
-      .getByRole("button", { name: "Select session workstation (session-one)" })).toBeInTheDocument();
+      .getByRole("button", { name: "Select session workstation-1 (session-one)" })).toBeInTheDocument();
   });
 
   it("distinguishes same-named beacons by target ID", async () => {
@@ -116,8 +235,8 @@ describe("ADExplorerPage", () => {
     }));
     render(<ADExplorerPage snapshot={current} />);
 
-    expect(screen.getByRole("button", { name: "Select beacon server (beacon-one)" })).toHaveTextContent("beacon-o");
-    await user.click(screen.getByRole("button", { name: "Select beacon server (beacon-two)" }));
+    expect(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" })).toHaveTextContent("beacon-o");
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-two)" }));
     await waitFor(() => expect(api.listAdCollectors).toHaveBeenCalledWith(secondRef));
   });
 
@@ -140,14 +259,14 @@ describe("ADExplorerPage", () => {
     await user.click(await screen.findByRole("button", { name: "Load more sessions" }));
     expect(api.listTargets).toHaveBeenCalledWith({ mode: "session", cursor: "catalog-cursor", limit: 100 });
     expect(api.listTargets).not.toHaveBeenCalledWith(expect.objectContaining({ cursor: "snapshot-cursor" }));
-    expect(await screen.findByRole("button", { name: "Select session second (session-two)" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Select session workstation-2 (session-two)" })).toBeInTheDocument();
   });
 
   it("passes the assigned DNS domain and main-issued target reference to the collector", async () => {
     const user = userEvent.setup();
     const api = installAPI();
     render(<ADExplorerPage snapshot={snapshot()} />);
-    await user.click(screen.getByRole("button", { name: "Select session workstation (session-one)" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
     await waitFor(() => expect(api.listAdCollectors).toHaveBeenCalledWith(sessionRef));
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.click(await screen.findByRole("button", { name: "Run collector" }));
@@ -170,14 +289,36 @@ describe("ADExplorerPage", () => {
       } });
     }));
     render(<ADExplorerPage snapshot={snapshot()} />);
-    await user.click(screen.getByRole("button", { name: "Select session workstation (session-one)" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.click(await screen.findByRole("button", { name: "Run collector" }));
-    await user.click(screen.getByRole("button", { name: "Select beacon server (beacon-one)" }));
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
     expect(screen.getByText("A collection is running on another target.")).toBeInTheDocument();
     finishRun();
     await waitFor(() => expect(screen.queryByText("A collection is running on another target.")).not.toBeInTheDocument());
     expect(screen.queryByText("Session collection imported.")).not.toBeInTheDocument();
+  });
+
+  it("keeps custom collectors collapsed until the operator opens Other collectors", async () => {
+    const user = userEvent.setup();
+    installAPI();
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    const disclosure = await screen.findByRole("button", { name: "Other collectors" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button", { name: "Use your own SharpHound-compatible .exe" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Use your own Invoke-BloodHound .ps1" })).not.toBeInTheDocument();
+
+    await user.click(disclosure);
+    expect(disclosure).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: "Use your own SharpHound-compatible .exe" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Use your own Invoke-BloodHound .ps1" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(await screen.findByRole("button", { name: "Other collectors" })).toHaveAttribute("aria-expanded", "false");
   });
 
   it("keeps an operator-supplied executable separate from verified defaults", async () => {
@@ -188,7 +329,8 @@ describe("ADExplorerPage", () => {
       value: { target, collectors: [customCollector] },
     }));
     render(<ADExplorerPage snapshot={snapshot()} />);
-    await user.click(screen.getByRole("button", { name: "Select session workstation (session-one)" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.click(await screen.findByRole("button", { name: "Other collectors" }));
     const advanced = await screen.findByRole("button", { name: "Use your own SharpHound-compatible .exe" });
     expect(screen.getByText("No verified Beagle-compatible collector is available for this target.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
@@ -210,7 +352,8 @@ describe("ADExplorerPage", () => {
       value: { target, collectors: [customScript] },
     }));
     render(<ADExplorerPage snapshot={snapshot()} />);
-    await user.click(screen.getByRole("button", { name: "Select session workstation (session-one)" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.click(await screen.findByRole("button", { name: "Other collectors" }));
     const choice = await screen.findByRole("button", { name: "Use your own Invoke-BloodHound .ps1" });
     expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
     expect(screen.getByText(/must accept the fixed domain, method, and output path/u)).toBeInTheDocument();
@@ -229,7 +372,7 @@ describe("ADExplorerPage", () => {
       ok: true as const, value: { target, collectors: [rustHound, collector] },
     }));
     render(<ADExplorerPage snapshot={snapshot()} />);
-    await user.click(screen.getByRole("button", { name: "Select session workstation (session-one)" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
     await waitFor(() => expect(screen.getAllByText("RustHound CE v2.5.27 (in memory)").length).toBeGreaterThan(0));
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.type(screen.getByRole("textbox", { name: "LDAP server FQDN (optional)" }), "dc.corp.example.com");

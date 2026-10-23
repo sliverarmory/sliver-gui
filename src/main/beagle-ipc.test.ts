@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BEAGLE_IPC_INVOKE } from "../shared/beagle-contracts.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
-import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers, type BeagleIpcServices } from "./beagle-ipc.js";
+import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers, type BeagleIpcServices, type BeagleIpcManager } from "./beagle-ipc.js";
 import { emptyBeagleWorkspace } from "../shared/beagle-workspace.js";
 
 const mocks = vi.hoisted(() => ({
@@ -25,14 +25,14 @@ function event(): IpcMainInvokeEvent {
   const frame = { processId: 123, frameToken: "beagle-main", url, isDestroyed: () => false };
   return { sender: { id: 12, mainFrame: frame, getURL: () => url, isDestroyed: () => false }, senderFrame: frame } as unknown as IpcMainInvokeEvent;
 }
-function services(): BeagleIpcServices {
-  return { manager: Object.fromEntries([
+function services(): BeagleIpcServices & { manager: BeagleIpcManager } {
+  const manager = Object.fromEntries([
     "getState", "createProject", "selectProject", "configureBinary", "importFiles", "analyze", "query", "getQueries",
     "runSavedQuery", "search", "entity", "neighborhood", "paths", "tag", "compose", "exportGraphToFile",
     "renameProject", "archiveProject", "restoreArchivedProject", "cleanup", "setRetention", "backupProject", "restoreProject",
     "getWorkspace", "saveWorkspace", "importQueries", "exportQueries", "exportResult", "relayTargets", "aclOrigins", "getRules", "previewRules", "applyRules", "getOperation", "cancelOperation",
-  ].map((name) => [name, vi.fn().mockResolvedValue({ marker: name })])) as unknown as BeagleIpcServices["manager"],
-  getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE };
+  ].map((name) => [name, vi.fn().mockResolvedValue({ marker: name })])) as unknown as BeagleIpcManager;
+  return { manager, getManager: () => manager, getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE };
 }
 function invoke(channel: string, fixture: IpcMainInvokeEvent, ...args: unknown[]): unknown {
   return mocks.handlers.get(channel)!(fixture, ...args);
@@ -42,6 +42,44 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("Beagle IPC", () => {
+  it("binds requests and dialog locks to each trusted window independently", async () => {
+    const first = services();
+    const second = services();
+    const otherWindow = { isDestroyed: () => false } as BrowserWindow;
+    const firstEvent = event();
+    const secondEvent = event();
+    mocks.fromWebContents.mockImplementation((contents) => contents === secondEvent.sender ? otherWindow : window);
+    registerBeagleIpcHandlers({
+      getManager: (candidate) => candidate === window ? first.manager : candidate === otherWindow ? second.manager : undefined,
+      getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE,
+    }, url, () => true);
+    let finish!: (value: unknown) => void;
+    mocks.open.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = invoke(BEAGLE_IPC_INVOKE.importFiles, firstEvent);
+    const id = "11111111-1111-4111-8111-111111111111";
+    await expect(invoke(BEAGLE_IPC_INVOKE.selectProject, firstEvent, { id })).resolves.toMatchObject({ ok: false });
+    await expect(invoke(BEAGLE_IPC_INVOKE.selectProject, secondEvent, { id })).resolves.toMatchObject({ ok: true });
+    await expect(invoke(BEAGLE_IPC_INVOKE.query, secondEvent, { cypher: "RETURN 1" })).resolves.toMatchObject({ ok: true });
+    expect(second.manager.selectProject).toHaveBeenCalledExactlyOnceWith({ id });
+    expect(second.manager.query).toHaveBeenCalledExactlyOnceWith({ cypher: "RETURN 1" });
+    expect(first.manager.selectProject).not.toHaveBeenCalled();
+    expect(first.manager.query).not.toHaveBeenCalled();
+    finish({ canceled: false, filePaths: ["/tmp/first.zip"] });
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(first.manager.importFiles).toHaveBeenCalledExactlyOnceWith(["/tmp/first.zip"]);
+    expect(second.manager.importFiles).not.toHaveBeenCalled();
+  });
+
+  it("rejects a window without a workspace before accessing request fields", async () => {
+    const service = services();
+    registerBeagleIpcHandlers({ ...service, getManager: () => undefined }, url, () => true);
+    const getter = vi.fn();
+    await expect(invoke(BEAGLE_IPC_INVOKE.query, event(), Object.defineProperty({}, "cypher", { get: getter, enumerable: true })))
+      .resolves.toMatchObject({ ok: false, error: "AD Explorer workspace is unavailable" });
+    expect(getter).not.toHaveBeenCalled();
+    expect(service.manager.query).not.toHaveBeenCalled();
+  });
+
   it("registers only its typed capability surface and removes every handler", () => {
     registerBeagleIpcHandlers(services(), url, () => true);
     expect([...mocks.handlers.keys()].sort()).toEqual(Object.values(BEAGLE_IPC_INVOKE).sort());

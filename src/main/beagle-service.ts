@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
@@ -32,7 +33,9 @@ const QUERY_TIMEOUT_MS = 40_000;
 const WORKFLOW_TIMEOUT_MS = 5 * 60_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const MAX_PROJECTS = 100;
-export class BeaglePostCommitError extends Error {}
+export class BeaglePostCommitError extends Error {
+  constructor(message: string, readonly projectId?: string) { super(message); }
+}
 // Only private, randomly named staging files created by this service. Never
 // match a committed database, project metadata, or user-selected output file.
 const ABANDONED_STAGE = /^\.(?:(?:mutation|backup)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.db(?:-wal|-shm|-journal)?|empty-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json)$/u;
@@ -53,6 +56,13 @@ export interface BeagleServiceOptions {
   verifier?: BeagleExecutableVerifier;
   resolveBundledRuntime?: () => Promise<BeagleExecutableIdentity>;
 }
+
+interface BeagleWorkspaceContext {
+  selectedProjectId: string | undefined;
+  disposed: boolean;
+}
+
+export type BeagleServiceWorkspace = Omit<BeagleService, "createWorkspace">;
 
 /** One serialized owner for every project's database, including reads and project switches. */
 export class BeagleService {
@@ -77,6 +87,8 @@ export class BeagleService {
   private operation: (BeagleOperationState & { controller: AbortController }) | null = null;
   private operationDatabase: string | undefined;
   private supportedOperations: readonly string[] = [];
+  private readonly workspaceContext = new AsyncLocalStorage<BeagleWorkspaceContext | undefined>();
+  private operationWorkspace: BeagleWorkspaceContext | undefined;
 
   constructor(options: BeagleServiceOptions) {
     if (!isAbsolute(options.userDataPath)) throw new TypeError("Beagle user data path must be absolute");
@@ -98,6 +110,74 @@ export class BeagleService {
     this.clients.clear();
   }
 
+  /** Each window keeps its selection while every database still has one serialized owner. */
+  createWorkspace(initialProjectId?: string): BeagleServiceWorkspace {
+    const context: BeagleWorkspaceContext = {
+      selectedProjectId: initialProjectId === undefined ? undefined : parseBeagleSelectProjectInput({ id: initialProjectId }).id,
+      disposed: false,
+    };
+    const scoped = <Args extends unknown[], Result>(method: (...args: Args) => Result) => (...args: Args): Result =>
+      this.workspaceContext.run(context, () => method.apply(this, args));
+    return {
+      getState: scoped(this.getState),
+      getSelectedProjectId: scoped(this.getSelectedProjectId),
+      listCollections: scoped(this.listCollections),
+      createProject: scoped(this.createProject),
+      selectProject: scoped(this.selectProject),
+      configureBinary: scoped(this.configureBinary),
+      importFiles: scoped(this.importFiles),
+      importCollectedData: scoped(this.importCollectedData),
+      analyze: scoped(this.analyze),
+      query: scoped(this.query),
+      runSavedQuery: scoped(this.runSavedQuery),
+      getQueries: scoped(this.getQueries),
+      search: scoped(this.search),
+      entity: scoped(this.entity),
+      neighborhood: scoped(this.neighborhood),
+      paths: scoped(this.paths),
+      tag: scoped(this.tag),
+      compose: scoped(this.compose),
+      exportGraph: scoped(this.exportGraph),
+      renameProject: scoped(this.renameProject),
+      archiveProject: scoped(this.archiveProject),
+      restoreArchivedProject: scoped(this.restoreArchivedProject),
+      cleanup: scoped(this.cleanup),
+      setRetention: scoped(this.setRetention),
+      getWorkspace: scoped(this.getWorkspace),
+      saveWorkspace: scoped(this.saveWorkspace),
+      relayTargets: scoped(this.relayTargets),
+      aclOrigins: scoped(this.aclOrigins),
+      getRules: scoped(this.getRules),
+      previewRules: scoped(this.previewRules),
+      applyRules: scoped(this.applyRules),
+      exportGraphToFile: scoped(this.exportGraphToFile),
+      backupProject: scoped(this.backupProject),
+      restoreProject: scoped(this.restoreProject),
+      importQueries: scoped(this.importQueries),
+      exportQueries: scoped(this.exportQueries),
+      exportResult: scoped(this.exportResult),
+      getOperation: scoped(this.getOperation),
+      cancelOperation: scoped(this.cancelOperation),
+      dispose: async () => {
+        context.disposed = true;
+        if (this.operationWorkspace === context && this.operation?.cancellable) {
+          this.operation.controller.abort();
+          this.controller?.abort();
+        }
+      },
+    };
+  }
+
+  getSelectedProjectId(): string | undefined {
+    const context = this.workspaceContext.getStore();
+    return context ? context.selectedProjectId : this.configuration?.selectedProjectId;
+  }
+
+  /** Read the dataset catalog without opening a database or changing any window's selection. */
+  listCollections(): Promise<BeagleProject[]> {
+    return this.serial(async () => (await this.loadConfiguration()).projects.map((project) => ({ ...project })));
+  }
+
   getState(): Promise<BeagleState> { return this.serial(() => this.state()); }
 
   createProject(value: BeagleCreateProjectInput): Promise<BeagleState> {
@@ -117,7 +197,9 @@ export class BeagleService {
   selectProject(value: BeagleSelectProjectInput): Promise<BeagleState> {
     const input = parseBeagleSelectProjectInput(value);
     return this.serial(async () => {
-      const configuration = await this.load();
+      // A window whose collection was archived elsewhere can explicitly choose
+      // another one without first loading its now-unavailable collection.
+      const configuration = await this.loadConfiguration();
       if (!configuration.projects.some((project) => project.id === input.id)) throw new Error("Unknown Beagle project");
       await this.save({ ...configuration, selectedProjectId: input.id });
       return this.state();
@@ -569,14 +651,14 @@ export class BeagleService {
   }
 
   getOperation(): BeagleOperationState | null {
-    if (!this.operation) return null;
+    if (!this.operation || this.operationWorkspace !== this.workspaceContext.getStore()) return null;
     const { controller: _controller, ...state } = this.operation;
     return { ...state };
   }
 
   cancelOperation(value: { id: string }): { cancelled: boolean } {
     const { id } = parseBeagleProjectIdInput(value);
-    if (!this.operation || this.operation.id !== id || !this.operation.cancellable) return { cancelled: false };
+    if (!this.operation || this.operationWorkspace !== this.workspaceContext.getStore() || this.operation.id !== id || !this.operation.cancellable) return { cancelled: false };
     this.operation.controller.abort(); this.controller?.abort();
     this.operation.phase = "Cancelling and recovering project";
     return { cancelled: true };
@@ -584,21 +666,35 @@ export class BeagleService {
 
   private checkCancelled(): void {
     if (this.disposed) throw new Error("Beagle service is closed");
+    if (this.workspaceContext.getStore()?.disposed) throw new Error("AD Explorer workspace is closed");
     if (this.operation?.controller.signal.aborted) throw new Error("AD Explorer operation cancelled; the committed project was preserved");
   }
   private phase(phase: string): void { this.checkCancelled(); if (this.operation) this.operation.phase = phase; }
 
   private serial<T>(operation: () => Promise<T>, label = "AD Explorer"): Promise<T> {
-    const result = this.pending.then(async () => {
-      if (this.disposed) throw new Error("Beagle service is closed");
+    const context = this.workspaceContext.getStore();
+    const result = this.pending.then(() => this.workspaceContext.run(context, async () => {
+      this.checkCancelled();
+      this.operationWorkspace = context;
       this.operation = { id: randomUUID(), label, phase: label, startedAt: Date.now(), cancellable: true, controller: new AbortController() };
-      try { return await operation(); } finally { this.operation = null; }
-    });
+      try { return await operation(); } finally { this.operation = null; this.operationWorkspace = undefined; }
+    }));
     this.pending = result.catch(() => undefined);
     return result;
   }
 
   private async load(): Promise<ProjectConfiguration> {
+    const configuration = await this.loadConfiguration();
+    const context = this.workspaceContext.getStore();
+    if (!context) return configuration;
+    context.selectedProjectId ??= configuration.selectedProjectId;
+    if (!configuration.projects.some((project) => project.id === context.selectedProjectId)) {
+      throw new Error("This AD Explorer collection is no longer available. Select another collection.");
+    }
+    return { ...configuration, selectedProjectId: context.selectedProjectId };
+  }
+
+  private async loadConfiguration(): Promise<ProjectConfiguration> {
     if (this.configuration) return this.configuration;
     await privateDirectory(this.rootPath);
     try {
@@ -634,12 +730,23 @@ export class BeagleService {
       if (!isNotFound(error)) throw error;
       const project = { id: randomUUID(), name: "Default", createdAt: new Date().toISOString() };
       const configuration: ProjectConfiguration = { version: 2, binaryPath: null, binarySha256: null, selectedProjectId: project.id, projects: [project], archivedProjects: [] };
-      await this.save(configuration);
+      await this.saveConfiguration(configuration);
       return configuration;
     }
   }
 
   private async save(configuration: ProjectConfiguration): Promise<void> {
+    const context = this.workspaceContext.getStore();
+    if (!context) return this.saveConfiguration(configuration);
+    const previousSelection = this.configuration?.selectedProjectId;
+    await this.saveConfiguration({
+      ...configuration,
+      selectedProjectId: configuration.projects.some((project) => project.id === previousSelection) ? previousSelection! : configuration.projects[0]!.id,
+    });
+    context.selectedProjectId = configuration.selectedProjectId;
+  }
+
+  private async saveConfiguration(configuration: ProjectConfiguration): Promise<void> {
     await writePrivateFileAtomic(this.configurationPath, Buffer.from(JSON.stringify(configuration, null, 2)));
     this.configuration = configuration;
   }
@@ -819,7 +926,7 @@ export class BeagleService {
       return { report, state: await this.state() };
     } catch (error) {
       if (operation && !committed) await this.appendHistory(beagleImportRecord(operation, files, undefined, { cancelled: this.operation?.controller.signal.aborted ?? false, message: error instanceof Error ? error.message : "Operation failed" })).catch(() => undefined);
-      if (committed) throw new BeaglePostCommitError("Graph changes were saved, but project metadata could not be saved. Reload the project and run Analyze to recover diagnostics.");
+      if (committed) throw new BeaglePostCommitError("Graph changes were saved, but project metadata could not be saved. Reload the project and run Analyze to recover diagnostics.", configuration.selectedProjectId);
       throw error;
     } finally {
       this.operationDatabase = undefined;

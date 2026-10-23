@@ -173,6 +173,7 @@ function installSliverAPI(
     listSessionShells: vi.fn(failedOperation),
     listBeaconTasks: vi.fn(failedOperation),
     listTargets: vi.fn(failedOperation),
+    listAdCollections: vi.fn().mockResolvedValue({ ok: true, value: [] }),
     listAdCollectors: vi.fn(failedOperation),
     runAdCollector: vi.fn(failedOperation),
     listTargetOperations: vi.fn(failedOperation),

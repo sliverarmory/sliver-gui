@@ -462,6 +462,7 @@ function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI
     listExecutionCatalog: vi.fn(failed),
     listInstalledBofs: vi.fn(failed),
     listDotNetAssemblies: vi.fn(failed),
+    listAdCollections: vi.fn().mockResolvedValue({ ok: true, value: [] }),
     listAdCollectors: vi.fn(failed),
     runAdCollector: vi.fn(failed),
     openBeagleWindow: vi.fn(failed),

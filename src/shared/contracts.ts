@@ -78,7 +78,7 @@ import type {
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
 import type { DotNetCatalog } from "./dotnet-contracts.js";
-import type { AdCollectorCatalog, AdCollectorRunInput, AdCollectorRunResult } from "./ad-explorer-contracts.js";
+import type { AdCollectionSummary, AdCollectorCatalog, AdCollectorRunInput, AdCollectorRunResult, AdExplorerOpenInput } from "./ad-explorer-contracts.js";
 import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
@@ -232,6 +232,7 @@ export const IPC_INVOKE = {
   listDotNetAssemblies: "sliver:dotnet:catalog",
   chooseDotNetAssemblyFile: "sliver:dotnet:choose-file",
   listAdCollectors: "sliver:ad-explorer:collectors",
+  listAdCollections: "sliver:ad-explorer:collections",
   runAdCollector: "sliver:ad-explorer:collect",
   openBeagleWindow: "sliver:ad-explorer:open-window",
   listInstalledBofs: "sliver:bof:catalog",
@@ -1198,8 +1199,9 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.listDotNetAssemblies]: { args: []; result: OperationResult<DotNetCatalog> };
   [IPC.chooseDotNetAssemblyFile]: { args: []; result: OperationResult<DotNetFileSelection | null> };
   [IPC.listAdCollectors]: { args: [target: TargetRef]; result: OperationResult<AdCollectorCatalog> };
+  [IPC.listAdCollections]: { args: []; result: OperationResult<AdCollectionSummary[]> };
   [IPC.runAdCollector]: { args: [input: AdCollectorRunInput]; result: OperationResult<AdCollectorRunResult> };
-  [IPC.openBeagleWindow]: { args: []; result: OperationResult };
+  [IPC.openBeagleWindow]: { args: [input?: AdExplorerOpenInput]; result: OperationResult };
   [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
   [IPC.chooseBofDirectory]: { args: []; result: OperationResult<BofDirectorySelection | null> };
   [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };

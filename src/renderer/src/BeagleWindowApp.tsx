@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Chip, Input, Label, Modal, Spinner, Tabs, TextArea, TextField, Tooltip, toast } from "@heroui/react";
+import { Button, Chip, Disclosure, Input, Label, Modal, Spinner, Tabs, TextArea, TextField, Tooltip, toast } from "@heroui/react";
 import { CellSwitch } from "@heroui-pro/react/cell-switch";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { NativeSelect } from "@heroui-pro/react/native-select";
@@ -63,6 +63,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   const [queryFilter, setQueryFilter] = useState("");
   const [category, setCategory] = useState("");
   const [cypher, setCypher] = useState(DEFAULT_QUERY);
+  const [editorExpanded, setEditorExpanded] = useState(true);
   const [parameters, setParameters] = useState("{}");
   const [queryName, setQueryName] = useState("");
   const [queryDescription, setQueryDescription] = useState("");
@@ -310,7 +311,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   function executeEditor() {
     if (!api || busy || !cypher.trim()) return;
     let parsed: BeagleJsonObject;
-    try { parsed = parseParameters(parameters); } catch (cause) { showError(`Invalid parameters: ${errorText(cause)}`); return; }
+    try { parsed = parseParameters(parameters); } catch (cause) { setEditorExpanded(true); showError(`Invalid parameters: ${errorText(cause)}`); return; }
     const official = catalog.find((query) => query.id === selectedSavedId && query.cypher === cypher);
     void runQuery(official?.name ?? "Custom query", () => official
       ? api.runSavedQuery({ id: official.id, parameters: parsed })
@@ -479,15 +480,9 @@ export function BeagleWindowApp(): React.JSX.Element {
 
   return <AuxiliaryWindowFrame className="beagle-workspace" ariaLabel="AD Explorer">
     <header className="beagle-header">
-      <div className="beagle-heading"><FontAwesomeIcon icon={faCircleNodes} className="text-accent" /><h1>AD Explorer</h1>
-        <Chip size="sm" variant="soft" color={state?.runtime.available ? "success" : "default"}>{loading ? "Starting…" : state?.runtime.available ? "Beagle ready" : "Backend unavailable"}</Chip></div>
       <div className="beagle-toolbar">
-        <NativeSelect className="beagle-project-select" variant="secondary"><NativeSelect.Trigger aria-label="Project" value={state?.selectedProjectId ?? ""}
-          disabled={Boolean(busy) || loading} onChange={(event) => { const id = event.target.value; void updateState("Opening project", () => api.selectProject({ id }), true); }}>
-          {!state?.projects.length ? <NativeSelect.Option value="">No project</NativeSelect.Option> : null}
-          {state?.projects.map((project) => <NativeSelect.Option key={project.id} value={project.id}>{project.name}</NativeSelect.Option>)}<NativeSelect.Indicator />
-        </NativeSelect.Trigger></NativeSelect>
-        <IconButton label="New project" icon={faPlus} disabled={Boolean(busy) || loading} onPress={() => setNewProjectOpen((open) => !open)} />
+        <div className="beagle-heading"><FontAwesomeIcon icon={faCircleNodes} className="text-accent" /><h1>AD Explorer</h1>
+          <Chip size="sm" variant="soft" color={state?.runtime.available ? "success" : "default"}>{loading ? "Starting…" : state?.runtime.available ? "Beagle ready" : "Backend unavailable"}</Chip></div>
         <div className="beagle-toolbar__actions">
           <Button size="sm" variant="secondary" isDisabled={disabled} onPress={() => { void mutate("Import", () => api.importFiles(), true); }}><FontAwesomeIcon icon={faUpload} />Import data</Button>
           <Button size="sm" variant="secondary" isDisabled={disabled || !state?.stats?.nodes} onPress={() => { void mutate("Analysis", () => api.analyze(), true); }}><FontAwesomeIcon icon={faCircleNodes} />Analyze</Button>
@@ -503,6 +498,14 @@ export function BeagleWindowApp(): React.JSX.Element {
         </div>
       </div>
       <div className="beagle-summary" aria-label="Project summary">
+        <div className="beagle-project-picker">
+          <NativeSelect className="beagle-project-select" variant="secondary"><NativeSelect.Trigger aria-label="Project" value={state?.selectedProjectId ?? ""}
+            disabled={Boolean(busy) || loading} onChange={(event) => { const id = event.target.value; void updateState("Opening project", () => api.selectProject({ id }), true); }}>
+            {!state?.projects.length ? <NativeSelect.Option value="">No project</NativeSelect.Option> : null}
+            {state?.projects.map((project) => <NativeSelect.Option key={project.id} value={project.id}>{project.name}</NativeSelect.Option>)}<NativeSelect.Indicator />
+          </NativeSelect.Trigger></NativeSelect>
+          <IconButton label="New project" icon={faPlus} disabled={Boolean(busy) || loading} onPress={() => setNewProjectOpen((open) => !open)} />
+        </div>
         <span><strong>{state?.stats?.nodes.toLocaleString() ?? "—"}</strong> objects</span>
         <span><strong>{state?.stats?.edges.toLocaleString() ?? "—"}</strong> relationships</span>
         <span><strong>{Object.keys(state?.stats?.labels ?? {}).filter((name) => name !== "Base").length}</strong> object types</span>
@@ -604,12 +607,12 @@ export function BeagleWindowApp(): React.JSX.Element {
             <div className="beagle-query-portability"><Button size="sm" variant="tertiary" isDisabled={disabled || investigation.loading} onPress={() => { void portableQueries("import"); }}>Import queries</Button>
               <Button size="sm" variant="tertiary" isDisabled={disabled || !customQueries.length} onPress={() => { void portableQueries("export"); }}>Export queries</Button></div>
             {customQueries.length ? <section><h2 className="beagle-section-label">My queries</h2>{customQueries.filter((query) => (!category || category === query.category) && `${query.name} ${query.description} ${query.category}`.toLowerCase().includes(queryFilter.toLowerCase())).map((query) => <div key={query.id} className="beagle-custom-query">
-              <Button variant="ghost" onPress={() => { setCypher(query.cypher); setParameters(query.parameters); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category); setSelectedSavedId(undefined); }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small></span></Button>
+              <Button variant="ghost" onPress={() => { setEditorExpanded(true); setCypher(query.cypher); setParameters(query.parameters); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category); setSelectedSavedId(undefined); }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small></span></Button>
               <IconButton label={`Remove saved query ${query.name}`} icon={faTrash} onPress={() => removeQuery(query.id)} />
             </div>)}</section> : null}
             <h2 className="beagle-section-label">BloodHound query library <span>{visibleQueries.length}</span></h2>
             <div className="beagle-query-list">{visibleQueries.map((query) => <Button key={query.id} variant="ghost" className="beagle-query-item" aria-label={`Load query ${query.name}`} aria-pressed={selectedSavedId === query.id} onPress={() => {
-              setCypher(query.cypher); setParameters(initialParameters(query.parameters)); setSelectedSavedId(query.id); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category);
+              setEditorExpanded(true); setCypher(query.cypher); setParameters(initialParameters(query.parameters)); setSelectedSavedId(query.id); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category);
             }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small>{query.parameters.length ? <em>Parameters: {query.parameters.join(", ")}</em> : null}</span></Button>)}</div>
             {!visibleQueries.length ? <p className="beagle-muted">No queries match this filter.</p> : null}
           </Tabs.Panel>
@@ -621,18 +624,23 @@ export function BeagleWindowApp(): React.JSX.Element {
         </Tabs>
       </aside>
       <section className="beagle-center" aria-label="Query workspace">
-        <div className="beagle-query-editor">
-          <div className="beagle-editor-heading"><h2><FontAwesomeIcon icon={faCode} />Cypher</h2><span>⌘ / Ctrl + Enter to run</span>
+        <Disclosure className="beagle-query-editor" isExpanded={editorExpanded} onExpandedChange={setEditorExpanded}>
+          <div className="beagle-editor-heading">
+            <Disclosure.Heading level={2}><Button slot="trigger" size="sm" variant="ghost" aria-label={editorExpanded ? "Collapse Cypher editor" : "Expand Cypher editor"}>
+              <FontAwesomeIcon aria-hidden icon={faCode} />Cypher<Disclosure.Indicator />
+            </Button></Disclosure.Heading><span>{editorExpanded ? "⌘ / Ctrl + Enter to run" : null}</span>
             <Button size="sm" isDisabled={disabled || !cypher.trim() || Boolean(queryBusy)} isPending={Boolean(queryBusy)} onPress={executeEditor}><FontAwesomeIcon icon={faPlay} />Run query</Button></div>
-          <div className="beagle-editor-fields" onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (!queryBusy) executeEditor(); } }}>
-            <TextField value={cypher} onChange={(value) => { setCypher(value); setSelectedSavedId(undefined); }} className="beagle-cypher-field" aria-label="Cypher query"><TextArea aria-label="Cypher query" spellCheck={false} rows={4} /></TextField>
-            <TextField value={parameters} onChange={setParameters} className="beagle-parameters-field"><Label>Parameters (JSON)</Label><TextArea aria-label="Query parameters" spellCheck={false} rows={3} /></TextField>
-          </div>
-          <div className="beagle-save-query"><TextField aria-label="Saved query name" value={queryName} onChange={setQueryName}><Input aria-label="Saved query name" placeholder="Name this query" maxLength={160} /></TextField>
-            <TextField aria-label="Saved query category" value={queryCategory} onChange={setQueryCategory}><Input aria-label="Saved query category" placeholder="Category" maxLength={160} /></TextField>
-            <TextField aria-label="Saved query description" value={queryDescription} onChange={setQueryDescription}><Input aria-label="Saved query description" placeholder="Description" maxLength={4000} /></TextField>
-            <Button size="sm" variant="tertiary" isDisabled={!investigation.workspace || !queryName.trim() || !cypher.trim()} onPress={saveQuery}><FontAwesomeIcon icon={faSave} />Save query</Button></div>
-        </div>
+          <Disclosure.Content><div className="beagle-editor-content">
+            <div className="beagle-editor-fields" onKeyDown={(event) => { if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) { event.preventDefault(); if (!queryBusy) executeEditor(); } }}>
+              <TextField value={cypher} onChange={(value) => { setCypher(value); setSelectedSavedId(undefined); }} className="beagle-cypher-field" aria-label="Cypher query"><TextArea aria-label="Cypher query" spellCheck={false} rows={4} /></TextField>
+              <TextField value={parameters} onChange={setParameters} className="beagle-parameters-field"><Label>Parameters (JSON)</Label><TextArea aria-label="Query parameters" spellCheck={false} rows={3} /></TextField>
+            </div>
+            <div className="beagle-save-query"><TextField aria-label="Saved query name" value={queryName} onChange={setQueryName}><Input aria-label="Saved query name" placeholder="Name this query" maxLength={160} /></TextField>
+              <TextField aria-label="Saved query category" value={queryCategory} onChange={setQueryCategory}><Input aria-label="Saved query category" placeholder="Category" maxLength={160} /></TextField>
+              <TextField aria-label="Saved query description" value={queryDescription} onChange={setQueryDescription}><Input aria-label="Saved query description" placeholder="Description" maxLength={4000} /></TextField>
+              <Button size="sm" variant="tertiary" isDisabled={!investigation.workspace || !queryName.trim() || !cypher.trim()} onPress={saveQuery}><FontAwesomeIcon icon={faSave} />Save query</Button></div>
+          </div></Disclosure.Content>
+        </Disclosure>
         {history?.entries.length ? <nav className="beagle-history" aria-label="Investigation history">
           <Button size="sm" variant="tertiary" aria-label="Back in investigation" isDisabled={history.index <= 0 || Boolean(busy)} onPress={() => navigateHistory(history.index - 1)}>Back</Button>
           <Button size="sm" variant="tertiary" aria-label="Forward in investigation" isDisabled={history.index >= history.entries.length - 1 || Boolean(busy)} onPress={() => navigateHistory(history.index + 1)}>Forward</Button>

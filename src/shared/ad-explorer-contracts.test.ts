@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAdCollectorRunInput, RUSTHOUND_ARMORY_COLLECTOR_ID } from "./ad-explorer-contracts.js";
+import { parseAdCollectorRunInput, parseAdExplorerOpenInput, RUSTHOUND_ARMORY_COLLECTOR_ID } from "./ad-explorer-contracts.js";
 
 const request = {
   target: { mode: "beacon", id: "beacon-1", backendEpoch: 1, domainRevision: 2, fingerprint: "a".repeat(64) },
@@ -9,6 +9,13 @@ const request = {
 };
 
 describe("AD collector input", () => {
+  it("accepts only an opaque collection identity for opening an explorer", () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    expect(parseAdExplorerOpenInput({ projectId })).toEqual({ projectId });
+    for (const input of [null, [], {}, { projectId: "../other" }, { projectId, path: "/tmp/graph.db" }, { projectId, selectedProjectId: projectId }]) {
+      expect(() => parseAdExplorerOpenInput(input)).toThrow();
+    }
+  });
   it("accepts an installed Armory alias with spaces and normalizes an explicit DNS domain", () => {
     expect(parseAdCollectorRunInput(request)).toMatchObject({
       collectorId: "sharphound:armory:aliases/SharpHound CE",

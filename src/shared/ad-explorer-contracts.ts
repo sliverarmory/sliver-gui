@@ -1,4 +1,17 @@
 import type { TargetRef } from "./target-contracts.js";
+import { BEAGLE_PROJECT_ID } from "./beagle-contracts.js";
+
+/** Main-window catalog metadata, without database paths or graph contents. */
+export interface AdCollectionSummary { id: string; name: string; createdAt: string }
+export interface AdExplorerOpenInput { projectId: string }
+
+export function parseAdExplorerOpenInput(value: unknown): AdExplorerOpenInput {
+  const input = record(value, "AD Explorer collection", ["projectId"]);
+  if (typeof input["projectId"] !== "string" || !BEAGLE_PROJECT_ID.test(input["projectId"])) {
+    throw new TypeError("Choose a valid AD Explorer collection");
+  }
+  return { projectId: input["projectId"] };
+}
 
 /** SharpHound collection methods supported by the integrated workflow. */
 export const AD_COLLECTION_METHODS = ["Default", "DCOnly", "ComputerOnly", "Session"] as const;

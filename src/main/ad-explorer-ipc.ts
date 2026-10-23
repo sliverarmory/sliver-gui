@@ -4,8 +4,11 @@ import { IPC, type OperationResult } from "../shared/contracts.js";
 import {
   parseAdCollectorRunInput,
   parseAdTargetRef,
+  parseAdExplorerOpenInput,
   RUSTHOUND_ARMORY_COLLECTOR_ID,
   type AdCollectorRunResult,
+  type AdCollectionSummary,
+  type AdExplorerOpenInput,
 } from "../shared/ad-explorer-contracts.js";
 import type { ConnectionRegistry } from "./connection-registry.js";
 import { BeaglePostCommitError } from "./beagle-service.js";
@@ -14,8 +17,9 @@ import { isSameRendererDocument } from "./security.js";
 
 export interface AdExplorerIpcServices {
   registry: Pick<ConnectionRegistry, "listAdCollectors" | "runAdCollector">;
+  listCollections: () => Promise<AdCollectionSummary[]>;
   importCollectedData: (input: { domain: string; path: string }) => Promise<{ projectId?: string }>;
-  openBeagleWindow: () => Promise<void>;
+  openBeagleWindow: (input?: AdExplorerOpenInput) => Promise<void>;
 }
 
 export function registerAdExplorerIpcHandlers(
@@ -34,6 +38,18 @@ export function registerAdExplorerIpcHandlers(
     }
     return window;
   }
+
+  ipcMain.handle(IPC.listAdCollections, async (event, ...args: unknown[]): Promise<OperationResult<AdCollectionSummary[]>> => {
+    try {
+      trustedWindow(event);
+      if (args.length !== 0) throw new TypeError("List AD Explorer collections takes no arguments");
+      const collections = await services.listCollections();
+      trustedWindow(event);
+      return { ok: true, value: collections };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "AD Explorer collections unavailable" };
+    }
+  });
 
   ipcMain.handle(IPC.listAdCollectors, async (event, ...args: unknown[]) => {
     try {
@@ -83,11 +99,12 @@ export function registerAdExplorerIpcHandlers(
         imported = await services.importCollectedData({ domain: collected.value.domain, path: collected.value.path });
       } catch (error) {
         if (error instanceof BeaglePostCommitError) {
-          await services.openBeagleWindow().catch(() => undefined);
+          await services.openBeagleWindow(error.projectId ? { projectId: error.projectId } : undefined).catch(() => undefined);
           return { ok: true, value: {
             state: "imported", collectorId: input.collectorId, targetId: input.target.id,
             domain: input.domain,
             message: "Graph data was imported, but Beagle could not save project metadata. Reload the project and run Analyze to recover diagnostics.",
+            ...(error.projectId ? { projectId: error.projectId } : {}),
           } };
         }
         return { ok: true, value: {
@@ -98,7 +115,7 @@ export function registerAdExplorerIpcHandlers(
       }
       trustedWindow(event);
       try {
-        await services.openBeagleWindow();
+        await services.openBeagleWindow(imported.projectId ? { projectId: imported.projectId } : undefined);
         trustedWindow(event);
       } catch {
         return { ok: true, value: {
@@ -121,8 +138,9 @@ export function registerAdExplorerIpcHandlers(
   ipcMain.handle(IPC.openBeagleWindow, async (event, ...args: unknown[]): Promise<OperationResult> => {
     try {
       trustedWindow(event);
-      if (args.length !== 0) throw new TypeError("Open AD Explorer takes no arguments");
-      await services.openBeagleWindow();
+      if (args.length > 1) throw new TypeError("Choose one AD Explorer collection");
+      const input = args.length === 0 ? undefined : parseAdExplorerOpenInput(args[0]);
+      await services.openBeagleWindow(input);
       trustedWindow(event);
       return { ok: true };
     } catch (error) {
@@ -132,7 +150,7 @@ export function registerAdExplorerIpcHandlers(
 }
 
 export function unregisterAdExplorerIpcHandlers(): void {
-  for (const channel of [IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]) ipcMain.removeHandler(channel);
+  for (const channel of [IPC.listAdCollections, IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]) ipcMain.removeHandler(channel);
 }
 
 function safeBeagleImportReason(error: unknown): string {

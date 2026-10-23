@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Card, Chip, Description, Input, Label, ListBox, Select, Switch, TextField, toast, Tooltip } from "@heroui/react";
+import { Breadcrumbs, Button, Card, Chip, Description, Disclosure, Input, Label, ListBox, Select, Switch, Tabs, TextField, toast, Tooltip } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faCircleNodes, faComputer, faRotate, faSatellite, faUpRightFromSquare } from "@fortawesome/free-solid-svg-icons";
+import { faChevronRight, faCircleNodes, faComputer, faRotate, faSatellite, faUpRightFromSquare } from "@fortawesome/free-solid-svg-icons";
 import type { SliverSnapshot, PageSummary } from "../../../shared/contracts";
 import { parseAdDomain, RUSTHOUND_ARMORY_COLLECTOR_ID,
   type AdCollectionMethod, type AdCollectorSummary, type AdCollectorRunResult } from "../../../shared/ad-explorer-contracts";
 import type { TargetCatalogEntry, TargetMode, TargetRef, TargetSummary } from "../../../shared/target-contracts";
+
+import { ADCollectionsPanel } from "./ADCollectionsPanel";
 
 type CollectionMethod = AdCollectionMethod;
 type PageState = { entries: TargetCatalogEntry[]; page?: PageSummary; loading: boolean; error?: string };
@@ -47,13 +49,18 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const [moreSessions, setMoreSessions] = useState<PageState>(EMPTY_PAGE);
   const [moreBeacons, setMoreBeacons] = useState<PageState>(EMPTY_PAGE);
   const [assignments, setAssignments] = useState<Record<string, string>>({});
+  const [activeTab, setActiveTab] = useState("targets");
   const [selectedKey, setSelectedKey] = useState<string>();
+  const collectionHeading = useRef<HTMLHeadingElement>(null);
+  const targetButtons = useRef(new Map<string, HTMLButtonElement>());
+  const returnFocusKey = useRef<string | undefined>(undefined);
   const [domainDraft, setDomainDraft] = useState("");
   const [ldapFqdn, setLdapFqdn] = useState("");
   const [ldaps, setLdaps] = useState(false);
   const [catalog, setCatalog] = useState<AdCollectorSummary[]>([]);
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [otherCollectorsOpen, setOtherCollectorsOpen] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [collectorId, setCollectorId] = useState("");
   const [method, setMethod] = useState<CollectionMethod>("Default");
@@ -119,6 +126,12 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
     setUsername("");
     setPassword("");
     setRunResult(undefined);
+    setOtherCollectorsOpen(false);
+    if (selectedKey) collectionHeading.current?.focus();
+    else if (returnFocusKey.current) {
+      targetButtons.current.get(returnFocusKey.current)?.focus();
+      returnFocusKey.current = undefined;
+    }
   }, [selectedKey]);
 
   useEffect(() => {
@@ -257,191 +270,261 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const hasMoreSessions = moreSessions.page?.nextCursor !== undefined;
   const hasMoreBeacons = moreBeacons.page?.nextCursor !== undefined;
 
+  const backToTargets = () => {
+    returnFocusKey.current = selectedKey;
+    setSelectedKey(undefined);
+  };
+
   return (
     <section className="page-stack" aria-labelledby="ad-explorer-heading">
       <header className="page-heading">
         <div className="min-w-0">
           <div className="eyebrow"><FontAwesomeIcon aria-hidden icon={faCircleNodes} /> Active Directory</div>
           <h1 id="ad-explorer-heading">AD Explorer</h1>
-          <p>Choose a Windows session or beacon, collect BloodHound data, and explore the imported graph.</p>
+          <p>Collect Active Directory data from a Windows target, then explore it in the graph.</p>
         </div>
-        <Button variant="secondary" onPress={() => void openExplorer()}>
+        <Button variant="outline" onPress={() => void openExplorer()}>
           <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} /> Open Explorer
         </Button>
       </header>
 
-      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_minmax(300px,360px)]">
-        <div className="min-w-0 space-y-5">
-          <Card variant="secondary">
-            <Card.Header className="flex-row items-center gap-3">
-              <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faComputer} /></span>
-              <div className="min-w-0 flex-1">
-                <Card.Title>Windows targets</Card.Title>
-                <Card.Description>{windowsCount} visible across {groups.length} {groups.length === 1 ? "domain group" : "domain groups"}.</Card.Description>
-              </div>
-            </Card.Header>
-            <Card.Content className="space-y-5">
-              {inventoryIncomplete ? (
-                <p className="text-sm text-warning" role="status">
-                  Target inventory may be incomplete. Load catalog pages below to include Windows targets beyond the current snapshot.
-                </p>
-              ) : null}
-              {groups.length ? groups.map((group) => (
-                <section key={group.name} aria-label={`Domain ${group.name}`} className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">{group.name}</h2>
-                    <Chip size="sm" variant="soft">{group.rows.length}</Chip>
+      <Tabs className="mx-auto w-full max-w-5xl" selectedKey={activeTab} onSelectionChange={(key) => setActiveTab(String(key))} variant="secondary">
+        <Tabs.ListContainer className="w-fit max-w-full self-start">
+          <Tabs.List aria-label="AD Explorer views">
+            <Tabs.Tab id="targets" className="whitespace-nowrap">Windows Targets<Tabs.Indicator /></Tabs.Tab>
+            <Tabs.Tab id="collections" className="whitespace-nowrap">Collections<Tabs.Indicator /></Tabs.Tab>
+          </Tabs.List>
+        </Tabs.ListContainer>
+        <Tabs.Panel id="targets" className="space-y-6 pt-6">
+          {selected ? (
+            <>
+              <nav aria-label="AD Explorer navigation">
+                <Breadcrumbs className="min-w-0 flex-wrap">
+                  <Breadcrumbs.Item className="no-underline" href="#ad-explorer-targets" onClick={(event) => event.preventDefault()} onPress={backToTargets}>
+                    Windows targets
+                  </Breadcrumbs.Item>
+                  <Breadcrumbs.Item className="min-w-0 max-w-full truncate no-underline">
+                    {selected.target.hostname || selected.target.name || selected.target.id}
+                  </Breadcrumbs.Item>
+                </Breadcrumbs>
+              </nav>
+
+              <div className="flex flex-wrap items-center justify-between gap-4" aria-label="Selected target">
+                <div className="flex min-w-0 items-center gap-3">
+                  <FontAwesomeIcon aria-hidden icon={selected.target.mode === "session" ? faComputer : faSatellite} className="text-muted" />
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">{selected.target.username || "Unknown user"}</p>
+                    <p className="truncate text-xs text-muted">
+                      {selected.target.name || "Unnamed target"} · {selected.target.mode === "session" ? "Session" : "Beacon"} · <span className="font-mono">{selected.target.id.slice(0, 8)}</span>
+                    </p>
                   </div>
-                  <div className="space-y-1">
-                    {group.rows.map((row) => {
-                      const status = row.target.mode === "session"
-                        ? row.target.liveness === "active" ? "Active" : "Dead"
-                        : row.target.checkinStatus === "on-time" ? "On time" : row.target.checkinStatus === "overdue" ? "Overdue" : "Unknown";
-                      return (
+                </div>
+                <TargetStatus target={selected.target} />
+              </div>
+
+              <Card className="gap-6 p-6 sm:p-8">
+                <Card.Header className="flex-row items-start justify-between gap-4 p-0">
+                  <div className="min-w-0 space-y-2">
+                    <h2 ref={collectionHeading} tabIndex={-1} className="text-lg font-semibold text-foreground outline-none">Collect Data</h2>
+                    <Card.Description>{rustHoundSelected
+                      ? "RustHound collects in memory using the AD credentials you provide."
+                      : "Use a domain user context on this target to collect with SharpHound."}</Card.Description>
+                  </div>
+                  {selectedRef ? (
+                    <Tooltip delay={250}>
+                      <Button aria-label="Refresh collectors" isIconOnly variant="ghost" isDisabled={catalogLoading || running} onPress={() => setCatalogRevision((revision) => revision + 1)}>
+                        <FontAwesomeIcon aria-hidden icon={faRotate} />
+                      </Button>
+                      <Tooltip.Content>Refresh collectors</Tooltip.Content>
+                    </Tooltip>
+                  ) : null}
+                </Card.Header>
+                <Card.Content className="gap-6 p-0">
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <TextField className="min-w-0 flex-1 basis-64" value={domainDraft} variant="secondary" onChange={setDomainDraft}>
+                        <Label>Windows domain</Label>
+                        <Input autoComplete="off" maxLength={77} placeholder="corp.example.com" aria-describedby="ad-domain-description" />
+                      </TextField>
+                      <Button variant="outline" isDisabled={domainDraft.trim() === (assignments[selected.key] ?? "")} onPress={saveDomain}>
+                        Assign domain
+                      </Button>
+                    </div>
+                    <p id="ad-domain-description" className="text-xs text-muted">Assignments stay on this workstation; the target does not report its AD domain.</p>
+                  </div>
+                  {selectedRef ? <>
+                    <div className="grid items-start gap-5 sm:grid-cols-2">
+                      <Select fullWidth isDisabled={catalogLoading || running || !verifiedCollectors.length} value={selectedCollector?.compatibility === "verified" ? collectorId : ""} variant="secondary" onChange={(value) => setCollectorId(value === null ? "" : String(value))}>
+                        <Label>Verified collector</Label>
+                        <Select.Trigger><Select.Value>{catalogLoading ? "Loading collectors…" : selectedCollector?.compatibility === "verified" ? selectedCollector.name : "Select a verified collector"}</Select.Value><Select.Indicator /></Select.Trigger>
+                        <Select.Popover><ListBox>{verifiedCollectors.map((collector) => (
+                          <ListBox.Item id={collector.id} key={collector.id} textValue={collector.name} isDisabled={!collector.available}>
+                            <span className="min-w-0"><span className="block truncate text-sm font-medium">{collector.name}</span><span className="block truncate text-xs text-muted">{collector.reason ?? collector.description}</span></span>
+                            <ListBox.ItemIndicator />
+                          </ListBox.Item>
+                        ))}</ListBox></Select.Popover>
+                      </Select>
+                      <Select fullWidth isDisabled={running || !selectedCollector || !supportedMethods.length} value={method} variant="secondary" onChange={(value) => { if (value !== null) setMethod(String(value) as CollectionMethod); }}>
+                        <Label>Collection method</Label>
+                        <Select.Trigger><Select.Value>{METHOD_OPTIONS.find((option) => option.id === method)?.label}</Select.Value><Select.Indicator /></Select.Trigger>
+                        <Select.Popover><ListBox>{supportedMethods.map((option) => (
+                          <ListBox.Item id={option.id} key={option.id} textValue={option.label}>{option.label}<ListBox.ItemIndicator /></ListBox.Item>
+                        ))}</ListBox></Select.Popover>
+                      </Select>
+                    </div>
+                    {!verifiedCollectors.some((collector) => collector.available) && !catalogLoading ? (
+                      <p className="text-sm text-muted">No verified Beagle-compatible collector is available for this target.</p>
+                    ) : null}
+                    {rustHoundSelected ? <div className="space-y-5">
+                      <div className="grid items-start gap-5 sm:grid-cols-2">
+                        <TextField fullWidth value={username} variant="secondary" isDisabled={running} onChange={setUsername}>
+                          <Label>AD user</Label>
+                          <Input autoComplete="off" maxLength={255} placeholder="user@corp.example.com" />
+                          <Description>Use a UPN or bare user name for this run.</Description>
+                        </TextField>
+                        <TextField fullWidth value={password} variant="secondary" isDisabled={running} onChange={setPassword}>
+                          <Label>AD password</Label>
+                          <Input autoComplete="off" type="password" />
+                        </TextField>
+                        <TextField fullWidth value={ldapFqdn} variant="secondary" isDisabled={running} onChange={setLdapFqdn}>
+                          <Label>LDAP server FQDN (optional)</Label>
+                          <Input autoComplete="off" placeholder="dc.corp.example.com" />
+                          <Description>Use a domain controller name if domain lookup fails.</Description>
+                        </TextField>
+                        <div className="space-y-2">
+                          <Switch className="w-full" aria-label="Use LDAPS" isSelected={ldaps} isDisabled={running} onChange={setLdaps}>
+                            <Switch.Content className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Use LDAPS</span></Switch.Content>
+                            <Switch.Control><Switch.Thumb /></Switch.Control>
+                          </Switch>
+                          <p className="text-xs text-warning">{ldaps
+                            ? "LDAPS encrypts the connection, but this RustHound build does not validate the domain controller certificate."
+                            : "LDAP simple bind sends the supplied password to the domain controller on port 389 without TLS. Use LDAPS when available."}</p>
+                        </div>
+                      </div>
+                    </div> : null}
+                    {customCollectors.length ? (
+                      <Disclosure isExpanded={otherCollectorsOpen} onExpandedChange={setOtherCollectorsOpen}>
+                        <Disclosure.Heading>
+                          <Button slot="trigger" variant="ghost" className="-ml-3">
+                            Other collectors <Disclosure.Indicator />
+                          </Button>
+                        </Disclosure.Heading>
+                        <Disclosure.Content>
+                          <Disclosure.Body className="space-y-3 pt-3">
+                            <div className="flex flex-wrap gap-2">
+                              {customCollectors.map((collector) => (
+                                <Button key={collector.id} className="h-auto min-h-10 whitespace-normal text-left" variant={collectorId === collector.id ? "secondary" : "outline"} aria-pressed={collectorId === collector.id} isDisabled={!collector.available || catalogLoading || running} onPress={() => setCollectorId(collector.id)}>
+                                  {collector.id === "sharphound:custom:script" ? "Use your own Invoke-BloodHound .ps1" : "Use your own SharpHound-compatible .exe"}
+                                </Button>
+                              ))}
+                            </div>
+                            {customCollectors.filter((collector) => !collector.available && collector.reason).map((collector) => (
+                              <p key={collector.id} className="text-xs text-muted">{collector.name}: {collector.reason}</p>
+                            ))}
+                            <p className="text-xs text-muted">Choose a file when you run. It must accept the fixed domain, method, and output path. The saved ZIP is validated during import.</p>
+                          </Disclosure.Body>
+                        </Disclosure.Content>
+                      </Disclosure>
+                    ) : null}
+                    {selectedCollector?.compatibility === "operator-supplied" ? (
+                      <p className="text-sm text-muted">Selected: {selectedCollector.name}. Choose a verified collector above to switch back.</p>
+                    ) : null}
+                    {catalogError ? <p role="alert" className="text-sm text-danger">{catalogError}</p> : null}
+                    {selected.target.mode === "beacon" ? (
+                      <p className="text-sm text-muted">{rustHoundSelected
+                        ? "Sliver stores beacon task requests and responses on its server, including the credentials supplied for this run. The collector does not save its ZIP on the target."
+                        : "Beacon collection ZIPs are limited to 12 MiB and remain on the target. Use an active session for larger collections."}</p>
+                    ) : null}
+                    {!selectedTargetAvailable ? <p className="text-sm text-muted">This session is no longer active.</p> : null}
+                    {running && runningTargetId !== selected.target.id ? <p role="status" className="text-sm text-muted">A collection is running on another target.</p> : null}
+                  </> : <p className="text-sm text-muted">This target cannot be selected for collection from the current inventory. Refresh the server snapshot.</p>}
+                  {runResult?.targetId === selected.target.id ? <p role="status" className="text-sm text-muted">{runResult.message}</p> : null}
+                </Card.Content>
+                <Card.Footer className="flex flex-wrap gap-3 p-0">
+                  {selectedRef ? (
+                    <Button isDisabled={!domainDraft.trim() || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading ||
+                      running || (rustHoundSelected && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
+                      {selectedCollector?.compatibility === "operator-supplied" ? "Run user-supplied collector" : "Run collector"}
+                    </Button>
+                  ) : null}
+                  <Button variant="ghost" onPress={backToTargets}>Change target</Button>
+                </Card.Footer>
+              </Card>
+            </>
+          ) : (
+            <Card className="gap-6 p-6 sm:p-8" id="ad-explorer-targets">
+              <Card.Header className="flex-row items-start justify-between gap-4 p-0">
+                <div className="min-w-0 space-y-2">
+                  <Card.Title>Windows Targets</Card.Title>
+                  <Card.Description>Choose a session or beacon to configure a collection.</Card.Description>
+                </div>
+                <span className="shrink-0 text-sm tabular-nums text-muted">{windowsCount} {windowsCount === 1 ? "target" : "targets"}</span>
+              </Card.Header>
+              <Card.Content className="gap-6 p-0">
+                {inventoryIncomplete ? (
+                  <p className="text-sm text-warning" role="status">Target inventory may be incomplete. Load more targets below to see the remaining sessions and beacons.</p>
+                ) : null}
+                {groups.length ? groups.map((group) => (
+                  <section key={group.name} aria-label={`Domain ${group.name}`} className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <h2 className="min-w-0 truncate text-sm font-medium text-muted">{group.name}</h2>
+                      <span className="text-xs tabular-nums text-muted">{group.rows.length}</span>
+                    </div>
+                    <div className="space-y-1">
+                      {group.rows.map((row) => (
                         <Button
                           key={row.key}
-                          aria-label={`Select ${row.target.mode} ${row.target.name || row.target.hostname || row.target.id} (${row.target.id})`}
-                          aria-pressed={selectedKey === row.key}
-                          className="h-auto w-full justify-start px-3 py-2 text-left"
-                          variant={selectedKey === row.key ? "secondary" : "ghost"}
+                          ref={(element) => { if (element) targetButtons.current.set(row.key, element); else targetButtons.current.delete(row.key); }}
+                          aria-label={`Select ${row.target.mode} ${row.target.hostname || row.target.name || row.target.id} (${row.target.id})`}
+                          className="h-auto min-h-18 w-full justify-start gap-3 rounded-xl px-3 py-3 text-left"
+                          variant="ghost"
                           onPress={() => setSelectedKey(row.key)}
                         >
                           <FontAwesomeIcon aria-hidden icon={row.target.mode === "session" ? faComputer : faSatellite} className="text-muted" />
                           <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{row.target.name || row.target.hostname || row.target.id}</span>
-                            <span className="block truncate text-xs text-muted">{row.target.username || "Unknown user"} · {row.target.hostname || "Unknown host"} · {row.target.id.slice(0, 8)}</span>
+                            <span className="block truncate text-sm font-medium text-foreground">{row.target.hostname || row.target.name || row.target.id}</span>
+                            <span className="block truncate text-xs text-muted">{row.target.username || "Unknown user"} · {row.target.name || "Unnamed target"}</span>
+                            <span className="block truncate text-xs text-muted">{row.target.mode === "session" ? "Session" : "Beacon"} · <span className="font-mono">{row.target.id.slice(0, 8)}</span></span>
                           </span>
-                          <Chip size="sm" variant="soft" color={status === "Active" || status === "On time" ? "success" : status === "Overdue" ? "warning" : "default"}>{status}</Chip>
+                          <TargetStatus target={row.target} />
+                          <FontAwesomeIcon aria-hidden icon={faChevronRight} className="text-xs text-muted" />
                         </Button>
-                      );
-                    })}
-                  </div>
-                </section>
-              )) : (
-                <EmptyState size="sm">
-                  <EmptyState.Header>
-                    <EmptyState.Media variant="icon"><FontAwesomeIcon icon={faComputer} /></EmptyState.Media>
-                    <EmptyState.Title>No Windows targets</EmptyState.Title>
-                    <EmptyState.Description>Connect a Windows session or beacon to collect Active Directory data.</EmptyState.Description>
-                  </EmptyState.Header>
-                </EmptyState>
-              )}
-              {(hasMoreSessions || hasMoreBeacons) ? (
-                <div className="flex flex-wrap gap-2">
-                  {hasMoreSessions ? <Button size="sm" variant="tertiary" isPending={moreSessions.loading} onPress={() => void loadMore("session")}>Load more sessions</Button> : null}
-                  {hasMoreBeacons ? <Button size="sm" variant="tertiary" isPending={moreBeacons.loading} onPress={() => void loadMore("beacon")}>Load more beacons</Button> : null}
-                </div>
-              ) : null}
-              {moreSessions.error || moreBeacons.error ? <p role="alert" className="text-sm text-danger">{moreSessions.error ?? moreBeacons.error}</p> : null}
-            </Card.Content>
-          </Card>
-        </div>
-
-        <Card variant="secondary" className="xl:sticky xl:top-6">
-          <Card.Header className="flex-row items-center gap-3">
-            <span aria-hidden="true" className="section-icon"><FontAwesomeIcon icon={faCircleNodes} /></span>
-            <div className="min-w-0 flex-1">
-              <Card.Title>Collect</Card.Title>
-              <Card.Description>{selected ? selected.target.name || selected.target.hostname || selected.target.id : "Select a Windows target"}</Card.Description>
-            </div>
-          </Card.Header>
-          <Card.Content className="space-y-4">
-            {selected ? <>
-              <p className="text-sm text-muted">{rustHoundSelected
-                ? "RustHound uses explicit AD credentials and collects through the in-memory Sliver extension."
-                : "SharpHound requires a domain user context on the selected target."}</p>
-              <TextField fullWidth value={domainDraft} variant="secondary" onChange={setDomainDraft}>
-                <Label>Windows domain</Label>
-                <Input maxLength={77} placeholder="corp.example.com" />
-                <Description>Operator-assigned on this workstation; target metadata cannot confirm the domain.</Description>
-              </TextField>
-              <Button size="sm" variant="tertiary" isDisabled={domainDraft.trim() === (assignments[selected.key] ?? "")} onPress={saveDomain}>
-                Assign domain
-              </Button>
-              {selectedRef ? <>
-                <Select fullWidth isDisabled={catalogLoading || !verifiedCollectors.length} value={selectedCollector?.compatibility === "verified" ? collectorId : ""} variant="secondary" onChange={(value) => setCollectorId(value === null ? "" : String(value))}>
-                  <Label>Verified collector</Label>
-                  <Select.Trigger><Select.Value>{selectedCollector?.compatibility === "verified" ? selectedCollector.name : "Select a verified collector"}</Select.Value><Select.Indicator /></Select.Trigger>
-                  <Select.Popover><ListBox>{verifiedCollectors.map((collector) => (
-                    <ListBox.Item id={collector.id} key={collector.id} textValue={collector.name} isDisabled={!collector.available}>
-                      <span className="min-w-0"><span className="block truncate text-sm font-medium">{collector.name}</span><span className="block truncate text-xs text-muted">{collector.reason ?? collector.description}</span></span>
-                      <ListBox.ItemIndicator />
-                    </ListBox.Item>
-                  ))}</ListBox></Select.Popover>
-                </Select>
-                {!verifiedCollectors.some((collector) => collector.available) && !catalogLoading ? (
-                  <p className="text-sm text-muted">No verified Beagle-compatible collector is available for this target.</p>
-                ) : null}
-                {customCollectors.length ? (
-                  <div className="space-y-2 rounded-lg border border-border p-3">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted">Advanced</p>
-                    {customCollectors.map((collector) => (
-                      <div key={collector.id} className="space-y-1">
-                        <Button size="sm" variant="tertiary" aria-pressed={collectorId === collector.id} isDisabled={!collector.available || catalogLoading || running} onPress={() => setCollectorId(collector.id)}>
-                          {collector.id === "sharphound:custom:script" ? "Use your own Invoke-BloodHound .ps1" : "Use your own SharpHound-compatible .exe"}
-                        </Button>
-                        {!collector.available && collector.reason ? <p className="text-xs text-muted">{collector.reason}</p> : null}
-                      </div>
-                    ))}
-                    <p className="text-xs text-muted">Choose the file in the native picker when you run it. The .exe or Invoke-BloodHound script must accept the fixed domain, method, and output path. Beagle validates the saved ZIP during import.</p>
+                      ))}
+                    </div>
+                  </section>
+                )) : (
+                  <EmptyState>
+                    <EmptyState.Header>
+                      <EmptyState.Media variant="icon"><FontAwesomeIcon icon={faComputer} className="text-muted" /></EmptyState.Media>
+                      <EmptyState.Title>No Windows targets</EmptyState.Title>
+                      <EmptyState.Description>Connect a Windows session or beacon to collect Active Directory data.</EmptyState.Description>
+                    </EmptyState.Header>
+                  </EmptyState>
+                )}
+                {(hasMoreSessions || hasMoreBeacons) ? (
+                  <div className="flex flex-wrap gap-2">
+                    {hasMoreSessions ? <Button variant="outline" isPending={moreSessions.loading} onPress={() => void loadMore("session")}>Load more sessions</Button> : null}
+                    {hasMoreBeacons ? <Button variant="outline" isPending={moreBeacons.loading} onPress={() => void loadMore("beacon")}>Load more beacons</Button> : null}
                   </div>
                 ) : null}
-                <Select fullWidth isDisabled={!selectedCollector || !supportedMethods.length} value={method} variant="secondary" onChange={(value) => { if (value !== null) setMethod(String(value) as CollectionMethod); }}>
-                  <Label>Collection method</Label>
-                  <Select.Trigger><Select.Value>{METHOD_OPTIONS.find((option) => option.id === method)?.label}</Select.Value><Select.Indicator /></Select.Trigger>
-                  <Select.Popover><ListBox>{supportedMethods.map((option) => (
-                    <ListBox.Item id={option.id} key={option.id} textValue={option.label}>{option.label}<ListBox.ItemIndicator /></ListBox.Item>
-                  ))}</ListBox></Select.Popover>
-                </Select>
-                {rustHoundSelected ? <div className="space-y-3">
-                  <TextField fullWidth value={ldapFqdn} variant="secondary" onChange={setLdapFqdn}>
-                    <Label>LDAP server FQDN (optional)</Label>
-                    <Input autoComplete="off" placeholder="dc.corp.example.com" />
-                    <Description>Use a domain controller name if the target cannot resolve the domain.</Description>
-                  </TextField>
-                  <Switch aria-label="Use LDAPS" isSelected={ldaps} onChange={setLdaps}>
-                    <Switch.Content className="min-w-0 flex-1"><span className="block text-sm font-medium text-foreground">Use LDAPS</span></Switch.Content>
-                    <Switch.Control><Switch.Thumb /></Switch.Control>
-                  </Switch>
-                  <p className="text-xs text-warning">{ldaps
-                    ? "LDAPS encrypts the connection, but this RustHound build does not validate the domain controller certificate."
-                    : "LDAP simple bind sends the supplied password to the domain controller on port 389 without TLS. Use LDAPS when available."}</p>
-                  <TextField fullWidth value={username} variant="secondary" onChange={setUsername}>
-                    <Label>AD user</Label>
-                    <Input autoComplete="off" maxLength={255} placeholder="user@corp.example.com" />
-                    <Description>Use a UPN or bare user name. Credentials are used for this run only.</Description>
-                  </TextField>
-                  <TextField fullWidth value={password} variant="secondary" onChange={setPassword}>
-                    <Label>AD password</Label>
-                    <Input autoComplete="off" type="password" />
-                  </TextField>
-                </div> : null}
-                {catalogError ? <p role="alert" className="text-sm text-danger">{catalogError}</p> : null}
-                {selected.target.mode === "beacon" ? (
-                  <p className="text-sm text-muted">{rustHoundSelected
-                    ? "Sliver stores beacon task requests and responses on its server, including the credentials supplied for this run. The collector does not save its ZIP on the target."
-                    : "Beacon collection ZIPs are limited to 12 MiB and remain on the target. Use an active session for larger collections."}</p>
-                ) : null}
-                <div className="flex flex-wrap gap-2">
-                  <Button isDisabled={!domainDraft.trim() || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading ||
-                    running || (rustHoundSelected && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
-                    {selectedCollector?.compatibility === "operator-supplied" ? "Run user-supplied collector" : "Run collector"}
-                  </Button>
-                  <Tooltip delay={250}>
-                    <Button aria-label="Refresh collectors" isIconOnly size="sm" variant="tertiary" isDisabled={catalogLoading || running} onPress={() => setCatalogRevision((revision) => revision + 1)}><FontAwesomeIcon aria-hidden icon={faRotate} /></Button>
-                    <Tooltip.Content>Refresh collectors</Tooltip.Content>
-                  </Tooltip>
-                </div>
-                {!selectedTargetAvailable ? <p className="text-sm text-muted">This session is no longer active.</p> : null}
-                {running && runningTargetId !== selected.target.id ? <p role="status" className="text-sm text-muted">A collection is running on another target.</p> : null}
-              </> : <p className="text-sm text-muted">This target cannot be selected for collection from the current inventory. Refresh the server snapshot.</p>}
-              {runResult?.targetId === selected.target.id ? <p role="status" className="text-sm text-muted">{runResult.message}</p> : null}
-            </> : <p className="text-sm text-muted">Choose a session or beacon from a domain group to configure its collector.</p>}
-          </Card.Content>
-        </Card>
-      </div>
+                {moreSessions.error || moreBeacons.error ? <p role="alert" className="text-sm text-danger">{moreSessions.error ?? moreBeacons.error}</p> : null}
+              </Card.Content>
+            </Card>
+          )}
+        </Tabs.Panel>
+        <Tabs.Panel id="collections" className="pt-6">
+          <ADCollectionsPanel onChooseTarget={() => setActiveTab("targets")} />
+        </Tabs.Panel>
+      </Tabs>
     </section>
   );
+}
+
+function TargetStatus({ target }: { target: TargetSummary }): React.JSX.Element {
+  const status = target.mode === "session"
+    ? target.liveness === "active" ? "Active" : "Dead"
+    : target.checkinStatus === "on-time" ? "On time" : target.checkinStatus === "overdue" ? "Overdue" : "Unknown";
+  return <Chip className="shrink-0" size="sm" variant="soft" color={status === "Active" || status === "On time" ? "success" : status === "Overdue" ? "warning" : "default"}>{status}</Chip>;
 }
 
 function targetRows(snapshot: SliverSnapshot, extraSessions: TargetCatalogEntry[], extraBeacons: TargetCatalogEntry[]): TargetRow[] {

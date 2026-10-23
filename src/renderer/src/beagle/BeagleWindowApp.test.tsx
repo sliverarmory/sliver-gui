@@ -143,18 +143,51 @@ describe("BeagleWindowApp", () => {
     expect(screen.getByRole("tab", { name: "Table" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("collapses the editor without losing drafts and can run the query while collapsed", async () => {
+    await mount();
+    const drafts = {
+      "Cypher query": "MATCH (n:User) WHERE n.enabled = $enabled RETURN n",
+      "Query parameters": '{"enabled":true}',
+      "Saved query name": "Enabled users",
+      "Saved query category": "Directory",
+      "Saved query description": "Investigate enabled accounts",
+    };
+    for (const [label, value] of Object.entries(drafts)) fireEvent.change(screen.getByLabelText(label), { target: { value } });
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Cypher editor" }));
+    expect(screen.getByRole("button", { name: "Expand Cypher editor" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("textbox", { name: "Cypher query" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save query" })).not.toBeInTheDocument();
+    expect(api.query).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    expect(api.query).toHaveBeenCalledExactlyOnceWith({ cypher: drafts["Cypher query"], parameters: { enabled: true } });
+    expect(await screen.findByLabelText("Active Directory graph")).toBeVisible();
+    const expand = screen.getByRole("button", { name: "Expand Cypher editor" });
+    expand.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Collapse Cypher editor" })).toHaveAttribute("aria-expanded", "true");
+    for (const [label, value] of Object.entries(drafts)) {
+      expect(screen.getByLabelText(label)).toBeVisible();
+      expect(screen.getByLabelText(label)).toHaveValue(value);
+    }
+  });
+
   it("rejects non-object query parameters before invoking the backend", async () => {
     await mount();
     fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: "[1,2]" } });
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Cypher editor" }));
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
     expect(await screen.findByRole("alertdialog", { name: /Parameters must be a JSON object/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Collapse Cypher editor" })).toHaveAttribute("aria-expanded", "true");
     expect(api.query).not.toHaveBeenCalled();
   });
 
   it("loads the official catalog query and executes it using its stable ID", async () => {
     await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Cypher editor" }));
     await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
     await userEvent.click(await screen.findByRole("button", { name: /Load query Tier Zero principals/ }));
+    expect(screen.getByRole("button", { name: "Collapse Cypher editor" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n) WHERE n.name = $name RETURN n");
     fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: '{"name":"DOMAIN ADMINS"}' } });
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
@@ -170,7 +203,9 @@ describe("BeagleWindowApp", () => {
     await waitFor(() => expect(workspaces.get(projectA)?.queries[0]?.name).toBe("Enabled users"));
     await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
     fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "RETURN 1" } });
+    await userEvent.click(screen.getByRole("button", { name: "Collapse Cypher editor" }));
     await userEvent.click(screen.getByRole("button", { name: "Enabled users" }));
+    expect(screen.getByRole("button", { name: "Collapse Cypher editor" })).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n:User) RETURN n");
     fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
     await waitFor(() => expect(screen.queryByRole("button", { name: "Enabled users" })).not.toBeInTheDocument());

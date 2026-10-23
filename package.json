@@ -90,7 +90,7 @@
     "build:beagle:host": "node ./scripts/buildBeagleRuntime.mjs --host && node ./scripts/verifyBeagleRuntime.mjs --host",
     "test:beagle:build": "node --test scripts/buildBeagleRuntime.test.mjs scripts/verifyBeagleRuntime.test.mjs scripts/beaglePackaging.test.mjs",
     "test:beagle:loader": "node ./scripts/testBeaglePackagedLoader.mjs",
-    "test:e2e:beagle:bundled": "npm run build:e2e-app && node --test .e2e-dist/src/e2e/beagle-bundled.e2e.js"
+    "test:e2e:beagle:bundled": "npm run build:e2e-app && node --test --test-concurrency=1 .e2e-dist/src/e2e/beagle-bundled.e2e.js .e2e-dist/src/e2e/ad-explorer-collections.e2e.js"
   },
   "devDependencies": {
     "@electron/asar": "4.3.1",

@@ -1,7 +1,8 @@
 import { GhosttyConfigStore } from "./ghostty-config.js";
 import { registerGhosttySettingsIpc } from "./ghostty-settings-ipc.js";
 import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
-import { BeagleService } from "./beagle-service.js";
+import { BeaglePostCommitError, BeagleService, type BeagleServiceWorkspace } from "./beagle-service.js";
+import { parseAdExplorerOpenInput, type AdExplorerOpenInput } from "../shared/ad-explorer-contracts.js";
 import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers } from "./beagle-ipc.js";
 import { BEAGLE_IPC_EVENTS } from "../shared/beagle-contracts.js";
 import { registerAdExplorerIpcHandlers, unregisterAdExplorerIpcHandlers } from "./ad-explorer-ipc.js";
@@ -396,7 +397,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       developmentRoot: options.beagleRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../.."),
     }),
   });
-  let beagleWindow: BrowserWindow | undefined;
+  const beagleWorkspaces = new Map<BrowserWindow, BeagleServiceWorkspace>();
+  let lastFocusedBeagleWindow: BrowserWindow | undefined;
+  let pendingBeagleOpen: Promise<void> = Promise.resolve();
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
   let armoryWindow: BrowserWindow | undefined;
@@ -808,36 +811,62 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return window;
   }
 
-  async function openBeagleWindow(): Promise<void> {
+  function openBeagleWindow(input?: AdExplorerOpenInput): Promise<void> {
+    const request = input === undefined ? undefined : parseAdExplorerOpenInput(input);
+    const opening = pendingBeagleOpen.then(() => createOrFocusBeagleWindow(request));
+    pendingBeagleOpen = opening.catch(() => undefined);
+    return opening;
+  }
+
+  async function createOrFocusBeagleWindow(input?: AdExplorerOpenInput): Promise<void> {
     if (shutdown.isStopping) throw new Error("AD Explorer is closing");
-    if (beagleWindow && !beagleWindow.isDestroyed() && !beagleWindow.webContents.isDestroyed()) {
-      if (beagleWindow.isMinimized()) beagleWindow.restore();
-      beagleWindow.show();
-      beagleWindow.focus();
+    if (input && !(await beagleService.listCollections()).some((project) => project.id === input.projectId)) {
+      throw new Error("This AD Explorer collection is no longer available");
+    }
+    if (shutdown.isStopping) throw new Error("AD Explorer is closing");
+    const available = [...beagleWorkspaces.entries()].filter(([window]) => !window.isDestroyed() && !window.webContents.isDestroyed());
+    const existing = input
+      ? available.find(([, workspace]) => workspace.getSelectedProjectId() === input.projectId)?.[0]
+      : available.find(([window]) => window === lastFocusedBeagleWindow)?.[0] ?? available[0]?.[0];
+    if (existing) {
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
       return;
     }
     let createdWindow: BrowserWindow | undefined;
+    const workspace = beagleService.createWorkspace(input?.projectId);
     try {
       const window = new BrowserWindow(beagleWindowOptions(
         beaglePreloadPath, process.platform, applicationIcons.getIconPath(), nativeTheme.shouldUseDarkColors,
       ));
-      createdWindow = beagleWindow = window;
-      window.on("closed", () => { if (beagleWindow === window) beagleWindow = undefined; });
+      createdWindow = window;
+      beagleWorkspaces.set(window, workspace);
+      window.on("focus", () => { lastFocusedBeagleWindow = window; });
+      window.on("closed", () => {
+        beagleWorkspaces.delete(window);
+        if (lastFocusedBeagleWindow === window) lastFocusedBeagleWindow = undefined;
+        trackPendingCleanup(workspace.dispose());
+      });
       window.webContents.on("did-finish-load", () => { if (!window.isDestroyed()) window.setTitle("AD Explorer"); });
       window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
       trackWindow(window, undefined, undefined, undefined, undefined, "beagle", false);
       await loadRenderer(window, "beagle");
       if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error("AD Explorer window closed during loading");
     } catch {
-      if (beagleWindow === createdWindow) beagleWindow = undefined;
+      if (createdWindow) beagleWorkspaces.delete(createdWindow);
       if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      await workspace.dispose();
       throw new Error("The AD Explorer window could not be opened");
     }
   }
 
-  function publishBeagleCollectionImported(): void {
-    if (shutdown.isStopping || !beagleWindow || beagleWindow.isDestroyed() || beagleWindow.webContents.isDestroyed()) return;
-    try { beagleWindow.webContents.send(BEAGLE_IPC_EVENTS.collectionImported); } catch { /* Closing renderer. */ }
+  function publishBeagleCollectionImported(projectId: string): void {
+    if (shutdown.isStopping) return;
+    for (const [window, workspace] of beagleWorkspaces) {
+      if (workspace.getSelectedProjectId() !== projectId || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try { window.webContents.send(BEAGLE_IPC_EVENTS.collectionImported); } catch { /* Closing renderer. */ }
+    }
   }
 
   function publishArmoryChanged(): void {
@@ -3309,18 +3338,24 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     },
   );
   registerBeagleIpcHandlers({
-    manager: beagleService,
+    getManager: (window) => beagleWorkspaces.get(window),
     getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
   }, beagleRendererUrl, (identity, window) =>
-    !shutdown.isStopping && beagleWindow === window && nativeWindowSurfaces.get(window) === "beagle" &&
+    !shutdown.isStopping && beagleWorkspaces.has(window) && nativeWindowSurfaces.get(window) === "beagle" &&
     sameWindowIdentity(identity, identityForWindow(window)),
   );
   registerAdExplorerIpcHandlers({
     registry,
+    listCollections: () => beagleService.listCollections(),
     importCollectedData: async (input) => {
-      const imported = await beagleService.importCollectedData(input);
-      publishBeagleCollectionImported();
-      return { projectId: imported.state.selectedProjectId };
+      try {
+        const imported = await beagleService.importCollectedData(input);
+        publishBeagleCollectionImported(imported.state.selectedProjectId);
+        return { projectId: imported.state.selectedProjectId };
+      } catch (error) {
+        if (error instanceof BeaglePostCommitError && error.projectId) publishBeagleCollectionImported(error.projectId);
+        throw error;
+      }
     },
     openBeagleWindow,
   }, rendererUrl, (identity, window) =>

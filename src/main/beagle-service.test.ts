@@ -1,13 +1,13 @@
 // @vitest-environment node
 import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BEAGLE_RESULT_LIMITS, type BeagleJsonValue } from "../shared/beagle-contracts.js";
 import { emptyBeagleWorkspace } from "../shared/beagle-workspace.js";
-import { assertBeagleGraphQuery, BeagleService, normalizeBeagleQueryResult, normalizeBeagleSnapshot } from "./beagle-service.js";
+import { assertBeagleGraphQuery, BeaglePostCommitError, BeagleService, normalizeBeagleQueryResult, normalizeBeagleSnapshot } from "./beagle-service.js";
 import type { BeagleRuntimeClient } from "./beagle-runtime.js";
 import type { BeagleExecutableVerifier } from "./beagle-runtime-loader.js";
 import { BEAGLE_RUNTIME_MAX_REQUEST_BYTES, BEAGLE_RUNTIME_MAX_RESPONSE_BYTES, BEAGLE_RUNTIME_OPERATIONS, BEAGLE_RUNTIME_REQUIRED_OPERATIONS, type BeagleRuntimeCommand, type BeagleRuntimeReady } from "../shared/beagle-runtime-contracts.js";
@@ -195,6 +195,157 @@ describe("Beagle service", () => {
     expect((await newService().getState()).projects).toEqual(next.projects);
     await expect(service.selectProject({ id: "12345678-1234-4123-8123-123456789abc" })).rejects.toThrow("Unknown Beagle project");
     await expect(service.createProject({ name: "default" })).rejects.toThrow("already exists");
+  });
+
+  it("lists collections without starting a runtime or changing selected projects", async () => {
+    const initial = await service.listCollections();
+    expect(initial).toHaveLength(1);
+    expect(createRuntime).not.toHaveBeenCalled();
+    const selectedProjectId = service.getSelectedProjectId();
+    const firstWindow = service.createWorkspace(initial[0]!.id);
+    const second = await firstWindow.createProject({ name: "Second collection" });
+    const listed = await service.listCollections();
+    expect(listed.map((project) => project.name)).toEqual(["Default", "Second collection"]);
+    expect(service.getSelectedProjectId()).toBe(selectedProjectId);
+    expect(firstWindow.getSelectedProjectId()).toBe(second.selectedProjectId);
+    listed[0]!.name = "Changed by caller";
+    expect((await service.listCollections())[0]!.name).toBe("Default");
+    expect(JSON.parse(await readFile(join(root, "beagle", "projects.json"), "utf8")).selectedProjectId).toBe(selectedProjectId);
+  });
+
+  it("keeps window selections and query databases independent through interleaved operations", async () => {
+    const firstId = (await service.getState()).selectedProjectId;
+    const secondId = (await service.createProject({ name: "Second" })).selectedProjectId;
+    const firstWindow = service.createWorkspace(firstId), secondWindow = service.createWorkspace(secondId);
+    const fallback = request.getMockImplementation()!;
+    const databases: string[] = [];
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "query") databases.push(activeClient().database!);
+      return fallback(command, options);
+    });
+    const results = await Promise.all([
+      firstWindow.query({ cypher: "RETURN 1" }),
+      secondWindow.query({ cypher: "RETURN 2" }),
+      firstWindow.query({ cypher: "RETURN 3" }),
+    ]);
+    expect(results.map((result) => result.projectId)).toEqual([firstId, secondId, firstId]);
+    expect(databases).toEqual([firstId, secondId, firstId].map((id) => join(root, "beagle", id, "graph.db")));
+    await firstWindow.selectProject({ id: secondId });
+    await secondWindow.selectProject({ id: firstId });
+    expect((await firstWindow.getState()).selectedProjectId).toBe(secondId);
+    expect((await secondWindow.getState()).selectedProjectId).toBe(firstId);
+    expect((await service.getState()).selectedProjectId).toBe(secondId);
+    expect(clients.filter((client) => !client.closed)).toHaveLength(1);
+  });
+
+  it("saves each window's workspace to its own collection and rejects stale saves", async () => {
+    const firstId = (await service.getState()).selectedProjectId;
+    const secondId = (await service.createProject({ name: "Second" })).selectedProjectId;
+    const firstWindow = service.createWorkspace(firstId), secondWindow = service.createWorkspace(secondId);
+    const first = { ...emptyBeagleWorkspace(firstId), legacyMigrated: true }, second = emptyBeagleWorkspace(secondId);
+    await Promise.all([
+      firstWindow.saveWorkspace({ projectId: firstId, workspace: first }),
+      secondWindow.saveWorkspace({ projectId: secondId, workspace: second }),
+    ]);
+    expect(await firstWindow.getWorkspace()).toEqual(first);
+    expect(await secondWindow.getWorkspace()).toEqual(second);
+    await firstWindow.selectProject({ id: secondId });
+    await expect(firstWindow.saveWorkspace({ projectId: firstId, workspace: { ...first, legacyMigrated: false } })).rejects.toThrow("Project changed before the workspace was saved");
+    expect(JSON.parse(await readFile(join(root, "beagle", firstId, "workspace.json"), "utf8"))).toEqual(first);
+    expect(JSON.parse(await readFile(join(root, "beagle", secondId, "workspace.json"), "utf8"))).toEqual(second);
+  });
+
+  it("imports into each window's selected dataset while background collections leave both selections intact", async () => {
+    const firstId = (await service.getState()).selectedProjectId;
+    const secondId = (await service.createProject({ name: "Second" })).selectedProjectId;
+    const firstWindow = service.createWorkspace(firstId), secondWindow = service.createWorkspace(secondId);
+    const collectionRoot = join(root, "gui", "ad-explorer", "collections");
+    await mkdir(collectionRoot, { recursive: true });
+    const firstPath = join(root, "first.json"), secondPath = join(root, "second.json"), backgroundPath = join(collectionRoot, "background.json");
+    await Promise.all([firstPath, secondPath, backgroundPath].map((path) => writeFile(path, JSON.stringify(snapshot))));
+    const [first, second, background] = await Promise.all([
+      firstWindow.importFiles([firstPath]),
+      secondWindow.importFiles([secondPath]),
+      service.importCollectedData({ domain: "example.test", path: backgroundPath }),
+    ]);
+    expect(first.state.selectedProjectId).toBe(firstId);
+    expect(second.state.selectedProjectId).toBe(secondId);
+    expect(background.state.selectedProjectId).not.toBe(firstId);
+    expect(background.state.selectedProjectId).not.toBe(secondId);
+    expect((await firstWindow.getState()).projectData?.history[0]?.files[0]?.name).toBe("first.json");
+    expect((await secondWindow.getState()).projectData?.history[0]?.files[0]?.name).toBe("second.json");
+    expect(firstWindow.getSelectedProjectId()).toBe(firstId);
+    expect(secondWindow.getSelectedProjectId()).toBe(secondId);
+  });
+
+  it("identifies the committed collection when imported graph data survives a metadata failure", async () => {
+    const originalId = (await service.getState()).selectedProjectId;
+    const existingWindow = service.createWorkspace(originalId);
+    const collectionRoot = join(root, "gui", "ad-explorer", "collections");
+    await mkdir(collectionRoot, { recursive: true });
+    const path = join(collectionRoot, "collection.json");
+    await writeFile(path, JSON.stringify(snapshot));
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "ingest") {
+        await writeFile(activeClient().database!, "committed imported graph");
+        // Force history publication to fail after the staged graph is committed.
+        await mkdir(join(dirname(activeClient().database!), "project-data.json"));
+      }
+      return fallback(command, options);
+    });
+    const error = await service.importCollectedData({ domain: "example.test", path }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(BeaglePostCommitError);
+    const projectId = (error as BeaglePostCommitError).projectId!;
+    expect(projectId).not.toBe(originalId);
+    expect((await service.listCollections()).find((project) => project.id === projectId)?.name).toBe("AD example.test");
+    expect(await readFile(join(root, "beagle", projectId, "graph.db"), "utf8")).toBe("committed imported graph");
+    expect(existingWindow.getSelectedProjectId()).toBe(originalId);
+    expect(service.getSelectedProjectId()).toBe(projectId);
+  });
+
+  it("does not redirect a window when another window archives its selected collection", async () => {
+    const firstId = (await service.getState()).selectedProjectId;
+    const secondId = (await service.createProject({ name: "Second" })).selectedProjectId;
+    const firstWindow = service.createWorkspace(firstId), secondWindow = service.createWorkspace(secondId);
+    await secondWindow.renameProject({ id: firstId, name: "Renamed" });
+    expect((await firstWindow.getState()).projects.find((project) => project.id === firstId)?.name).toBe("Renamed");
+    await secondWindow.archiveProject({ id: firstId });
+    const count = queries().length;
+    await expect(firstWindow.query({ cypher: "RETURN 1" })).rejects.toThrow("collection is no longer available");
+    expect(queries()).toHaveLength(count);
+    expect(firstWindow.getSelectedProjectId()).toBe(firstId);
+    expect((await service.listCollections()).map((project) => project.id)).toEqual([secondId]);
+    await firstWindow.selectProject({ id: secondId });
+    expect((await firstWindow.query({ cypher: "RETURN 2" })).projectId).toBe(secondId);
+    await expect(service.createWorkspace("11111111-1111-4111-8111-111111111111").getState()).rejects.toThrow("collection is no longer available");
+  });
+
+  it("isolates operation visibility, cancellation and closing between windows", async () => {
+    const firstId = (await service.getState()).selectedProjectId;
+    const secondId = (await service.createProject({ name: "Second" })).selectedProjectId;
+    const firstWindow = service.createWorkspace(firstId), secondWindow = service.createWorkspace(secondId);
+    const fallback = request.getMockImplementation()!;
+    let signal: AbortSignal | undefined;
+    request.mockImplementation(async (command, options) => {
+      if (command.type !== "query") return fallback(command, options);
+      signal = options.signal;
+      return new Promise((_resolve, reject) => options.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    });
+    const running = secondWindow.query({ cypher: "RETURN 1" }).catch((error: unknown) => error);
+    const pending = firstWindow.getState().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    const operation = secondWindow.getOperation()!;
+    expect(firstWindow.getOperation()).toBeNull();
+    expect(service.getOperation()).toBeNull();
+    expect(firstWindow.cancelOperation({ id: operation.id })).toEqual({ cancelled: false });
+    await firstWindow.dispose();
+    expect(signal!.aborted).toBe(false);
+    expect(secondWindow.cancelOperation({ id: operation.id })).toEqual({ cancelled: true });
+    expect(await running).toEqual(new Error("AD Explorer operation cancelled; the committed project was preserved"));
+    expect(await pending).toEqual(new Error("AD Explorer workspace is closed"));
+    expect((await secondWindow.getState()).selectedProjectId).toBe(secondId);
+    expect((await service.getState()).selectedProjectId).toBe(secondId);
   });
 
   it("removes only abandoned private regular staging files once per project on startup", async () => {
