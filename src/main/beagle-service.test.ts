@@ -6,6 +6,7 @@ import { isAbsolute, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BEAGLE_RESULT_LIMITS, type BeagleJsonValue } from "../shared/beagle-contracts.js";
+import { emptyBeagleWorkspace } from "../shared/beagle-workspace.js";
 import { assertBeagleGraphQuery, BeagleService, normalizeBeagleQueryResult, normalizeBeagleSnapshot } from "./beagle-service.js";
 import type { BeagleRuntimeClient } from "./beagle-runtime.js";
 import type { BeagleExecutableVerifier } from "./beagle-runtime-loader.js";
@@ -414,6 +415,60 @@ describe("Beagle service", () => {
     const newProject = await create;
     expect(order).toEqual(["backup", "ingest", "query", "stats"]);
     expect(queryResult.projectId).not.toBe(newProject.selectedProjectId);
+  });
+
+  it("queues workspace snapshots behind active work in order and persists the latest snapshot", async () => {
+    const { selectedProjectId: projectId } = await service.getState();
+    const initial = { ...emptyBeagleWorkspace(projectId), legacyMigrated: true };
+    await service.saveWorkspace({ projectId, workspace: initial });
+    const path = join(root, "beagle", projectId, "workspace.json");
+    const query = (name: string) => ({ id: name, name, description: "", category: "My queries", cypher: "RETURN 1", parameters: "{}" });
+    const first = { ...initial, queries: [query("First draft")] }, latest = { ...initial, queries: [query("Latest draft")] };
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => { if (command.type === "query") await barrier; return fallback(command, options); });
+    const running = service.query({ cypher: "RETURN 1" });
+    await vi.waitFor(() => expect(request.mock.calls.at(-1)?.[0].type).toBe("query"));
+    const completed: string[] = [];
+    const firstSave = service.saveWorkspace({ projectId, workspace: first }).then((value) => { completed.push("first"); return value; });
+    const between = service.getWorkspace();
+    const latestSave = service.saveWorkspace({ projectId, workspace: latest }).then((value) => { completed.push("latest"); return value; });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(initial);
+    expect(completed).toEqual([]);
+    release();
+    await running;
+    expect(await firstSave).toEqual(first);
+    expect(await between).toEqual(first);
+    expect(await latestSave).toEqual(latest);
+    expect(completed).toEqual(["first", "latest"]);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(latest);
+    await service.dispose();
+    expect(await newService().getWorkspace()).toEqual(latest);
+  });
+
+  it.each(["select", "archive"] as const)("rejects a late workspace save after %s changes the selected project without modifying either workspace", async (change) => {
+    const { selectedProjectId: firstId } = await service.getState();
+    const first = { ...emptyBeagleWorkspace(firstId), legacyMigrated: true };
+    await service.saveWorkspace({ projectId: firstId, workspace: first });
+    const { selectedProjectId: secondId } = await service.createProject({ name: "Second" });
+    const second = { ...emptyBeagleWorkspace(secondId), legacyMigrated: true };
+    await service.saveWorkspace({ projectId: secondId, workspace: second });
+    await service.selectProject({ id: firstId });
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => { release = resolve; });
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => { if (command.type === "query") await barrier; return fallback(command, options); });
+    const running = service.query({ cypher: "RETURN 1" });
+    await vi.waitFor(() => expect(request.mock.calls.at(-1)?.[0].type).toBe("query"));
+    const switching = change === "select" ? service.selectProject({ id: secondId }) : service.archiveProject({ id: firstId });
+    const lateSave = service.saveWorkspace({ projectId: firstId, workspace: { ...first, legacyMigrated: false } }).catch((cause: unknown) => cause);
+    release(); await running;
+    expect((await switching).selectedProjectId).toBe(secondId);
+    expect(await lateSave).toEqual(new Error("Project changed before the workspace was saved"));
+    expect(JSON.parse(await readFile(join(root, "beagle", firstId, "workspace.json"), "utf8"))).toEqual(first);
+    expect(JSON.parse(await readFile(join(root, "beagle", secondId, "workspace.json"), "utf8"))).toEqual(second);
+    expect(await service.getWorkspace()).toEqual(second);
   });
 
   it("hydrates relationship-only results in the same persistent helper and database", async () => {

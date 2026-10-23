@@ -76,7 +76,7 @@ jobs:
         run: npm ci --omit=dev --ignore-scripts
 
       - name: Verify native console build and provenance helper
-        run: node --test scripts/buildSliverConsole.test.mjs scripts/buildRdpRuntime.test.mjs scripts/verifyRdpRuntime.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyPreloadBundles.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
+        run: node --test scripts/buildSliverConsole.test.mjs scripts/buildRdpRuntime.test.mjs scripts/verifyRdpRuntime.test.mjs scripts/buildBeagleRuntime.test.mjs scripts/verifyBeagleRuntime.test.mjs scripts/prepareNodePtyRuntime.test.mjs scripts/verifyPreloadBundles.test.mjs scripts/verifyReleaseRequest.test.mjs scripts/verifyPublishedUpdate.test.mjs scripts/importReleaseSigningIdentity.test.mjs scripts/releaseSigning.test.mjs scripts/syncReleaseVersion.test.mjs
 
       - name: Verify protocol, parity, and client package provenance
         run: npm run protocol:check
@@ -166,6 +166,9 @@ jobs:
           node scripts/buildRdpRuntime.mjs
           node scripts/verifyRdpRuntime.mjs
 
+      - name: Prepare and execute bundled Beagle on Intel hardware
+        run: npm run build:beagle
+
   build:
     name: Build (${{ matrix.platform }})
     needs:
@@ -187,6 +190,8 @@ jobs:
             build_args: --mac --universal
             packaged_smoke: npm run test:e2e:packaged
             rdp_loader: npm run test:rdp:loader
+            beagle_loader: npm run test:beagle:loader
+            beagle_window: npm run test:e2e:beagle:bundled
             update_platform: macos
             app_update_path: release/mac-universal/Sliver GUI.app/Contents/Resources/app-update.yml
             artifact_name: sliver-gui-macos-universal
@@ -202,6 +207,8 @@ jobs:
             build_args: --win --x64
             packaged_smoke: npm run test:e2e:packaged
             rdp_loader: npm run test:rdp:loader
+            beagle_loader: npm run test:beagle:loader
+            beagle_window: npm run test:e2e:beagle:bundled
             update_platform: windows
             app_update_path: release/win-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-windows-x64
@@ -215,6 +222,8 @@ jobs:
             build_args: --linux --x64
             packaged_smoke: xvfb-run --auto-servernum npm run test:e2e:packaged
             rdp_loader: xvfb-run --auto-servernum npm run test:rdp:loader
+            beagle_loader: xvfb-run --auto-servernum npm run test:beagle:loader
+            beagle_window: xvfb-run --auto-servernum npm run test:e2e:beagle:bundled
             update_platform: linux
             app_update_path: release/linux-unpacked/resources/app-update.yml
             artifact_name: sliver-gui-linux-x64
@@ -330,6 +339,9 @@ jobs:
       - name: Test RDP adapter and packaging boundaries
         run: npm run test:rdp:build && npm run test:rdp:native
 
+      - name: Test Beagle release and packaging boundaries
+        run: npm run test:beagle:build
+
       - name: Prepare native packages
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
@@ -337,6 +349,17 @@ jobs:
 
       - name: Verify RDP loader with actual Electron ASAR and native helper
         run: ${{ matrix.rdp_loader }}
+
+      - name: Verify Beagle loader with actual Electron ASAR and native helper
+        run: ${{ matrix.beagle_loader }}
+
+      - name: Exercise the bundled Beagle helper with synthetic collections
+        env:
+          SLIVER_BEAGLE_E2E_BINARY: ${{ github.workspace }}/native/beagle/bin/${{ runner.os == 'Windows' && 'beagle.exe' || 'beagle' }}
+        run: npm run test:beagle:helper
+
+      - name: Open AD Explorer with bundled Beagle and fresh settings
+        run: ${{ matrix.beagle_window }}
 
       - name: Import pinned release signing identity on the isolated runner
         if: env.RELEASE_TAG != '' && runner.os != 'Linux'

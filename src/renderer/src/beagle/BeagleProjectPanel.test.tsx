@@ -1,17 +1,26 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { Modal } from "@heroui/react";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { BeagleAPI, BeagleState } from "../../../shared/beagle-contracts";
 import { BeagleProjectPanel } from "./BeagleProjectPanel";
 
+beforeAll(() => {
+  vi.stubGlobal("ResizeObserver", class ResizeObserver { observe() {} unobserve() {} disconnect() {} });
+  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
+});
+afterAll(() => { vi.unstubAllGlobals(); Reflect.deleteProperty(Element.prototype, "getAnimations"); });
 afterEach(cleanup);
 const state: BeagleState = { runtime: { available: true, version: "1", source: "test", operations: ["backup"] }, projects: [{ id: "11111111-1111-4111-8111-111111111111", name: "Lab", createdAt: "2026-10-23" }],
   selectedProjectId: "11111111-1111-4111-8111-111111111111", stats: null };
-function setup(beforeAction: () => Promise<void> = vi.fn(async () => undefined)) {
+function setup(beforeAction: () => Promise<void> = vi.fn(async () => undefined), inProjectModal = false) {
   const api = { importFiles: vi.fn(async () => ({ ok: true, value: { state, report: {} } })), cleanup: vi.fn(async () => ({ ok: true, value: { state, report: {} } })),
     archiveProject: vi.fn(async () => ({ ok: true, value: state })), backupProject: vi.fn(async () => ({ ok: true, value: { cancelled: false } })) } as unknown as BeagleAPI;
   const callbacks = { onState: vi.fn(), onError: vi.fn(), onNotice: vi.fn(), onBusyChange: vi.fn() };
-  render(<BeagleProjectPanel api={api} state={state} busy={false} beforeAction={beforeAction} {...callbacks} />);
+  const panel = <BeagleProjectPanel api={api} state={state} busy={false} beforeAction={beforeAction} {...callbacks} />;
+  render(inProjectModal ? <Modal.Backdrop isOpen><Modal.Container placement="center" scroll="inside" size="lg"><Modal.Dialog>
+    <Modal.Header><Modal.Heading>Project tools</Modal.Heading></Modal.Header><Modal.Body>{panel}</Modal.Body>
+  </Modal.Dialog></Modal.Container></Modal.Backdrop> : panel);
   return { api, beforeAction, ...callbacks };
 }
 describe("BeagleProjectPanel", () => {
@@ -47,5 +56,25 @@ describe("BeagleProjectPanel", () => {
     expect(api.backupProject).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledWith("Disk is full");
     expect(onBusyChange).toHaveBeenLastCalledWith(false);
+  });
+  it("opens confirmation above project tools and restores focus after Cancel or Escape without mutating data", async () => {
+    const { api } = setup(undefined, true);
+    const panel = screen.getByRole("region", { name: "Project management" });
+    const archive = screen.getByRole("button", { name: "Archive project" });
+    await userEvent.click(archive);
+    const confirmation = screen.getByRole("alertdialog", { name: "Archive project?" });
+    expect(panel).not.toContainElement(confirmation);
+    expect(confirmation).toHaveTextContent("Its data stays available for recovery.");
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("dialog", { name: "Project tools" })).toBeInTheDocument();
+    await waitFor(() => expect(archive).toHaveFocus());
+    await userEvent.click(archive);
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(screen.getByRole("dialog", { name: "Project tools" })).toBeInTheDocument();
+    expect(api.archiveProject).not.toHaveBeenCalled();
+    expect(api.cleanup).not.toHaveBeenCalled();
+    expect(api.importFiles).not.toHaveBeenCalled();
   });
 });

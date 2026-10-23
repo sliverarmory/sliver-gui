@@ -1,5 +1,9 @@
 # Beagle compatibility verification
 
+This records historical compatibility runs against their listed inputs. Current
+native packages bundle Beagle as described in [the helper architecture](beagle-helper.md);
+packaging checks do not extend the compatibility evidence below to a different build.
+
 The real GOAD SharpHound collection was imported independently into Beagle and a fresh BloodHound CE service on October 22, 2026 (America/Los_Angeles). Both raw ingestion and analyzed graphs matched, and real Cypher queries were compared with the actual CE API and its Neo4j database.
 
 ## Pinned inputs

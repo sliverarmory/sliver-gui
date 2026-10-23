@@ -29,6 +29,15 @@ available in `LICENSES/MIT.txt`, the retained package license, and the generated
 `dist/THIRD_PARTY_LICENSES.txt` shipped with native packages. Source:
 https://github.com/coder/ghostty-web
 
+AD Explorer bundles Beagle under the Apache License 2.0. Its release archive,
+source revision, and checksums are pinned in `protocol/beagle-provenance.json`.
+The application retains Beagle's `LICENSE`, `THIRD_PARTY_NOTICES.md`, and dependency
+license files under `resources/beagle/licenses/<target>/`, including the notices for its statically
+linked GraphQLite, PCRE2, and SQLite components. Windows builds additionally retain
+the notices for the static POSIX compatibility libraries. Beagle's matching GitHub
+release provides its source and Windows dependency source archive with rebuild
+instructions. Source and releases: https://github.com/sliverarmory/Beagle
+
 The Text Editor bundles Monaco Editor 0.56.0, copyright Microsoft Corporation,
 distributed under the MIT License. Its exact package integrity is retained in
 `package-lock.json`, with license texts in the generated dependency inventory.

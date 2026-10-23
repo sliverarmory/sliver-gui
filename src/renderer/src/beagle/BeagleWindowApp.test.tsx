@@ -1,3 +1,4 @@
+import { Toast, toast } from "@heroui/react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -72,7 +73,7 @@ function createAPI() {
     aclOrigins: vi.fn<BeagleAPI["aclOrigins"]>(async () => ({ ok: true as const, value: graphResult() })),
     getRules: vi.fn(async () => ({ ok: true as const, value: { groups: [] } })),
     previewRules: vi.fn(async () => ({ ok: true as const, value: { selected: {}, counts: {}, missingObjectids: [], missingTotal: 0, truncated: false } })),
-    applyRules: vi.fn(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
+    applyRules: vi.fn<BeagleAPI["applyRules"]>(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
     getOperation: vi.fn<BeagleAPI["getOperation"]>(async () => ({ ok: true as const, value: null })),
     cancelOperation: vi.fn(async () => ({ ok: true as const, value: { cancelled: true } })),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
@@ -100,9 +101,18 @@ beforeEach(() => {
   Object.defineProperty(window, "beagle", { configurable: true, value: api });
   localStorage.clear();
 });
-afterEach(() => { cleanup(); Reflect.deleteProperty(window, "beagle"); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); toast.clear(); Reflect.deleteProperty(window, "beagle"); vi.restoreAllMocks(); });
 
-async function mount() { render(<BeagleWindowApp />); await screen.findByText("Beagle ready"); }
+function renderApp() { return render(<><BeagleWindowApp /><Toast.Provider maxVisibleToasts={4} placement="bottom" /></>); }
+async function mount() { renderApp(); await screen.findByText("Beagle ready"); }
+async function openDiagnostics() {
+  await userEvent.click(screen.getByRole("button", { name: /^Analysis diagnostics/ }));
+  return screen.findByRole("dialog", { name: "Analysis diagnostics" });
+}
+async function closeDialog(name: string) {
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(screen.queryByRole("dialog", { name })).not.toBeInTheDocument());
+}
 
 describe("BeagleWindowApp", () => {
   it("runs real bridge queries with JSON parameters and renders scalar rows", async () => {
@@ -121,7 +131,7 @@ describe("BeagleWindowApp", () => {
     await mount();
     fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: "[1,2]" } });
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Parameters must be a JSON object");
+    expect(await screen.findByRole("alertdialog", { name: /Parameters must be a JSON object/ })).toBeVisible();
     expect(api.query).not.toHaveBeenCalled();
   });
 
@@ -251,7 +261,7 @@ describe("BeagleWindowApp", () => {
     fireEvent.change(screen.getByLabelText("Find an object"), { target: { value: "arya" } });
     await userEvent.click(screen.getByRole("button", { name: "Search" }));
     await userEvent.click(await screen.findByRole("button", { name: "Next search results" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Search timed out");
+    expect(await screen.findByRole("alertdialog", { name: "Search timed out" })).toBeVisible();
     expect(screen.getByText("Objects 1–1 · More available")).toBeVisible();
     expect(screen.getByRole("button", { name: `Inspect ${userNode.properties["name"]}` })).toBeVisible();
     expect(screen.getByRole("button", { name: "Next search results" })).toBeEnabled();
@@ -273,13 +283,14 @@ describe("BeagleWindowApp", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Inspect Last graph slot" }));
     expect(screen.getByRole("button", { name: "Graph Last graph slot" })).toBeVisible();
     await userEvent.click(await screen.findByRole("button", { name: "Inspect Outside graph" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("The graph display limit is 1,500 objects");
+    const limitToast = await screen.findByRole("alertdialog", { name: /The graph display limit is 1,500 objects/ });
+    expect(limitToast).toBeVisible();
     const graph = screen.getByLabelText("Active Directory graph");
     expect(within(graph).getAllByRole("button")).toHaveLength(BEAGLE_RESULT_LIMITS.nodes);
     expect(within(graph).queryByRole("button", { name: "Graph Outside graph" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: `Inspect ${userNode.properties["name"]}` }));
     expect(screen.getByRole("heading", { name: "Object details" })).toBeVisible();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: /The graph display limit is 1,500 objects/ })).not.toBeInTheDocument());
     expect(within(graph).getAllByRole("button")).toHaveLength(BEAGLE_RESULT_LIMITS.nodes);
   });
 
@@ -311,7 +322,7 @@ describe("BeagleWindowApp", () => {
     api.query.mockResolvedValue({ ok: false, error: "Cypher syntax error near WRONG" });
     await mount();
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Cypher syntax error near WRONG");
+    expect(await screen.findByRole("alertdialog", { name: "Cypher syntax error near WRONG" })).toBeVisible();
     expect(screen.queryByRole("table", { name: "Cypher results" })).not.toBeInTheDocument();
   });
 
@@ -486,21 +497,27 @@ describe("BeagleWindowApp", () => {
     expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue("");
   });
 
-  it("keeps analysis choices visible through queries and opens the affected object", async () => {
+  it.each([
+    ["Inspect affected computer", userNode.objectid],
+    [`Inspect group ${groupNode.objectid}`, groupNode.objectid],
+  ])("keeps analysis choices available through queries and closes the dialog for %s", async (button, objectid) => {
     currentState = { ...currentState, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [{
       computer: userNode.objectid, suffix: "-544", relationshipKind: "AdminTo", selectedGroup: groupNode.objectid,
       candidateGroups: [{ objectid: groupNode.objectid, directMembers: [userNode.objectid] }, { objectid: "other-group", directMembers: [] }],
     }] } };
     await mount();
-    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "Analysis diagnostics" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Analysis diagnostics/ })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Run query" }));
     await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` });
-    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: `AdminTo on ${userNode.objectid}` }));
-    await userEvent.click(screen.getByRole("button", { name: "Inspect affected computer" }));
-    await waitFor(() => expect(api.entity).toHaveBeenCalledWith({ objectid: userNode.objectid }));
+    const diagnostics = await openDiagnostics();
+    await userEvent.click(within(diagnostics).getByRole("button", { name: `AdminTo on ${userNode.objectid}` }));
+    await userEvent.click(within(diagnostics).getByRole("button", { name: button }));
+    await waitFor(() => expect(api.entity).toHaveBeenCalledWith({ objectid }));
     expect(await screen.findByRole("heading", { name: "Object details" })).toBeVisible();
-    expect(screen.getByLabelText("Analysis diagnostics")).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "Analysis diagnostics" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Analysis diagnostics/ })).toBeVisible();
+    expect(await openDiagnostics()).toHaveTextContent("1 ambiguous local-group choice");
   });
 
   it("uses the native import/export bridges and shows the import report", async () => {
@@ -508,7 +525,8 @@ describe("BeagleWindowApp", () => {
     await userEvent.click(screen.getByRole("button", { name: "Import data" }));
     await waitFor(() => expect(api.importFiles).toHaveBeenCalledTimes(1));
     await userEvent.click(await screen.findByRole("button", { name: "View report" }));
-    expect(screen.getByLabelText("Operation report")).toHaveTextContent('"imported": 100');
+    expect(await screen.findByRole("dialog", { name: "Operation report" })).toHaveTextContent('"imported": 100');
+    await closeDialog("Operation report");
     await userEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(api.exportGraph).toHaveBeenCalledTimes(1));
   });
@@ -516,7 +534,7 @@ describe("BeagleWindowApp", () => {
   it.each(["Analyze", "Import data"] as const)("refreshes persisted uncertainty after failed %s and retains the operation error", async (button) => {
     currentState = { ...currentState, diagnostics: { version: 1, localGroupAmbiguities: [], errors: [] } };
     await mount();
-    expect(screen.queryByLabelText("Analysis diagnostics")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Analysis diagnostics" })).not.toBeInTheDocument();
     const action = button === "Analyze" ? api.analyze : api.importFiles;
     action.mockImplementationOnce(async () => {
       currentState = { ...currentState, diagnostics: { version: 1, localGroupAmbiguities: [], errors: ["Analysis failed after replacing derived edges."] } };
@@ -524,8 +542,8 @@ describe("BeagleWindowApp", () => {
     });
     await userEvent.click(screen.getByRole("button", { name: button }));
     await waitFor(() => expect(api.getState).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText("Analysis failed after replacing derived edges.")).toBeVisible();
-    expect(screen.getByText("Native analysis process exited with code 1")).toBeVisible();
+    expect(await screen.findByRole("alertdialog", { name: "Native analysis process exited with code 1" })).toBeVisible();
+    expect(await openDiagnostics()).toHaveTextContent("Analysis failed after replacing derived edges.");
     expect(screen.queryByText(/finished\./)).not.toBeInTheDocument();
   });
 
@@ -535,17 +553,18 @@ describe("BeagleWindowApp", () => {
       candidateGroups: [{ objectid: groupNode.objectid, directMembers: [] }, { objectid: "old-candidate", directMembers: [] }],
     }] } };
     await mount();
-    expect(screen.getByText("1 ambiguous local-group choice")).toBeVisible();
+    expect(await openDiagnostics()).toHaveTextContent("1 ambiguous local-group choice");
+    await closeDialog("Analysis diagnostics");
     api.analyze.mockRejectedValueOnce(new Error("Original analysis error"));
     if (recovery === "failure") api.getState.mockRejectedValueOnce(new Error("Refresh also failed"));
     else api.getState.mockResolvedValueOnce({ ok: true, value: { ...currentState, selectedProjectId: projectB, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [] } } });
     await userEvent.click(screen.getByRole("button", { name: "Analyze" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
-    expect(screen.getByText("Original analysis error")).toBeVisible();
-    expect(screen.getByText("The latest import or analysis did not complete. Run Analyze to verify this project.")).toBeVisible();
+    expect(screen.getByRole("alertdialog", { name: "Original analysis error" })).toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectA);
+    expect(await openDiagnostics()).toHaveTextContent("The latest import or analysis did not complete. Run Analyze to verify this project.");
     expect(screen.queryByText("1 ambiguous local-group choice")).not.toBeInTheDocument();
     expect(screen.queryByText("Refresh also failed")).not.toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectA);
   });
 
   it("shows failed import uncertainty even when the project was previously empty", async () => {
@@ -554,21 +573,26 @@ describe("BeagleWindowApp", () => {
     api.importFiles.mockResolvedValueOnce({ ok: false, error: "Import failed" });
     api.getState.mockResolvedValueOnce({ ok: false, error: "Could not refresh project" });
     await userEvent.click(screen.getByRole("button", { name: "Import collection" }));
-    expect(await screen.findByText("The latest import or analysis did not complete. Run Analyze to verify this project.")).toBeVisible();
-    expect(screen.getByText("Import failed")).toBeVisible();
+    expect(await screen.findByRole("alertdialog", { name: "Import failed" })).toBeVisible();
+    expect(await openDiagnostics()).toHaveTextContent("The latest import or analysis did not complete. Run Analyze to verify this project.");
     expect(screen.queryByText("Could not refresh project")).not.toBeInTheDocument();
   });
 
-  it("clears an old operation report when a saved-query notice replaces it", async () => {
+  it("retains the last operation report after dismissing its toast and saving a query", async () => {
     await mount();
     await userEvent.click(screen.getByRole("button", { name: "Import data" }));
-    await userEvent.click(await screen.findByRole("button", { name: "View report" }));
-    expect(screen.getByLabelText("Operation report")).toBeVisible();
+    const notice = await screen.findByRole("alertdialog", { name: "Import finished." });
+    await userEvent.click(within(notice).getByRole("button", { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Import finished." })).not.toBeInTheDocument());
+    await userEvent.click(screen.getByRole("button", { name: "View last report" }));
+    expect(await screen.findByRole("dialog", { name: "Operation report" })).toHaveTextContent('"imported": 100');
+    await closeDialog("Operation report");
     fireEvent.change(screen.getByLabelText("Saved query name"), { target: { value: "GOAD memberships" } });
     await userEvent.click(screen.getByRole("button", { name: "Save query" }));
-    expect(screen.getByText("Saved “GOAD memberships” in this project.")).toBeVisible();
-    expect(screen.queryByRole("button", { name: /report/ })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Operation report")).not.toBeInTheDocument();
+    expect(await screen.findByRole("alertdialog", { name: "Saved “GOAD memberships” in this project." })).toBeVisible();
+    expect(screen.queryByRole("dialog", { name: "Operation report" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "View last report" }));
+    expect(await screen.findByRole("dialog", { name: "Operation report" })).toHaveTextContent('"imported": 100');
   });
 
   it("loads edge composition without mislabeling unknown origins", async () => {
@@ -583,11 +607,14 @@ describe("BeagleWindowApp", () => {
 
   it("offers native runtime selection when Beagle is unavailable", async () => {
     currentState.runtime = { available: false, version: null, source: null, error: "Beagle executable not found" };
-    render(<BeagleWindowApp />);
+    renderApp();
     await screen.findByText("Backend unavailable");
-    expect(await screen.findByText("Beagle executable not found")).toBeVisible();
+    const dialog = await screen.findByRole("dialog", { name: "Beagle runtime settings" });
+    expect(dialog).toHaveTextContent("Beagle executable not found");
+    await closeDialog("Beagle runtime settings");
     expect(screen.getByRole("button", { name: "Run query" })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Choose Beagle" }));
+    await userEvent.click(screen.getByRole("button", { name: "Beagle runtime settings" }));
+    await userEvent.click(within(await screen.findByRole("dialog", { name: "Beagle runtime settings" })).getByRole("button", { name: "Choose Beagle" }));
     expect(api.chooseBinary).toHaveBeenCalledTimes(1);
   });
 
@@ -596,10 +623,11 @@ describe("BeagleWindowApp", () => {
     currentState = { ...currentState, runtime: { available: false, version: null, source: null, error: "Choose Beagle" } };
     api.getQueries.mockResolvedValueOnce({ ok: false, error: "Runtime unavailable" });
     api.chooseBinary.mockResolvedValue({ ok: true, value: available });
-    render(<BeagleWindowApp />);
+    renderApp();
     await screen.findByText("Backend unavailable");
     await userEvent.click(screen.getByRole("button", { name: "Choose Beagle" }));
     await waitFor(() => expect(api.getQueries).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Beagle runtime settings" })).not.toBeInTheDocument());
     await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
     expect(await screen.findByRole("button", { name: "Load query Tier Zero principals" })).toBeVisible();
   });
@@ -616,6 +644,115 @@ describe("BeagleWindowApp", () => {
     await waitFor(() => expect(api.entity).toHaveBeenCalledWith({ objectid: owned.objectid }));
     await waitFor(() => expect(screen.getByRole("switch", { name: "Owned" })).not.toBeChecked());
     expect(api.tag).toHaveBeenCalledWith({ objectid: owned.objectid, tag: "owned", enabled: false });
+  });
+
+  it("opens analysis reports from a success toast without moving or remounting the query workspace", async () => {
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    const graph = await screen.findByLabelText("Active Directory graph");
+    const workspace = screen.getByRole("region", { name: "Query workspace" });
+    const editor = screen.getByLabelText("Cypher query");
+    fireEvent.change(editor, { target: { value: "MATCH (n:User) RETURN n" } });
+    await userEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    const notice = await screen.findByRole("alertdialog", { name: "Analysis finished." });
+    expect(workspace).not.toContainElement(notice);
+    expect(screen.queryByRole("dialog", { name: "Operation report" })).not.toBeInTheDocument();
+    await userEvent.click(within(notice).getByRole("button", { name: "View report" }));
+    const report = await screen.findByRole("dialog", { name: "Operation report" });
+    expect(report).toHaveTextContent('"derived": 25');
+    expect(workspace).not.toContainElement(report);
+    await closeDialog("Operation report");
+    expect(screen.getByRole("region", { name: "Query workspace" })).toBe(workspace);
+    expect(screen.getByLabelText("Cypher query")).toBe(editor);
+    expect(editor).toHaveValue("MATCH (n:User) RETURN n");
+    expect(screen.getByLabelText("Active Directory graph")).toBe(graph);
+    expect(document.querySelector(".beagle-message, .beagle-inline-panel")).toBeNull();
+  });
+
+  it("shows search failure in a dismissible toast while retaining the investigation", async () => {
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    const graph = await screen.findByLabelText("Active Directory graph");
+    const workspace = screen.getByRole("region", { name: "Query workspace" });
+    const editor = screen.getByLabelText("Cypher query");
+    api.search.mockResolvedValueOnce({ ok: false, error: "Directory search failed" });
+    fireEvent.change(screen.getByLabelText("Find an object"), { target: { value: "arya" } });
+    await userEvent.click(screen.getByRole("button", { name: "Search" }));
+    const error = await screen.findByRole("alertdialog", { name: "Directory search failed" });
+    expect(workspace).not.toContainElement(error);
+    expect(document.querySelector(".beagle-message, .beagle-inline-panel")).toBeNull();
+    await userEvent.click(within(error).getByRole("button", { name: /close/i }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Directory search failed" })).not.toBeInTheDocument());
+    expect(screen.getByLabelText("Active Directory graph")).toBe(graph);
+    expect(screen.getByLabelText("Cypher query")).toBe(editor);
+  });
+
+  it("creates projects from a modal and allows cancellation without changing the workspace", async () => {
+    await mount();
+    const workspace = screen.getByRole("region", { name: "Query workspace" });
+    const editor = screen.getByLabelText("Cypher query");
+    fireEvent.change(editor, { target: { value: "RETURN 17" } });
+    await userEvent.click(screen.getByRole("button", { name: "New project" }));
+    let dialog = await screen.findByRole("dialog", { name: "New project" });
+    expect(workspace).not.toContainElement(dialog);
+    expect(within(dialog).getByRole("button", { name: "Create project" })).toBeDisabled();
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Project name" }), { target: { value: "Cancelled lab" } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New project" })).not.toBeInTheDocument());
+    expect(api.createProject).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Cypher query")).toBe(editor);
+    expect(editor).toHaveValue("RETURN 17");
+    await userEvent.click(screen.getByRole("button", { name: "New project" }));
+    dialog = await screen.findByRole("dialog", { name: "New project" });
+    fireEvent.change(within(dialog).getByRole("textbox", { name: "Project name" }), { target: { value: "  Fresh lab  " } });
+    await userEvent.click(within(dialog).getByRole("button", { name: "Create project" }));
+    await waitFor(() => expect(api.createProject).toHaveBeenCalledWith({ name: "Fresh lab" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "New project" })).not.toBeInTheDocument());
+    expect(document.querySelector(".beagle-message, .beagle-inline-panel")).toBeNull();
+  });
+
+  it("keeps project tools in a separate modal with data and rules tabs", async () => {
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    const graph = await screen.findByLabelText("Active Directory graph");
+    const workspace = screen.getByRole("region", { name: "Query workspace" });
+    const editor = screen.getByLabelText("Cypher query");
+    await userEvent.click(screen.getByRole("button", { name: "Project tools" }));
+    const dialog = await screen.findByRole("dialog", { name: "Project tools" });
+    expect(workspace).not.toContainElement(dialog);
+    expect(within(dialog).getByRole("tab", { name: "Project data" })).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(within(dialog).getByRole("tab", { name: "Asset group rules" }));
+    expect(within(dialog).getByRole("tab", { name: "Asset group rules" })).toHaveAttribute("aria-selected", "true");
+    expect(await within(dialog).findByRole("button", { name: "Preview all rules" })).toBeEnabled();
+    await closeDialog("Project tools");
+    expect(screen.getByLabelText("Active Directory graph")).toBe(graph);
+    expect(screen.getByLabelText("Cypher query")).toBe(editor);
+    expect(document.querySelector(".beagle-message, .beagle-inline-panel")).toBeNull();
+  });
+
+  it.each([false, true])("distinguishes unchecked and clean diagnostics in the modal (checked=%s)", async (checked) => {
+    if (checked) currentState = { ...currentState, diagnostics: { version: 1, errors: [], localGroupAmbiguities: [] } };
+    await mount();
+    const workspace = screen.getByRole("region", { name: "Query workspace" });
+    expect(screen.queryByRole("dialog", { name: "Analysis diagnostics" })).not.toBeInTheDocument();
+    const dialog = await openDiagnostics();
+    expect(workspace).not.toContainElement(dialog);
+    expect(dialog).toHaveTextContent(checked ? "No analysis warnings were reported." : "Analysis choices have not been checked. Run Analyze to check this project.");
+    await closeDialog("Analysis diagnostics");
+    expect(screen.getByRole("region", { name: "Query workspace" })).toBe(workspace);
+  });
+
+  it("removes report notifications and the last report when switching projects", async () => {
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    const notice = await screen.findByRole("alertdialog", { name: "Analysis finished." });
+    const action = within(notice).getByRole("button", { name: "View report" });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    fireEvent.click(action);
+    expect(screen.queryByRole("dialog", { name: "Operation report" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View last report" })).toBeDisabled();
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Analysis finished." })).not.toBeInTheDocument());
   });
 });
 
@@ -639,7 +776,7 @@ describe("persistent investigations", () => {
     await waitFor(() => expect(workspaces.get(projectA)?.queries).toHaveLength(3));
     expect(workspaces.get(projectA)?.queries[2]?.id).not.toBe("legacy");
     cleanup();
-    render(<BeagleWindowApp />);
+    renderApp();
     await waitFor(() => expect(api.getWorkspace).toHaveBeenCalledTimes(2));
     expect(workspaces.get(projectA)?.queries.filter((query) => query.id === "legacy")).toHaveLength(1);
   });
@@ -677,7 +814,7 @@ describe("persistent investigations", () => {
     expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":123}');
     expect(screen.getByRole("combobox", { name: "Via 1 object ID" })).toHaveValue("different-waypoint");
     await waitFor(() => expect(workspaces.get(projectA)?.history.index).toBe(1));
-    cleanup(); render(<BeagleWindowApp />);
+    cleanup(); renderApp();
     expect(await screen.findByText("123")).toBeVisible();
     expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN $checkpoint AS count");
     expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":123}');
@@ -698,7 +835,7 @@ describe("persistent investigations", () => {
     await act(async () => resolve({ ok: true, value: scalarResult(77) }));
     await waitFor(() => expect(workspaces.get(projectA)?.history.entries[0]?.editor).toMatchObject({ cypher: "RETURN $checkpoint AS count", parameters: '{"checkpoint":77}' }));
     expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n) RETURN n");
-    cleanup(); render(<BeagleWindowApp />);
+    cleanup(); renderApp();
     expect(await screen.findByText("77")).toBeVisible();
     expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN $checkpoint AS count");
     expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":77}');
@@ -732,6 +869,29 @@ describe("persistent investigations", () => {
 });
 
 describe("operation controls", () => {
+  it("keeps project tools open during a rule operation and exposes its matching cancellation", async () => {
+    let resolve!: (value: Awaited<ReturnType<BeagleAPI["applyRules"]>>) => void;
+    api.applyRules.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    api.getOperation.mockResolvedValue({ ok: true, value: { id: "rule-op", label: "Applying rules", phase: "Deriving relationships", startedAt: 123, cancellable: true } });
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Project tools" }));
+    const dialog = await screen.findByRole("dialog", { name: "Project tools" });
+    await userEvent.click(within(dialog).getByRole("tab", { name: "Asset group rules" }));
+    const apply = within(dialog).getByRole("button", { name: "Save and apply rules" });
+    await waitFor(() => expect(apply).toBeEnabled());
+    await userEvent.click(apply);
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Cancel operation" })).toBeEnabled());
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByRole("dialog", { name: "Project tools" })).toBe(dialog);
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeDisabled();
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel operation" }));
+    expect(api.cancelOperation).toHaveBeenCalledWith({ id: "rule-op" });
+    await act(async () => resolve({ ok: false, error: "Rule operation cancelled" }));
+    await waitFor(() => expect(within(dialog).getByRole("button", { name: "Close" })).toBeEnabled());
+    await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Project tools" })).not.toBeInTheDocument());
+  });
+
   it("shows native progress and cancels the matching operation", async () => {
     let resolve!: (value: OperationResult<{ state: BeagleState; report: {} }>) => void;
     api.analyze.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
@@ -742,14 +902,14 @@ describe("operation controls", () => {
     await userEvent.click(screen.getByRole("button", { name: "Cancel operation" }));
     expect(api.cancelOperation).toHaveBeenCalledWith({ id: "op-123" });
     await act(async () => resolve({ ok: false, error: "Analysis cancelled" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Analysis cancelled");
+    expect(await screen.findByRole("alertdialog", { name: "Analysis cancelled" })).toBeVisible();
   });
   it("keeps the current project open when investigation saving fails", async () => {
     await mount();
     api.saveWorkspace.mockResolvedValue({ ok: false, error: "Disk is full" });
     fireEvent.change(screen.getByLabelText("Saved query name"), { target: { value: "Unsaved" } });
     await userEvent.click(screen.getByRole("button", { name: "Save query" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("Disk is full");
+    expect(await screen.findByRole("alertdialog", { name: /Disk is full/ })).toBeVisible();
     fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
     await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
     expect(api.selectProject).not.toHaveBeenCalled();

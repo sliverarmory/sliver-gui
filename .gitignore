@@ -12,6 +12,9 @@
 /native/rdp/bin/
 /native/rdp/packaged-provenance.json*
 /native/rdp/target/
+/native/beagle/bin/
+/native/beagle/cache/
+/native/beagle/packaged-provenance.json*
 /.release-signing/
 *.tsbuildinfo
 *.log

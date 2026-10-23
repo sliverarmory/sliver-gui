@@ -96,7 +96,9 @@ export function registerBeagleIpcHandlers(
   handle(BEAGLE_IPC_INVOKE.cleanup, one(parseBeagleCleanupInput), (input) => manager.cleanup(input));
   handle(BEAGLE_IPC_INVOKE.setRetention, one(parseBeagleRetentionInput), (input) => manager.setRetention(input));
   handle(BEAGLE_IPC_INVOKE.getWorkspace, none, () => manager.getWorkspace(), false);
-  handle(BEAGLE_IPC_INVOKE.saveWorkspace, one(parseBeagleSaveWorkspaceInput), (input) => manager.saveWorkspace(input));
+  // Autosaves can overlap each other and foreground operations. The service
+  // queues them in order and checks the project again before its atomic write.
+  handle(BEAGLE_IPC_INVOKE.saveWorkspace, one(parseBeagleSaveWorkspaceInput), (input) => manager.saveWorkspace(input), false);
   handle(BEAGLE_IPC_INVOKE.getOperation, none, () => manager.getOperation(), false);
   handle(BEAGLE_IPC_INVOKE.cancelOperation, one(parseBeagleCancelOperationInput), (input) => manager.cancelOperation(input), false);
   handle(BEAGLE_IPC_INVOKE.query, one(parseBeagleQueryInput), (input) => manager.query(input), false);

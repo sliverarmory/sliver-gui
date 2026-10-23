@@ -48,6 +48,7 @@ export interface BeagleServiceOptions {
   environment?: NodeJS.ProcessEnv;
   createRuntime?: typeof createBeagleRuntime;
   verifier?: BeagleExecutableVerifier;
+  resolveBundledRuntime?: () => Promise<BeagleExecutableIdentity>;
 }
 
 /** One serialized owner for every project's database, including reads and project switches. */
@@ -57,6 +58,7 @@ export class BeagleService {
   private readonly environment: NodeJS.ProcessEnv;
   private readonly createRuntime: typeof createBeagleRuntime;
   private readonly verifier: BeagleExecutableVerifier;
+  private readonly resolveBundledRuntime: BeagleServiceOptions["resolveBundledRuntime"];
   private configuration: ProjectConfiguration | null = null;
   private catalog: BeagleSavedQuery[] | null = null;
   private binary: BeagleExecutableIdentity | null = null;
@@ -79,6 +81,7 @@ export class BeagleService {
     this.environment = { ...process.env, ...options.environment };
     this.createRuntime = options.createRuntime ?? createBeagleRuntime;
     this.verifier = options.verifier ?? beagleExecutableVerifier;
+    this.resolveBundledRuntime = options.resolveBundledRuntime;
   }
 
   async dispose(): Promise<void> {
@@ -596,21 +599,22 @@ export class BeagleService {
     const configuration = await this.load();
     const path = configuration.binaryPath ?? this.environment["SLIVER_BEAGLE_BINARY"];
     const sha256 = configuration.binaryPath ? configuration.binarySha256 : this.environment["SLIVER_BEAGLE_SHA256"];
-    if (!path || !sha256) {
+    const bundled = !configuration.binaryPath && !this.environment["SLIVER_BEAGLE_BINARY"] && !this.environment["SLIVER_BEAGLE_SHA256"];
+    if ((!path || !sha256) && !(bundled && this.resolveBundledRuntime)) {
       this.runtime = { available: false, version: null, source: null,
         error: "Beagle requires a verified executable. Choose a Beagle executable to pin it, or configure SLIVER_BEAGLE_BINARY and SLIVER_BEAGLE_SHA256." };
       return;
     }
     try {
-      const identity = await this.verifier.verify(path, sha256);
+      const identity = bundled && this.resolveBundledRuntime ? await this.resolveBundledRuntime() : await this.verifier.verify(path!, sha256!);
       const version = await this.inspectBinary(identity);
       if (this.disposed) throw new Error("Beagle service is closed");
       this.binary = identity;
-      this.runtime = { available: true, version, source: configuration.binaryPath ? "Selected executable" : "SLIVER_BEAGLE_BINARY", operations: this.supportedOperations };
+      this.runtime = { available: true, version, source: bundled ? "Bundled Beagle" : configuration.binaryPath ? "Selected executable" : "SLIVER_BEAGLE_BINARY", operations: this.supportedOperations };
     } catch (error) {
       const compatibility = error instanceof Error && /^(Unsupported|Incompatible) Beagle runtime/u.test(error.message) ? error.message : undefined;
       this.runtime = { available: false, version: null, source: null,
-        error: compatibility ?? "Beagle executable verification or startup failed. Choose a Beagle executable to verify it again." };
+        error: compatibility ?? (bundled ? "The bundled Beagle runtime could not be verified or started. Rebuild or reinstall Sliver GUI." : "Beagle executable verification or startup failed. Choose a Beagle executable to verify it again.") };
     }
   }
 

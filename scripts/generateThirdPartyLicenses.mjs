@@ -150,5 +150,11 @@ if (!rustLicenses.startsWith("SLIVER RDP RUST DEPENDENCY LICENSES\n") || !rustLi
   throw new Error("The RDP Cargo license inventory is missing; run npm run build:rdp");
 }
 output.push(divider, rustLicenses, "");
+// Preserve Beagle's release notices, including its native GraphQLite/SQLite components.
+const beagleLicenses = await readFile(join(rootDir, "native/beagle/bin/THIRD_PARTY_LICENSES.txt"), "utf8");
+if (!beagleLicenses.startsWith("SLIVER BEAGLE RELEASE LICENSES\n")) {
+  throw new Error("The Beagle dependency license inventory is missing; run npm run build:beagle");
+}
+output.push(divider, beagleLicenses, "");
 await mkdir(join(rootDir, "dist"), { recursive: true });
 await writeFile(join(rootDir, "dist", "THIRD_PARTY_LICENSES.txt"), output.join("\n"), "utf8");

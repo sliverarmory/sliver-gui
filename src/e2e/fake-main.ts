@@ -660,6 +660,7 @@ void startApplication({
   rdpRuntimeRootDirectory: repositoryRoot,
   ...(overviewRdpFixture || manualSocksRdpFixture ? { rdpRuntime: { resolve: async () => "fake-rdp-runtime", create: createFakeRdpRuntime } } : {}),
   beaglePreloadPath: `${repositoryRoot}/dist/preload/beagle.cjs`,
+  beagleRuntimeRootDirectory: repositoryRoot,
   armoryPreloadPath: `${repositoryRoot}/dist/preload/armory.cjs`,
   cloudDeploymentController,
 }).then((handle) => {

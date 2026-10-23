@@ -20,6 +20,7 @@ import {
 import { packagedRuntimeFilesForPlatform, runtimeFilesForPlatform } from "./prepareNodePtyRuntime.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedMacosSignatures, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 import { verifyPreparedRdpRuntime, verifyPackagedRdpRuntime, verifyRdpArchiveRecord } from "./verifyRdpRuntime.mjs";
+import { verifyPreparedBeagleRuntime, verifyPackagedBeagleRuntime, verifyBeagleArchiveRecord } from "./verifyBeagleRuntime.mjs";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const distDir = join(rootDir, "dist");
@@ -65,6 +66,8 @@ const requiredBuilderPaths = [
   "protocol/terminal-fonts-provenance.json",
   "protocol/ironrdp-provenance.json",
   "native/rdp/packaged-provenance.json",
+  "protocol/beagle-provenance.json",
+  "native/beagle/packaged-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -107,6 +110,7 @@ const requiredPackagedFiles = [
   "dist/preload/armory.cjs",
   "dist/preload/ssh.cjs",
   "dist/preload/rdp.cjs",
+  "dist/preload/beagle.cjs",
   "dist/preload/text-editor.cjs",
   "dist/renderer/index.html",
   "node_modules/sliver-script/LICENSE",
@@ -121,6 +125,8 @@ const requiredPackagedFiles = [
   "protocol/terminal-fonts-provenance.json",
   "protocol/ironrdp-provenance.json",
   "native/rdp/packaged-provenance.json",
+  "protocol/beagle-provenance.json",
+  "native/beagle/packaged-provenance.json",
   "docs/operator-parity.generated.json",
   "docs/operator-parity.annotations.json",
   "docs/operator-parity.schema.json",
@@ -410,6 +416,8 @@ for (const requiredSetting of [
   "to: licenses/THIRD_PARTY_LICENSES.txt",
   "from: native/rdp/bin",
   "to: rdp",
+  "from: native/beagle/bin",
+  "to: beagle",
   "- source-provenance.json",
 ]) {
   if (!builderConfiguration.includes(requiredSetting)) {
@@ -429,6 +437,7 @@ for (const forbiddenPath of [".e2e-dist", "src/e2e", "tsconfig.e2e", "artifacts/
 const sliverClientEvidence = await verifyInstalledSliverClient();
 const sliverConsoleEvidence = await verifyPreparedSliverConsole();
 const rdpEvidence = await verifyPreparedRdpRuntime();
+const beagleEvidence = await verifyPreparedBeagleRuntime();
 const updateSigningEvidence = await readUpdateSigningAssets(rootDir);
 await verifyNodePtyDirectory(join(rootDir, "node_modules/node-pty"), process.platform);
 
@@ -438,12 +447,13 @@ if (verifyPackaged) {
     : [await newestPackagedArchive()];
 
   for (const archive of archives) {
-    verifyArchive(archive, terminalFontEvidence, sliverClientEvidence, rdpEvidence.recordBytes);
+    verifyArchive(archive, terminalFontEvidence, sliverClientEvidence, rdpEvidence.recordBytes, beagleEvidence.recordBytes);
     await verifyExternalBrandAsset(archive);
     await verifyExternalLegalAssets(archive);
     await verifyExternalUpdateSigning(archive, updateSigningEvidence);
     await verifyExternalSliverConsole(archive, sliverConsoleEvidence);
     await verifyPackagedRdpRuntime({ resourcesDirectory: dirname(archive), evidence: rdpEvidence });
+    await verifyPackagedBeagleRuntime({ resourcesDirectory: dirname(archive), evidence: beagleEvidence });
     await verifyExternalNodePtyRuntime(archive);
   }
   console.log(`Verified ${archives.length} packaged app.asar archive(s) contain no E2E or secret fixtures`);
@@ -841,7 +851,7 @@ async function newestFile(paths) {
   return dated[0].path;
 }
 
-function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence, rdpRecordBytes) {
+function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence, rdpRecordBytes, beagleRecordBytes) {
   const entries = listPackage(archivePath, { isPack: false }).map(asarEntryPaths);
   const normalizedEntries = entries.map(({ normalizedPath }) => normalizedPath);
   const forbiddenEntries = normalizedEntries.filter((entry) =>
@@ -860,6 +870,7 @@ function verifyArchive(archivePath, terminalFontEvidence, sliverClientEvidence, 
     }
   }
   verifyRdpArchiveRecord(archivePath, entries, rdpRecordBytes, extractFile);
+  verifyBeagleArchiveRecord(archivePath, entries, beagleRecordBytes, extractFile);
   const packagedFontEntries = entries.filter(({ normalizedPath }) =>
     normalizedPath.startsWith("dist/renderer/assets/") && normalizedPath.endsWith(".woff2"),
   );

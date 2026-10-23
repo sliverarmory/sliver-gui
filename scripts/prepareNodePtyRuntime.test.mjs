@@ -196,6 +196,7 @@ test("afterPack prepares the exact unpacked runtime before signing", async () =>
   try {
     let verifiedResourcesDirectory;
     let verifiedRdpDirectory;
+    let verifiedBeagleDirectory;
     await afterPack(
       { electronPlatformName: "darwin", appOutDir },
       {
@@ -207,10 +208,15 @@ test("afterPack prepares the exact unpacked runtime before signing", async () =>
           assert.equal(stage, "before-sign");
           verifiedRdpDirectory = resourcesDirectory;
         },
+        verifyBeagleBeforeSigning: async ({ resourcesDirectory, stage }) => {
+          assert.equal(stage, "before-sign");
+          verifiedBeagleDirectory = resourcesDirectory;
+        },
       },
     );
     assert.equal(verifiedResourcesDirectory, join(appOutDir, "Sliver GUI.app", "Contents", "Resources"));
     assert.equal(verifiedRdpDirectory, verifiedResourcesDirectory);
+    assert.equal(verifiedBeagleDirectory, verifiedResourcesDirectory);
     for (const relativePath of files.helpers) {
       assert.equal((await stat(join(moduleDirectory, ...relativePath.split("/")))).mode & 0o777, 0o755);
     }

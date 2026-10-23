@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button, Input, Label, TextField } from "@heroui/react";
+import { AlertDialog, Button, Input, Label, TextField } from "@heroui/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { BeagleAPI, BeagleState } from "../../../shared/beagle-contracts";
 import { parseBeagleRetentionInput, type BeagleCleanupInput, type BeagleImportRecord } from "../../../shared/beagle-projects";
@@ -54,7 +54,7 @@ export function BeagleProjectPanel({ api, state, busy, beforeAction, onBusyChang
 
   return <section aria-label="Project management" className="flex flex-col gap-4 text-sm">
     <div className="flex items-end gap-2">
-      <TextField value={name} onChange={setName} isDisabled={locked} className="min-w-0 flex-1"><Label>Project name</Label><Input maxLength={80} /></TextField>
+      <TextField value={name} onChange={setName} isDisabled={locked} className="min-w-0 flex-1"><Label>Project name</Label><Input variant="secondary" maxLength={80} /></TextField>
       <Button size="sm" variant="secondary" isDisabled={locked || !name.trim() || name.trim() === project?.name} onPress={() => void run(async () => {
         const response = await api.renameProject({ id: state.selectedProjectId, name });
         if (!response.ok) throw new Error(response.error);
@@ -76,10 +76,17 @@ export function BeagleProjectPanel({ api, state, busy, beforeAction, onBusyChang
       <NativeSelect.Option value="sessions">Collected sessions only</NativeSelect.Option><NativeSelect.Option value="collected">All collected graph data</NativeSelect.Option><NativeSelect.Indicator />
     </NativeSelect.Trigger></NativeSelect>
     <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" isDisabled={locked || !p2Available} onPress={() => setConfirmation("cleanup")}>Clean selected data</Button><Button size="sm" variant="secondary" isDisabled={locked} onPress={() => setConfirmation("archive")}>Archive project</Button></div>
-    {confirmation ? <div role="alert" className="flex flex-col gap-2 rounded-lg border border-warning/30 p-3">
-      <p>{confirmation === "replace" ? "Replace the current collected graph with the files you select? Queries, rules, manual overrides and history are retained." : confirmation === "archive" ? "Archive this project? Its data stays available for recovery below." : scope === "sessions" ? "Remove all collected HasSession relationships and rerun analysis?" : "Clear every collected object and relationship? Queries, rules and history are retained."}</p>
-      <div className="flex gap-2"><Button size="sm" variant="danger" onPress={() => void run(confirmation === "replace" ? importCollection : confirmation === "archive" ? archive : clean)}>Confirm {confirmation}</Button><Button size="sm" variant="secondary" onPress={() => setConfirmation(undefined)}>Cancel</Button></div>
-    </div> : null}
+    <AlertDialog.Backdrop isOpen={Boolean(confirmation)} isDismissable={false} isKeyboardDismissDisabled={working}
+      onOpenChange={(open) => { if (!open && !working) setConfirmation(undefined); }}>
+      <AlertDialog.Container placement="center" size="sm"><AlertDialog.Dialog>
+        <AlertDialog.Header><AlertDialog.Icon status="warning" /><AlertDialog.Heading>
+          {confirmation === "replace" ? "Replace collected data?" : confirmation === "archive" ? "Archive project?" : "Clean collected data?"}
+        </AlertDialog.Heading></AlertDialog.Header>
+        <AlertDialog.Body><p>{confirmation === "replace" ? "Replace the current collected graph with the files you select? Queries, rules, manual overrides and history are retained." : confirmation === "archive" ? "Archive this project? Its data stays available for recovery." : scope === "sessions" ? "Remove all collected HasSession relationships and rerun analysis?" : "Clear every collected object and relationship? Queries, rules and history are retained."}</p></AlertDialog.Body>
+        <AlertDialog.Footer><Button variant="secondary" isDisabled={working} onPress={() => setConfirmation(undefined)}>Cancel</Button>
+          <Button variant="danger" isDisabled={locked} onPress={() => void run(confirmation === "replace" ? importCollection : confirmation === "archive" ? archive : clean)}>Confirm {confirmation}</Button></AlertDialog.Footer>
+      </AlertDialog.Dialog></AlertDialog.Container>
+    </AlertDialog.Backdrop>
     {(state.archivedProjects?.length ?? 0) > 0 ? <details><summary className="cursor-pointer">Archived projects ({state.archivedProjects!.length})</summary><ul className="mt-3 flex flex-col gap-2">{state.archivedProjects!.map((item) => <li key={item.id} className="flex items-center justify-between gap-2"><span className="truncate">{item.name}</span><Button size="sm" variant="secondary" isDisabled={locked} aria-label={`Restore ${item.name}`} onPress={() => void run(async () => { const response = await api.restoreArchivedProject({ id: item.id }); if (!response.ok) throw new Error(response.error); onState(response.value); onNotice("Archived project restored."); })}>Restore</Button></li>)}</ul></details> : null}
     <NativeSelect variant="secondary"><Label>Import history retention</Label><NativeSelect.Trigger aria-label="Import history retention" value={state.projectData?.historyLimit ?? 50} disabled={locked} onChange={(event) => { const historyLimit = Number(event.target.value); void run(async () => { const response = await api.setRetention(parseBeagleRetentionInput({ historyLimit })); if (!response.ok) throw new Error(response.error); onState(response.value); }); }}>
       {[10, 25, 50, 100].map((limit) => <NativeSelect.Option key={limit} value={limit}>{limit} operations</NativeSelect.Option>)}<NativeSelect.Indicator />

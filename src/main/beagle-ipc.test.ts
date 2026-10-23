@@ -125,7 +125,7 @@ describe("Beagle IPC", () => {
     await expect(invoke(BEAGLE_IPC_INVOKE.importFiles, event())).resolves.toMatchObject({ ok: true });
     expect(service.manager.importFiles).toHaveBeenCalledExactlyOnceWith(["/tmp/approved.zip"]);
   });
-  it("keeps cancellation and progress available while project mutations and workspace saves are locked", async () => {
+  it("allows autosaves during a native dialog without releasing its project mutation lock", async () => {
     const service = services();
     registerBeagleIpcHandlers(service, url, () => true);
     let finish!: (value: unknown) => void;
@@ -135,10 +135,57 @@ describe("Beagle IPC", () => {
     await expect(invoke(BEAGLE_IPC_INVOKE.getOperation, event())).resolves.toMatchObject({ ok: true });
     await expect(invoke(BEAGLE_IPC_INVOKE.cancelOperation, event(), { id })).resolves.toMatchObject({ ok: true });
     expect(service.manager.cancelOperation).toHaveBeenCalledWith({ id });
-    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { projectId: id, workspace: emptyBeagleWorkspace(id) })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("in progress") });
+    const input = { projectId: id, workspace: emptyBeagleWorkspace(id) };
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), input)).resolves.toMatchObject({ ok: true });
+    expect(service.manager.saveWorkspace).toHaveBeenCalledExactlyOnceWith(input);
+    await expect(invoke(BEAGLE_IPC_INVOKE.selectProject, event(), { id })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("in progress") });
+    expect(service.manager.selectProject).not.toHaveBeenCalled();
     finish({ canceled: false, filePaths: ["/tmp/approved.zip"] });
     await expect(pending).resolves.toMatchObject({ ok: true });
     expect(service.manager.importFiles).toHaveBeenCalledWith(["/tmp/approved.zip"], { mode: "replace" });
+  });
+  it("accepts overlapping autosaves without blocking foreground operations", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const first = emptyBeagleWorkspace(id);
+    const latest = { ...first, legacyMigrated: true };
+    let finish!: (value: typeof first) => void;
+    vi.mocked(service.manager.saveWorkspace).mockReturnValueOnce(new Promise((resolve) => { finish = resolve; })).mockResolvedValueOnce(latest);
+    const pending = invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { projectId: id, workspace: first });
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { projectId: id, workspace: latest })).resolves.toEqual({ ok: true, value: latest });
+    await expect(invoke(BEAGLE_IPC_INVOKE.analyze, event())).resolves.toMatchObject({ ok: true });
+    expect(service.manager.saveWorkspace).toHaveBeenCalledTimes(2);
+    finish(first);
+    await expect(pending).resolves.toEqual({ ok: true, value: first });
+  });
+  it("passes autosaves to the service queue during analysis and keeps mutations exclusive", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    let finish!: () => void;
+    const completed = new Promise<void>((resolve) => { finish = resolve; });
+    vi.mocked(service.manager.analyze).mockImplementation(async () => {
+      await completed;
+      return { state: await service.manager.getState(), report: {} };
+    });
+    const pending = invoke(BEAGLE_IPC_INVOKE.analyze, event());
+    const id = "11111111-1111-4111-8111-111111111111";
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { projectId: id, workspace: emptyBeagleWorkspace(id) })).resolves.toMatchObject({ ok: true });
+    await expect(invoke(BEAGLE_IPC_INVOKE.createProject, event(), { name: "Other" })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("in progress") });
+    finish();
+    await expect(pending).resolves.toMatchObject({ ok: true });
+  });
+  it("still authorizes and validates nonexclusive workspace saves", async () => {
+    const service = services();
+    const authorize = vi.fn().mockReturnValue(false);
+    registerBeagleIpcHandlers(service, url, authorize);
+    const id = "11111111-1111-4111-8111-111111111111";
+    const input = { projectId: id, workspace: emptyBeagleWorkspace(id) };
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), input)).resolves.toMatchObject({ ok: false, error: "Untrusted AD Explorer renderer" });
+    authorize.mockReturnValue(true);
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { ...input, path: "/tmp/other.json" })).resolves.toMatchObject({ ok: false });
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { ...input, projectId: "22222222-2222-4222-8222-222222222222" })).resolves.toMatchObject({ ok: false });
+    expect(service.manager.saveWorkspace).not.toHaveBeenCalled();
   });
   it("publishes streamed exports from private sibling files only after a trust recheck", async () => {
     const directory = await mkdtemp(join(tmpdir(), "beagle-ipc-export-")); directories.push(directory);

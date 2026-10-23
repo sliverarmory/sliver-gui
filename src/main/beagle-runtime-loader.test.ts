@@ -1,11 +1,12 @@
 // @vitest-environment node
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, open, realpath, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, open, readFile, realpath, rename, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { beagleRuntimeEnvironment, captureBeagleExecutable, verifyBeagleExecutable } from "./beagle-runtime-loader.js";
+import { beagleRuntimeEnvironment, captureBeagleExecutable, resolveVerifiedBeagleRuntime, verifyBeagleExecutable } from "./beagle-runtime-loader.js";
+import type { NativeVerificationCommand } from "./native-runtime-loader.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const original = await importOriginal<typeof import("node:fs/promises")>();
@@ -156,5 +157,146 @@ describe("Beagle runtime environment", () => {
       "PYTHONPATH", "PYTHONSTARTUP", "NODE_OPTIONS", "NODE_PATH", "AWS_SECRET_ACCESS_KEY", "AZURE_CLIENT_SECRET",
       "GRAPHQLITE_EXTENSION_PATH", "SLIVER_BEAGLE_BINARY", "SLIVER_BEAGLE_SHA256", "RUST_LOG", "RUST_BACKTRACE", "LOCPATH", "LC_SECRET"];
     expect(beagleRuntimeEnvironment(Object.fromEntries(keys.map((key) => [key, "sensitive"])))).toEqual({});
+  });
+});
+
+async function bundledFixture(platform: NodeJS.Platform = "linux", packaged = false) {
+  const root = await mkdtemp(join(tmpdir(), "sliver-beagle-bundled-"));
+  directories.push(root);
+  const resourcesPath = join(root, "Sliver GUI.app/Contents/Resources");
+  const directory = packaged ? join(resourcesPath, "beagle") : join(root, "native/beagle/bin");
+  const protocolPath = packaged ? join(resourcesPath, "app.asar/protocol/beagle-provenance.json") : join(root, "protocol/beagle-provenance.json");
+  await mkdir(dirname(protocolPath), { recursive: true });
+  await mkdir(directory, { recursive: true });
+  const source = { repository: "https://github.com/sliverarmory/Beagle", commit: "a".repeat(40), tree: "b".repeat(40) };
+  const manifest = { schemaVersion: 1, protocolVersion: 1, version: "0.1.0", source };
+  const sourceBytes = JSON.stringify(manifest);
+  const inputs = [{ path: "scripts/buildBeagleRuntime.mjs", sha256: "c".repeat(64) }];
+  const buildIdentity = hash(JSON.stringify({ manifest, inputs }));
+  const target = platform === "linux" ? "x86_64-unknown-linux-gnu" : platform === "win32" ? "x86_64-pc-windows-gnu" : "aarch64-apple-darwin";
+  const filename = platform === "win32" ? "beagle.exe" : "beagle";
+  const contents = "known Beagle executable image";
+  const record = { schemaVersion: 1, protocolVersion: 1, source, inputs, sourceManifestSha256: hash(sourceBytes), buildIdentity,
+    artifact: { fileName: filename, sha256: hash(contents), size: Buffer.byteLength(contents) },
+    build: { target: platform === "linux" ? "linux-x64" : platform === "win32" ? "windows-x64" : "darwin-universal",
+      slices: platform === "darwin" ? [{ target: "x86_64-apple-darwin" }, { target: "aarch64-apple-darwin" }] : [{ target }] } };
+  const path = join(directory, filename);
+  await writeFile(protocolPath, sourceBytes);
+  await writeFile(join(directory, "source-provenance.json"), sourceBytes);
+  await writeFile(join(directory, "provenance.json"), JSON.stringify(record));
+  const packagedRecordPath = join(resourcesPath, "app.asar/native/beagle/packaged-provenance.json");
+  if (packaged) {
+    await mkdir(dirname(packagedRecordPath), { recursive: true });
+    await writeFile(packagedRecordPath, JSON.stringify(record));
+  }
+  await writeFile(path, contents, { mode: 0o755 });
+  await chmod(path, 0o755);
+  const info = { name: "beagle", protocol: 1, version: "0.1.0", beagleRevision: source.commit, target };
+  const execute = vi.fn<NativeVerificationCommand>().mockResolvedValue(JSON.stringify(info));
+  const options = { isPackaged: packaged, resourcesPath, developmentRoot: root, platform,
+    architecture: platform === "darwin" ? "arm64" : "x64", execute };
+  return { root, directory, options, path, contents, protocolPath, packagedRecordPath, record, execute, info };
+}
+
+describe("bundled Beagle runtime loading", () => {
+  it.each([false, true])("resolves the fixed helper with verified source, build and executable identity (packaged=%s)", async (packaged) => {
+    const entry = await bundledFixture("linux", packaged);
+    const path = await realpath(entry.path);
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).resolves.toEqual({ path, sha256: hash(entry.contents), size: Buffer.byteLength(entry.contents) });
+    expect(entry.execute).toHaveBeenCalledExactlyOnceWith(path, ["--build-info"], expect.objectContaining({ timeout: 15_000, maxBuffer: 16 * 1024 }));
+    expect(entry.execute.mock.calls[0]?.[2].env).not.toHaveProperty("PATH");
+  });
+
+  it.each(["name", "protocol", "version", "beagleRevision", "target"])("rejects a helper with incompatible %s build information", async (field) => {
+    const entry = await bundledFixture();
+    entry.execute.mockResolvedValue(JSON.stringify({ ...entry.info, [field]: "wrong" }));
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow(/bundled Beagle runtime could not be verified/u);
+  });
+
+  it.each([false, true])("rejects changed bytes before execution on Linux (packaged=%s)", async (packaged) => {
+    const entry = await bundledFixture("linux", packaged);
+    await writeFile(entry.path, "replacement");
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects simultaneous packaged helper and external provenance replacement against the ASAR build record", async () => {
+    const entry = await bundledFixture("linux", true);
+    const replacement = "replacement helper";
+    await writeFile(entry.path, replacement);
+    entry.record.artifact.sha256 = hash(replacement);
+    entry.record.artifact.size = Buffer.byteLength(replacement);
+    await writeFile(join(entry.directory, "provenance.json"), JSON.stringify(entry.record));
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects provenance-selected paths and source pin drift before executing a helper", async () => {
+    const entry = await bundledFixture();
+    entry.record.artifact.fileName = "../other-executable";
+    await writeFile(join(entry.directory, "provenance.json"), JSON.stringify(entry.record));
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    await writeFile(entry.protocolPath, "changed source pin");
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported architectures and packaged builds missing a required universal slice", async () => {
+    const entry = await bundledFixture("darwin", true);
+    await expect(resolveVerifiedBeagleRuntime({ ...entry.options, architecture: "riscv64" })).rejects.toThrow();
+    entry.record.build.slices = [{ target: "aarch64-apple-darwin" }];
+    const bytes = JSON.stringify(entry.record);
+    await writeFile(join(entry.directory, "provenance.json"), bytes);
+    await writeFile(entry.packagedRecordPath, bytes);
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === "win32")("rejects symlinked and non-executable bundled helpers", async () => {
+    const entry = await bundledFixture();
+    await chmod(entry.path, 0o644);
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    const external = join(entry.root, "external");
+    await writeFile(external, await readFile(entry.path), { mode: 0o755 });
+    await rm(entry.path);
+    await symlink(external, entry.path);
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
+    expect(entry.execute).not.toHaveBeenCalled();
+  });
+
+  it("requires matching Windows signatures for signing changes and pins the installed bytes", async () => {
+    const entry = await bundledFixture("win32", true);
+    const signedBytes = "signed Beagle executable";
+    await writeFile(entry.path, signedBytes);
+    entry.execute.mockImplementation(async (file) => file === "powershell.exe" ? "verified" : JSON.stringify(entry.info));
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).resolves.toMatchObject({ sha256: hash(signedBytes), size: Buffer.byteLength(signedBytes) });
+    expect(entry.execute.mock.calls[0]?.[0]).toBe("powershell.exe");
+    expect(entry.execute.mock.calls[0]?.[1].at(-1)).toContain("$fingerprints[0] -cne $fingerprints[1]");
+    entry.execute.mockClear().mockRejectedValue(new Error("private diagnostic"));
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow("The bundled Beagle runtime could not be verified. Rebuild or reinstall Sliver GUI.");
+    expect(entry.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("verifies both macOS architectures against the application signer", async () => {
+    const entry = await bundledFixture("darwin", true);
+    await writeFile(entry.path, "signed Beagle executable");
+    entry.execute.mockImplementation(async (file, args) => {
+      if (file !== "/usr/bin/codesign") return JSON.stringify(entry.info);
+      const extract = args.find((value) => value.startsWith("--extract-certificates="));
+      if (extract) await writeFile(`${extract.slice("--extract-certificates=".length)}0`, "same certificate");
+      return "";
+    });
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).resolves.toMatchObject({ sha256: hash("signed Beagle executable") });
+    const slices = entry.execute.mock.calls.filter(([, args]) => args.includes("--architecture")).map(([, args]) => args[args.indexOf("--architecture") + 1]);
+    expect(slices).toEqual(["x86_64", "arm64"]);
+  });
+
+  it("rejects a helper replaced while build information was read", async () => {
+    const entry = await bundledFixture();
+    entry.execute.mockImplementation(async () => {
+      await writeFile(entry.path, "replacement helper");
+      return JSON.stringify(entry.info);
+    });
+    await expect(resolveVerifiedBeagleRuntime(entry.options)).rejects.toThrow();
   });
 });

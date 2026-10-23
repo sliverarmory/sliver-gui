@@ -78,8 +78,9 @@ Keep credentials out of tracked files.
 
 `npm run dev` builds and launches the static application at
 `sliver://app/index.html`, using the production content security policy.
-It also builds the host RDP helper from the pinned IronRDP fork. Ordinary
-TypeScript builds and unit tests do not require compiling Rust.
+It also builds the host RDP helper from the pinned IronRDP fork and stages the
+checksum-pinned Beagle release for this machine. Ordinary TypeScript builds and
+unit tests do not require compiling Rust or downloading Beagle.
 Restart the command after source changes; this workflow does not use HMR.
 
 The TypeScript client is installed from the pinned `sliver-script` npm package.
@@ -130,6 +131,10 @@ sharing, the Monaco editor, platform transparency support, and runtime limits.
 | `npm run build:rdp:host` | Build and verify the RDP helper for this machine. |
 | `npm run build:rdp` | Build the RDP packaging target, including both macOS slices. |
 | `npm run test:rdp:native` | Run the Rust runtime tests. |
+| `npm run build:beagle:host` | Download, stage, and verify the pinned Beagle release for this machine. |
+| `npm run build:beagle` | Prepare bundled Beagle for packaging, including both macOS slices. |
+| `npm run test:beagle:loader` | Exercise bundled Beagle through the real Electron ASAR loader. |
+| `npm run test:e2e:beagle:bundled` | Open AD Explorer with fresh settings and query bundled Beagle. |
 | `npm run package` | Create an unpacked application under `release/`. |
 | `npm run dist` | Create platform installers under `release/`. |
 | `npm run test:e2e:packaged` | Verify and test an existing unpacked application against a local fixture. |
@@ -160,6 +165,11 @@ license inventory before packaging. Generated output under `dist/`, `release/`,
 `native/sliver-console/`, and `.e2e-dist/` is ignored by Git.
 The generated RDP executables, provenance, and Cargo license inventory under
 `native/rdp/bin/` are also ignored. The helper source and lockfile are tracked.
+Beagle release archives are pinned in `protocol/beagle-provenance.json` and
+downloaded during native build preparation. Its generated executable, provenance,
+and license inventory under `native/beagle/bin/` are ignored, as is the generated
+`native/beagle/packaged-provenance.json` ASAR trust anchor. Universal macOS builds
+combine the verified Intel and Apple Silicon release executables with `lipo`.
 
 ## Packages and updates
 
@@ -231,14 +241,18 @@ expansion and path endpoints; relationship details expose Beagle's composition
 workflow. Custom queries are saved per project, and **Export graph** writes the
 complete canonical graph through a native save dialog.
 
-Install a standalone [Beagle](https://github.com/sliverarmory/Beagle) executable,
-with the `helper-stdio` subcommand, then choose it in the window's runtime settings.
-The selection pins its SHA-256, which is checked again before every helper launch.
-Select the executable again after intentionally upgrading it; existing installations
-with an unpinned saved path also need one new selection. Alternatively, configure
+[Beagle](https://github.com/sliverarmory/Beagle) is bundled with native packages
+and available automatically. The application verifies its pinned provenance,
+executable identity, and helper protocol before launching it. Downloads happen
+during build preparation; the installed application uses its bundled executable.
+
+To use a custom Beagle build with the `helper-stdio` subcommand, choose it in
+the window's runtime settings. The selection pins its SHA-256, checked before
+every helper launch. Select it again after intentionally upgrading that file;
+existing unpinned saved paths also require reselection. Alternatively, configure
 both `SLIVER_BEAGLE_BINARY` (an absolute path) and `SLIVER_BEAGLE_SHA256` (the expected
-SHA-256). Automatic PATH and staged-runtime discovery are disabled. Beagle remains
-an external prerequisite; the GUI does not download it.
+SHA-256). Explicit overrides retain their verification requirements. There is no
+automatic PATH search.
 
 Project databases live under Electron's user-data directory in `beagle/`; imports
 merge into the selected project and run analysis. Use a new project for a separate
@@ -255,8 +269,15 @@ The backend response ceiling is 32 MiB, including exports.
 Run the real helper integration test with synthetic collection data:
 
 ```sh
+npm run build:beagle:host
 SLIVER_BEAGLE_E2E_BINARY=/absolute/path/to/beagle npm run test:beagle:helper
 ```
+
+Use the prepared `native/beagle/bin/beagle` (`beagle.exe` on Windows) or an
+explicit custom build. CI exercises the prepared helper without private data.
+After preparing the helper, `npm run test:e2e:beagle:bundled` opens a fresh
+AD Explorer window without a runtime setup prompt and executes a local query.
+Its screenshot is written to `artifacts/e2e/beagle-bundled.png`.
 
 Run focused native validation with an existing private GOAD collection:
 

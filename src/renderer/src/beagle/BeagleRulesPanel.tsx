@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { Button, Checkbox, Input, Label, ScrollShadow, TextArea, TextField } from "@heroui/react";
+import { Button, Checkbox, Input, Label, ScrollShadow, TextArea, TextField, toast } from "@heroui/react";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { OperationResult } from "../../../shared/contracts";
 import type { BeagleMutationResult } from "../../../shared/beagle-contracts";
 import { beagleRuleLabels, parseBeagleRuleConfiguration, type BeagleAssetGroup, type BeagleRuleConfiguration, type BeagleRuleExpansion, type BeagleRulePreview, type BeagleRulesInput } from "../../../shared/beagle-rules";
+
+export interface BeagleRulesDraft {
+  projectId: string;
+  configuration: BeagleRuleConfiguration;
+  label: string;
+  preview?: BeagleRulePreview;
+  status?: string;
+}
 
 export interface BeagleRulesPanelProps {
   api: {
@@ -17,38 +25,74 @@ export interface BeagleRulesPanelProps {
   onApplied: (value: BeagleMutationResult) => void;
   onInspectObject: (objectid: string) => void;
   onBusyChange?: (busy: boolean) => void;
+  draft?: BeagleRulesDraft | undefined;
+  onDraftChange?: (draft: BeagleRulesDraft | undefined) => void;
 }
 
-export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onApplied, onInspectObject, onBusyChange }: BeagleRulesPanelProps) {
-  const [configuration, setConfiguration] = useState<BeagleRuleConfiguration>({ groups: [] });
-  const [label, setLabel] = useState("Tag_Tier_Zero");
-  const [loaded, setLoaded] = useState(false);
+export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onApplied, onInspectObject, onBusyChange, draft, onDraftChange }: BeagleRulesPanelProps) {
+  const restored = draft?.projectId === projectId ? draft : undefined;
+  const [configuration, setConfiguration] = useState<BeagleRuleConfiguration>(restored?.configuration ?? { groups: [] });
+  const [label, setLabel] = useState(restored?.label ?? "Tag_Tier_Zero");
+  const [loaded, setLoaded] = useState(Boolean(restored));
+  const [draftProject, setDraftProject] = useState(restored?.projectId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
-  const [preview, setPreview] = useState<BeagleRulePreview>();
-  const [status, setStatus] = useState<string>();
+  const [preview, setPreview] = useState<BeagleRulePreview | undefined>(restored?.preview);
+  const [status, setStatus] = useState<string | undefined>(restored?.status);
   const [reload, setReload] = useState(0);
   const sequence = useRef(0);
   const currentProject = useRef(projectId);
+  const errorToast = useRef<ReturnType<typeof toast.danger> | undefined>(undefined);
+  const draftRef = useRef(draft);
+  const onDraftChangeRef = useRef(onDraftChange);
+  draftRef.current = draft; onDraftChangeRef.current = onDraftChange;
   currentProject.current = projectId;
   const available = beagleRuleLabels(labels, configuration);
   const rule = configuration.groups.find((entry) => entry.label === label);
   const locked = disabled || busy || !loaded;
+  function clearErrorToast() {
+    if (errorToast.current !== undefined) toast.close(errorToast.current);
+    errorToast.current = undefined;
+  }
+  function showError(message: string, retry?: () => void) {
+    clearErrorToast(); setError(message);
+    errorToast.current = toast.danger("Label rule error", { description: message, timeout: 0,
+      ...(retry ? { actionProps: { children: "Reload label rules", onPress: retry } } : {}),
+    });
+  }
 
   useEffect(() => {
     const request = ++sequence.current;
+    const saved = reload === 0 && draftRef.current?.projectId === projectId ? draftRef.current : undefined;
+    if (saved) {
+      setConfiguration(saved.configuration); setLabel(saved.label); setPreview(saved.preview); setStatus(saved.status);
+      setError(undefined); setBusy(false); setLoaded(true); setDraftProject(projectId);
+      return () => { sequence.current++; clearErrorToast(); };
+    }
+    onDraftChangeRef.current?.(undefined); setDraftProject(undefined);
     setLoaded(false); setConfiguration({ groups: [] }); setLabel("Tag_Tier_Zero"); setError(undefined); setPreview(undefined); setStatus(undefined); setBusy(false);
     void api.getRules().then((response) => {
       if (request !== sequence.current || currentProject.current !== projectId) return;
       if (!response.ok) throw new Error(response.error);
-      setConfiguration(response.value); setLoaded(true);
+      setConfiguration(response.value); setLoaded(true); setDraftProject(projectId);
     }).catch((cause: unknown) => {
-      if (request === sequence.current) setError(cause instanceof Error ? cause.message : "Could not load label rules.");
+      if (request === sequence.current) showError(cause instanceof Error ? cause.message : "Could not load label rules.", () => {
+        if (request === sequence.current && currentProject.current === projectId) setReload((value) => value + 1);
+      });
     });
-    return () => { sequence.current++; };
+    return () => { sequence.current++; clearErrorToast(); };
   }, [api, projectId, reload]);
 
+  useEffect(() => {
+    // The owner outlives the modal. Never publish the previous project's state
+    // during the render before its replacement configuration has loaded.
+    if (!loaded || draftProject !== projectId) return;
+    onDraftChangeRef.current?.({ projectId, configuration, label,
+      ...(preview === undefined ? {} : { preview }), ...(status === undefined ? {} : { status }) });
+  }, [configuration, label, preview, status, loaded, draftProject, projectId]);
+
   function edit(next: BeagleRuleConfiguration) {
+    clearErrorToast();
     setConfiguration(next); setPreview(undefined); setError(undefined); setStatus("Unsaved rule changes");
   }
   function update(values: Partial<BeagleAssetGroup>) {
@@ -61,9 +105,9 @@ export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onA
       seeds: group.seeds.filter((seed) => seed.type !== "objectid" || seed.value.trim()).map((seed) => seed.type === "objectid" ? { ...seed, value: seed.value.trim() } : seed),
       exclusions: group.exclusions.map((id) => id.trim()).filter(Boolean),
     })) }); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Invalid label rules."); return; }
+    catch (cause) { showError(cause instanceof Error ? cause.message : "Invalid label rules."); return; }
     const request = ++sequence.current;
-    setBusy(true); setError(undefined); setStatus(undefined); setPreview(undefined);
+    clearErrorToast(); setBusy(true); setError(undefined); setStatus(undefined); setPreview(undefined);
     onBusyChange?.(true);
     try {
       if (apply) {
@@ -71,7 +115,8 @@ export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onA
         if (request !== sequence.current || currentProject.current !== projectId) return;
         if (!response.ok) throw new Error(response.error);
         if (response.value.state.selectedProjectId !== projectId) return;
-        setConfiguration(validated); setStatus("Rules saved and applied. They will run again on analysis and import.");
+        // The containing workspace announces success and owns its report action.
+        setConfiguration(validated); setStatus(undefined);
         onApplied(response.value);
       } else {
         const response = await api.previewRules({ configuration: validated });
@@ -80,7 +125,7 @@ export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onA
         setPreview(response.value); setStatus("Preview only. The project and saved rules have not changed.");
       }
     } catch (cause) {
-      if (request === sequence.current) setError(cause instanceof Error ? cause.message : "Could not evaluate label rules.");
+      if (request === sequence.current) showError(cause instanceof Error ? cause.message : "Could not evaluate label rules.");
     } finally { if (request === sequence.current) setBusy(false); onBusyChange?.(false); }
   }
 
@@ -95,13 +140,13 @@ export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onA
       <Checkbox isSelected={rule.enabled} isDisabled={locked} onChange={(enabled) => update({ enabled })}><Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>Enable rule</Checkbox.Content></Checkbox>
       <p className="text-xs text-muted">Disabling a rule preserves its settings and restores analysis defaults for that label.</p>
       <TextField value={rule.seeds.filter((seed) => seed.type === "objectid").map((seed) => seed.value).join("\n")} onChange={(value) => update({ seeds: [...(value ? value.split("\n") : []).map((value) => ({ type: "objectid" as const, value })), ...rule.seeds.filter((seed) => seed.type === "cypher")] })} isDisabled={locked}>
-        <Label>Object ID selectors (one per line)</Label><TextArea rows={3} />
+        <Label>Object ID selectors (one per line)</Label><TextArea variant="secondary" rows={3} />
       </TextField>
       {rule.seeds.filter((seed) => seed.type === "cypher").map((seed, index) => <div className="flex flex-col gap-2" key={index}>
         <TextField value={seed.value} isDisabled={locked} onChange={(value) => {
           let current = -1;
           update({ seeds: rule.seeds.map((entry) => entry.type === "cypher" && ++current === index ? { ...entry, value } : entry) });
-        }}><Label>Cypher selector {index + 1}</Label><TextArea rows={4} className="font-mono" /></TextField>
+        }}><Label>Cypher selector {index + 1}</Label><TextArea variant="secondary" rows={4} className="font-mono" /></TextField>
         <Button size="sm" variant="tertiary" isDisabled={locked} onPress={() => { let current = -1; update({ seeds: rule.seeds.filter((entry) => entry.type !== "cypher" || ++current !== index) }); }}>Remove Cypher selector {index + 1}</Button>
       </div>)}
       <Button size="sm" variant="tertiary" isDisabled={locked || rule.seeds.length >= 128} onPress={() => update({ seeds: [...rule.seeds, { type: "cypher", value: "MATCH (n:User) RETURN n LIMIT 100" }] })}>Add Cypher selector</Button>
@@ -110,15 +155,14 @@ export function BeagleRulesPanel({ api, projectId, labels, disabled = false, onA
         <NativeSelect.Option value="none">Selected objects only</NativeSelect.Option><NativeSelect.Option value="children">Children</NativeSelect.Option><NativeSelect.Option value="parents">Parents</NativeSelect.Option><NativeSelect.Option value="all">Children and parents</NativeSelect.Option><NativeSelect.Indicator />
       </NativeSelect.Trigger></NativeSelect>
       <p className="text-xs text-muted">Children include group members and contained objects. Parents include applicable containers and linked GPOs; parent expansion does not add siblings.</p>
-      <TextField value={rule.exclusions.join("\n")} onChange={(value) => update({ exclusions: value ? value.split("\n") : [] })} isDisabled={locked}><Label>Excluded object IDs (one per line)</Label><TextArea rows={3} /></TextField>
+      <TextField value={rule.exclusions.join("\n")} onChange={(value) => update({ exclusions: value ? value.split("\n") : [] })} isDisabled={locked}><Label>Excluded object IDs (one per line)</Label><TextArea variant="secondary" rows={3} /></TextField>
       <Checkbox isSelected={rule.tier} isDisabled={locked} onChange={(tier) => update({ tier })}><Checkbox.Content><Checkbox.Control><Checkbox.Indicator /></Checkbox.Control>Use tier precedence</Checkbox.Content></Checkbox>
-      <TextField value={String(rule.priority)} onChange={(value) => update({ priority: value === "" ? 0 : Number(value) })} isDisabled={locked}><Label>Priority</Label><Input type="number" min={0} max={1_000_000} /></TextField>
+      <TextField value={String(rule.priority)} onChange={(value) => update({ priority: value === "" ? 0 : Number(value) })} isDisabled={locked}><Label>Priority</Label><Input variant="secondary" type="number" min={0} max={1_000_000} /></TextField>
       <p className="text-xs text-muted">Lower priority numbers claim overlapping tier objects first. Equal priorities use rule list order. Non-tier rules may overlap.</p>
       <Button size="sm" variant="danger-soft" isDisabled={locked} onPress={() => edit({ groups: configuration.groups.filter((entry) => entry.label !== label) })}>Remove rule for {label}</Button>
     </div> : null}
     <div className="flex flex-wrap gap-2"><Button size="sm" variant="secondary" isDisabled={locked} onPress={() => { void run(false); }}>Preview all rules</Button><Button size="sm" isDisabled={locked} onPress={() => { void run(true); }}>Save and apply rules</Button></div>
     {busy ? <p role="status" className="text-muted">Evaluating label rules…</p> : status ? <p role="status" className="text-muted">{status}</p> : null}
-    {error ? <div className="flex flex-col gap-2"><p role="alert" className="text-danger">{error}</p>{!loaded ? <Button size="sm" variant="secondary" isDisabled={disabled || busy} onPress={() => setReload((value) => value + 1)}>Reload label rules</Button> : null}</div> : null}
     {preview ? <div aria-label="Rule preview" className="flex flex-col gap-3">
       <p className="font-medium">Rule-selected objects before per-object tag overrides</p>
       {Object.entries(preview.counts).map(([name, total]) => <div key={name} className="flex flex-col gap-2 border-t border-separator pt-3">

@@ -8,18 +8,9 @@
 .beagle-toolbar__actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .beagle-summary { display: flex; gap: 24px; color: var(--color-muted); align-items: center; font-size: 12px; margin-top: 12px; min-height: 24px; font-variant-numeric: tabular-nums; }
 .beagle-summary strong { font-weight: 600; color: var(--color-foreground); }
-.beagle-busy { margin-left: auto; display: flex; align-items: center; gap: 6px; }
-.beagle-inline-panel { flex: none; padding: 12px 24px; background: var(--color-surface-secondary); display: flex; align-items: end; gap: 12px; }
-.beagle-project-name { width: min(320px, 50%); }
-.beagle-runtime { align-items: center; justify-content: space-between; }
-.beagle-runtime strong { font-size: 13px; }
-.beagle-runtime p, .beagle-runtime code { display: block; font-size: 12px; color: var(--color-muted); overflow-wrap: anywhere; }
-.beagle-message { display: flex; align-items: center; gap: 8px; padding: 8px 16px 8px 24px; font-size: 13px; background: var(--color-surface-secondary); flex: none; }
-.beagle-message > span { flex: 1; overflow-wrap: anywhere; }
-.beagle-message--error { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 9%, var(--color-background)); }
-.beagle-operation-report { flex: none; max-height: 180px; overflow: auto; padding: 12px 24px; font-size: 11px; background: var(--color-surface-secondary); }
-.beagle-analysis-diagnostics { flex: none; max-height: 220px; overflow: auto; padding: 8px 24px; background: var(--color-surface-secondary); }
-.beagle-analysis-diagnostics:empty { display: none; }
+.beagle-summary__actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.beagle-project-tools-panel[data-inert] { display: none; }
+.beagle-operation-report { overflow: auto; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .beagle-body { display: flex; flex: 1; min-height: 0; border-top: 1px solid var(--color-separator); }
 .beagle-sidebar { width: 284px; min-width: 250px; border-right: 1px solid var(--color-separator); display: flex; min-height: 0; }
 .beagle-sidebar-tabs { width: 100%; min-height: 0; display: flex; flex-direction: column; }
@@ -198,7 +189,5 @@
 .beagle-edge-guidance p { font-size: 12px; line-height: 1.65; margin-top: 8px; }
 .beagle-edge-guidance a { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--color-accent); text-decoration: underline; }
 .beagle-edge-endpoints button, .beagle-composition > button { min-height: 28px; height: auto; white-space: normal; text-align: left; justify-content: start; overflow-wrap: anywhere; font-size: 11px; }
-.beagle-management-panel { flex: none; max-height: 48vh; overflow: auto; padding: 16px 24px; border-top: 1px solid var(--color-separator); background: var(--color-surface-secondary); }
-.beagle-management-panel .beagle-rules { max-width: 1000px; }
 @media (max-width: 1100px) { .beagle-history > span { display: none; } .beagle-history { padding-inline: 8px; } .beagle-result-summary { max-width: 160px; } }
 @media (max-width: 900px) { .beagle-toolbar__actions { flex-wrap: wrap; } .beagle-result-heading { gap: 4px; flex-wrap: wrap; } .beagle-graph__tools { bottom: 8px; left: 8px; max-width: calc(100% - 16px); } }

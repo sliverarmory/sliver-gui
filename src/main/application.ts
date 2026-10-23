@@ -100,6 +100,7 @@ import { TextEditorSettingsStore } from "./text-editor-settings.js";
 import { RdpWindows, type RdpRuntimeFactory } from "./rdp-windows.js";
 import { RdpStore } from "./rdp-store.js";
 import { resolveVerifiedRdpRuntime } from "./rdp-runtime-loader.js";
+import { resolveVerifiedBeagleRuntime } from "./beagle-runtime-loader.js";
 import { RDP_SESSION_PARTITION } from "./window-options.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
@@ -214,6 +215,7 @@ export interface StartApplicationOptions {
   networkPreloadPath?: string;
   armoryPreloadPath?: string;
   beaglePreloadPath?: string;
+  beagleRuntimeRootDirectory?: string;
   sshPreloadPath?: string;
   textEditorPreloadPath?: string;
   rdpPreloadPath?: string;
@@ -382,7 +384,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const zoomReadyWorkspaceContents = new Set<number>();
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
   const beagleRendererUrl = rendererUrlForSurface(rendererUrl, "beagle");
-  const beagleService = new BeagleService({ userDataPath: app.getPath("userData") });
+  const beagleService = new BeagleService({
+    userDataPath: app.getPath("userData"),
+    resolveBundledRuntime: () => resolveVerifiedBeagleRuntime({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      developmentRoot: options.beagleRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../.."),
+    }),
+  });
   let beagleWindow: BrowserWindow | undefined;
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
