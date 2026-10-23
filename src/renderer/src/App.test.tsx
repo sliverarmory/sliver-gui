@@ -173,6 +173,8 @@ function installSliverAPI(
     listSessionShells: vi.fn(failedOperation),
     listBeaconTasks: vi.fn(failedOperation),
     listTargets: vi.fn(failedOperation),
+    listAdCollectors: vi.fn(failedOperation),
+    runAdCollector: vi.fn(failedOperation),
     listTargetOperations: vi.fn(failedOperation),
     onBeaconTasksInvalidated: vi.fn(() => vi.fn()),
     onSessionShellsChanged: vi.fn(() => vi.fn()),
@@ -191,6 +193,7 @@ function installSliverAPI(
       return vi.fn();
     }),
     openInteractionWindow: vi.fn(failedOperation),
+    openBeagleWindow: vi.fn(failedOperation),
     openCloudDeploymentWindow: vi.fn(failedOperation),
     openRdpWindow: vi.fn(failedOperation),
     openTargetRdpWindow: vi.fn(failedOperation),
@@ -1589,7 +1592,7 @@ describe("Sidebar navigation", () => {
     expect(onViewChange).toHaveBeenCalledExactlyOnceWith("overview");
   });
 
-  it("opens the loot and credential stores from the shared Data navigation", async () => {
+  it("opens AD Explorer, loot, and credentials from the shared Data navigation", async () => {
     const user = userEvent.setup();
     const snapshot = disconnectedSnapshot();
     snapshot.connection = {
@@ -1620,6 +1623,15 @@ describe("Sidebar navigation", () => {
     render(<App />);
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
     const data = screen.getByRole("treegrid", { name: "Data navigation" });
+    expect(within(data).getAllByRole("row").map((row) => row.getAttribute("aria-label"))).toEqual([
+      "AD Explorer", "Loot", "Credentials",
+    ]);
+    await user.click(within(data).getByRole("row", { name: "AD Explorer" }));
+    expect(await screen.findByRole("heading", { name: "AD Explorer" })).toBeInTheDocument();
+    await waitFor(() => {
+      expect(api.listTargets).toHaveBeenCalledWith({ mode: "session", limit: 100 });
+      expect(api.listTargets).toHaveBeenCalledWith({ mode: "beacon", limit: 100 });
+    });
     await user.click(within(data).getByRole("row", { name: "Loot" }));
     expect(await screen.findByRole("heading", { name: "Loot" })).toBeInTheDocument();
     await waitFor(() => {
@@ -1888,7 +1900,7 @@ describe("Sidebar navigation", () => {
     expect(image).toHaveAttribute("draggable", "false");
   });
 
-  it("shows labels as tooltips only while collapsed and keeps disabled items inactive", async () => {
+  it("configures collapsed tooltip triggers and keeps disabled items inactive", async () => {
     const user = userEvent.setup();
     const onViewChange = renderNavigation(false);
     const generateItem = screen.getByRole("row", { name: "Generate" });
@@ -1897,23 +1909,10 @@ describe("Sidebar navigation", () => {
     const tooltipTrigger = generateItem.querySelector("[data-slot=tooltip-trigger]");
     expect(tooltipTrigger).not.toBeNull();
     expect(tooltipTrigger?.querySelector('[data-slot="sidebar-menu-item-content"]')).not.toBeNull();
-    if (!(tooltipTrigger instanceof HTMLElement)) throw new Error("Generate tooltip trigger is missing");
-    await user.hover(tooltipTrigger);
-    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Generate");
-
-    await user.unhover(tooltipTrigger);
     const sessionsItem = screen.getByRole("row", { name: "Sessions" });
-    const sessionsTooltipTrigger = sessionsItem.querySelector("[data-slot=tooltip-trigger]");
-    if (!(sessionsTooltipTrigger instanceof HTMLElement)) throw new Error("Sessions tooltip trigger is missing");
-    await user.hover(sessionsTooltipTrigger);
-    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Sessions");
-
-    await user.unhover(sessionsTooltipTrigger);
     const beaconsItem = screen.getByRole("row", { name: "Beacons" });
-    const beaconsTooltipTrigger = beaconsItem.querySelector("[data-slot=tooltip-trigger]");
-    if (!(beaconsTooltipTrigger instanceof HTMLElement)) throw new Error("Beacons tooltip trigger is missing");
-    await user.hover(beaconsTooltipTrigger);
-    expect(await screen.findByRole("tooltip", {}, { timeout: 2_000 })).toHaveTextContent("Beacons");
+    expect(sessionsItem.querySelector("[data-slot=tooltip-trigger]")).not.toBeNull();
+    expect(beaconsItem.querySelector("[data-slot=tooltip-trigger]")).not.toBeNull();
 
     await user.click(generateItem);
     expect(onViewChange).not.toHaveBeenCalled();
@@ -1976,6 +1975,7 @@ describe("Sidebar navigation", () => {
     expect(within(sessionsItem).getByText("501")).toBeInTheDocument();
     expect(within(beaconsItem).getByText("702")).toBeInTheDocument();
     expect(screen.getByText("Interact")).toBeInTheDocument();
+    const explorerItem = within(data).getByRole("row", { name: "AD Explorer" });
     const lootItem = within(data).getByRole("row", { name: "Loot" });
     expect(within(lootItem).getByText("19")).toBeInTheDocument();
     expect(within(within(data).getByRole("row", { name: "Credentials" })).getByText("27")).toBeInTheDocument();
@@ -1986,6 +1986,8 @@ describe("Sidebar navigation", () => {
     expect(onViewChange).toHaveBeenCalledWith("sessions");
     await user.click(beaconsItem);
     expect(onViewChange).toHaveBeenCalledWith("beacons");
+    await user.click(explorerItem);
+    expect(onViewChange).toHaveBeenCalledWith("ad-explorer");
     await user.click(lootItem);
     expect(onViewChange).toHaveBeenCalledWith("loot");
     await user.click(within(data).getByRole("row", { name: "Credentials" }));

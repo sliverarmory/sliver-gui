@@ -303,6 +303,12 @@ import {
 } from "./bof-workbench.js";
 import { packLegacyBofArguments, readInstalledBofLoader } from "./bof-legacy-dispatch.js";
 import { installedDotNetAssemblies, MAX_DOTNET_ASSEMBLY_BYTES, readInstalledDotNetAssembly } from "./dotnet-armory.js";
+import { collectSharpHound } from "./ad-collector.js";
+import { isVerifiedSharpHoundCeExecutable, isVerifiedSharpHoundCeScript, VERIFIED_SHARPHOUND_CE } from "./ad-collector-compatibility.js";
+import { collectRustHound, type RustHoundMethod } from "./rusthound-collector.js";
+import { installedRustHound, isVerifiedRustHoundBuild, readInstalledRustHound } from "./rusthound-armory.js";
+import { AD_COLLECTION_METHODS, RUSTHOUND_COLLECTION_METHODS, RUSTHOUND_ARMORY_COLLECTOR_ID,
+  type AdCollectorCatalog, type AdCollectorRunInput } from "../shared/ad-explorer-contracts.js";
 import {
   ExecutionArtifactStore,
   type ExecutionArtifactScope,
@@ -745,6 +751,7 @@ export class ConnectionRegistry {
   private readonly terminalRuntimeAdmissions = new Set<number>();
   private readonly sessionShellPrepareGlobalAdmissions = new Set<string>();
   private readonly executionGlobalAdmissions = new Set<string>();
+  private readonly adCollectorAdmissions = new Set<string>();
   private readonly sessionSaveIntents = new Map<string, SessionSaveIntent>();
   private readonly sessionSaveLocks = new Map<string, Promise<void>>();
   private sessionSaveReservationTail: Promise<void> = Promise.resolve();
@@ -2564,6 +2571,210 @@ export class ConnectionRegistry {
       }
       return catalog;
     });
+  }
+
+  /** Only collector builds that passed the Beagle compatibility gate appear as defaults. */
+  async listAdCollectors(contentsId: number, targetRef: TargetRef): Promise<OperationResult<AdCollectorCatalog>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      assertTargetDomainAuthoritative(pool, targetRef.mode);
+      if (!pool.targetStore.isCurrentTargetRef(targetRef, pool.epoch)) {
+        throw new Error("The target inventory changed; refresh AD Explorer");
+      }
+      const current = pool.targetStore.revalidateTargetRef(targetRef, pool.epoch);
+      if (!current) throw new Error("The selected target is no longer available");
+      let reason: string | undefined;
+      try { assertExecutionOperationSupported("execution.assembly", current.target); }
+      catch { reason = "SharpHound requires a Windows target that supports .NET assembly execution"; }
+      if (current.target.os !== "windows" || !["amd64", "386"].includes(current.target.arch)) {
+        reason = "SharpHound requires a Windows x64 or x86 target";
+      }
+      if (current.target.mode === "session" && current.target.liveness !== "active") {
+        reason = "The selected Windows session is no longer active";
+      }
+      const { entries } = await installedDotNetAssemblies(this.clientRootDirectory, current.target, current.ref);
+      let rustHound: Awaited<ReturnType<typeof installedRustHound>> = null;
+      try { rustHound = await installedRustHound(this.clientRootDirectory, current.target); }
+      catch {
+        // A damaged or manually modified package must not hide other collectors.
+      }
+      assertBinding();
+      const collectors: AdCollectorCatalog["collectors"] = [];
+      if (rustHound && isVerifiedRustHoundBuild(rustHound) &&
+          pool.client.nativeExtensionArtifactTransportAvailable) {
+        let artifact: Buffer | undefined;
+        try {
+          artifact = await readInstalledRustHound(rustHound);
+          const rustReason = current.target.mode === "session" && current.target.liveness !== "active"
+            ? "The selected Windows session is no longer active" : undefined;
+          collectors.push({
+            id: RUSTHOUND_ARMORY_COLLECTOR_ID,
+            name: `RustHound CE ${rustHound.version} (in memory)`, source: "armory", compatibility: "verified",
+            description: "Run the signed sliverarmory RustHound DLL through Reflektor and import its ZIP into Beagle.",
+            collectionMethods: RUSTHOUND_COLLECTION_METHODS, available: !rustReason,
+            ...(rustReason ? { reason: rustReason } : {}),
+          });
+        } catch {
+          // Changed or invalid DLLs never enter the verified picker.
+        } finally { artifact?.fill(0); }
+      }
+      collectors.push({
+        id: "sharphound:verified:file", name: `SharpHound CE ${VERIFIED_SHARPHOUND_CE.version}`, source: "native-file",
+        compatibility: "verified",
+        description: "Choose the verified official SharpHound CE executable when you run it.",
+        collectionMethods: AD_COLLECTION_METHODS, available: !reason,
+        ...(reason ? { reason } : {}),
+      }, {
+        id: "sharphound:verified:script", name: `SharpHound CE ${VERIFIED_SHARPHOUND_CE.version} PowerShell`, source: "native-file",
+        compatibility: "verified",
+        description: "Choose the verified official Invoke-BloodHound script when you run it.",
+        collectionMethods: AD_COLLECTION_METHODS, available: !reason,
+        ...(reason ? { reason } : {}),
+      });
+      for (const entry of entries) {
+        if (reason || !entry.dto.available || entry.dto.isDll || !/\.exe$/iu.test(entry.dto.fileName) ||
+            !/sharphound/iu.test(`${entry.dto.commandName} ${entry.dto.packageName} ${entry.dto.fileName}`)) continue;
+        let artifact: Buffer | undefined;
+        try {
+          artifact = await readInstalledDotNetAssembly(entry);
+          if (!isVerifiedSharpHoundCeExecutable(artifact)) continue;
+          collectors.push({
+            id: `sharphound:armory:${entry.dto.id}`,
+            name: `${entry.dto.packageName || entry.dto.commandName} (verified CE ${VERIFIED_SHARPHOUND_CE.version})`,
+            source: "armory", compatibility: "verified", description: entry.dto.description,
+            collectionMethods: AD_COLLECTION_METHODS, available: true,
+          });
+        } catch {
+          // Unreadable or changed aliases do not qualify as verified collectors.
+        } finally { artifact?.fill(0); }
+      }
+      collectors.push({
+        id: "sharphound:custom:file", name: "Operator-supplied .NET executable", source: "native-file",
+        compatibility: "operator-supplied",
+        description: "Use an executable that accepts SharpHound CE options; Beagle checks its output before import.",
+        collectionMethods: AD_COLLECTION_METHODS, available: !reason,
+        ...(reason ? { reason } : {}),
+      }, {
+        id: "sharphound:custom:script", name: "Operator-supplied Invoke-BloodHound script", source: "native-file",
+        compatibility: "operator-supplied",
+        description: "Use a PowerShell script with Invoke-BloodHound; Beagle checks its output before import.",
+        collectionMethods: AD_COLLECTION_METHODS, available: !reason,
+        ...(reason ? { reason } : {}),
+      });
+      assertBinding();
+      return { target: { ...targetRef }, collectors };
+    });
+  }
+
+  /** Main-only collection result. The absolute saved path is consumed by Beagle
+   * in main and is never returned to the renderer bridge. */
+  async runAdCollector(contentsId: number, input: AdCollectorRunInput, nativeFilePath?: string): Promise<OperationResult<{ path: string; domain: string; collectorId: string; targetId: string }>> {
+    const admissionId = `${input.target.backendEpoch}:${input.target.mode}:${input.target.id}`;
+    if (this.adCollectorAdmissions.has(admissionId)) return { ok: false, error: "A collection is already running on this target" };
+    this.adCollectorAdmissions.add(admissionId);
+    try {
+      return await this.withPool(contentsId, async (pool, assertBinding) => {
+        assertTargetDomainAuthoritative(pool, input.target.mode);
+        if (!pool.targetStore.isCurrentTargetRef(input.target, pool.epoch)) {
+          throw new Error("The target inventory changed; refresh AD Explorer");
+        }
+        const current = pool.targetStore.revalidateTargetRef(input.target, pool.epoch);
+        if (!current) throw new Error("The selected target is no longer available");
+        if (input.collectorId === RUSTHOUND_ARMORY_COLLECTOR_ID) {
+          if (nativeFilePath !== undefined) throw new Error("RustHound uses only its installed Armory DLL");
+          if (!RUSTHOUND_COLLECTION_METHODS.includes(input.collectionMethod as RustHoundMethod)) {
+            throw new Error("Choose a supported RustHound collection method");
+          }
+          if (!input.credentials) throw new Error("RustHound requires a user name and password");
+          const installed = await installedRustHound(this.clientRootDirectory, current.target);
+          if (!installed || !isVerifiedRustHoundBuild(installed)) {
+            throw new Error("The compatible RustHound Armory DLL is unavailable; refresh collectors");
+          }
+          const dll = await readInstalledRustHound(installed);
+          try {
+            const assertCurrent = (): void => {
+              assertBinding();
+              // Revalidate exact ID, fingerprint, and backend epoch without
+              // coupling an in-flight collection to unrelated catalog revisions.
+              const latest = pool.targetStore.revalidateTargetRef(input.target, pool.epoch);
+              if (!latest || (latest.target.mode === "session" && latest.target.liveness !== "active")) {
+                throw new Error("The selected target changed during AD collection");
+              }
+            };
+            const path = await collectRustHound({
+              client: pool.client, target: current.target, dll,
+              domain: input.domain, method: input.collectionMethod as RustHoundMethod,
+              ...(input.ldapFqdn ? { ldapFqdn: input.ldapFqdn } : {}),
+              ...(input.ldaps ? { ldaps: true } : {}),
+              username: input.credentials.username, password: input.credentials.password,
+              collectionRoot: join(this.clientRootDirectory, "gui", "ad-explorer", "collections"),
+              assertCurrent,
+            });
+            return { path, domain: input.domain, collectorId: input.collectorId, targetId: input.target.id };
+          } finally { dll.fill(0); }
+        }
+        assertExecutionOperationSupported("execution.assembly", current.target);
+        if (!AD_COLLECTION_METHODS.includes(input.collectionMethod as (typeof AD_COLLECTION_METHODS)[number])) {
+          throw new Error("Choose a supported SharpHound collection method");
+        }
+        if (current.target.os !== "windows" || !["amd64", "386"].includes(current.target.arch)) {
+          throw new Error("SharpHound requires a Windows x64 or x86 target");
+        }
+        if (current.target.mode === "session" && current.target.liveness !== "active") {
+          throw new Error("The selected Windows session is no longer active");
+        }
+        const catalog = await installedDotNetAssemblies(this.clientRootDirectory, current.target, current.ref);
+        let artifact: Buffer;
+        const script = input.collectorId === "sharphound:custom:script" || input.collectorId === "sharphound:verified:script";
+        if (["sharphound:verified:file", "sharphound:verified:script", "sharphound:custom:file", "sharphound:custom:script"].includes(input.collectorId)) {
+          if (!nativeFilePath || !win32Path.isAbsolute(nativeFilePath) && !nativeFilePath.startsWith("/")) {
+            throw new Error("Choose a collector with the native file picker");
+          }
+          if (!(script ? /\.ps1$/iu : /\.exe$/iu).test(nativeFilePath)) {
+            throw new Error(script ? "Choose an Invoke-BloodHound .ps1 file" : "Choose a SharpHound-compatible .exe file");
+          }
+          artifact = (await readBoundedRegularFile(nativeFilePath, {
+            label: script ? "Invoke-BloodHound script" : "SharpHound executable",
+            maxBytes: script ? 4 * 1024 * 1024 : MAX_DOTNET_ASSEMBLY_BYTES,
+          })).data;
+        } else {
+          if (nativeFilePath !== undefined) throw new Error("Unexpected local collector file");
+          const entry = catalog.entries.find((candidate) =>
+            `sharphound:armory:${candidate.dto.id}` === input.collectorId &&
+            candidate.dto.available && !candidate.dto.isDll && /\.exe$/iu.test(candidate.dto.fileName));
+          if (!entry) throw new Error("The installed SharpHound collector changed; refresh the catalog");
+          artifact = await readInstalledDotNetAssembly(entry);
+        }
+        try {
+          if (!script && (artifact.length < 2 || artifact[0] !== 0x4d || artifact[1] !== 0x5a)) {
+            throw new Error("The selected SharpHound file is not a Windows executable");
+          }
+          if (input.collectorId === "sharphound:verified:file" || input.collectorId.startsWith("sharphound:armory:")) {
+            if (!isVerifiedSharpHoundCeExecutable(artifact)) {
+              throw new Error(`Only the verified SharpHound CE ${VERIFIED_SHARPHOUND_CE.version} executable is available as a default. Use an operator-supplied collector for another version.`);
+            }
+          }
+          if (input.collectorId === "sharphound:verified:script" && !isVerifiedSharpHoundCeScript(artifact)) {
+            throw new Error(`Only the verified SharpHound CE ${VERIFIED_SHARPHOUND_CE.version} PowerShell script is available as a default. Use an operator-supplied collector for another version.`);
+          }
+          const assertCurrent = (): void => {
+            assertBinding();
+            if (!pool.targetStore.revalidateTargetRef(input.target, pool.epoch)) {
+              throw new Error("The selected target changed during AD collection");
+            }
+          };
+          const path = await collectSharpHound({
+            client: pool.client, target: current.target,
+            ...(script ? { collectorKind: "powershell" as const, script: artifact }
+              : { collectorKind: "exe" as const, assembly: artifact }),
+            domain: input.domain,
+            collectionMethod: input.collectionMethod,
+            collectionRoot: join(this.clientRootDirectory, "gui", "ad-explorer", "collections"),
+            assertCurrent,
+          });
+          return { path, domain: input.domain, collectorId: input.collectorId, targetId: input.target.id };
+        } finally { artifact.fill(0); }
+      });
+    } finally { this.adCollectorAdmissions.delete(admissionId); }
   }
 
   async chooseDotNetAssemblyFile(sender: WebContents): Promise<OperationResult<DotNetFileSelection | null>> {

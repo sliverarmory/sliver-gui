@@ -16,6 +16,7 @@ import { IPC, SLIVER_PROTOCOL_BASELINE_COMMIT, type ManagedCloudOverview, type M
 import { OPERATOR_DATA_LIMITS } from "../shared/operator-data-contracts.js";
 import type { ExecuteAssemblyDraft } from "../shared/execution-contracts.js";
 import type { SessionStoredArtifact } from "../shared/session-contracts.js";
+import { RUSTHOUND_ARMORY_COLLECTOR_ID } from "../shared/ad-explorer-contracts.js";
 import { WEBSITE_LIMITS, type WebsiteRenderedPreview } from "../shared/website-contracts.js";
 import {
   STREAM_PROTOCOL_VERSION,
@@ -70,6 +71,7 @@ import {
 import { BeaconTaskStore } from "./beacon-task-store.js";
 import type { OperationEngine } from "./operation-engine.js";
 import * as websiteFiles from "./websites.js";
+import { installedRustHound, readInstalledRustHound, VERIFIED_RUSTHOUND_DLL_SHA256 } from "./rusthound-armory.js";
 
 let root: string;
 let externalDirectory: string;
@@ -1126,6 +1128,86 @@ describe(".NET assembly execution sources", () => {
     }));
     return { manifestPath, artifactPath };
   }
+
+  it("hides unverified SharpHound aliases and rejects stale or unsupported target refs", async () => {
+    const directory = join(root, "aliases", "SharpHound CE");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "SharpHound.exe"), Buffer.from("MZfixture"));
+    await writeFile(join(directory, "alias.json"), JSON.stringify({
+      name: "SharpHound CE", command_name: "SharpHound CE", help: "AD collector", is_assembly: true,
+      files: [{ os: "windows", arch: "amd64", path: "SharpHound.exe" }],
+    }));
+    const { registry, client } = await windowsRegistry();
+    const ref = registry.snapshot(1).targetContext.activeTarget;
+    if (!ref) throw new Error("Expected selected Windows target ref");
+    await expect(registry.listAdCollectors(1, ref)).resolves.toMatchObject({ ok: true, value: {
+      collectors: [
+        { id: "sharphound:verified:file", compatibility: "verified", available: true },
+        { id: "sharphound:verified:script", compatibility: "verified", available: true },
+        { id: "sharphound:custom:file", compatibility: "operator-supplied", available: true },
+        { id: "sharphound:custom:script", compatibility: "operator-supplied", available: true },
+      ],
+    } });
+
+    client.sessionState.Sessions[0]!.Arch = "arm64";
+    await registry.refresh(1);
+    await expect(registry.listAdCollectors(1, ref)).resolves.toMatchObject({ ok: false });
+    const changed = registry.snapshot(1).targetContext.selectableTargets.find(({ id }) => id === "session_dotnet");
+    if (!changed) throw new Error("Expected refreshed Windows target ref");
+    await expect(registry.listAdCollectors(1, changed)).resolves.toMatchObject({ ok: true, value: {
+      collectors: [
+        { id: "sharphound:verified:file", available: false, reason: expect.stringContaining("x64 or x86") },
+        { id: "sharphound:verified:script", available: false, reason: expect.stringContaining("x64 or x86") },
+        { id: "sharphound:custom:file", available: false, reason: expect.stringContaining("x64 or x86") },
+        { id: "sharphound:custom:script", available: false, reason: expect.stringContaining("x64 or x86") },
+      ],
+    } });
+  });
+
+  it("lists an installed RustHound build only when the adapter advertises artifact transport", async () => {
+    const directory = join(root, "extensions", "rusthound-ce");
+    await mkdir(join(directory, "dist"), { recursive: true });
+    const dll = Buffer.alloc(128);
+    dll.writeUInt16LE(0x5a4d, 0);
+    dll.writeUInt32LE(64, 0x3c);
+    dll.writeUInt32LE(0x00004550, 64);
+    dll.writeUInt16LE(0x8664, 68);
+    dll.writeUInt16LE(0x2000, 86);
+    const digest = createHash("sha256").update(dll).digest("hex");
+    await writeFile(join(directory, "dist", "rusthound-ce-windows-amd64.dll"), dll);
+    await writeFile(join(directory, "extension.json"), JSON.stringify({
+      name: "RustHound CE", package_name: "rusthound-ce", command_name: "rusthound-ce",
+      version: "v2.5.29", repo_url: "https://github.com/sliverarmory/RustHound-CE",
+      help: "AD collection", entrypoint: "RustHoundCE",
+      files: [{ os: "windows", arch: "amd64", path: "dist/rusthound-ce-windows-amd64.dll", sha256: digest }],
+    }));
+    const { registry, client } = await windowsRegistry();
+    const ref = registry.snapshot(1).targetContext.activeTarget;
+    if (!ref) throw new Error("Expected selected Windows target ref");
+    const target = registry.snapshot(1).targetContext.activeTargetSummary;
+    if (!target) throw new Error("Expected selected Windows target");
+    VERIFIED_RUSTHOUND_DLL_SHA256.add(digest);
+    try {
+      const entry = await installedRustHound(root, target);
+      expect(entry?.artifactDigest).toBe(digest);
+      expect(await readInstalledRustHound(entry!)).toEqual(dll);
+      const unavailable = await registry.listAdCollectors(1, ref);
+      expect(unavailable).toMatchObject({ ok: true });
+      if (!unavailable.ok) throw new Error(unavailable.error);
+      expect(unavailable.value.collectors.some((collector) => collector.id === RUSTHOUND_ARMORY_COLLECTOR_ID)).toBe(false);
+
+      // The adapter exposes this reviewed capability; raw SDK methods are intentionally absent here.
+      Object.assign(client.adapter, { nativeExtensionArtifactTransportAvailable: true });
+      const available = await registry.listAdCollectors(1, ref);
+      expect(available).toMatchObject({ ok: true });
+      if (!available.ok) throw new Error(available.error);
+      expect(available.value.collectors[0]).toMatchObject({
+        id: RUSTHOUND_ARMORY_COLLECTOR_ID, compatibility: "verified", available: true,
+      });
+    } finally {
+      VERIFIED_RUSTHOUND_DLL_SHA256.delete(digest);
+    }
+  });
 
   it("stages an installed Armory assembly and dispatches its exact CLI arguments", async () => {
     const bytes = Buffer.from("managed-argument-echo");

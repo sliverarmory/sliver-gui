@@ -25,6 +25,7 @@ const groupNode: BeagleNode = { objectid: "S-1-5-21-512", labels: ["Group", "Bas
 let currentState: BeagleState;
 let workspaces = new Map<string, BeagleWorkspace>();
 let api: ReturnType<typeof createAPI>;
+let collectionImported: (() => void) | undefined;
 function graphResult(projectId = projectA): BeagleQueryResult {
   return { projectId, columns: ["p"], rows: [{ p: "one path" }], elapsedMs: 8, totalRows: 1, truncated: false,
     limits: { rows: 5_000, nodes: 1_500, edges: 3_000 }, graph: { nodes: [userNode, groupNode], edges: [{ id: "edge-1", source: userNode.objectid, target: groupNode.objectid, kind: "MemberOf", properties: {}, derived: null }] } };
@@ -78,6 +79,10 @@ function createAPI() {
     cancelOperation: vi.fn(async () => ({ ok: true as const, value: { cancelled: true } })),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
     onApplicationSettingsChanged: vi.fn(() => () => undefined),
+    onCollectionImported: vi.fn<BeagleAPI["onCollectionImported"]>((listener) => {
+      collectionImported = listener;
+      return () => { if (collectionImported === listener) collectionImported = undefined; };
+    }),
   } satisfies BeagleAPI;
 }
 
@@ -97,6 +102,7 @@ beforeEach(() => {
     projects: [{ id: projectA, name: "GOAD", createdAt: "2026-10-23" }, { id: projectB, name: "Other lab", createdAt: "2026-10-23" }],
     stats: { nodes: 100, edges: 250, labels: { Base: 100, User: 50, Group: 50 }, relationships: { MemberOf: 250 } } };
   workspaces = new Map();
+  collectionImported = undefined;
   api = createAPI();
   Object.defineProperty(window, "beagle", { configurable: true, value: api });
   localStorage.clear();
@@ -115,6 +121,16 @@ async function closeDialog(name: string) {
 }
 
 describe("BeagleWindowApp", () => {
+  it("refreshes the selected project when a managed collection is imported", async () => {
+    await mount();
+    currentState = { ...currentState, selectedProjectId: projectB,
+      stats: { ...currentState.stats!, nodes: 321 } };
+    act(() => collectionImported?.());
+    await waitFor(() => expect(api.getState).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    expect(screen.getByLabelText("Project summary")).toHaveTextContent("321 objects");
+  });
+
   it("runs real bridge queries with JSON parameters and renders scalar rows", async () => {
     api.query.mockResolvedValue({ ok: true, value: scalarResult() });
     await mount();

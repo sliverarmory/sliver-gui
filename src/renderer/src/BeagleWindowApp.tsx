@@ -196,6 +196,21 @@ export function BeagleWindowApp(): React.JSX.Element {
     setCypher(DEFAULT_QUERY); setParameters("{}"); setSelectedSavedId(undefined); setQueryName(""); setQueryDescription(""); setQueryCategory("");
   }, [clearNotifications]);
 
+  useEffect(() => {
+    if (!api) return;
+    let active = true;
+    const unsubscribe = api.onCollectionImported(() => {
+      void api.getState().then((response) => {
+        if (!active || !mounted.current) return;
+        if (!response.ok) { showError(response.error); return; }
+        resetProjectView();
+        setState(response.value);
+        showNotice("Collected AD data imported and analyzed.");
+      }).catch((cause: unknown) => { if (active && mounted.current) showError(errorText(cause)); });
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [api, resetProjectView, showError, showNotice]);
+
   async function updateState(label: string, action: () => Promise<OperationResult<BeagleState>>, switchProject = false, reloadCatalog = false) {
     if (mutationPending.current) return;
     mutationPending.current = true;

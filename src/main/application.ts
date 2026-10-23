@@ -3,6 +3,8 @@ import { registerGhosttySettingsIpc } from "./ghostty-settings-ipc.js";
 import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
 import { BeagleService } from "./beagle-service.js";
 import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers } from "./beagle-ipc.js";
+import { BEAGLE_IPC_EVENTS } from "../shared/beagle-contracts.js";
+import { registerAdExplorerIpcHandlers, unregisterAdExplorerIpcHandlers } from "./ad-explorer-ipc.js";
 import { BEAGLE_SESSION_PARTITION, beagleWindowOptions } from "./window-options.js";
 import { ArmoryService } from "./armory-service.js";
 import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers } from "./armory-ipc.js";
@@ -373,6 +375,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ".sliver-client",
   ));
   const registry = options.registry ?? new ConnectionRegistry({
+    clientRootDirectory: consoleClientRootDirectory,
     savedConfigDirectory: join(consoleClientRootDirectory, "configs"),
     managedConfigDirectory: join(consoleClientRootDirectory, "gui"),
   });
@@ -386,6 +389,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   const beagleRendererUrl = rendererUrlForSurface(rendererUrl, "beagle");
   const beagleService = new BeagleService({
     userDataPath: app.getPath("userData"),
+    collectionRootPath: join(consoleClientRootDirectory, "gui", "ad-explorer", "collections"),
     resolveBundledRuntime: () => resolveVerifiedBeagleRuntime({
       isPackaged: app.isPackaged,
       resourcesPath: process.resourcesPath,
@@ -805,7 +809,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   async function openBeagleWindow(): Promise<void> {
-    if (shutdown.isStopping) return;
+    if (shutdown.isStopping) throw new Error("AD Explorer is closing");
     if (beagleWindow && !beagleWindow.isDestroyed() && !beagleWindow.webContents.isDestroyed()) {
       if (beagleWindow.isMinimized()) beagleWindow.restore();
       beagleWindow.show();
@@ -823,11 +827,17 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
       trackWindow(window, undefined, undefined, undefined, undefined, "beagle", false);
       await loadRenderer(window, "beagle");
+      if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error("AD Explorer window closed during loading");
     } catch {
       if (beagleWindow === createdWindow) beagleWindow = undefined;
       if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
-      if (!shutdown.isStopping) dialog.showErrorBox("AD Explorer unavailable", "The AD Explorer window could not be opened");
+      throw new Error("The AD Explorer window could not be opened");
     }
+  }
+
+  function publishBeagleCollectionImported(): void {
+    if (shutdown.isStopping || !beagleWindow || beagleWindow.isDestroyed() || beagleWindow.webContents.isDestroyed()) return;
+    try { beagleWindow.webContents.send(BEAGLE_IPC_EVENTS.collectionImported); } catch { /* Closing renderer. */ }
   }
 
   function publishArmoryChanged(): void {
@@ -2431,7 +2441,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           });
         },
         openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
-        openBeagle: () => void openBeagleWindow(),
+        openBeagle: () => void openBeagleWindow().catch((error: unknown) => {
+          if (!shutdown.isStopping) dialog.showErrorBox("AD Explorer unavailable", error instanceof Error ? error.message : "The AD Explorer window could not be opened");
+        }),
         openArmory: (tab) => void openArmoryWindow(tab),
         openNetwork: (tab, sourceWindow) => {
           void openNetworkWindow(
@@ -3303,6 +3315,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     !shutdown.isStopping && beagleWindow === window && nativeWindowSurfaces.get(window) === "beagle" &&
     sameWindowIdentity(identity, identityForWindow(window)),
   );
+  registerAdExplorerIpcHandlers({
+    registry,
+    importCollectedData: async (input) => {
+      const imported = await beagleService.importCollectedData(input);
+      publishBeagleCollectionImported();
+      return { projectId: imported.state.selectedProjectId };
+    },
+    openBeagleWindow,
+  }, rendererUrl, (identity, window) =>
+    !shutdown.isStopping && nativeWindowSurfaces.get(window) === "workspace" &&
+    windowsByContentsId.get(identity.contentsId) === window &&
+    sameWindowIdentity(identity, identityForWindow(window)),
+  );
   registerArmoryIpcHandlers({
     manager: armoryService,
     writeClipboardText: (text) => clipboard.writeText(text),
@@ -3408,6 +3433,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterCloudDeploymentIpcHandlers();
       unregisterNetworkForwardingIpcHandlers();
       unregisterArmoryIpcHandlers();
+      unregisterAdExplorerIpcHandlers();
       unregisterBeagleIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();

@@ -233,6 +233,32 @@ constraints.
 
 ### Active Directory Explorer (Beagle)
 
+Open **Data → AD Explorer** in the main workspace to collect from Windows
+sessions and beacons. Targets are grouped by Windows domain; assign a DNS domain
+to a target before collecting because Sliver's target inventory does not supply
+an authoritative AD domain. The first verified choice on Windows/amd64 is the
+exact GOAD-tested [sliverarmory RustHound-CE](https://github.com/sliverarmory/RustHound-CE)
+DLL when installed through Armory. It collects into target memory through
+Reflektor, returns bounded chunks, and does not create a target-side output
+file. The other verified choices are the exact
+[SharpHound CE v2.17.1](https://github.com/SpecterOps/SharpHound/releases/tag/v2.17.1)
+executable and its `Invoke-BloodHound` PowerShell script, selected through the
+native picker. An installed Armory alias appears only when its executable has
+the same verified digest. Legacy SharpHound3/4 aliases are excluded. Advanced
+choices allow an operator-supplied SharpHound-compatible `.exe` or
+`Invoke-BloodHound` `.ps1`. These use fixed collection options, and Beagle
+validates their output before reporting an import. Select a collection method
+and run it. The GUI saves the resulting ZIP privately under
+`~/.sliver-client/gui/ad-explorer/collections/<domain>/`, imports it into a
+domain project, and opens the standalone AD Explorer window. The collector
+is supplied through Armory or selected by the operator and is not bundled with
+the GUI. RustHound transfers ZIPs up to 64 MiB in bounded chunks for sessions
+and beacons. SharpHound session downloads support ZIPs under 64 MiB; its beacon
+downloads are limited to 12 MiB by the current Sliver client RPC channel.
+Generated SharpHound target ZIPs are removed after a verified local save when
+possible. SharpHound requires a domain user context on the target; see its
+[upstream usage guide](https://github.com/SpecterOps/SharpHound).
+
 Open **View → AD Explorer** for a standalone local AD workspace. Create a project,
 choose **Import data** to load SharpHound ZIP/JSON collections, then search entities,
 run parameterized Cypher or a built-in BloodHound query, and inspect the React Flow
@@ -289,6 +315,8 @@ npm run test:e2e:beagle
 
 See [the implementation plan](docs/beagle-implementation-plan.md) and
 [compatibility evidence and reproduction instructions](docs/beagle-verification.md).
+The [AD collector compatibility record](docs/ad-collector-compatibility.md) lists
+the verified default, advanced operator choices, and other collectors considered.
 The [persistent helper architecture](docs/beagle-helper.md) describes its protocol,
 executable trust, environment and lifecycle.
 The private lab collection and generated databases are excluded from version control.

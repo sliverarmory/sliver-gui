@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { basename, extname, isAbsolute, join } from "node:path";
+import { chmod, lstat, mkdir, open, readdir, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, extname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   BEAGLE_PROJECT_ID, BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, BEAGLE_NEIGHBORHOOD_PAGE_SIZE, parseBeagleComposeInput, parseBeagleCreateProjectInput,
@@ -32,6 +32,7 @@ const QUERY_TIMEOUT_MS = 40_000;
 const WORKFLOW_TIMEOUT_MS = 5 * 60_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const MAX_PROJECTS = 100;
+export class BeaglePostCommitError extends Error {}
 // Only private, randomly named staging files created by this service. Never
 // match a committed database, project metadata, or user-selected output file.
 const ABANDONED_STAGE = /^\.(?:(?:mutation|backup)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.db(?:-wal|-shm|-journal)?|empty-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json)$/u;
@@ -45,6 +46,8 @@ interface ProjectConfiguration {
 }
 export interface BeagleServiceOptions {
   userDataPath: string;
+  /** Main-owned SharpHound downloads, normally ~/.sliver-client/gui/ad-explorer/collections. */
+  collectionRootPath?: string;
   environment?: NodeJS.ProcessEnv;
   createRuntime?: typeof createBeagleRuntime;
   verifier?: BeagleExecutableVerifier;
@@ -54,6 +57,7 @@ export interface BeagleServiceOptions {
 /** One serialized owner for every project's database, including reads and project switches. */
 export class BeagleService {
   private readonly rootPath: string;
+  private readonly collectionRootPath: string | undefined;
   private readonly configurationPath: string;
   private readonly environment: NodeJS.ProcessEnv;
   private readonly createRuntime: typeof createBeagleRuntime;
@@ -76,7 +80,9 @@ export class BeagleService {
 
   constructor(options: BeagleServiceOptions) {
     if (!isAbsolute(options.userDataPath)) throw new TypeError("Beagle user data path must be absolute");
+    if (options.collectionRootPath !== undefined) validateAbsolutePath(options.collectionRootPath);
     this.rootPath = join(options.userDataPath, "beagle");
+    this.collectionRootPath = options.collectionRootPath === undefined ? undefined : resolve(options.collectionRootPath);
     this.configurationPath = join(this.rootPath, "projects.json");
     this.environment = { ...process.env, ...options.environment };
     this.createRuntime = options.createRuntime ?? createBeagleRuntime;
@@ -141,18 +147,62 @@ export class BeagleService {
     const input = parseBeagleImportInput(value);
     if (paths.length === 0 || paths.length > 100) throw new TypeError("Select between 1 and 100 collection files");
     paths.forEach(validateAbsolutePath);
+    return this.serial(() => this.importIntoSelectedProject(paths, input.mode), "Import collection");
+  }
+
+  /** Accept a completed collector artifact from main only, in its configured private download root. */
+  importCollectedData(value: { domain: string; path: string }): Promise<BeagleMutationResult> {
+    if (!this.collectionRootPath) throw new Error("AD collection storage is not configured");
+    const domain = validateCollectedDomain(value.domain);
+    validateAbsolutePath(value.path);
+    if (![".zip", ".json"].includes(extname(value.path).toLowerCase())) throw new TypeError("AD collection must be ZIP or JSON");
     return this.serial(async () => {
-      const files: BeagleImportRecord["files"] = [];
-      this.phase("Checking collection files");
-      for (const path of paths) files.push({ name: basename(path), ...await hashBeagleFile(path, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal) });
-      const { historyLimit } = await this.projectData();
-      return this.mutate({ type: "ingest", paths: [...paths], analyze: true, mode: input.mode, compactReports: true, historyLimit }, input.mode, files, async () => {
-        for (let index = 0; index < paths.length; index++) {
-          const current = await hashBeagleFile(paths[index]!, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal);
-          if (current.sha256 !== files[index]!.sha256) throw new Error("Collection file changed during import; the committed project was preserved");
+      await this.assertCollectedFile(value.path);
+      const configuration = await this.load();
+      const name = `AD ${domain}`;
+      let project = configuration.projects.find((entry) => entry.name.toLowerCase() === name.toLowerCase());
+      let created: BeagleProject | undefined;
+      try {
+        if (!project) {
+          if (configuration.projects.length >= MAX_PROJECTS) throw new Error("The Beagle project limit has been reached");
+          project = created = { id: randomUUID(), name, createdAt: new Date().toISOString() };
+          await this.save({ ...configuration, projects: [...configuration.projects, project], selectedProjectId: project.id });
+        } else if (configuration.selectedProjectId !== project.id) {
+          await this.save({ ...configuration, selectedProjectId: project.id });
         }
-      });
-    }, "Import collection");
+        return await this.importIntoSelectedProject([value.path], "merge");
+      } catch (error) {
+        // A post-commit metadata failure leaves recoverable graph data in this
+        // project. Other failures must not redirect the operator's workspace.
+        if (!(error instanceof BeaglePostCommitError) && this.configuration !== configuration) {
+          await this.closeClient();
+          await this.save(configuration);
+          if (created) await rm(join(this.rootPath, created.id), { recursive: true, force: true });
+        }
+        throw error;
+      }
+    }, "Import collected AD data");
+  }
+
+  private async assertCollectedFile(path: string): Promise<void> {
+    const root = this.collectionRootPath!;
+    const [canonicalRoot, canonicalPath, entry] = await Promise.all([realpath(root), realpath(path), lstat(path)]);
+    const inside = relative(canonicalRoot, canonicalPath);
+    if (!inside || inside === ".." || inside.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(inside) ||
+      entry.isSymbolicLink() || !entry.isFile()) throw new Error("AD collection must be a regular file inside managed collection storage");
+  }
+
+  private async importIntoSelectedProject(paths: readonly string[], mode: BeagleImportInput["mode"]): Promise<BeagleMutationResult> {
+    const files: BeagleImportRecord["files"] = [];
+    this.phase("Checking collection files");
+    for (const path of paths) files.push({ name: basename(path), ...await hashBeagleFile(path, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal) });
+    const { historyLimit } = await this.projectData();
+    return this.mutate({ type: "ingest", paths: [...paths], analyze: true, mode, compactReports: true, historyLimit }, mode, files, async () => {
+      for (let index = 0; index < paths.length; index++) {
+        const current = await hashBeagleFile(paths[index]!, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal);
+        if (current.sha256 !== files[index]!.sha256) throw new Error("Collection file changed during import; the committed project was preserved");
+      }
+    });
   }
 
   analyze(): Promise<BeagleMutationResult> { return this.serial(() => this.mutate({ type: "analyze", compactReports: true }, "analyze"), "Analyze project"); }
@@ -769,7 +819,7 @@ export class BeagleService {
       return { report, state: await this.state() };
     } catch (error) {
       if (operation && !committed) await this.appendHistory(beagleImportRecord(operation, files, undefined, { cancelled: this.operation?.controller.signal.aborted ?? false, message: error instanceof Error ? error.message : "Operation failed" })).catch(() => undefined);
-      if (committed) throw new Error("Graph changes were saved, but project metadata could not be saved. Reload the project and run Analyze to recover diagnostics.");
+      if (committed) throw new BeaglePostCommitError("Graph changes were saved, but project metadata could not be saved. Reload the project and run Analyze to recover diagnostics.");
       throw error;
     } finally {
       this.operationDatabase = undefined;
@@ -897,6 +947,12 @@ function validateAbsolutePath(path: unknown): asserts path is string {
   if (typeof path !== "string" || !isAbsolute(path) || path.length > 4_096 || /[\x00\r\n]/u.test(path)) {
     throw new TypeError("Beagle native file selection must be an absolute path");
   }
+}
+function validateCollectedDomain(value: unknown): string {
+  if (typeof value !== "string") throw new TypeError("Invalid AD collection domain");
+  const domain = value.trim();
+  if (!domain || domain.length > 77 || /[\x00-\x1f\x7f]/u.test(domain)) throw new TypeError("Invalid AD collection domain");
+  return domain;
 }
 function decode(source: string): BeagleJsonValue {
   try { return parseBeagleJson(JSON.parse(source) as unknown, 2_000_000); }

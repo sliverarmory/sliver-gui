@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
-import type { BeagleAPI } from "../shared/beagle-contracts.js";
+import { BEAGLE_IPC_EVENTS, type BeagleAPI } from "../shared/beagle-contracts.js";
 import type { ApplicationSettingsState } from "../shared/application-settings-contracts.js";
 import type {
   ApplicationContextMenuActionRequest,
@@ -97,6 +97,14 @@ const api: BeagleAPI = {
     };
     ipcRenderer.on("sliver:application-settings:changed", handler);
     return () => ipcRenderer.removeListener("sliver:application-settings:changed", handler);
+  },
+  onCollectionImported: (listener) => {
+    if (typeof listener !== "function") throw new TypeError("collection listener must be a function");
+    const handler = (_event: Electron.IpcRendererEvent, ...payload: unknown[]): void => {
+      if (payload.length === 0) listener();
+    };
+    ipcRenderer.on(BEAGLE_IPC_EVENTS.collectionImported, handler);
+    return () => ipcRenderer.removeListener(BEAGLE_IPC_EVENTS.collectionImported, handler);
   },
 };
 installRestrictedTargetContextMenuSignal();

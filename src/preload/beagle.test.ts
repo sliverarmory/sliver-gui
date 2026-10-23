@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { BEAGLE_IPC_INVOKE, type BeagleAPI } from "../shared/beagle-contracts.js";
+import { BEAGLE_IPC_EVENTS, BEAGLE_IPC_INVOKE, type BeagleAPI } from "../shared/beagle-contracts.js";
 
 const mocks = vi.hoisted(() => ({ expose: vi.fn(), invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() }));
 vi.mock("electron", () => ({ contextBridge: { exposeInMainWorld: mocks.expose },
@@ -26,5 +26,15 @@ describe("Beagle sandbox bridge", () => {
     expect(listener).not.toHaveBeenCalled();
     off();
     expect(mocks.removeListener).toHaveBeenCalledWith(channel, handler);
+    const imported = vi.fn();
+    const stopImported = api.onCollectionImported(imported);
+    const [importChannel, importHandler] = mocks.on.mock.calls.at(-1)!;
+    expect(importChannel).toBe(BEAGLE_IPC_EVENTS.collectionImported);
+    importHandler({}, "unexpected data");
+    expect(imported).not.toHaveBeenCalled();
+    importHandler({});
+    expect(imported).toHaveBeenCalledOnce();
+    stopImported();
+    expect(mocks.removeListener).toHaveBeenCalledWith(importChannel, importHandler);
   });
 });

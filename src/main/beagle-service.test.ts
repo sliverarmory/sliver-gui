@@ -150,7 +150,7 @@ describe("Beagle service", () => {
     return client;
   }
   function newService(environment: NodeJS.ProcessEnv = { SLIVER_BEAGLE_BINARY: "/chosen/beagle", SLIVER_BEAGLE_SHA256: digest }): BeagleService {
-    const instance = new BeagleService({ userDataPath: root, createRuntime, verifier, environment });
+    const instance = new BeagleService({ userDataPath: root, collectionRootPath: join(root, "gui", "ad-explorer", "collections"), createRuntime, verifier, environment });
     services.push(instance);
     return instance;
   }
@@ -284,6 +284,58 @@ describe("Beagle service", () => {
     await writeFile(path, "selected file");
     await service.importFiles([path]);
     expect(request.mock.calls.find(([command]) => command.type === "ingest")?.[0]).toEqual({ type: "ingest", paths: [path], analyze: true, mode: "merge", compactReports: true, historyLimit: 50 });
+  });
+
+  it("imports managed collector output into one project per domain", async () => {
+    const collectionRoot = join(root, "gui", "ad-explorer", "collections");
+    await mkdir(collectionRoot, { recursive: true });
+    const firstPath = join(collectionRoot, "first.zip");
+    const secondPath = join(collectionRoot, "second.json");
+    await writeFile(firstPath, "first collection");
+    await writeFile(secondPath, "second collection");
+    const first = await service.importCollectedData({ domain: "EXAMPLE.LOCAL", path: firstPath });
+    expect(first.state.projects.find((project) => project.id === first.state.selectedProjectId)?.name).toBe("AD EXAMPLE.LOCAL");
+    const second = await service.importCollectedData({ domain: "example.local", path: secondPath });
+    expect(second.state.selectedProjectId).toBe(first.state.selectedProjectId);
+    expect(second.state.projects).toHaveLength(first.state.projects.length);
+    expect(request.mock.calls.filter(([command]) => command.type === "ingest").map(([command]) => command)).toEqual([
+      { type: "ingest", paths: [firstPath], analyze: true, mode: "merge", compactReports: true, historyLimit: 50 },
+      { type: "ingest", paths: [secondPath], analyze: true, mode: "merge", compactReports: true, historyLimit: 50 },
+    ]);
+  });
+
+  it("rejects unmanaged or linked collector paths before changing the project", async () => {
+    const collectionRoot = join(root, "gui", "ad-explorer", "collections");
+    await mkdir(collectionRoot, { recursive: true });
+    const outside = join(root, "outside.zip");
+    await writeFile(outside, "outside collection");
+    const linked = join(collectionRoot, "linked.zip");
+    await symlink(outside, linked);
+    const initial = await service.getState();
+    await expect(service.importCollectedData({ domain: "EXAMPLE.LOCAL", path: outside })).rejects.toThrow(/managed collection storage/u);
+    await expect(service.importCollectedData({ domain: "EXAMPLE.LOCAL", path: linked })).rejects.toThrow(/managed collection storage/u);
+    expect(() => service.importCollectedData({ domain: "", path: outside })).toThrow(/domain/u);
+    expect(() => service.importCollectedData({ domain: "EXAMPLE.LOCAL", path: join(collectionRoot, "bad.txt") })).toThrow(/ZIP or JSON/u);
+    expect((await service.getState()).projects).toEqual(initial.projects);
+    expect(request.mock.calls.some(([command]) => command.type === "ingest")).toBe(false);
+  });
+
+  it("restores the prior project when a collected import fails before commit", async () => {
+    const collectionRoot = join(root, "gui", "ad-explorer", "collections");
+    await mkdir(collectionRoot, { recursive: true });
+    const path = join(collectionRoot, "failing.zip");
+    await writeFile(path, "failing collection");
+    const initial = await service.getState();
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "ingest") throw new Error("Invalid SharpHound collection");
+      return fallback(command, options);
+    });
+    await expect(service.importCollectedData({ domain: "EXAMPLE.LOCAL", path })).rejects.toThrow(/Invalid SharpHound collection/u);
+    const recovered = await service.getState();
+    expect(recovered.projects).toEqual(initial.projects);
+    expect(recovered.selectedProjectId).toBe(initial.selectedProjectId);
+    expect((await readdir(join(root, "beagle"))).sort()).toEqual([initial.selectedProjectId, "projects.json"].sort());
   });
 
   it("returns bounded search pages without leaking the lookahead row into the graph", async () => {

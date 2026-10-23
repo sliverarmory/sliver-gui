@@ -91,16 +91,24 @@ describe("trusted Electron IPC boundary", () => {
     }
   });
 
-  it("registers every shared invoke channel exactly once", () => {
+  it("registers every generic operator invoke channel exactly once", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
 
+    const dedicatedChannels = new Set<string>([IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]);
+    const genericChannels = Object.values(IPC_INVOKE).filter((channel) => !dedicatedChannels.has(channel));
+
     expect([...electronMocks.handlers.keys()].sort()).toEqual([
-      ...Object.values(IPC_INVOKE),
+      ...genericChannels,
       LOOT_DROPPED_ADD_IPC_CHANNEL,
       SESSION_DROPPED_UPLOAD_IPC_CHANNEL,
       WEBSITE_DROPPED_IMPORT_IPC_CHANNEL,
     ].sort());
-    expect(electronMocks.handle).toHaveBeenCalledTimes(Object.keys(IPC_INVOKE).length + 3);
+    expect(electronMocks.handle).toHaveBeenCalledTimes(genericChannels.length + 3);
+
+    unregisterIpcHandlers();
+    for (const channel of dedicatedChannels) {
+      expect(electronMocks.removeHandler).not.toHaveBeenCalledWith(channel);
+    }
   });
 
   it("registers and unregisters the isolated shell and console port listeners", () => {

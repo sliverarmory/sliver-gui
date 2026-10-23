@@ -1141,6 +1141,7 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
   return {
     event$: eventSubject.asObservable(),
     eventStreamState$: eventStreamState.asObservable(),
+    nativeExtensionArtifactTransportAvailable: false,
     ...createWebsiteFixture(record, () => eventSubject.next(fakeEvent("website")), async () => {
       if (websiteWritesBeforeHold === undefined) return;
       if (websiteWritesBeforeHold > 0) {
@@ -1790,6 +1791,18 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Response: queueTask(beaconId, fixture.description, fixture.result, fakeBeaconDownloadRequest(beaconId, path, String(BEACON_TEXT_READ_PROBE_BYTES), "0")),
       });
     },
+    async downloadAdCollectionBeacon() {
+      return unsupported("downloadAdCollectionBeacon");
+    },
+    async uploadAdCollectionBeacon() {
+      return unsupported("uploadAdCollectionBeacon");
+    },
+    async rmAdCollectionBeacon() {
+      return unsupported("rmAdCollectionBeacon");
+    },
+    async fetchAdCollectionBeaconTask() {
+      return unsupported("fetchAdCollectionBeaconTask");
+    },
     async headBeacon(beaconId: string, path: string, options: { bytes?: number; lines?: number }) {
       record("headBeacon");
       requireBeacon(beaconId);
@@ -2397,6 +2410,11 @@ function createFakeClient(config: SliverClientConfig, testState: FakeMainState):
         Response: queueTask(beaconId, "CallExtensionReq", Buffer.from(sliverpb.CallExtension.encode(completed).finish())),
       });
     },
+    async registerAdCollectorSession() { return unsupported("registerAdCollectorSession"); },
+    async registerAdCollectorBeacon() { return unsupported("registerAdCollectorBeacon"); },
+    async callAdCollectorSession() { return unsupported("callAdCollectorSession"); },
+    async callAdCollectorBeacon() { return unsupported("callAdCollectorBeacon"); },
+    async fetchAdCollectorBeaconTask() { return unsupported("fetchAdCollectorBeaconTask"); },
     async executeChildrenSession(sessionId) {
       recordM4("executeChildrenSession");
       requireSession(sessionId);

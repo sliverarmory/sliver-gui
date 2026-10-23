@@ -121,7 +121,11 @@ export interface BeagleAPI {
   cancelOperation(input: { id: string }): Promise<OperationResult<{ cancelled: boolean }>>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   onApplicationSettingsChanged(listener: (settings: ApplicationSettingsState) => void): () => void;
+  onCollectionImported(listener: () => void): () => void;
 }
+
+/** Main-to-Beagle-window notification after a managed collector import commits. */
+export const BEAGLE_IPC_EVENTS = Object.freeze({ collectionImported: "sliver:beagle:collection-imported" });
 
 export const BEAGLE_IPC_INVOKE = Object.freeze({
   getState: "sliver:beagle:state",
