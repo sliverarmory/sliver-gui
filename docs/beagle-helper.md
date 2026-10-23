@@ -54,9 +54,12 @@ One helper owns one selected project database. A project switch closes stdin and
 waits for the old process to exit before starting its replacement. Shutdown also
 waits for exit, with a force-kill fallback. Deadlines or cancellation kill the
 helper. A later explicit request can launch a newly verified helper, but the failed
-request is never replayed: interrupted writes may have committed before the pipe
-closed. Imports and analysis retain an uncertain-diagnostics marker until their
-verified response is received.
+request is never replayed. Recoverable writes execute against a private staged database;
+only a validated response followed by closed SQLite handles permits atomic publication.
+Cancellation preserves the previous committed graph. The optional `closeDatabase` command
+lets staged writes release and reopen databases inside the same persistent helper.
+New file-export, backup, retention, rules and relay operations are advertised separately
+from the original protocol-1 required set. See [P2 contracts and verification](beagle-p2-roadmap.md).
 
 ## Verification
 

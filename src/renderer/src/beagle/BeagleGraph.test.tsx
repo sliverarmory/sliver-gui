@@ -1,4 +1,5 @@
-import { act, cleanup, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState, type ReactNode } from "react";
 import type { Edge, Node, ReactFlowProps } from "@xyflow/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -6,8 +7,8 @@ import type { BeagleEdge, BeagleNode, BeagleQueryResult } from "../../../shared/
 import { BeagleGraph } from "./BeagleGraph";
 import type { BeagleSelection } from "./beagle-model";
 
-type DirectoryNode = Node<{ entity: BeagleNode }, "directory">;
-type DirectoryEdge = Edge<{ relationship: BeagleEdge; parallelIndex: number }, "relationship">;
+type DirectoryNode = Node<{ entity: BeagleNode; showLabel: boolean }, "directory">;
+type DirectoryEdge = Edge<{ relationship: BeagleEdge; parallelIndex: number; showLabel: boolean }, "relationship">;
 const mock = vi.hoisted(() => ({ props: null as ReactFlowProps<DirectoryNode, DirectoryEdge> | null,
   flow: { fitView: vi.fn(async () => true), zoomIn: vi.fn(), zoomOut: vi.fn() } }));
 vi.mock("@xyflow/react", async (importOriginal) => {
@@ -53,5 +54,25 @@ describe("BeagleGraph", () => {
     expect(select).toHaveBeenLastCalledWith({ kind: "edge", id: edge.id });
     act(() => mock.props?.onEdgesChange?.([{ type: "select", id: encodeURIComponent(edge.id), selected: false }]));
     expect(select).toHaveBeenLastCalledWith(null);
+  });
+  it("changes layout and label visibility without dropping graph identities", async () => {
+    render(<BeagleGraph result={result} selection={null} onSelect={() => undefined} />);
+    await waitFor(() => expect(mock.props?.nodes).toHaveLength(1));
+    fireEvent.change(screen.getByRole("combobox", { name: "Graph layout" }), { target: { value: "circle" } });
+    await waitFor(() => expect(mock.props?.nodes?.[0]?.position).toEqual({ x: 200, y: 0 }));
+    await userEvent.click(screen.getByRole("button", { name: "Show object labels" }));
+    await userEvent.click(screen.getByRole("button", { name: "Show relationship labels" }));
+    expect(mock.props?.nodes?.[0]?.data.showLabel).toBe(false);
+    expect(mock.props?.edges?.[0]?.data?.showLabel).toBe(false);
+    expect(mock.props?.nodes?.[0]?.data.entity.objectid).toBe(node.objectid);
+    expect(screen.getByRole("button", { name: "Show object labels" })).toHaveAttribute("aria-pressed", "false");
+  });
+  it("finds a loaded graph object and focuses its encoded display identity", async () => {
+    const select = vi.fn();
+    render(<BeagleGraph result={result} selection={null} onSelect={select} />);
+    await userEvent.type(screen.getByRole("combobox", { name: "Find in current graph" }), "ARYA");
+    await userEvent.click(await screen.findByRole("option", { name: /ARYA/ }));
+    expect(select).toHaveBeenCalledWith({ kind: "node", id: node.objectid });
+    expect(mock.flow.fitView).toHaveBeenCalledWith(expect.objectContaining({ nodes: [{ id: encodeURIComponent(node.objectid) }] }));
   });
 });

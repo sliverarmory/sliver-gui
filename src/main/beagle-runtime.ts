@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { parseBeagleJson, type BeagleJsonValue } from "../shared/beagle-contracts.js";
 import {
   BEAGLE_RUNTIME_MAX_REQUEST_BYTES, BEAGLE_RUNTIME_MAX_RESPONSE_BYTES, BEAGLE_RUNTIME_OPERATIONS,
+  BEAGLE_RUNTIME_REQUIRED_OPERATIONS,
   BEAGLE_RUNTIME_PROTOCOL, type BeagleRuntimeCommand, type BeagleRuntimeReady,
 } from "../shared/beagle-runtime-contracts.js";
 
@@ -84,13 +85,14 @@ function parseReady(raw: unknown): BeagleRuntimeReady {
   const operations = value["operations"];
   if (value["type"] !== "ready" || value["protocol"] !== BEAGLE_RUNTIME_PROTOCOL || value["name"] !== "beagle" ||
       typeof value["version"] !== "string" || !/^0\.1\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(value["version"]) ||
-      !Array.isArray(operations) || operations.length !== BEAGLE_RUNTIME_OPERATIONS.length ||
-      new Set(operations).size !== operations.length || BEAGLE_RUNTIME_OPERATIONS.some((name) => !operations.includes(name)) ||
+      !Array.isArray(operations) || operations.length > 64 ||
+      operations.some((name) => typeof name !== "string" || !/^[a-zA-Z][a-zA-Z0-9]{0,63}$/u.test(name)) ||
+      new Set(operations).size !== operations.length || BEAGLE_RUNTIME_REQUIRED_OPERATIONS.some((name) => !operations.includes(name)) ||
       limits["requestBytes"] !== BEAGLE_RUNTIME_MAX_REQUEST_BYTES || limits["responseBytes"] !== BEAGLE_RUNTIME_MAX_RESPONSE_BYTES) {
     throw new Error("Incompatible Beagle runtime protocol; update the Beagle executable");
   }
   return Object.freeze({ type: "ready", protocol: BEAGLE_RUNTIME_PROTOCOL, name: "beagle", version: value["version"],
-    operations: Object.freeze([...BEAGLE_RUNTIME_OPERATIONS]),
+    operations: Object.freeze(BEAGLE_RUNTIME_OPERATIONS.filter((name) => operations.includes(name))),
     limits: Object.freeze({ requestBytes: BEAGLE_RUNTIME_MAX_REQUEST_BYTES, responseBytes: BEAGLE_RUNTIME_MAX_RESPONSE_BYTES }) });
 }
 
@@ -151,6 +153,7 @@ class BeagleRuntime implements BeagleRuntimeClient {
   request(command: BeagleRuntimeCommand, options: BeagleRuntimeRequestOptions): Promise<BeagleJsonValue> {
     if (this.#closed) return Promise.reject(new Error("Beagle runtime is closed"));
     if (this.#pending) return Promise.reject(new Error("Beagle runtime already has an active request"));
+    if (options.signal?.aborted) return Promise.reject(new Error("Beagle request was canceled before it was sent"));
     if (!Number.isSafeInteger(options.timeout) || options.timeout < 1 || options.timeout > 2_147_483_647) return Promise.reject(new Error("Invalid Beagle request timeout"));
     if (!Number.isSafeInteger(this.#nextId)) { this.#fail(new Error("Beagle runtime request IDs exhausted")); return Promise.reject(new Error("Beagle runtime is closed")); }
     const id = this.#nextId++;
@@ -161,7 +164,10 @@ class BeagleRuntime implements BeagleRuntimeClient {
       if (bytes.length > BEAGLE_RUNTIME_MAX_REQUEST_BYTES) { bytes.fill(0); throw new Error(); }
     } catch { return Promise.reject(new Error("Beagle request is invalid or exceeds the 1 MiB limit")); }
     return new Promise((resolve, reject) => {
-      const aborted = (): void => this.#fail(new Error("Beagle request was canceled; its outcome may be unknown"));
+      const aborted = (): void => {
+        if (pending.sent) this.#fail(new Error("Beagle request was canceled; its outcome may be unknown"));
+        else { this.#clearPending(); bytes.fill(0); reject(new Error("Beagle request was canceled before it was sent")); }
+      };
       const pending: PendingRequest = {
         id, sent: false, resolve, reject,
         timer: setTimeout(() => this.#fail(new Error("Beagle request timed out; its outcome may be unknown")), options.timeout),
@@ -171,8 +177,11 @@ class BeagleRuntime implements BeagleRuntimeClient {
       this.#pending = pending;
       options.signal?.addEventListener("abort", aborted, { once: true });
       if (options.signal?.aborted) aborted();
-      void this.ready.then(() => {
+      void this.ready.then((ready) => {
         if (this.#closed || this.#pending !== pending) { bytes.fill(0); return; }
+        if (!ready.operations.includes(command.type)) {
+          this.#clearPending(); bytes.fill(0); reject(new Error("This Beagle executable does not support the requested operation; choose a current executable")); return;
+        }
         pending.sent = true;
         try {
           this.#child.stdin.write(bytes, (error) => {

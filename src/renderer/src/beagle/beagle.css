@@ -170,3 +170,35 @@
   .beagle-body { position: relative; }
   .beagle-result-heading { padding-inline: 8px; }
 }
+
+.beagle-save-query { flex-wrap: wrap; }
+.beagle-save-query > .text-field { flex: 1 1 130px; width: auto; min-width: 100px; }
+.beagle-save-query > .text-field:nth-child(3) { flex-grow: 2; }
+.beagle-custom-query small { display: block; font-size: 10px; color: var(--color-muted); font-weight: normal; }
+.beagle-custom-query > button:first-child { height: auto; min-height: 38px; padding-block: 8px; }
+.beagle-query-portability, .beagle-edge-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.beagle-history { flex: none; display: flex; align-items: center; gap: 6px; padding: 6px 16px; border-bottom: 1px solid var(--color-separator); }
+.beagle-history > .native-select { flex: 1; min-width: 0; max-width: 460px; }
+.beagle-history .native-select__trigger { font-size: 11px; }
+.beagle-history > span { font-size: 10px; white-space: nowrap; }
+.beagle-graph__find { position: absolute; top: 40px; left: 16px; width: min(260px, calc(100% - 32px)); }
+.beagle-graph__find label { font-size: 10px; }
+.beagle-graph__find input { font-size: 11px; }
+.beagle-graph__tools { flex-wrap: wrap; max-width: calc(100% - 32px); align-items: center; }
+.beagle-graph__tools > .native-select { width: 116px; }
+.beagle-graph__tools .native-select__trigger, .beagle-graph__tools > button { font-size: 10px; }
+.beagle-graph__tools > button[aria-pressed="true"] { background: var(--color-surface-secondary); }
+.beagle-node[data-labels="false"] { width: 64px; height: 64px; justify-content: center; }
+.beagle-table-actions { display: flex; justify-content: space-between; align-items: start; gap: 8px; padding: 4px 12px; border-bottom: 1px solid var(--color-separator); }
+.beagle-table-actions > .disclosure { flex: 1; min-width: 0; }
+.beagle-table-columns { display: flex; flex-wrap: wrap; gap: 12px; max-height: 160px; overflow: auto; }
+.beagle-table-columns .checkbox { font-size: 11px; }
+.beagle-table-scroll th { padding: 4px 10px; }
+.beagle-table-scroll th > button { font-size: 11px; }
+.beagle-edge-guidance p { font-size: 12px; line-height: 1.65; margin-top: 8px; }
+.beagle-edge-guidance a { display: inline-block; margin-top: 8px; font-size: 11px; color: var(--color-accent); text-decoration: underline; }
+.beagle-edge-endpoints button, .beagle-composition > button { min-height: 28px; height: auto; white-space: normal; text-align: left; justify-content: start; overflow-wrap: anywhere; font-size: 11px; }
+.beagle-management-panel { flex: none; max-height: 48vh; overflow: auto; padding: 16px 24px; border-top: 1px solid var(--color-separator); background: var(--color-surface-secondary); }
+.beagle-management-panel .beagle-rules { max-width: 1000px; }
+@media (max-width: 1100px) { .beagle-history > span { display: none; } .beagle-history { padding-inline: 8px; } .beagle-result-summary { max-width: 160px; } }
+@media (max-width: 900px) { .beagle-toolbar__actions { flex-wrap: wrap; } .beagle-result-heading { gap: 4px; flex-wrap: wrap; } .beagle-graph__tools { bottom: 8px; left: 8px; max-width: calc(100% - 16px); } }

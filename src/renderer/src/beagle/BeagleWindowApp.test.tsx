@@ -5,6 +5,7 @@ import { BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, type BeagleAPI, type Bea
 import type { OperationResult } from "../../../shared/contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
 import { BEAGLE_PATH_EDGE_KINDS } from "../../../shared/beagle-investigations";
+import { emptyBeagleWorkspace, type BeagleWorkspace } from "../../../shared/beagle-workspace";
 import { BeagleWindowApp } from "../BeagleWindowApp";
 import { queryStorageKey, type BeagleSelection } from "./beagle-model";
 
@@ -21,6 +22,7 @@ const projectB = "22222222-2222-4222-8222-222222222222";
 const userNode: BeagleNode = { objectid: "S-1-5-21-1000", labels: ["Base", "User"], properties: { name: "ARYA@NORTH.SEVENKINGDOMS.LOCAL", enabled: true, owned: false } };
 const groupNode: BeagleNode = { objectid: "S-1-5-21-512", labels: ["Group", "Base"], properties: { name: "DOMAIN ADMINS@NORTH.SEVENKINGDOMS.LOCAL", system_tags: "admin_tier_0" } };
 let currentState: BeagleState;
+let workspaces = new Map<string, BeagleWorkspace>();
 let api: ReturnType<typeof createAPI>;
 function graphResult(projectId = projectA): BeagleQueryResult {
   return { projectId, columns: ["p"], rows: [{ p: "one path" }], elapsedMs: 8, totalRows: 1, truncated: false,
@@ -40,7 +42,7 @@ function createAPI() {
   return {
     getState: vi.fn<BeagleAPI["getState"]>(async () => ({ ok: true as const, value: currentState })),
     createProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
-    selectProject: vi.fn(async ({ id }: { id: string }) => ({ ok: true as const, value: { ...currentState, selectedProjectId: id } })),
+    selectProject: vi.fn(async ({ id }: { id: string }) => { currentState = { ...currentState, selectedProjectId: id }; return { ok: true as const, value: currentState }; }),
     chooseBinary: vi.fn(async () => ({ ok: true as const, value: currentState })),
     importFiles: vi.fn<BeagleAPI["importFiles"]>(async () => ({ ok: true as const, value: { state: currentState, report: { imported: 100 } } })),
     analyze: vi.fn<BeagleAPI["analyze"]>(async () => ({ ok: true as const, value: { state: currentState, report: { derived: 25 } } })),
@@ -54,6 +56,25 @@ function createAPI() {
     tag: vi.fn<BeagleAPI["tag"]>(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
     compose: vi.fn<BeagleAPI["compose"]>(async () => ({ ok: true as const, value: graphResult() })),
     exportGraph: vi.fn(async () => ({ ok: true as const, value: { cancelled: false } })),
+    renameProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    archiveProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    restoreArchivedProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    cleanup: vi.fn(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
+    setRetention: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    backupProject: vi.fn(async () => ({ ok: true as const, value: { cancelled: false } })),
+    restoreProject: vi.fn(async () => ({ ok: true as const, value: currentState })),
+    getWorkspace: vi.fn<BeagleAPI["getWorkspace"]>(async () => ({ ok: true as const, value: workspaces.get(currentState.selectedProjectId) ?? emptyBeagleWorkspace(currentState.selectedProjectId) })),
+    saveWorkspace: vi.fn<BeagleAPI["saveWorkspace"]>(async ({ workspace }) => { workspaces.set(workspace.projectId, workspace); return { ok: true as const, value: workspace }; }),
+    importQueries: vi.fn<BeagleAPI["importQueries"]>(async () => ({ ok: true as const, value: { cancelled: false, queries: [] } })),
+    exportQueries: vi.fn(async () => ({ ok: true as const, value: { cancelled: false } })),
+    exportResult: vi.fn<BeagleAPI["exportResult"]>(async () => ({ ok: true as const, value: { cancelled: false } })),
+    relayTargets: vi.fn<BeagleAPI["relayTargets"]>(async () => ({ ok: true as const, value: graphResult() })),
+    aclOrigins: vi.fn<BeagleAPI["aclOrigins"]>(async () => ({ ok: true as const, value: graphResult() })),
+    getRules: vi.fn(async () => ({ ok: true as const, value: { groups: [] } })),
+    previewRules: vi.fn(async () => ({ ok: true as const, value: { selected: {}, counts: {}, missingObjectids: [], missingTotal: 0, truncated: false } })),
+    applyRules: vi.fn(async () => ({ ok: true as const, value: { state: currentState, report: {} } })),
+    getOperation: vi.fn<BeagleAPI["getOperation"]>(async () => ({ ok: true as const, value: null })),
+    cancelOperation: vi.fn(async () => ({ ok: true as const, value: { cancelled: true } })),
     getApplicationSettings: vi.fn(async () => DEFAULT_APPLICATION_SETTINGS_STATE),
     onApplicationSettingsChanged: vi.fn(() => () => undefined),
   } satisfies BeagleAPI;
@@ -74,6 +95,7 @@ beforeEach(() => {
   currentState = { runtime: { available: true, version: "1.0", source: "/test/beagle" }, selectedProjectId: projectA,
     projects: [{ id: projectA, name: "GOAD", createdAt: "2026-10-23" }, { id: projectB, name: "Other lab", createdAt: "2026-10-23" }],
     stats: { nodes: 100, edges: 250, labels: { Base: 100, User: 50, Group: 50 }, relationships: { MemberOf: 250 } } };
+  workspaces = new Map();
   api = createAPI();
   Object.defineProperty(window, "beagle", { configurable: true, value: api });
   localStorage.clear();
@@ -119,7 +141,7 @@ describe("BeagleWindowApp", () => {
     fireEvent.change(screen.getByLabelText("Saved query name"), { target: { value: "Enabled users" } });
     fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "MATCH (n:User) RETURN n" } });
     await userEvent.click(screen.getByRole("button", { name: "Save query" }));
-    expect(localStorage.getItem(queryStorageKey(projectA))).toContain("Enabled users");
+    await waitFor(() => expect(workspaces.get(projectA)?.queries[0]?.name).toBe("Enabled users"));
     await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
     fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "RETURN 1" } });
     await userEvent.click(screen.getByRole("button", { name: "Enabled users" }));
@@ -443,7 +465,7 @@ describe("BeagleWindowApp", () => {
     await act(async () => resolveOld({ ok: true, value: searchResult([userNode]) }));
     expect(screen.queryByRole("option", { name: /ARYA/ })).not.toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
-    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "Project" }), { target: { value: projectB } });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
     expect(screen.getByRole("combobox", { name: "Source object ID" })).toHaveValue("");
     expect(screen.queryByRole("option", { name: /DOMAIN ADMINS/ })).not.toBeInTheDocument();
@@ -457,7 +479,7 @@ describe("BeagleWindowApp", () => {
     await userEvent.type(screen.getByRole("combobox", { name: "Source object ID" }), "arya");
     await waitFor(() => expect(api.search).toHaveBeenCalledTimes(1));
     await userEvent.keyboard("{Escape}");
-    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    fireEvent.change(await screen.findByRole("combobox", { name: "Project" }), { target: { value: projectB } });
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
     await act(async () => resolveSearch({ ok: true, value: searchResult([userNode]) }));
     expect(screen.queryByRole("option", { name: /ARYA/ })).not.toBeInTheDocument();
@@ -595,4 +617,154 @@ describe("BeagleWindowApp", () => {
     await waitFor(() => expect(screen.getByRole("switch", { name: "Owned" })).not.toBeChecked());
     expect(api.tag).toHaveBeenCalledWith({ objectid: owned.objectid, tag: "owned", enabled: false });
   });
+});
+
+describe("persistent investigations", () => {
+  it("migrates legacy queries once and preserves portable descriptions, categories and parameters", async () => {
+    localStorage.setItem(queryStorageKey(projectA), JSON.stringify([{ id: "legacy", name: "Legacy query", cypher: "RETURN $value", parameters: '{"value":7}' }]));
+    await mount();
+    await waitFor(() => expect(workspaces.get(projectA)?.legacyMigrated).toBe(true));
+    expect(workspaces.get(projectA)?.queries[0]).toMatchObject({ id: "legacy", category: "My queries", description: "", parameters: '{"value":7}' });
+    fireEvent.change(screen.getByLabelText("Saved query name"), { target: { value: "Portable query" } });
+    fireEvent.change(screen.getByLabelText("Saved query category"), { target: { value: "Access review" } });
+    fireEvent.change(screen.getByLabelText("Saved query description"), { target: { value: "Review the specified identity." } });
+    fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: '{"name":"Arya"}' } });
+    await userEvent.click(screen.getByRole("button", { name: "Save query" }));
+    await waitFor(() => expect(workspaces.get(projectA)?.queries[0]?.description).toBe("Review the specified identity."));
+    await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
+    await userEvent.click(screen.getByRole("button", { name: "Export queries" }));
+    expect(api.exportQueries).toHaveBeenCalledWith({ queries: workspaces.get(projectA)?.queries });
+    api.importQueries.mockResolvedValueOnce({ ok: true, value: { cancelled: false, queries: [{ id: "legacy", name: "Imported", description: "From CE", category: "Imported", cypher: "RETURN 1", parameters: "{}" }] } });
+    await userEvent.click(screen.getByRole("button", { name: "Import queries" }));
+    await waitFor(() => expect(workspaces.get(projectA)?.queries).toHaveLength(3));
+    expect(workspaces.get(projectA)?.queries[2]?.id).not.toBe("legacy");
+    cleanup();
+    render(<BeagleWindowApp />);
+    await waitFor(() => expect(api.getWorkspace).toHaveBeenCalledTimes(2));
+    expect(workspaces.get(projectA)?.queries.filter((query) => query.id === "legacy")).toHaveLength(1);
+  });
+
+  it("restores executed query inputs, selected object and ordered path filters with back/forward and reopen", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "MATCH (n:Domain) RETURN n" } });
+    fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: '{"checkpoint":1}' } });
+    await userEvent.click(screen.getByRole("tab", { name: "Paths" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Source object ID" }), { target: { value: userNode.objectid } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Target object ID" }), { target: { value: groupNode.objectid } });
+    await userEvent.click(screen.getByRole("button", { name: "Add waypoint" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Via 1 object ID" }), { target: { value: "waypoint" } });
+    await userEvent.click(screen.getByRole("button", { name: /Relationship types/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Clear types" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "MemberOf" }));
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await userEvent.click(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` }));
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "RETURN $checkpoint AS count" } });
+    fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: '{"checkpoint":123}' } });
+    fireEvent.change(screen.getByRole("combobox", { name: "Via 1 object ID" }), { target: { value: "different-waypoint" } });
+    await userEvent.click(screen.getByRole("button", { name: "Select all types" }));
+    api.query.mockResolvedValueOnce({ ok: true, value: scalarResult(123) });
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await screen.findByText("123");
+    await userEvent.click(screen.getByRole("button", { name: "Back in investigation" }));
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n:Domain) RETURN n");
+    expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":1}');
+    expect(screen.getByRole("combobox", { name: "Via 1 object ID" })).toHaveValue("waypoint");
+    expect(screen.getByRole("button", { name: /Relationship types \(1\/62\)/ })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Object details" })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Forward in investigation" }));
+    expect(await screen.findByText("123")).toBeVisible();
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN $checkpoint AS count");
+    expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":123}');
+    expect(screen.getByRole("combobox", { name: "Via 1 object ID" })).toHaveValue("different-waypoint");
+    await waitFor(() => expect(workspaces.get(projectA)?.history.index).toBe(1));
+    cleanup(); render(<BeagleWindowApp />);
+    expect(await screen.findByText("123")).toBeVisible();
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN $checkpoint AS count");
+    expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":123}');
+    expect(screen.getByRole("button", { name: "Forward in investigation" })).toBeDisabled();
+    expect(screen.getByText(/Resumed the last investigation/)).toBeVisible();
+    expect(api.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("records inputs at execution time when the editor changes before the result arrives", async () => {
+    let resolve!: (value: OperationResult<BeagleQueryResult>) => void;
+    api.query.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    await mount();
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "RETURN $checkpoint AS count" } });
+    fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: '{"checkpoint":77}' } });
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "MATCH (n) RETURN n" } });
+    fireEvent.change(screen.getByLabelText("Query parameters"), { target: { value: "{}" } });
+    await act(async () => resolve({ ok: true, value: scalarResult(77) }));
+    await waitFor(() => expect(workspaces.get(projectA)?.history.entries[0]?.editor).toMatchObject({ cypher: "RETURN $checkpoint AS count", parameters: '{"checkpoint":77}' }));
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n) RETURN n");
+    cleanup(); render(<BeagleWindowApp />);
+    expect(await screen.findByText("77")).toBeVisible();
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN $checkpoint AS count");
+    expect(screen.getByLabelText("Query parameters")).toHaveValue('{"checkpoint":77}');
+  });
+
+  it("exports only the current result and passes selected table columns and sorting to main", async () => {
+    api.query.mockResolvedValueOnce({ ok: true, value: { ...scalarResult(), columns: ["name", "count"], rows: [{ name: "Alpha", count: 9 }, { name: "Beta", count: 2 }] } });
+    await mount(); await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await screen.findByRole("table");
+    await userEvent.click(screen.getByRole("button", { name: "Sort by count" }));
+    await userEvent.click(screen.getByRole("button", { name: "Columns (2/2)" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: "name" }));
+    await userEvent.click(screen.getByRole("button", { name: "Export table CSV" }));
+    expect(api.exportResult).toHaveBeenLastCalledWith(expect.objectContaining({ format: "csv", columns: ["count"], sort: { column: "count", direction: "asc" } }));
+    await userEvent.click(screen.getByRole("button", { name: "Export result JSON" }));
+    expect(api.exportResult).toHaveBeenLastCalledWith(expect.objectContaining({ format: "json", result: expect.objectContaining({ rows: [{ name: "Alpha", count: 9 }, { name: "Beta", count: 2 }] }) }));
+    expect(api.exportGraph).not.toHaveBeenCalled();
+  });
+
+  it("ignores workspace loading from an old project", async () => {
+    let resolve!: (value: OperationResult<BeagleWorkspace>) => void;
+    api.getWorkspace.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    await mount();
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    await act(async () => resolve({ ok: true, value: { ...emptyBeagleWorkspace(projectA), queries: [{ id: "old", name: "Old project query", description: "", category: "", cypher: "RETURN 1", parameters: "{}" }] } }));
+    await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
+    expect(screen.queryByRole("button", { name: "Old project query" })).not.toBeInTheDocument();
+    expect(api.saveWorkspace.mock.calls.every(([input]) => input.projectId === projectB)).toBe(true);
+  });
+});
+
+describe("operation controls", () => {
+  it("shows native progress and cancels the matching operation", async () => {
+    let resolve!: (value: OperationResult<{ state: BeagleState; report: {} }>) => void;
+    api.analyze.mockReturnValueOnce(new Promise((done) => { resolve = done; }));
+    api.getOperation.mockResolvedValue({ ok: true, value: { id: "op-123", label: "Analysis", phase: "Deriving relationships", startedAt: 123, cancellable: true } });
+    await mount();
+    await userEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    expect(await screen.findByText("Deriving relationships")).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel operation" }));
+    expect(api.cancelOperation).toHaveBeenCalledWith({ id: "op-123" });
+    await act(async () => resolve({ ok: false, error: "Analysis cancelled" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Analysis cancelled");
+  });
+  it("keeps the current project open when investigation saving fails", async () => {
+    await mount();
+    api.saveWorkspace.mockResolvedValue({ ok: false, error: "Disk is full" });
+    fireEvent.change(screen.getByLabelText("Saved query name"), { target: { value: "Unsaved" } });
+    await userEvent.click(screen.getByRole("button", { name: "Save query" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Disk is full");
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
+    expect(api.selectProject).not.toHaveBeenCalled();
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectA);
+    expect(screen.getByLabelText("Saved query name")).toHaveValue("Unsaved");
+  });
+});
+
+it("drops stale table sorting when a subsequent query changes the result schema", async () => {
+  api.query.mockResolvedValueOnce({ ok: true, value: scalarResult(17) }).mockResolvedValueOnce({ ok: true, value: { ...scalarResult(), columns: ["name"], rows: [{ name: "Arya" }] } });
+  await mount(); await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+  await userEvent.click(await screen.findByRole("button", { name: "Sort by count" }));
+  await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+  await screen.findByRole("button", { name: "Sort by name" });
+  await userEvent.click(screen.getByRole("button", { name: "Export table CSV" }));
+  expect(api.exportResult.mock.lastCall?.[0]).not.toHaveProperty("sort");
+  expect(api.exportResult.mock.lastCall?.[0].columns).toEqual(["name"]);
 });

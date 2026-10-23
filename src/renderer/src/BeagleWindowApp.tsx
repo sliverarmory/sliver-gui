@@ -5,13 +5,13 @@ import { EmptyState } from "@heroui-pro/react/empty-state";
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import {
-  faArrowRight, faArrowsRotate, faBookBookmark, faCircleNodes, faCode, faDownload,
+  faArrowsRotate, faBookBookmark, faCircleNodes, faCode, faDownload,
   faFolderOpen, faMagnifyingGlass, faPlay, faPlus, faSave, faSliders,
   faTrash, faUpload, faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 import type {
-  BeagleAPI, BeagleEdge, BeagleJsonObject, BeagleMutationResult, BeagleNeighborhoodResult, BeagleNode,
+  BeagleJsonObject, BeagleMutationResult, BeagleNeighborhoodResult, BeagleNode,
   BeagleQueryResult, BeagleSavedQuery, BeagleSearchResult, BeagleState,
 } from "../../shared/beagle-contracts";
 import { BEAGLE_RESULT_LIMITS } from "../../shared/beagle-contracts";
@@ -23,9 +23,16 @@ import { BeaglePathControls } from "./beagle/BeaglePathControls";
 import { BeagleAnalysisWarnings } from "./beagle/BeagleAnalysisWarnings";
 import { BEAGLE_DRILLDOWNS } from "../../shared/beagle-investigations";
 import {
-  displayValue, initialParameters, nodeKind, nodeName, nodeTagged, parseParameters,
-  readCustomQueries, saveCustomQueries, type BeagleSelection, type CustomQuery,
+  initialParameters, nodeKind, nodeName, nodeTagged, parseParameters,
+  type BeagleSelection,
 } from "./beagle/beagle-model";
+import { BeagleResultTable, normalizeTableView } from "./beagle/BeagleResultTable";
+import { BeagleEdgeInspector, BeagleProperties as Properties } from "./beagle/BeagleEdgeInspector";
+import { useBeagleWorkspace, appendInvestigation } from "./beagle/useBeagleWorkspace";
+import { BeagleProjectPanel } from "./beagle/BeagleProjectPanel";
+import { BeagleRulesPanel } from "./beagle/BeagleRulesPanel";
+import { defaultBeagleGraphView, defaultBeaglePathDraft, parseBeagleCustomQueries, type BeagleHistoryEntry, type BeagleTableView } from "../../shared/beagle-workspace";
+import type { BeagleOperationState } from "../../shared/beagle-projects";
 import "./beagle/beagle.css";
 
 const DEFAULT_QUERY = "MATCH (n:Domain) RETURN n LIMIT 100";
@@ -37,7 +44,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   const api = window.beagle;
   const [state, setState] = useState<BeagleState>();
   const [catalog, setCatalog] = useState<BeagleSavedQuery[]>([]);
-  const [customQueries, setCustomQueries] = useState<CustomQuery[]>([]);
+
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string>();
   const [error, setError] = useState<string>();
@@ -58,13 +65,21 @@ export function BeagleWindowApp(): React.JSX.Element {
   const [cypher, setCypher] = useState(DEFAULT_QUERY);
   const [parameters, setParameters] = useState("{}");
   const [queryName, setQueryName] = useState("");
+  const [queryDescription, setQueryDescription] = useState("");
+  const [queryCategory, setQueryCategory] = useState("");
+  const [managementOpen, setManagementOpen] = useState(false);
+  const [operation, setOperation] = useState<BeagleOperationState | null>(null);
   const [selectedSavedId, setSelectedSavedId] = useState<string>();
   const [queryBusy, setQueryBusy] = useState<string>();
   const [result, setResult] = useState<BeagleQueryResult>();
   const [resultTitle, setResultTitle] = useState("Query results");
   const [selection, setSelection] = useState<BeagleSelection>(null);
-  const [pathSource, setPathSource] = useState("");
-  const [pathTarget, setPathTarget] = useState("");
+  const [pathDraft, setPathDraft] = useState(defaultBeaglePathDraft);
+  const pathSource = pathDraft.source, pathTarget = pathDraft.target;
+  const setPathSource = (source: string) => setPathDraft((previous) => ({ ...previous, source }));
+  const setPathTarget = (target: string) => setPathDraft((previous) => ({ ...previous, target }));
+  const [graphView, setGraphView] = useState(defaultBeagleGraphView);
+  const [tableView, setTableView] = useState<BeagleTableView>({ columns: [], sort: null });
   const [neighborhood, setNeighborhood] = useState<BeagleNeighborhoodResult>();
   const [neighborhoodBusy, setNeighborhoodBusy] = useState(false);
   const [report, setReport] = useState<BeagleMutationResult["report"]>();
@@ -95,24 +110,77 @@ export function BeagleWindowApp(): React.JSX.Element {
     return () => { active = false; mounted.current = false; generation.current++; };
   }, [api]);
 
-  useEffect(() => { setCustomQueries(state ? readCustomQueries(state.selectedProjectId) : []); }, [state?.selectedProjectId]);
+
   useEffect(() => { neighborhoodSequence.current++; setNeighborhood(undefined); setNeighborhoodBusy(false); }, [selection?.kind, selection?.id]);
+
+  const investigation = useBeagleWorkspace(api, state?.selectedProjectId ?? "", setError);
+  const customQueries = investigation.workspace?.queries ?? [];
+  const history = investigation.workspace?.history;
+  const restoredProject = useRef("");
+  const restoring = useRef(false);
+  const context = useRef({ selection, sidebarTab, resultTab, editor: { cypher, parameters, name: queryName, description: queryDescription, category: queryCategory,
+    ...(selectedSavedId ? { savedId: selectedSavedId } : {}) }, path: pathDraft, graph: graphView, table: tableView });
+  context.current = { selection, sidebarTab, resultTab, editor: { cypher, parameters, name: queryName, description: queryDescription, category: queryCategory,
+    ...(selectedSavedId ? { savedId: selectedSavedId } : {}) }, path: pathDraft, graph: graphView, table: tableView };
+  function restoreEntry(entry: BeagleHistoryEntry) {
+    querySequence.current++; neighborhoodSequence.current++; setQueryBusy(undefined); setNeighborhood(undefined); setNeighborhoodBusy(false);
+    restoring.current = true;
+    setResult(entry.result); resultRef.current = entry.result; setResultTitle(entry.title); setSelection(entry.selection);
+    setSidebarTab(entry.sidebarTab); setResultTab(entry.resultTab); setCypher(entry.editor.cypher); setParameters(entry.editor.parameters);
+    setQueryName(entry.editor.name); setQueryDescription(entry.editor.description); setQueryCategory(entry.editor.category); setSelectedSavedId(entry.editor.savedId);
+    setPathDraft(entry.path); setGraphView(entry.graph); setTableView(entry.table);
+  }
+  useEffect(() => {
+    const workspace = investigation.workspace;
+    if (!workspace || restoredProject.current === workspace.projectId) return;
+    restoredProject.current = workspace.projectId;
+    const entry = workspace.history.entries[workspace.history.index];
+    if (entry) { restoreEntry(entry); setNotice("Resumed the last investigation. Results are a saved snapshot; run the query to refresh them."); }
+  }, [investigation.workspace]);
+  useEffect(() => {
+    if (restoring.current) { restoring.current = false; return; }
+    if (!result || !history?.entries.length || history.entries[history.index]?.result !== result) return;
+    // Presentation changes belong to the displayed snapshot. Editor and path
+    // drafts belong to the next execution, and must not rewrite its inputs.
+    const { selection, sidebarTab, resultTab, graph, table } = context.current;
+    investigation.update((previous) => ({ ...previous, history: { ...previous.history, entries: previous.history.entries.map((entry, index) =>
+      index === previous.history.index ? { ...entry, selection, sidebarTab, resultTab, graph, table } : entry) } }));
+  }, [selection, sidebarTab, resultTab, graphView, tableView]);
+  useEffect(() => {
+    if (!api?.getOperation || (!busy && !queryBusy && !neighborhoodBusy)) { setOperation(null); return; }
+    let active = true;
+    const poll = async () => { try { const response = await api.getOperation(); if (active && response.ok) setOperation(response.value); } catch { /* The operation's own response reports failures. */ } };
+    void poll(); const timer = window.setInterval(() => { void poll(); }, 500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [api, busy, queryBusy, neighborhoodBusy]);
+  function showResult(next: BeagleQueryResult, title: string, nextSelection: BeagleSelection = null, tab: ResultTab = next.graph.nodes.length ? "graph" : "table", snapshot = context.current) {
+    const table = normalizeTableView(next, context.current.table);
+    setResult(next); resultRef.current = next; setResultTitle(title); setSelection(nextSelection); setResultTab(tab);
+    setTableView(table);
+    investigation.update((previous) => appendInvestigation(previous, { id: crypto.randomUUID(), title, createdAt: new Date().toISOString(),
+      result: next, ...snapshot, selection: nextSelection, resultTab: tab, table }));
+  }
+  function navigateHistory(index: number) {
+    const entry = history?.entries[index]; if (!entry) return;
+    restoreEntry(entry); investigation.update((previous) => ({ ...previous, history: { ...previous.history, index } }));
+  }
 
   const resetProjectView = useCallback(() => {
     generation.current++; querySequence.current++; searchSequence.current++; neighborhoodSequence.current++;
     setResult(undefined); setSelection(null); setSearch(""); setSearchResults([]); setSearchPage(undefined); setSearched(false); setSearchError(undefined);
     setQueryBusy(undefined); setSearchBusy(false); setError(undefined); setNotice(undefined);
-    setPathSource(""); setPathTarget(""); setReport(undefined); setReportOpen(false);
+    setPathDraft(defaultBeaglePathDraft()); setGraphView(defaultBeagleGraphView()); setTableView({ columns: [], sort: null }); restoredProject.current = ""; setReport(undefined); setReportOpen(false);
     setNeighborhood(undefined); setNeighborhoodBusy(false);
-    setCypher(DEFAULT_QUERY); setParameters("{}"); setSelectedSavedId(undefined); setQueryName("");
+    setCypher(DEFAULT_QUERY); setParameters("{}"); setSelectedSavedId(undefined); setQueryName(""); setQueryDescription(""); setQueryCategory("");
   }, []);
 
   async function updateState(label: string, action: () => Promise<OperationResult<BeagleState>>, switchProject = false, reloadCatalog = false) {
     if (mutationPending.current) return;
     mutationPending.current = true;
-    if (switchProject) resetProjectView();
     setBusy(label); setError(undefined); setNotice(undefined);
+    if (switchProject) { generation.current++; querySequence.current++; searchSequence.current++; neighborhoodSequence.current++; setQueryBusy(undefined); setSearchBusy(false); setNeighborhoodBusy(false); }
     try {
+      if (switchProject) { await investigation.flush(); resetProjectView(); }
       const response = await action();
       if (!mounted.current) return;
       if (!response.ok) throw new Error(response.error);
@@ -167,6 +235,7 @@ export function BeagleWindowApp(): React.JSX.Element {
 
   async function runQuery(label: string, action: QueryAction, merge = false) {
     const epoch = generation.current;
+    const snapshot = context.current;
     const sequence = ++querySequence.current;
     neighborhoodSequence.current++; setNeighborhood(undefined); setNeighborhoodBusy(false);
     setQueryBusy(label); setError(undefined); setNotice(undefined);
@@ -175,10 +244,7 @@ export function BeagleWindowApp(): React.JSX.Element {
       if (!mounted.current || epoch !== generation.current || sequence !== querySequence.current) return;
       if (!response.ok) throw new Error(response.error);
       if (response.value.projectId !== projectRef.current) throw new Error("The project changed before the query completed. Run the query again.");
-      setResult((previous) => merge && previous ? mergeResults(previous, response.value) : response.value);
-      if (!merge) setSelection(null);
-      setResultTitle(label);
-      setResultTab(response.value.graph.nodes.length ? "graph" : "table");
+      showResult(merge && resultRef.current ? mergeResults(resultRef.current, response.value) : response.value, label, merge ? selectionRef.current : null, undefined, snapshot);
     } catch (cause) { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setError(errorText(cause)); }
     finally { if (mounted.current && epoch === generation.current && sequence === querySequence.current) setQueryBusy(undefined); }
   }
@@ -186,6 +252,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   async function loadNeighborhood(node: BeagleNode, view: string, offset: number) {
     if (!api || busy) return;
     const epoch = generation.current;
+    const snapshot = context.current;
     const sequence = ++neighborhoodSequence.current;
     const query = ++querySequence.current;
     setNeighborhoodBusy(true); setError(undefined); setNotice(undefined);
@@ -196,9 +263,8 @@ export function BeagleWindowApp(): React.JSX.Element {
       if (!response.ok) throw new Error(response.error);
       if (response.value.projectId !== projectRef.current || response.value.objectid !== node.objectid || response.value.view !== view) return;
       setNeighborhood(response.value);
-      setResult((previous) => previous ? mergeResults(previous, response.value) : response.value);
-      setResultTitle(`${BEAGLE_DRILLDOWNS.find((item) => item.id === view)?.label ?? "Relationships"} of ${nodeName(node)}`);
-      setResultTab("graph");
+      showResult(resultRef.current ? mergeResults(resultRef.current, response.value) : response.value,
+        `${BEAGLE_DRILLDOWNS.find((item) => item.id === view)?.label ?? "Relationships"} of ${nodeName(node)}`, selectionRef.current, "graph", snapshot);
     } catch (cause) { if (mounted.current && epoch === generation.current && sequence === neighborhoodSequence.current && query === querySequence.current) setError(errorText(cause)); }
     finally { if (mounted.current && epoch === generation.current && sequence === neighborhoodSequence.current) setNeighborhoodBusy(false); }
   }
@@ -245,12 +311,13 @@ export function BeagleWindowApp(): React.JSX.Element {
       return;
     }
     setError(undefined);
-    setResult((previous) => previous?.projectId === state.selectedProjectId ? {
+    const previous = resultRef.current;
+    const next = previous?.projectId === state.selectedProjectId ? {
       ...previous, graph: { ...previous.graph, nodes: previous.graph.nodes.some((entry) => entry.objectid === node.objectid)
         ? previous.graph.nodes.map((entry) => entry.objectid === node.objectid ? node : entry)
         : [...previous.graph.nodes, node].slice(0, BEAGLE_RESULT_LIMITS.nodes) },
-    } : emptyResult(state.selectedProjectId, [node]));
-    setSelection({ kind: "node", id: node.objectid }); setResultTab("graph");
+    } : emptyResult(state.selectedProjectId, [node]);
+    showResult(next, `Inspect ${nodeName(node)}`, { kind: "node", id: node.objectid }, "graph");
   }
 
   async function inspectDiagnosticObject(objectid: string) {
@@ -272,21 +339,52 @@ export function BeagleWindowApp(): React.JSX.Element {
   }
 
   function saveQuery() {
-    if (!state || !cypher.trim() || !queryName.trim()) return;
+    if (!state || !cypher.trim() || !queryName.trim() || !investigation.workspace) return;
     try {
-      parseParameters(parameters);
-      const name = queryName.trim().slice(0, 80);
+      const name = queryName.trim();
       const existing = customQueries.find((query) => query.name === name);
-      const next = [{ id: existing?.id ?? crypto.randomUUID(), name, cypher, parameters }, ...customQueries.filter((query) => query.name !== name)].slice(0, 100);
-      saveCustomQueries(state.selectedProjectId, next); setCustomQueries(next); setReport(undefined); setReportOpen(false);
-      setNotice(`Saved “${name}” in this project.`); setError(undefined);
+      const next = parseBeagleCustomQueries([{ id: existing?.id ?? crypto.randomUUID(), name, description: queryDescription, category: queryCategory,
+        cypher, parameters }, ...customQueries.filter((query) => query.name !== name)]);
+      investigation.update((previous) => ({ ...previous, queries: next }));
+      setNotice(`Saved “${name}” in this project.`); setReport(undefined); setReportOpen(false); setError(undefined);
     } catch (cause) { setError(`The query could not be saved: ${errorText(cause)}`); }
   }
-
-  function removeQuery(id: string) {
-    if (!state) return;
-    try { const next = customQueries.filter((query) => query.id !== id); saveCustomQueries(state.selectedProjectId, next); setCustomQueries(next); }
-    catch (cause) { setError(`The saved query could not be removed: ${errorText(cause)}`); }
+  function removeQuery(id: string) { investigation.update((previous) => ({ ...previous, queries: previous.queries.filter((query) => query.id !== id) })); }
+  async function portableQueries(action: "import" | "export") {
+    if (!api || busy || !investigation.workspace) return;
+    const epoch = generation.current;
+    setBusy(action === "import" ? "Importing queries" : "Exporting queries"); setError(undefined);
+    try {
+      if (action === "import") {
+        const response = await api.importQueries();
+        if (epoch !== generation.current || !mounted.current) return;
+        if (!response.ok) throw new Error(response.error);
+        if (!response.value.cancelled) {
+          const entries = response.value.queries.map((query) => ({ ...query, id: crypto.randomUUID() }));
+          const next = parseBeagleCustomQueries([...customQueries, ...entries]);
+          investigation.update((previous) => ({ ...previous, queries: next }));
+          setNotice(`Imported ${entries.length} saved queries.`);
+        }
+      } else {
+        const response = await api.exportQueries({ queries: customQueries });
+        if (epoch !== generation.current || !mounted.current) return;
+        if (!response.ok) throw new Error(response.error);
+        if (!response.value.cancelled) setNotice("Saved query library exported.");
+      }
+    } catch (cause) { if (epoch === generation.current && mounted.current) setError(errorText(cause)); }
+    finally { if (epoch === generation.current && mounted.current) setBusy(undefined); }
+  }
+  async function exportResult(format: "json" | "csv", columns?: string[]) {
+    if (!api || !result || busy) return;
+    const epoch = generation.current;
+    setBusy("Exporting result"); setError(undefined);
+    try {
+      const response = await api.exportResult({ format, title: resultTitle, result, ...(columns ? { columns } : {}), ...(format === "csv" && tableView.sort ? { sort: tableView.sort } : {}) });
+      if (epoch !== generation.current || !mounted.current) return;
+      if (!response.ok) throw new Error(response.error);
+      if (!response.value.cancelled) setNotice(`Current result exported as ${format.toUpperCase()}${result.truncated ? " (display-limited snapshot)" : ""}.`);
+    } catch (cause) { if (epoch === generation.current && mounted.current) setError(errorText(cause)); }
+    finally { if (epoch === generation.current && mounted.current) setBusy(undefined); }
   }
 
   async function updateTag(node: BeagleNode, tag: "owned" | "admin_tier_0", enabled: boolean) {
@@ -302,16 +400,22 @@ export function BeagleWindowApp(): React.JSX.Element {
       const entity = refreshed.value.graph.nodes.find((item) => item.objectid === node.objectid);
       if (!entity) throw new Error("The updated object was not returned. Refresh its query to see the current tags.");
       const update = (item: BeagleNode): BeagleNode => item.objectid === entity.objectid ? entity : item;
-      setResult((previous) => previous ? { ...previous, graph: { ...previous.graph, nodes: previous.graph.nodes.map(update) } } : previous);
+      const previous = resultRef.current;
+      if (previous) {
+        const next = { ...previous, graph: { ...previous.graph, nodes: previous.graph.nodes.map(update) } };
+        setResult(next); resultRef.current = next;
+        investigation.update((workspace) => ({ ...workspace, history: { ...workspace.history, entries: workspace.history.entries.map((entry, index) =>
+          index === workspace.history.index ? { ...entry, result: next } : entry) } }));
+      }
       setSearchResults((previous) => previous.map(update));
     } catch (cause) { if (mounted.current && epoch === generation.current) setError(`The tag was updated, but object details could not be refreshed: ${errorText(cause)}`); }
   }
 
   const ready = Boolean(state?.runtime.available && state.selectedProjectId);
-  const disabled = !ready || Boolean(busy);
+  const disabled = !ready || Boolean(busy) || investigation.loading;
   const selectedNode = selection?.kind === "node" ? result?.graph.nodes.find((node) => node.objectid === selection.id) : undefined;
   const selectedEdge = selection?.kind === "edge" ? result?.graph.edges.find((edge) => edge.id === selection.id) : undefined;
-  const categories = useMemo(() => [...new Set(catalog.map((query) => query.category))].sort(), [catalog]);
+  const categories = useMemo(() => [...new Set([...catalog, ...customQueries].map((query) => query.category).filter(Boolean))].sort(), [catalog, customQueries]);
   const visibleQueries = catalog.filter((query) => (!category || query.category === category) &&
     `${query.name} ${query.description} ${query.category}`.toLowerCase().includes(queryFilter.toLowerCase()));
 
@@ -323,7 +427,7 @@ export function BeagleWindowApp(): React.JSX.Element {
         <Chip size="sm" variant="soft" color={state?.runtime.available ? "success" : "default"}>{loading ? "Starting…" : state?.runtime.available ? "Beagle ready" : "Backend unavailable"}</Chip></div>
       <div className="beagle-toolbar">
         <NativeSelect className="beagle-project-select" variant="secondary"><NativeSelect.Trigger aria-label="Project" value={state?.selectedProjectId ?? ""}
-          disabled={Boolean(busy) || loading} onChange={(event) => { void updateState("Opening project", () => api.selectProject({ id: event.target.value }), true); }}>
+          disabled={Boolean(busy) || loading} onChange={(event) => { const id = event.target.value; void updateState("Opening project", () => api.selectProject({ id }), true); }}>
           {!state?.projects.length ? <NativeSelect.Option value="">No project</NativeSelect.Option> : null}
           {state?.projects.map((project) => <NativeSelect.Option key={project.id} value={project.id}>{project.name}</NativeSelect.Option>)}<NativeSelect.Indicator />
         </NativeSelect.Trigger></NativeSelect>
@@ -337,6 +441,7 @@ export function BeagleWindowApp(): React.JSX.Element {
             void api.exportGraph().then((response) => { if (!mounted.current) return; if (!response.ok) setError(response.error); else if (!response.value.cancelled) setNotice("Project graph exported."); })
               .catch((cause: unknown) => { if (mounted.current) setError(errorText(cause)); }).finally(() => { mutationPending.current = false; if (mounted.current) setBusy(undefined); });
           }}><FontAwesomeIcon icon={faDownload} />Export</Button>
+          <Button size="sm" variant="tertiary" aria-expanded={managementOpen} onPress={() => setManagementOpen((open) => !open)}>Project tools</Button>
           <IconButton label="Beagle runtime settings" icon={faSliders} disabled={Boolean(busy)} onPress={() => setRuntimeOpen((open) => !open)} />
           <IconButton label="Refresh project" icon={faArrowsRotate} disabled={Boolean(busy) || loading} onPress={() => { void updateState("Refreshing", () => api.getState()); }} />
         </div>
@@ -346,6 +451,9 @@ export function BeagleWindowApp(): React.JSX.Element {
         <span><strong>{state?.stats?.edges.toLocaleString() ?? "—"}</strong> relationships</span>
         <span><strong>{Object.keys(state?.stats?.labels ?? {}).filter((name) => name !== "Base").length}</strong> object types</span>
         {busy ? <span role="status" className="beagle-busy"><Spinner size="sm" />{busy}…</span> : null}
+        {operation ? <span className="beagle-busy" role="status">{operation.phase}{operation.cancellable ? <Button size="sm" variant="tertiary" onPress={() => {
+          void api.cancelOperation({ id: operation.id }).then((response) => { if (!response.ok) setError(response.error); }).catch((cause: unknown) => setError(errorText(cause)));
+        }}>Cancel operation</Button> : null}</span> : null}
       </div>
     </header>
     {newProjectOpen ? <form className="beagle-inline-panel" onSubmit={(event) => { event.preventDefault(); if (projectName.trim()) void updateState("Creating project", () => api.createProject({ name: projectName.trim() }), true); }}>
@@ -364,6 +472,13 @@ export function BeagleWindowApp(): React.JSX.Element {
     {reportOpen && report !== undefined ? <pre className="beagle-operation-report" aria-label="Operation report">{JSON.stringify(report, null, 2)}</pre> : null}
     {ready && Boolean(state?.stats?.nodes || state?.diagnostics?.errors.length || state?.diagnostics?.localGroupAmbiguities.length) ? <div className="beagle-analysis-diagnostics"><BeagleAnalysisWarnings diagnostics={state?.diagnostics}
       disabled={disabled || Boolean(queryBusy)} onInspectObject={(objectid) => { void inspectDiagnosticObject(objectid); }} /></div> : null}
+    {managementOpen && state ? <div className="beagle-management-panel">
+      <BeagleProjectPanel api={api} state={state} busy={Boolean(busy || queryBusy || neighborhoodBusy)} beforeAction={investigation.flush} onBusyChange={(working) => { mutationPending.current = working; setBusy(working ? "Project operation" : undefined); }}
+        onState={(next) => { if (next.selectedProjectId !== projectRef.current) resetProjectView(); setState(next); }} onError={setError} onNotice={setNotice} />
+      <BeagleRulesPanel api={api} projectId={state.selectedProjectId} labels={Object.keys(state.stats?.labels ?? {})} disabled={disabled || Boolean(queryBusy || neighborhoodBusy)}
+        onBusyChange={(working) => { mutationPending.current = working; setBusy(working ? "Rule operation" : undefined); }}
+        onApplied={(value) => { setState(value.state); setReport(value.report); setNotice("Rules saved and applied."); }} onInspectObject={(id) => { void inspectDiagnosticObject(id); }} />
+    </div> : null}
     <div className="beagle-body">
       <aside className="beagle-sidebar" aria-label="Directory exploration">
         <Tabs selectedKey={sidebarTab} onSelectionChange={(key) => setSidebarTab(String(key) as SidebarTab)} className="beagle-sidebar-tabs">
@@ -389,19 +504,21 @@ export function BeagleWindowApp(): React.JSX.Element {
             <NativeSelect variant="secondary"><NativeSelect.Trigger aria-label="Query category" value={category} onChange={(event) => setCategory(event.target.value)}>
               <NativeSelect.Option value="">All categories</NativeSelect.Option>{categories.map((item) => <NativeSelect.Option key={item} value={item}>{item}</NativeSelect.Option>)}<NativeSelect.Indicator />
             </NativeSelect.Trigger></NativeSelect>
-            {customQueries.length ? <section><h2 className="beagle-section-label">My queries</h2>{customQueries.filter((query) => query.name.toLowerCase().includes(queryFilter.toLowerCase())).map((query) => <div key={query.id} className="beagle-custom-query">
-              <Button variant="ghost" onPress={() => { setCypher(query.cypher); setParameters(query.parameters); setQueryName(query.name); setSelectedSavedId(undefined); }}>{query.name}</Button>
+            <div className="beagle-query-portability"><Button size="sm" variant="tertiary" isDisabled={disabled || investigation.loading} onPress={() => { void portableQueries("import"); }}>Import queries</Button>
+              <Button size="sm" variant="tertiary" isDisabled={disabled || !customQueries.length} onPress={() => { void portableQueries("export"); }}>Export queries</Button></div>
+            {customQueries.length ? <section><h2 className="beagle-section-label">My queries</h2>{customQueries.filter((query) => (!category || category === query.category) && `${query.name} ${query.description} ${query.category}`.toLowerCase().includes(queryFilter.toLowerCase())).map((query) => <div key={query.id} className="beagle-custom-query">
+              <Button variant="ghost" onPress={() => { setCypher(query.cypher); setParameters(query.parameters); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category); setSelectedSavedId(undefined); }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small></span></Button>
               <IconButton label={`Remove saved query ${query.name}`} icon={faTrash} onPress={() => removeQuery(query.id)} />
             </div>)}</section> : null}
             <h2 className="beagle-section-label">BloodHound query library <span>{visibleQueries.length}</span></h2>
             <div className="beagle-query-list">{visibleQueries.map((query) => <Button key={query.id} variant="ghost" className="beagle-query-item" aria-label={`Load query ${query.name}`} aria-pressed={selectedSavedId === query.id} onPress={() => {
-              setCypher(query.cypher); setParameters(initialParameters(query.parameters)); setSelectedSavedId(query.id); setQueryName(query.name);
+              setCypher(query.cypher); setParameters(initialParameters(query.parameters)); setSelectedSavedId(query.id); setQueryName(query.name); setQueryDescription(query.description); setQueryCategory(query.category);
             }}><span><strong>{query.name}</strong><small>{query.description || query.category}</small>{query.parameters.length ? <em>Parameters: {query.parameters.join(", ")}</em> : null}</span></Button>)}</div>
             {!visibleQueries.length ? <p className="beagle-muted">No queries match this filter.</p> : null}
           </Tabs.Panel>
           <Tabs.Panel id="paths" className="beagle-sidebar-panel" shouldForceMount>
             <BeaglePathControls key={state?.selectedProjectId} api={api} projectId={state?.selectedProjectId ?? ""} source={pathSource} target={pathTarget}
-              onSourceChange={setPathSource} onTargetChange={setPathTarget} disabled={disabled || Boolean(queryBusy)} loading={Boolean(queryBusy)}
+              draft={pathDraft} onDraftChange={setPathDraft} onSourceChange={setPathSource} onTargetChange={setPathTarget} disabled={disabled || Boolean(queryBusy)} loading={Boolean(queryBusy)}
               onRun={(input) => { void runQuery(input.all ? "All shortest paths" : "Shortest path", () => api.paths(input)); }} />
           </Tabs.Panel>
         </Tabs>
@@ -414,16 +531,27 @@ export function BeagleWindowApp(): React.JSX.Element {
             <TextField value={cypher} onChange={(value) => { setCypher(value); setSelectedSavedId(undefined); }} className="beagle-cypher-field" aria-label="Cypher query"><TextArea aria-label="Cypher query" spellCheck={false} rows={4} /></TextField>
             <TextField value={parameters} onChange={setParameters} className="beagle-parameters-field"><Label>Parameters (JSON)</Label><TextArea aria-label="Query parameters" spellCheck={false} rows={3} /></TextField>
           </div>
-          <div className="beagle-save-query"><TextField aria-label="Saved query name" value={queryName} onChange={setQueryName}><Input aria-label="Saved query name" placeholder="Name this query" maxLength={80} /></TextField>
-            <Button size="sm" variant="tertiary" isDisabled={!state || !queryName.trim() || !cypher.trim()} onPress={saveQuery}><FontAwesomeIcon icon={faSave} />Save query</Button></div>
+          <div className="beagle-save-query"><TextField aria-label="Saved query name" value={queryName} onChange={setQueryName}><Input aria-label="Saved query name" placeholder="Name this query" maxLength={160} /></TextField>
+            <TextField aria-label="Saved query category" value={queryCategory} onChange={setQueryCategory}><Input aria-label="Saved query category" placeholder="Category" maxLength={160} /></TextField>
+            <TextField aria-label="Saved query description" value={queryDescription} onChange={setQueryDescription}><Input aria-label="Saved query description" placeholder="Description" maxLength={4000} /></TextField>
+            <Button size="sm" variant="tertiary" isDisabled={!investigation.workspace || !queryName.trim() || !cypher.trim()} onPress={saveQuery}><FontAwesomeIcon icon={faSave} />Save query</Button></div>
         </div>
+        {history?.entries.length ? <nav className="beagle-history" aria-label="Investigation history">
+          <Button size="sm" variant="tertiary" aria-label="Back in investigation" isDisabled={history.index <= 0 || Boolean(busy)} onPress={() => navigateHistory(history.index - 1)}>Back</Button>
+          <Button size="sm" variant="tertiary" aria-label="Forward in investigation" isDisabled={history.index >= history.entries.length - 1 || Boolean(busy)} onPress={() => navigateHistory(history.index + 1)}>Forward</Button>
+          <NativeSelect variant="secondary"><NativeSelect.Trigger aria-label="Resume investigation" value={String(history.index)} disabled={Boolean(busy)} onChange={(event) => navigateHistory(Number(event.target.value))}>
+            {history.entries.map((entry, index) => <NativeSelect.Option key={entry.id} value={String(index)}>{index + 1}. {entry.title} · {new Date(entry.createdAt).toLocaleTimeString()}</NativeSelect.Option>)}<NativeSelect.Indicator />
+          </NativeSelect.Trigger></NativeSelect>
+          <span className="beagle-muted">Saved snapshots</span>
+        </nav> : null}
         <div className="beagle-result-area" aria-busy={Boolean(queryBusy)}>
           {result ? <Tabs className="beagle-result-tabs" selectedKey={resultTab} onSelectionChange={(key) => setResultTab(String(key) as ResultTab)}>
             <div className="beagle-result-heading"><Tabs.ListContainer><Tabs.List aria-label="Query result view"><Tab id="graph" label="Graph" /><Tab id="table" label="Table" /><Tab id="objects" label="Objects" /></Tabs.List></Tabs.ListContainer>
+              <Button size="sm" variant="tertiary" isDisabled={Boolean(busy)} onPress={() => { void exportResult("json"); }}>Export result JSON</Button>
               <span className="beagle-result-summary" title={resultTitle}>{queryBusy ? `${queryBusy}…` : `${result.totalRows.toLocaleString()} rows · ${result.elapsedMs.toLocaleString()} ms`}</span></div>
             {result.truncated ? <p className="beagle-limit-warning" role="status">Results reached a display limit ({result.limits.rows.toLocaleString()} rows, {result.limits.nodes.toLocaleString()} objects, {result.limits.edges.toLocaleString()} relationships). Add a narrower filter or LIMIT.</p> : null}
-            <Tabs.Panel id="graph" className="beagle-graph-panel">{result.graph.nodes.length ? <BeagleGraph result={result} selection={selection} onSelect={setSelection} /> : <Empty title="No graph objects" description={result.rows.length ? "This query returned scalar values. Open Table to inspect the results." : "The query returned no matching objects or paths."} />}</Tabs.Panel>
-            <Tabs.Panel id="table" className="beagle-table-panel"><ResultTable result={result} /></Tabs.Panel>
+            <Tabs.Panel id="graph" className="beagle-graph-panel">{result.graph.nodes.length ? <BeagleGraph result={result} selection={selection} onSelect={setSelection} view={graphView} onViewChange={setGraphView} /> : <Empty title="No graph objects" description={result.rows.length ? "This query returned scalar values. Open Table to inspect the results." : "The query returned no matching objects or paths."} />}</Tabs.Panel>
+            <Tabs.Panel id="table" className="beagle-table-panel"><BeagleResultTable result={result} view={tableView} onViewChange={setTableView} disabled={Boolean(busy)} onExport={(columns) => { void exportResult("csv", columns); }} /></Tabs.Panel>
             <Tabs.Panel id="objects" className="beagle-objects-panel">{result.graph.nodes.length ? result.graph.nodes.map((node) => <ObjectButton key={node.objectid} node={node} onPress={() => setSelection({ kind: "node", id: node.objectid })} />) : <Empty title="No objects" description="No directory objects were returned by this query." />}</Tabs.Panel>
           </Tabs> : <Empty title={loading ? "Opening directory workspace" : state?.stats?.nodes ? "Explore your directory" : "Import Active Directory data"}
             description={loading ? "Loading Beagle and your projects…" : state?.stats?.nodes ? "Search for an object, choose a BloodHound query, or run your own Cypher." : "Import a BloodHound collection ZIP or JSON files, then analyze the graph to derive relationships."}
@@ -450,64 +578,11 @@ export function BeagleWindowApp(): React.JSX.Element {
           <BeagleNeighborhoodControls key={`${state?.selectedProjectId}:${selectedNode.objectid}`} node={selectedNode} result={neighborhood} loading={neighborhoodBusy}
             disabled={disabled || Boolean(queryBusy)} onLoad={(view, offset) => { void loadNeighborhood(selectedNode, view, offset); }} />
           <h3 className="beagle-section-label">Properties</h3><Properties values={selectedNode.properties} />
-        </> : selectedEdge && result ? <EdgeInspector key={`${result.projectId}:${selectedEdge.id}`} edge={selectedEdge} result={result} api={api} disabled={disabled}
-          onOpen={(composition) => { setResult(composition); setSelection(null); setResultTitle(`${selectedEdge.kind} composition`); setResultTab("graph"); }} /> : null}
+        </> : selectedEdge && result ? <BeagleEdgeInspector key={`${result.projectId}:${selectedEdge.id}`} edge={selectedEdge} result={result} api={api} disabled={disabled || Boolean(queryBusy)}
+          onInspectObject={(id) => { void inspectDiagnosticObject(id); }} onOpen={(value, title) => { querySequence.current++; setQueryBusy(undefined); showResult(value, title); }} /> : null}
       </aside> : null}
     </div>
   </AuxiliaryWindowFrame>;
-}
-
-function EdgeInspector({ edge, result, api, disabled, onOpen }: { edge: BeagleEdge; result: BeagleQueryResult; api: BeagleAPI; disabled: boolean; onOpen: (result: BeagleQueryResult) => void }) {
-  const [composition, setComposition] = useState<BeagleQueryResult>();
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
-  const alive = useRef(true);
-  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
-  const source = result.graph.nodes.find((node) => node.objectid === edge.source);
-  const target = result.graph.nodes.find((node) => node.objectid === edge.target);
-  return <>
-    <h3 className="beagle-edge-kind">{edge.kind}</h3><Chip size="sm" variant="soft">{edge.derived === true ? "Derived relationship" : edge.derived === false ? "Collected relationship" : "Relationship"}</Chip>
-    <div className="beagle-edge-endpoints"><span>{source ? nodeName(source) : edge.source}</span><FontAwesomeIcon icon={faArrowRight} /><span>{target ? nodeName(target) : edge.target}</span></div>
-    <Properties values={edge.properties} />
-    <h3 className="beagle-section-label">Composition</h3><p className="beagle-muted">Inspect the underlying relationships that support this edge.</p>
-    <Button size="sm" variant="secondary" isDisabled={disabled || loading} isPending={loading} onPress={() => {
-      setLoading(true); setError(undefined);
-      void api.compose({ source: edge.source, target: edge.target, kind: edge.kind }).then((response) => {
-        if (!alive.current) return;
-        if (!response.ok) throw new Error(response.error);
-        if (response.value.projectId !== result.projectId) throw new Error("The active project changed. Select the relationship again.");
-        setComposition(response.value);
-      }).catch((cause: unknown) => { if (alive.current) setError(errorText(cause)); }).finally(() => { if (alive.current) setLoading(false); });
-    }}><FontAwesomeIcon icon={faCircleNodes} />Show composition</Button>
-    {error ? <p role="alert" className="text-danger text-sm">{error}</p> : null}
-    {composition ? <section className="beagle-composition"><p>{composition.graph.nodes.length} objects · {composition.graph.edges.length} relationships</p>
-      {composition.graph.edges.map((item) => <p key={item.id}><strong>{item.kind}</strong><small>{item.source} → {item.target}</small></p>)}
-      {!composition.graph.edges.length ? <p className="beagle-muted">No additional relationship composition was returned.</p> : <Button size="sm" variant="secondary" onPress={() => onOpen(composition)}>Open composition graph</Button>}
-    </section> : null}
-  </>;
-}
-
-function Properties({ values }: { values: BeagleJsonObject }) {
-  const entries = Object.entries(values).sort(([a], [b]) => a.localeCompare(b));
-  return entries.length ? <dl className="beagle-properties">{entries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{displayValue(value)}</dd></div>)}</dl> : <p className="beagle-muted">No additional properties.</p>;
-}
-
-function ResultTable({ result }: { result: BeagleQueryResult }) {
-  const [page, setPage] = useState(0);
-  useEffect(() => { setPage(0); }, [result]);
-  const pageSize = 50;
-  const pageCount = Math.max(1, Math.ceil(result.rows.length / pageSize));
-  const columns = result.columns.length ? result.columns : [...new Set(result.rows.flatMap((row) => Object.keys(row)))];
-  if (!result.rows.length) return <Empty title="No rows returned" description="The query completed successfully with an empty result." />;
-  return <div className="beagle-table-wrapper"><div className="beagle-table-scroll"><table aria-label="Cypher results"><thead><tr>{columns.map((column, index) => <th key={`${column}:${index}`}>{column}</th>)}</tr></thead>
-    <tbody>{result.rows.slice(page * pageSize, (page + 1) * pageSize).map((row, index) => <tr key={page * pageSize + index}>{columns.map((column, columnIndex) => {
-      const value = displayValue(row[column]);
-      return <td key={`${column}:${columnIndex}`}><details className="beagle-cell-value"><summary title={value.length <= 400 ? value : undefined}>{value.length > 400 ? `${value.slice(0, 400)}…` : value}</summary>{value.length > 400 ? <pre>{value}</pre> : null}</details></td>;
-    })}</tr>)}</tbody></table></div>
-    <div className="beagle-pagination"><span>{page * pageSize + 1}–{Math.min((page + 1) * pageSize, result.rows.length)} of {result.rows.length.toLocaleString()} displayed rows</span>
-      <Button size="sm" variant="tertiary" isDisabled={page === 0} onPress={() => setPage((current) => Math.max(0, current - 1))}>Previous</Button>
-      <Button size="sm" variant="tertiary" isDisabled={page >= pageCount - 1} onPress={() => setPage((current) => Math.min(pageCount - 1, current + 1))}>Next</Button></div>
-  </div>;
 }
 
 function ObjectButton({ node, onPress }: { node: BeagleNode; onPress: () => void }) {

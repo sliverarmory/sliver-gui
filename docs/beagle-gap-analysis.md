@@ -1,5 +1,8 @@
 # Beagle / AD Explorer gap analysis against BloodHound CE
 
+> Follow-up: P1 remediation and the P2 implementation are tracked separately. See [P2 roadmap and local verification](beagle-p2-roadmap.md) for implemented workflows, measured limits, and remaining scope choices. The findings below describe the original assessment.
+
+
 Assessment date: October 23, 2026. This is an implementation and evidence review, not a new full CE oracle run. No application code was changed.
 
 This document preserves the assessment baseline. Subsequent P1 implementation and local acceptance results are tracked in [the P1 roadmap](beagle-p1-roadmap.md); the findings below describe the pre-implementation state. CI compatibility work remains deferred by request.

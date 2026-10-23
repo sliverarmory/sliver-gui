@@ -1,9 +1,13 @@
 // @vitest-environment node
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BEAGLE_IPC_INVOKE } from "../shared/beagle-contracts.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
 import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers, type BeagleIpcServices } from "./beagle-ipc.js";
+import { emptyBeagleWorkspace } from "../shared/beagle-workspace.js";
 
 const mocks = vi.hoisted(() => ({
   handlers: new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>(),
@@ -24,7 +28,9 @@ function event(): IpcMainInvokeEvent {
 function services(): BeagleIpcServices {
   return { manager: Object.fromEntries([
     "getState", "createProject", "selectProject", "configureBinary", "importFiles", "analyze", "query", "getQueries",
-    "runSavedQuery", "search", "entity", "neighborhood", "paths", "tag", "compose", "exportGraph",
+    "runSavedQuery", "search", "entity", "neighborhood", "paths", "tag", "compose", "exportGraphToFile",
+    "renameProject", "archiveProject", "restoreArchivedProject", "cleanup", "setRetention", "backupProject", "restoreProject",
+    "getWorkspace", "saveWorkspace", "importQueries", "exportQueries", "exportResult", "relayTargets", "aclOrigins", "getRules", "previewRules", "applyRules", "getOperation", "cancelOperation",
   ].map((name) => [name, vi.fn().mockResolvedValue({ marker: name })])) as unknown as BeagleIpcServices["manager"],
   getApplicationSettings: () => DEFAULT_APPLICATION_SETTINGS_STATE };
 }
@@ -32,6 +38,8 @@ function invoke(channel: string, fixture: IpcMainInvokeEvent, ...args: unknown[]
   return mocks.handlers.get(channel)!(fixture, ...args);
 }
 beforeEach(() => { vi.resetAllMocks(); mocks.handlers.clear(); mocks.fromWebContents.mockReturnValue(window); });
+const directories: string[] = [];
+afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("Beagle IPC", () => {
   it("registers only its typed capability surface and removes every handler", () => {
@@ -116,5 +124,68 @@ describe("Beagle IPC", () => {
     mocks.open.mockResolvedValue({ canceled: false, filePaths: ["/tmp/approved.zip"] });
     await expect(invoke(BEAGLE_IPC_INVOKE.importFiles, event())).resolves.toMatchObject({ ok: true });
     expect(service.manager.importFiles).toHaveBeenCalledExactlyOnceWith(["/tmp/approved.zip"]);
+  });
+  it("keeps cancellation and progress available while project mutations and workspace saves are locked", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    let finish!: (value: unknown) => void;
+    mocks.open.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = invoke(BEAGLE_IPC_INVOKE.importFiles, event(), { mode: "replace" });
+    const id = "11111111-1111-4111-8111-111111111111";
+    await expect(invoke(BEAGLE_IPC_INVOKE.getOperation, event())).resolves.toMatchObject({ ok: true });
+    await expect(invoke(BEAGLE_IPC_INVOKE.cancelOperation, event(), { id })).resolves.toMatchObject({ ok: true });
+    expect(service.manager.cancelOperation).toHaveBeenCalledWith({ id });
+    await expect(invoke(BEAGLE_IPC_INVOKE.saveWorkspace, event(), { projectId: id, workspace: emptyBeagleWorkspace(id) })).resolves.toMatchObject({ ok: false, error: expect.stringContaining("in progress") });
+    finish({ canceled: false, filePaths: ["/tmp/approved.zip"] });
+    await expect(pending).resolves.toMatchObject({ ok: true });
+    expect(service.manager.importFiles).toHaveBeenCalledWith(["/tmp/approved.zip"], { mode: "replace" });
+  });
+  it("publishes streamed exports from private sibling files only after a trust recheck", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "beagle-ipc-export-")); directories.push(directory);
+    const destination = join(directory, "graph.json");
+    await writeFile(destination, "original");
+    const service = services(); const authorize = vi.fn().mockReturnValue(true);
+    registerBeagleIpcHandlers(service, url, authorize);
+    mocks.save.mockResolvedValue({ canceled: false, filePath: destination });
+    vi.mocked(service.manager.exportGraphToFile).mockImplementation(async (path) => {
+      expect(path).not.toBe(destination); expect(path).toMatch(/\.tmp\.json$/u);
+      await writeFile(path, "complete graph", { flag: "wx", mode: 0o600 });
+      authorize.mockReturnValue(false);
+    });
+    await expect(invoke(BEAGLE_IPC_INVOKE.exportGraph, event())).resolves.toMatchObject({ ok: false });
+    expect(await readFile(destination, "utf8")).toBe("original");
+    expect(await readdir(directory)).toEqual(["graph.json"]);
+    authorize.mockReturnValue(true);
+    vi.mocked(service.manager.exportGraphToFile).mockImplementation(async (path) => { await writeFile(path, "complete graph", { flag: "wx", mode: 0o600 }); });
+    await expect(invoke(BEAGLE_IPC_INVOKE.exportGraph, event())).resolves.toEqual({ ok: true, value: { cancelled: false } });
+    expect(await readFile(destination, "utf8")).toBe("complete graph");
+    expect(await readdir(directory)).toEqual(["graph.json"]);
+  });
+  it("uses main-selected backup and query files and wraps canceled imports", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    mocks.open.mockResolvedValue({ canceled: true, filePaths: [] });
+    await expect(invoke(BEAGLE_IPC_INVOKE.importQueries, event())).resolves.toEqual({ ok: true, value: { cancelled: true, queries: [] } });
+    await expect(invoke(BEAGLE_IPC_INVOKE.restoreProject, event(), { path: "/tmp/injected.beagle" })).resolves.toMatchObject({ ok: false });
+    mocks.open.mockResolvedValue({ canceled: false, filePaths: ["/tmp/approved.beagle"] });
+    await expect(invoke(BEAGLE_IPC_INVOKE.restoreProject, event())).resolves.toMatchObject({ ok: true });
+    expect(service.manager.restoreProject).toHaveBeenCalledWith("/tmp/approved.beagle");
+    vi.mocked(service.manager.importQueries).mockResolvedValue([]);
+    mocks.open.mockResolvedValue({ canceled: false, filePaths: ["/tmp/approved.zip"] });
+    await expect(invoke(BEAGLE_IPC_INVOKE.importQueries, event())).resolves.toEqual({ ok: true, value: { cancelled: false, queries: [] } });
+    expect(service.manager.importQueries).toHaveBeenCalledWith("/tmp/approved.zip");
+  });
+  it("validates rules and edge identities before forwarding new capabilities", async () => {
+    const service = services();
+    registerBeagleIpcHandlers(service, url, () => true);
+    const configuration = { groups: [{ label: "Tag_Owned", seeds: [], expansion: "none", exclusions: [], tier: false, enabled: true, priority: 0 }] };
+    await expect(invoke(BEAGLE_IPC_INVOKE.previewRules, event(), { configuration })).resolves.toMatchObject({ ok: true });
+    expect(service.manager.previewRules).toHaveBeenCalledExactlyOnceWith({ configuration });
+    await expect(invoke(BEAGLE_IPC_INVOKE.applyRules, event(), { configuration, path: "injected" })).resolves.toMatchObject({ ok: false });
+    const edge = { source: "source", target: "target", kind: "GenericAll" };
+    await expect(invoke(BEAGLE_IPC_INVOKE.aclOrigins, event(), edge)).resolves.toMatchObject({ ok: true });
+    await expect(invoke(BEAGLE_IPC_INVOKE.relayTargets, event(), edge)).resolves.toMatchObject({ ok: true });
+    expect(service.manager.aclOrigins).toHaveBeenCalledWith(edge); expect(service.manager.relayTargets).toHaveBeenCalledWith(edge);
+    await expect(invoke(BEAGLE_IPC_INVOKE.cancelOperation, event(), { id: "../../database" })).resolves.toMatchObject({ ok: false });
   });
 });

@@ -2,6 +2,9 @@ import type { ApplicationSettingsState } from "./application-settings-contracts.
 import type { OperationResult } from "./contracts.js";
 import type { BeagleAnalysisDiagnostics } from "./beagle-diagnostics.js";
 import { BEAGLE_DRILLDOWNS, BEAGLE_PATH_EDGE_KINDS } from "./beagle-investigations.js";
+import type { BeagleImportInput, BeagleRenameProjectInput, BeagleProjectIdInput, BeagleCleanupInput, BeagleRetentionInput, BeagleProjectData, BeagleOperationState } from "./beagle-projects.js";
+import type { BeagleWorkspace, BeagleCustomQuery } from "./beagle-workspace.js";
+import type { BeagleRuleConfiguration, BeagleRulePreview } from "./beagle-rules.js";
 
 export type BeagleJsonValue = null | boolean | number | string | BeagleJsonValue[] | BeagleJsonObject;
 export interface BeagleJsonObject { [key: string]: BeagleJsonValue }
@@ -29,12 +32,14 @@ export interface BeagleStats {
   relationships: Record<string, number>;
 }
 export interface BeagleState {
-  runtime: { available: boolean; version: string | null; source: string | null; error?: string };
+  runtime: { available: boolean; version: string | null; source: string | null; error?: string; operations?: readonly string[] };
   projects: BeagleProject[];
   selectedProjectId: string;
   stats: BeagleStats | null;
   /** Absent until this project has a recorded analysis diagnostic result. */
   diagnostics?: BeagleAnalysisDiagnostics;
+  projectData?: BeagleProjectData;
+  archivedProjects?: BeagleProject[];
 }
 export interface BeagleQueryResult {
   projectId: string;
@@ -83,7 +88,7 @@ export interface BeagleAPI {
   createProject(input: BeagleCreateProjectInput): Promise<OperationResult<BeagleState>>;
   selectProject(input: BeagleSelectProjectInput): Promise<OperationResult<BeagleState>>;
   chooseBinary(): Promise<OperationResult<BeagleState>>;
-  importFiles(): Promise<OperationResult<BeagleMutationResult>>;
+  importFiles(input?: BeagleImportInput): Promise<OperationResult<BeagleMutationResult>>;
   analyze(): Promise<OperationResult<BeagleMutationResult>>;
   query(input: BeagleQueryInput): Promise<OperationResult<BeagleQueryResult>>;
   getQueries(): Promise<OperationResult<BeagleSavedQuery[]>>;
@@ -95,6 +100,25 @@ export interface BeagleAPI {
   tag(input: BeagleTagInput): Promise<OperationResult<BeagleMutationResult>>;
   compose(input: BeagleComposeInput): Promise<OperationResult<BeagleQueryResult>>;
   exportGraph(): Promise<OperationResult<{ cancelled: boolean }>>;
+  renameProject(input: BeagleRenameProjectInput): Promise<OperationResult<BeagleState>>;
+  archiveProject(input: BeagleProjectIdInput): Promise<OperationResult<BeagleState>>;
+  restoreArchivedProject(input: BeagleProjectIdInput): Promise<OperationResult<BeagleState>>;
+  cleanup(input: BeagleCleanupInput): Promise<OperationResult<BeagleMutationResult>>;
+  setRetention(input: BeagleRetentionInput): Promise<OperationResult<BeagleState>>;
+  backupProject(): Promise<OperationResult<{ cancelled: boolean }>>;
+  restoreProject(): Promise<OperationResult<BeagleState>>;
+  getWorkspace(): Promise<OperationResult<BeagleWorkspace>>;
+  saveWorkspace(input: { projectId: string; workspace: BeagleWorkspace }): Promise<OperationResult<BeagleWorkspace>>;
+  importQueries(): Promise<OperationResult<{ cancelled: boolean; queries: BeagleCustomQuery[] }>>;
+  exportQueries(input: { queries: BeagleCustomQuery[] }): Promise<OperationResult<{ cancelled: boolean }>>;
+  exportResult(input: { format: "json" | "csv"; title: string; result: BeagleQueryResult; columns?: string[]; sort?: { column: string; direction: "asc" | "desc" } }): Promise<OperationResult<{ cancelled: boolean }>>;
+  relayTargets(input: BeagleComposeInput): Promise<OperationResult<BeagleQueryResult>>;
+  aclOrigins(input: BeagleComposeInput): Promise<OperationResult<BeagleQueryResult>>;
+  getRules(): Promise<OperationResult<BeagleRuleConfiguration>>;
+  previewRules(input: { configuration: BeagleRuleConfiguration }): Promise<OperationResult<BeagleRulePreview>>;
+  applyRules(input: { configuration: BeagleRuleConfiguration }): Promise<OperationResult<BeagleMutationResult>>;
+  getOperation(): Promise<OperationResult<BeagleOperationState | null>>;
+  cancelOperation(input: { id: string }): Promise<OperationResult<{ cancelled: boolean }>>;
   getApplicationSettings(): Promise<ApplicationSettingsState>;
   onApplicationSettingsChanged(listener: (settings: ApplicationSettingsState) => void): () => void;
 }
@@ -116,6 +140,25 @@ export const BEAGLE_IPC_INVOKE = Object.freeze({
   tag: "sliver:beagle:tag",
   compose: "sliver:beagle:compose",
   exportGraph: "sliver:beagle:export",
+  renameProject: "sliver:beagle:project:rename",
+  archiveProject: "sliver:beagle:project:archive",
+  restoreArchivedProject: "sliver:beagle:project:unarchive",
+  cleanup: "sliver:beagle:cleanup",
+  setRetention: "sliver:beagle:retention",
+  backupProject: "sliver:beagle:backup",
+  restoreProject: "sliver:beagle:restore",
+  getWorkspace: "sliver:beagle:workspace:get",
+  saveWorkspace: "sliver:beagle:workspace:save",
+  importQueries: "sliver:beagle:queries:import",
+  exportQueries: "sliver:beagle:queries:export",
+  exportResult: "sliver:beagle:result:export",
+  relayTargets: "sliver:beagle:relay-targets",
+  aclOrigins: "sliver:beagle:acl-origins",
+  getRules: "sliver:beagle:rules:get",
+  previewRules: "sliver:beagle:rules:preview",
+  applyRules: "sliver:beagle:rules:apply",
+  getOperation: "sliver:beagle:operation",
+  cancelOperation: "sliver:beagle:operation:cancel",
   getApplicationSettings: "sliver:beagle:application-settings:get",
 });
 

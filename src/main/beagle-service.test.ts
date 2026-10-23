@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -9,7 +9,7 @@ import { BEAGLE_RESULT_LIMITS, type BeagleJsonValue } from "../shared/beagle-con
 import { assertBeagleGraphQuery, BeagleService, normalizeBeagleQueryResult, normalizeBeagleSnapshot } from "./beagle-service.js";
 import type { BeagleRuntimeClient } from "./beagle-runtime.js";
 import type { BeagleExecutableVerifier } from "./beagle-runtime-loader.js";
-import { BEAGLE_RUNTIME_MAX_REQUEST_BYTES, BEAGLE_RUNTIME_MAX_RESPONSE_BYTES, BEAGLE_RUNTIME_OPERATIONS, type BeagleRuntimeCommand, type BeagleRuntimeReady } from "../shared/beagle-runtime-contracts.js";
+import { BEAGLE_RUNTIME_MAX_REQUEST_BYTES, BEAGLE_RUNTIME_MAX_RESPONSE_BYTES, BEAGLE_RUNTIME_OPERATIONS, BEAGLE_RUNTIME_REQUIRED_OPERATIONS, type BeagleRuntimeCommand, type BeagleRuntimeReady } from "../shared/beagle-runtime-contracts.js";
 
 const statistics = { nodes: 2, edges: 1, labels: { Base: 2, User: 1, Group: 1 }, relationships: { MemberOf: 1 } };
 const user = { id: 42, labels: ["Base", "User"], properties: { objectid: "U", name: "ALICE" } };
@@ -119,6 +119,7 @@ describe("Beagle service", () => {
     limits: { requestBytes: BEAGLE_RUNTIME_MAX_REQUEST_BYTES, responseBytes: BEAGLE_RUNTIME_MAX_RESPONSE_BYTES } };
   type FakeClient = BeagleRuntimeClient & {
     closed: boolean;
+    database?: string;
     request: ReturnType<typeof vi.fn<BeagleRuntimeClient["request"]>>;
     stop: ReturnType<typeof vi.fn<BeagleRuntimeClient["stop"]>>;
   };
@@ -136,7 +137,9 @@ describe("Beagle service", () => {
     const client: FakeClient = {
       ready: readiness, closed: false,
       request: vi.fn(async (command, options) => {
-        if (command.type === "open") { database = command.database; return null; }
+        if (command.type === "open") { database = command.database; client.database = database; return null; }
+        if (command.type === "closeDatabase") { database = undefined; delete client.database; return null; }
+        if (command.type === "backup") await copyFile(database!, command.path, 1);
         if (command.type === "stats" && database === ":memory:") return probe;
         return request(command, options);
       }),
@@ -193,6 +196,56 @@ describe("Beagle service", () => {
     await expect(service.createProject({ name: "default" })).rejects.toThrow("already exists");
   });
 
+  it("removes only abandoned private regular staging files once per project on startup", async () => {
+    const state = await service.getState(), directory = join(root, "beagle", state.selectedProjectId);
+    await service.dispose();
+    const id = "11111111-1111-4111-8111-111111111111";
+    const abandoned = [`.mutation-${id}.db`, `.mutation-${id}.db-wal`, `.mutation-${id}.db-shm`, `.mutation-${id}.db-journal`, `.backup-${id}.db`, `.backup-${id}.db-journal`, `.empty-${id}.json`];
+    for (const name of abandoned) await writeFile(join(directory, name), "abandoned");
+    const preserved = ["graph.db", "graph.db-wal", "workspace.json", "project-data.json", ".mutation-user.db", `.mutation-${id}.db.extra`, `.backup-${id}.json`, `.empty-${id}.json.backup`, ".mutation-11111111-1111-1111-8111-111111111111.db"];
+    for (const name of preserved) await writeFile(join(directory, name), "preserved");
+    const linkName = ".mutation-22222222-2222-4222-8222-222222222222.db", target = join(root, "outside.db");
+    await writeFile(target, "symlink target"); await symlink(target, join(directory, linkName));
+    const directoryName = ".backup-33333333-3333-4333-8333-333333333333.db";
+    await mkdir(join(directory, directoryName)); await writeFile(join(directory, directoryName, "keep"), "directory contents");
+    const restarted = newService(); await restarted.getState();
+    const names = await readdir(directory);
+    expect(abandoned.every((name) => !names.includes(name))).toBe(true);
+    for (const name of preserved) expect(await readFile(join(directory, name), "utf8")).toBe("preserved");
+    expect((await lstat(join(directory, linkName))).isSymbolicLink()).toBe(true);
+    expect(await readFile(target, "utf8")).toBe("symlink target");
+    expect(await readFile(join(directory, directoryName, "keep"), "utf8")).toBe("directory contents");
+    // Recovery must not run again while this owner may have live staging files.
+    const current = join(directory, `.mutation-${id}.db`); await writeFile(current, "current process stage");
+    await restarted.getState();
+    const second = await restarted.createProject({ name: "Second" });
+    const secondDirectory = join(root, "beagle", second.selectedProjectId);
+    await restarted.selectProject({ id: state.selectedProjectId });
+    expect(await readFile(current, "utf8")).toBe("current process stage");
+    await restarted.dispose();
+    await writeFile(join(secondDirectory, `.empty-${id}.json`), "abandoned second project");
+    const nextStart = newService(); await nextStart.selectProject({ id: second.selectedProjectId });
+    expect(await readdir(secondDirectory)).not.toContain(`.empty-${id}.json`);
+  });
+
+  it("recovers before creating an empty collection input on the first operation", async () => {
+    const state = await service.getState(); await service.dispose();
+    const restarted = newService(), directory = join(root, "beagle", state.selectedProjectId);
+    const orphan = join(directory, ".empty-11111111-1111-4111-8111-111111111111.json");
+    await writeFile(orphan, "abandoned");
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "importSnapshot") {
+        expect(JSON.parse(await readFile(command.path, "utf8"))).toEqual({ nodes: [], edges: [] });
+        expect(await readdir(directory)).not.toContain(orphan.split("/").at(-1));
+        return { complete: true };
+      }
+      return fallback(command, options);
+    });
+    await restarted.cleanup({ scope: "collected" });
+    expect((await readdir(directory)).some((name) => name.startsWith(".empty-") || name.startsWith(".mutation-"))).toBe(false);
+  });
+
   it("keeps one helper and database open across consecutive operations", async () => {
     await service.getState();
     const client = activeClient();
@@ -200,7 +253,8 @@ describe("Beagle service", () => {
     await service.entity({ objectid: "U" });
     await service.tag({ objectid: "U", tag: "owned", enabled: true });
     expect(createRuntime).toHaveBeenCalledTimes(2); // One compatibility probe and one project owner.
-    expect(client.request.mock.calls.filter(([command]) => command.type === "open")).toHaveLength(1);
+    expect(client.request.mock.calls.filter(([command]) => command.type === "open")).toHaveLength(3); // Original, staged copy, published database.
+    expect(client.request.mock.calls.filter(([command]) => command.type === "closeDatabase")).toHaveLength(2);
     expect(client.stop).not.toHaveBeenCalled();
     expect(clients[0]?.stop).toHaveBeenCalledOnce();
   });
@@ -225,8 +279,10 @@ describe("Beagle service", () => {
     expect(request.mock.calls.at(-1)?.[0]).toEqual({ type: "query", parameters: { term: "--db=escape;`id`", offset: 0, limit: 101 }, cypher: expect.stringContaining("ORDER BY n.name, n.objectid SKIP $offset LIMIT $limit") });
     await service.paths({ source: "--db=escape", target: "$(id)", all: true, maxHops: 3 });
     expect(request.mock.calls.at(-1)?.[0]).toEqual({ type: "query", parameters: { source: "--db=escape", target: "$(id)" }, cypher: expect.stringMatching(/^MATCH p=allShortestPaths\(.+\*1\.\.3\]/u) });
-    await service.importFiles(["/tmp/collection;$(id).zip"]);
-    expect(request.mock.calls.find(([command]) => command.type === "ingest")?.[0]).toEqual({ type: "ingest", paths: ["/tmp/collection;$(id).zip"], analyze: true });
+    const path = join(root, "collection;$(id).zip");
+    await writeFile(path, "selected file");
+    await service.importFiles([path]);
+    expect(request.mock.calls.find(([command]) => command.type === "ingest")?.[0]).toEqual({ type: "ingest", paths: [path], analyze: true, mode: "merge", compactReports: true, historyLimit: 50 });
   });
 
   it("returns bounded search pages without leaking the lookahead row into the graph", async () => {
@@ -305,7 +361,7 @@ describe("Beagle service", () => {
     expect((await service.selectProject({ id: first.selectedProjectId })).diagnostics).toEqual(analyzed.state.diagnostics);
     request.mockImplementation(async (command) => { if (command.type === "analyze") throw new Error("output lost after native operation"); return statistics; });
     await expect(service.analyze()).rejects.toThrow("output lost");
-    expect((await service.getState()).diagnostics?.errors[0]).toContain("not completed with verified diagnostics");
+    expect((await service.getState()).diagnostics).toEqual(analyzed.state.diagnostics); // Failed stage never replaced the committed graph or its diagnostics.
     await writeFile(join(root, "beagle", first.selectedProjectId, "analysis-diagnostics.json"), "invalid json");
     expect((await service.getState()).diagnostics?.errors).toHaveLength(1);
   });
@@ -346,15 +402,17 @@ describe("Beagle service", () => {
       if (command.type === "stats") return statistics;
       return { columns: ["n"], rows: [] };
     });
-    const failed = service.importFiles(["/tmp/data.zip"]).catch((error: unknown) => error);
+    const path = join(root, "data.zip");
+    await writeFile(path, "selected file");
+    const failed = service.importFiles([path]).catch((error: unknown) => error);
     const query = service.query({ cypher: "RETURN 1" });
     const create = service.createProject({ name: "Second" });
-    await vi.waitFor(() => expect(order).toEqual(["ingest"]));
+    await vi.waitFor(() => expect(order).toEqual(["backup", "ingest"]));
     release();
     expect(await failed).toEqual(new Error("bad collection"));
     const queryResult = await query;
     const newProject = await create;
-    expect(order).toEqual(["ingest", "query", "stats"]);
+    expect(order).toEqual(["backup", "ingest", "query", "stats"]);
     expect(queryResult.projectId).not.toBe(newProject.selectedProjectId);
   });
 
@@ -398,7 +456,7 @@ describe("Beagle service", () => {
     await expect(service.query({ cypher: "RETURN 1" })).rejects.toThrow("Choose a Beagle executable");
     expect(createRuntime).not.toHaveBeenCalled();
     verifier.verify.mockImplementation(async (path, sha256) => ({ path, sha256, size: 42 }));
-    expect((await service.configureBinary("/native/beagle")).runtime).toEqual({ available: true, version: "beagle 0.1.0", source: "Selected executable" });
+    expect((await service.configureBinary("/native/beagle")).runtime).toEqual({ available: true, version: "beagle 0.1.0", source: "Selected executable", operations: BEAGLE_RUNTIME_OPERATIONS });
     expect(verifier.capture).toHaveBeenCalledExactlyOnceWith("/native/beagle");
     expect(JSON.parse(await readFile(join(root, "beagle", "projects.json"), "utf8"))).toMatchObject({ version: 2, binaryPath: "/native/beagle", binarySha256: digest });
     expect(() => service.configureBinary("relative-path")).toThrow("absolute path");
@@ -466,7 +524,11 @@ describe("Beagle service", () => {
 
   it("never replays a failed mutation and re-verifies before restarting a closed helper", async () => {
     await service.getState();
-    request.mockImplementationOnce(async () => { activeClient().closed = true; throw new Error("connection lost; outcome unknown"); });
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "tag") { activeClient().closed = true; throw new Error("connection lost; outcome unknown"); }
+      return fallback(command, options);
+    });
     await expect(service.tag({ objectid: "U", tag: "owned", enabled: true })).rejects.toThrow("outcome unknown");
     expect(request.mock.calls.filter(([command]) => command.type === "tag")).toHaveLength(1);
     const launches = createRuntime.mock.calls.length;
@@ -476,6 +538,69 @@ describe("Beagle service", () => {
     await service.query({ cypher: "RETURN 2" });
     expect(createRuntime).toHaveBeenCalledTimes(launches + 1);
     expect(request.mock.calls.filter(([command]) => command.type === "tag")).toHaveLength(1);
+  });
+
+  it("cancels a staged mutation without publishing native changes or continuing validation", async () => {
+    const state = await service.getState();
+    const directory = join(root, "beagle", state.selectedProjectId), database = join(directory, "graph.db");
+    await writeFile(database, "committed bytes");
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type !== "analyze") return fallback(command, options);
+      expect(activeClient().database).not.toBe(database);
+      await writeFile(activeClient().database!, "native stage changed");
+      return new Promise((resolve) => options.signal!.addEventListener("abort", () => resolve({ complete: true }), { once: true }));
+    });
+    const running = service.analyze().catch((error: unknown) => error);
+    await vi.waitFor(() => expect(request.mock.calls.at(-1)?.[0].type).toBe("analyze"));
+    const operation = service.getOperation()!;
+    expect(service.cancelOperation({ id: "11111111-1111-4111-8111-111111111111" })).toEqual({ cancelled: false });
+    expect(service.cancelOperation({ id: operation.id })).toEqual({ cancelled: true });
+    expect(await running).toEqual(new Error("AD Explorer operation cancelled; the committed project was preserved"));
+    expect(request.mock.calls.at(-1)?.[0].type).toBe("analyze");
+    expect(await readFile(database, "utf8")).toBe("committed bytes");
+    expect((await readdir(directory)).some((name) => name.startsWith(".mutation-"))).toBe(false);
+    expect(service.getOperation()).toBeNull();
+    expect((await service.getState()).projectData?.history.at(-1)?.status).toBe("cancelled");
+    expect(request.mock.calls.filter(([command]) => command.type === "analyze")).toHaveLength(1);
+  });
+
+  it("rolls back a completed native mutation when staged statistics cannot be verified", async () => {
+    const state = await service.getState();
+    const database = join(root, "beagle", state.selectedProjectId, "graph.db");
+    await writeFile(database, "committed bytes");
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "analyze") { await writeFile(activeClient().database!, "unverified changes"); return { complete: true }; }
+      if (command.type === "stats" && activeClient().database !== database) return { nodes: -1 };
+      return fallback(command, options);
+    });
+    await expect(service.analyze()).rejects.toThrow("Invalid Beagle count");
+    expect(await readFile(database, "utf8")).toBe("committed bytes");
+    expect((await service.getState()).projectData?.history.at(-1)?.status).toBe("failed");
+  });
+
+  it("rechecks selected collection hashes before publishing an import", async () => {
+    const state = await service.getState();
+    const database = join(root, "beagle", state.selectedProjectId, "graph.db"), path = join(root, "collection.json");
+    await writeFile(database, "committed bytes"); await writeFile(path, "original selected file");
+    const fallback = request.getMockImplementation()!;
+    request.mockImplementation(async (command, options) => {
+      if (command.type === "ingest") { await writeFile(path, "changed while importing"); await writeFile(activeClient().database!, "stage"); return { complete: true }; }
+      return fallback(command, options);
+    });
+    await expect(service.importFiles([path])).rejects.toThrow(/changed/u);
+    expect(await readFile(database, "utf8")).toBe("committed bytes");
+    expect((await service.getState()).projectData?.history.at(-1)?.status).toBe("failed");
+  });
+
+  it("keeps legacy helper reads available and rejects unsupported staged mutations before sending them", async () => {
+    createRuntime.mockImplementation(() => makeClient(Promise.resolve({ ...ready, operations: BEAGLE_RUNTIME_REQUIRED_OPERATIONS })));
+    expect((await service.query({ cypher: "RETURN 1" })).rows).toHaveLength(1);
+    await expect(service.analyze()).rejects.toThrow("does not support backup");
+    expect(request.mock.calls.some(([command]) => command.type === "backup" || command.type === "analyze")).toBe(false);
+    expect((await service.query({ cypher: "RETURN 2" })).rows).toHaveLength(1);
+    expect((await service.getState()).runtime.operations).toEqual(BEAGLE_RUNTIME_REQUIRED_OPERATIONS);
   });
 
   it("rejects malformed runtime values, propagates operation errors and applies per-operation deadlines", async () => {
@@ -505,7 +630,7 @@ describe("Beagle service", () => {
     const pending = service.getState().catch((error: unknown) => error);
     await vi.waitFor(() => expect(request.mock.calls.at(-1)?.[0].type).toBe("query"));
     await service.dispose();
-    expect(await running).toEqual(new Error("aborted"));
+    expect(await running).toEqual(new Error("Beagle service is closed"));
     expect(await pending).toEqual(new Error("Beagle service is closed"));
     expect(activeClient().stop).toHaveBeenCalled();
     expect(clients.every((client) => client.closed)).toBe(true);

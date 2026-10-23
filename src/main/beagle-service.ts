@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { chmod, lstat, mkdir, open, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { basename, extname, isAbsolute, join } from "node:path";
 
 import {
   BEAGLE_PROJECT_ID, BEAGLE_RESULT_LIMITS, BEAGLE_SEARCH_PAGE_SIZE, BEAGLE_NEIGHBORHOOD_PAGE_SIZE, parseBeagleComposeInput, parseBeagleCreateProjectInput,
@@ -19,17 +19,29 @@ import { BEAGLE_PATH_EDGE_KINDS } from "../shared/beagle-investigations.js";
 import type { BeagleRuntimeCommand } from "../shared/beagle-runtime-contracts.js";
 import { createBeagleRuntime, type BeagleRuntimeClient } from "./beagle-runtime.js";
 import { beagleExecutableVerifier, beagleRuntimeEnvironment, type BeagleExecutableIdentity, type BeagleExecutableVerifier } from "./beagle-runtime-loader.js";
+import { BEAGLE_STORAGE_LIMITS, emptyBeagleProjectData, parseBeagleProjectData, parseBeagleProjectIdInput, parseBeagleRenameProjectInput, parseBeagleImportInput, parseBeagleCleanupInput, parseBeagleRetentionInput, type BeagleProjectData, type BeagleImportRecord, type BeagleOperationState, type BeagleImportInput, type BeagleCleanupInput, type BeagleProjectIdInput, type BeagleRenameProjectInput, type BeagleRetentionInput } from "../shared/beagle-projects.js";
+import { emptyBeagleWorkspace, parseBeagleWorkspace, parseBeagleCustomQueries, type BeagleWorkspace, type BeagleCustomQuery } from "../shared/beagle-workspace.js";
+import { parseBeagleRuleConfiguration, parseBeagleRulesInput, type BeagleRuleConfiguration, type BeagleRulesInput, type BeagleRulePreview } from "../shared/beagle-rules.js";
+import { assertBeagleRuleLabels, normalizeBeagleRulePreview } from "./beagle-rules.js";
+import { buildBeagleAclOriginsQuery } from "./beagle-edge-details.js";
+import { beagleImportRecord } from "./beagle-project-data.js";
+import { hashBeagleFile, readBeagleBackup, writeBeagleBackup } from "./beagle-project-backup.js";
+import { readBeagleQueries, serializeBeagleQueries, serializeBeagleResult, type BeagleResultExportInput } from "./beagle-file-exchange.js";
 
 const QUERY_TIMEOUT_MS = 40_000;
 const WORKFLOW_TIMEOUT_MS = 5 * 60_000;
 const VERSION_TIMEOUT_MS = 5_000;
 const MAX_PROJECTS = 100;
+// Only private, randomly named staging files created by this service. Never
+// match a committed database, project metadata, or user-selected output file.
+const ABANDONED_STAGE = /^\.(?:(?:mutation|backup)-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.db(?:-wal|-shm|-journal)?|empty-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.json)$/u;
 interface ProjectConfiguration {
   version: 2;
   binaryPath: string | null;
   binarySha256: string | null;
   selectedProjectId: string;
   projects: BeagleProject[];
+  archivedProjects: BeagleProject[];
 }
 export interface BeagleServiceOptions {
   userDataPath: string;
@@ -51,10 +63,14 @@ export class BeagleService {
   private client: BeagleRuntimeClient | undefined;
   private clientDatabase: string | undefined;
   private readonly clients = new Set<BeagleRuntimeClient>();
+  private readonly recoveredDirectories = new Set<string>();
   private runtime: BeagleState["runtime"] = { available: false, version: null, source: null };
   private pending: Promise<unknown> = Promise.resolve();
   private controller: AbortController | null = null;
   private disposed = false;
+  private operation: (BeagleOperationState & { controller: AbortController }) | null = null;
+  private operationDatabase: string | undefined;
+  private supportedOperations: readonly string[] = [];
 
   constructor(options: BeagleServiceOptions) {
     if (!isAbsolute(options.userDataPath)) throw new TypeError("Beagle user data path must be absolute");
@@ -67,6 +83,7 @@ export class BeagleService {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.operation?.controller.abort();
     this.controller?.abort();
     await Promise.all([...this.clients].map((client) => client.stop()));
     this.clients.clear();
@@ -111,19 +128,31 @@ export class BeagleService {
       await this.save({ ...configuration, binaryPath: identity.path, binarySha256: identity.sha256 });
       this.binary = identity;
       this.catalog = null;
-      this.runtime = { available: true, version, source: "Selected executable" };
+      this.runtime = { available: true, version, source: "Selected executable", operations: this.supportedOperations };
       return this.state();
     });
   }
 
   /** File paths are selected by a native dialog and are never accepted over renderer IPC. */
-  importFiles(paths: readonly string[]): Promise<BeagleMutationResult> {
+  importFiles(paths: readonly string[], value: BeagleImportInput = { mode: "merge" }): Promise<BeagleMutationResult> {
+    const input = parseBeagleImportInput(value);
     if (paths.length === 0 || paths.length > 100) throw new TypeError("Select between 1 and 100 collection files");
     paths.forEach(validateAbsolutePath);
-    return this.serial(() => this.mutate({ type: "ingest", paths: [...paths], analyze: true }));
+    return this.serial(async () => {
+      const files: BeagleImportRecord["files"] = [];
+      this.phase("Checking collection files");
+      for (const path of paths) files.push({ name: basename(path), ...await hashBeagleFile(path, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal) });
+      const { historyLimit } = await this.projectData();
+      return this.mutate({ type: "ingest", paths: [...paths], analyze: true, mode: input.mode, compactReports: true, historyLimit }, input.mode, files, async () => {
+        for (let index = 0; index < paths.length; index++) {
+          const current = await hashBeagleFile(paths[index]!, BEAGLE_STORAGE_LIMITS.snapshotBytes, this.operation?.controller.signal);
+          if (current.sha256 !== files[index]!.sha256) throw new Error("Collection file changed during import; the committed project was preserved");
+        }
+      });
+    }, "Import collection");
   }
 
-  analyze(): Promise<BeagleMutationResult> { return this.serial(() => this.mutate({ type: "analyze" })); }
+  analyze(): Promise<BeagleMutationResult> { return this.serial(() => this.mutate({ type: "analyze", compactReports: true }, "analyze"), "Analyze project"); }
 
   query(value: BeagleQueryInput): Promise<BeagleQueryResult> {
     const input = parseBeagleQueryInput(value);
@@ -261,10 +290,256 @@ export class BeagleService {
     return this.serial(async () => normalizeBeagleSnapshot(await this.execute({ type: "export" })));
   }
 
-  private serial<T>(operation: () => Promise<T>): Promise<T> {
+  renameProject(value: BeagleRenameProjectInput): Promise<BeagleState> {
+    const input = parseBeagleRenameProjectInput(value);
+    return this.serial(async () => {
+      const configuration = await this.load();
+      if (!configuration.projects.some((p) => p.id === input.id)) throw new Error("Unknown project");
+      if (configuration.projects.some((p) => p.id !== input.id && p.name.toLowerCase() === input.name.toLowerCase())) throw new Error("A project with this name already exists");
+      await this.save({ ...configuration, projects: configuration.projects.map((p) => p.id === input.id ? { ...p, name: input.name } : p) });
+      return this.state();
+    });
+  }
+
+  archiveProject(value: BeagleProjectIdInput): Promise<BeagleState> {
+    const { id } = parseBeagleProjectIdInput(value);
+    return this.serial(async () => {
+      const configuration = await this.load();
+      const project = configuration.projects.find((p) => p.id === id);
+      if (!project) throw new Error("Unknown project");
+      if (configuration.archivedProjects.length >= MAX_PROJECTS) throw new Error("The archived project limit has been reached");
+      await this.closeClient();
+      const projects = configuration.projects.filter((p) => p.id !== id);
+      if (!projects.length) projects.push({ id: randomUUID(), name: "Default", createdAt: new Date().toISOString() });
+      await this.save({ ...configuration, projects, archivedProjects: [...configuration.archivedProjects, project], selectedProjectId: configuration.selectedProjectId === id ? projects[0]!.id : configuration.selectedProjectId });
+      return this.state();
+    }, "Archive project");
+  }
+
+  restoreArchivedProject(value: BeagleProjectIdInput): Promise<BeagleState> {
+    const { id } = parseBeagleProjectIdInput(value);
+    return this.serial(async () => {
+      const configuration = await this.load();
+      const project = configuration.archivedProjects.find((p) => p.id === id);
+      if (!project) throw new Error("Unknown archived project");
+      if (configuration.projects.length >= MAX_PROJECTS) throw new Error("The project limit has been reached");
+      await this.save({ ...configuration, projects: [...configuration.projects, { ...project, name: this.uniqueProjectName(project.name, configuration) }], archivedProjects: configuration.archivedProjects.filter((p) => p.id !== id), selectedProjectId: id });
+      return this.state();
+    });
+  }
+
+  private uniqueProjectName(name: string, configuration: ProjectConfiguration): string {
+    let proposed = name;
+    for (let suffix = 2; configuration.projects.some((p) => p.name.toLowerCase() === proposed.toLowerCase()); suffix++) proposed = `${name.slice(0, 70)} (${suffix})`;
+    return proposed;
+  }
+
+  cleanup(value: BeagleCleanupInput): Promise<BeagleMutationResult> {
+    const input = parseBeagleCleanupInput(value);
+    return this.serial(async () => {
+      if (input.scope === "sessions") return this.mutate({ type: "cleanup", kinds: ["HasSession"] }, "sessions");
+      const configuration = await this.load();
+      await this.database();
+      const path = join(this.rootPath, configuration.selectedProjectId, `.empty-${randomUUID()}.json`);
+      try {
+        await writeFile(path, JSON.stringify({ nodes: [], edges: [] }), { mode: 0o600, flag: "wx" });
+        return await this.mutate({ type: "importSnapshot", path, analyze: true, compactReports: true }, "collected");
+      } finally { await unlink(path).catch(() => undefined); }
+    }, "Clean collected data");
+  }
+
+  private async projectData(): Promise<BeagleProjectData> {
+    const { selectedProjectId } = await this.load();
+    try {
+      const file = await readBoundedRegularFile(join(this.rootPath, selectedProjectId, "project-data.json"), { label: "Project history", maxBytes: BEAGLE_STORAGE_LIMITS.projectDataBytes });
+      return parseBeagleProjectData(JSON.parse(file.data.toString("utf8")));
+    } catch (error) {
+      if (isNotFound(error)) return emptyBeagleProjectData();
+      return { ...emptyBeagleProjectData(), error: "Project history could not be read. Restore a backup to recover it; new operations will create a new history." };
+    }
+  }
+
+  private async saveProjectData(data: BeagleProjectData): Promise<void> {
+    const { selectedProjectId } = await this.load();
+    await this.database();
+    await writePrivateFileAtomic(join(this.rootPath, selectedProjectId, "project-data.json"), Buffer.from(JSON.stringify(parseBeagleProjectData(data))));
+  }
+
+  private async appendHistory(record: BeagleImportRecord): Promise<void> {
+    const data = await this.projectData();
+    data.history = [record, ...data.history].slice(0, data.historyLimit);
+    while (Buffer.byteLength(JSON.stringify(data)) > BEAGLE_STORAGE_LIMITS.projectDataBytes && data.history.length > 1) data.history.pop();
+    delete data.error;
+    await this.saveProjectData(data);
+  }
+
+  setRetention(value: BeagleRetentionInput): Promise<BeagleState> {
+    const input = parseBeagleRetentionInput(value);
+    return this.serial(async () => {
+      const data = await this.projectData();
+      await this.mutate({ type: "setImportHistoryRetention", limit: input.historyLimit });
+      await this.saveProjectData({ ...data, historyLimit: input.historyLimit, history: data.history.slice(0, input.historyLimit) });
+      return this.state();
+    });
+  }
+
+  private async workspace(): Promise<BeagleWorkspace> {
+    const { selectedProjectId } = await this.load();
+    try {
+      const file = await readBoundedRegularFile(join(this.rootPath, selectedProjectId, "workspace.json"), { label: "Investigation workspace", maxBytes: BEAGLE_STORAGE_LIMITS.workspaceBytes });
+      const workspace = parseBeagleWorkspace(JSON.parse(file.data.toString("utf8")));
+      if (workspace.projectId !== selectedProjectId) throw new Error("Workspace belongs to another project");
+      return workspace;
+    } catch (error) { if (isNotFound(error)) return emptyBeagleWorkspace(selectedProjectId); throw error; }
+  }
+
+  getWorkspace(): Promise<BeagleWorkspace> { return this.serial(() => this.workspace()); }
+
+  saveWorkspace(value: { projectId: string; workspace: BeagleWorkspace }): Promise<BeagleWorkspace> {
+    const { id } = parseBeagleProjectIdInput({ id: value.projectId });
+    const workspace = parseBeagleWorkspace(value.workspace);
+    if (workspace.projectId !== id) throw new Error("Workspace belongs to another project");
+    return this.serial(async () => {
+      if ((await this.load()).selectedProjectId !== id) throw new Error("Project changed before the workspace was saved");
+      await this.database();
+      this.checkCancelled();
+      await writePrivateFileAtomic(join(this.rootPath, id, "workspace.json"), Buffer.from(JSON.stringify(workspace)));
+      return workspace;
+    });
+  }
+
+  relayTargets(value: BeagleComposeInput): Promise<BeagleQueryResult> {
+    const input = parseBeagleComposeInput(value);
+    return this.serial(() => this.queryCommand({ type: "relayTargets", ...input }));
+  }
+
+  aclOrigins(value: BeagleComposeInput): Promise<BeagleQueryResult> {
+    const input = buildBeagleAclOriginsQuery(parseBeagleComposeInput(value));
+    return this.serial(() => this.queryCommand({ type: "query", cypher: input.cypher, parameters: input.parameters ?? {} }));
+  }
+
+  getRules(): Promise<BeagleRuleConfiguration> { return this.serial(async () => parseBeagleRuleConfiguration(await this.execute({ type: "getAssetGroups" }))); }
+
+  private async validateRules(input: BeagleRulesInput): Promise<void> {
+    for (const group of input.configuration.groups) for (const seed of group.seeds) if (seed.type === "cypher") assertBeagleGraphQuery(seed.value);
+    const saved = parseBeagleRuleConfiguration(await this.execute({ type: "getAssetGroups" }));
+    const stats = normalizeStats(await this.execute({ type: "stats" }));
+    assertBeagleRuleLabels(input.configuration, Object.keys(stats.labels), saved);
+  }
+
+  previewRules(value: BeagleRulesInput): Promise<BeagleRulePreview> {
+    const input = parseBeagleRulesInput(value);
+    return this.serial(async () => { await this.validateRules(input); return normalizeBeagleRulePreview(await this.execute({ type: "previewAssetGroups", configuration: input.configuration }, WORKFLOW_TIMEOUT_MS)); }, "Preview label rules");
+  }
+
+  applyRules(value: BeagleRulesInput): Promise<BeagleMutationResult> {
+    const input = parseBeagleRulesInput(value);
+    return this.serial(async () => { await this.validateRules(input); return this.mutate({ type: "applyAssetGroups", configuration: input.configuration }, "rules"); }, "Apply label rules");
+  }
+
+  /** Paths accepted here are main-owned native dialog selections, never renderer arguments. */
+  exportGraphToFile(path: string): Promise<void> {
+    validateAbsolutePath(path);
+    return this.serial(async () => { this.phase("Writing complete graph snapshot"); await this.execute({ type: "exportToFile", path, kind: "current" }, WORKFLOW_TIMEOUT_MS); }, "Export graph");
+  }
+
+  backupProject(path: string): Promise<void> {
+    validateAbsolutePath(path);
+    return this.serial(async () => {
+      const configuration = await this.load();
+      const project = configuration.projects.find((p) => p.id === configuration.selectedProjectId)!;
+      const state = await this.state();
+      const metadata = { project, workspace: await this.workspace(), projectData: await this.projectData(), diagnostics: state.diagnostics ?? null };
+      const database = join(this.rootPath, project.id, `.backup-${randomUUID()}.db`);
+      try {
+        this.phase("Copying project database");
+        await this.execute({ type: "backup", path: database }, WORKFLOW_TIMEOUT_MS);
+        this.phase("Writing project backup");
+        await writeBeagleBackup(path, database, metadata, this.operation?.controller.signal);
+      } finally { await unlink(database).catch(() => undefined); }
+    }, "Back up project");
+  }
+
+  restoreProject(path: string): Promise<BeagleState> {
+    validateAbsolutePath(path);
+    return this.serial(async () => {
+      const configuration = await this.load();
+      if (configuration.projects.length >= MAX_PROJECTS) throw new Error("The project limit has been reached");
+      const id = randomUUID(), directory = join(this.rootPath, id), database = join(directory, "graph.db");
+      await privateDirectory(directory);
+      let published = false;
+      try {
+        this.phase("Verifying project backup");
+        const raw = await readBeagleBackup(path, database, this.operation?.controller.signal);
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Invalid project backup metadata");
+        const metadata = raw as Record<string, unknown>;
+        const original = metadata["project"] as BeagleProject;
+        const { name } = parseBeagleCreateProjectInput({ name: original?.name });
+        const workspace = parseBeagleWorkspace(metadata["workspace"]);
+        workspace.projectId = id;
+        for (const entry of workspace.history.entries) entry.result.projectId = id;
+        const projectData = parseBeagleProjectData(metadata["projectData"]);
+        const diagnostics = metadata["diagnostics"] == null ? undefined : parseBeagleAnalysisDiagnostics(metadata["diagnostics"]);
+        await this.closeClient(); this.operationDatabase = database;
+        normalizeStats(await this.execute({ type: "stats" }));
+        await this.closeClient(); this.operationDatabase = undefined;
+        await writePrivateFileAtomic(join(directory, "workspace.json"), Buffer.from(JSON.stringify(workspace)));
+        await writePrivateFileAtomic(join(directory, "project-data.json"), Buffer.from(JSON.stringify(projectData)));
+        if (diagnostics) await writePrivateFileAtomic(join(directory, "analysis-diagnostics.json"), Buffer.from(JSON.stringify(diagnostics)));
+        this.checkCancelled();
+        if (this.operation) this.operation.cancellable = false;
+        const project = { id, name: this.uniqueProjectName(`${name.slice(0, 69)} restored`, configuration), createdAt: new Date().toISOString() };
+        await this.save({ ...configuration, projects: [...configuration.projects, project], selectedProjectId: id }); published = true;
+        return this.state();
+      } finally {
+        this.operationDatabase = undefined;
+        if (!published) { await this.closeClient(); await rm(directory, { recursive: true, force: true }); }
+      }
+    }, "Restore project");
+  }
+
+  importQueries(path: string): Promise<BeagleCustomQuery[]> {
+    validateAbsolutePath(path);
+    return this.serial(async () => { const queries = await readBeagleQueries(path); for (const query of queries) assertBeagleGraphQuery(query.cypher); return queries; });
+  }
+  exportQueries(path: string, value: { queries: BeagleCustomQuery[] }): Promise<void> {
+    validateAbsolutePath(path);
+    const queries = parseBeagleCustomQueries(value.queries);
+    return this.serial(async () => { await writeFile(path, serializeBeagleQueries(queries, extname(path).toLowerCase() === ".zip" ? "zip" : "json"), { mode: 0o600, flag: "wx" }); });
+  }
+  exportResult(path: string, input: BeagleResultExportInput): Promise<void> {
+    validateAbsolutePath(path);
+    return this.serial(async () => {
+      if (input.result.projectId !== (await this.load()).selectedProjectId) throw new Error("Result belongs to another project");
+      await writeFile(path, serializeBeagleResult(input), { mode: 0o600, flag: "wx" });
+    });
+  }
+
+  getOperation(): BeagleOperationState | null {
+    if (!this.operation) return null;
+    const { controller: _controller, ...state } = this.operation;
+    return { ...state };
+  }
+
+  cancelOperation(value: { id: string }): { cancelled: boolean } {
+    const { id } = parseBeagleProjectIdInput(value);
+    if (!this.operation || this.operation.id !== id || !this.operation.cancellable) return { cancelled: false };
+    this.operation.controller.abort(); this.controller?.abort();
+    this.operation.phase = "Cancelling and recovering project";
+    return { cancelled: true };
+  }
+
+  private checkCancelled(): void {
+    if (this.disposed) throw new Error("Beagle service is closed");
+    if (this.operation?.controller.signal.aborted) throw new Error("AD Explorer operation cancelled; the committed project was preserved");
+  }
+  private phase(phase: string): void { this.checkCancelled(); if (this.operation) this.operation.phase = phase; }
+
+  private serial<T>(operation: () => Promise<T>, label = "AD Explorer"): Promise<T> {
     const result = this.pending.then(async () => {
       if (this.disposed) throw new Error("Beagle service is closed");
-      return operation();
+      this.operation = { id: randomUUID(), label, phase: label, startedAt: Date.now(), cancellable: true, controller: new AbortController() };
+      try { return await operation(); } finally { this.operation = null; }
     });
     this.pending = result.catch(() => undefined);
     return result;
@@ -279,14 +554,19 @@ export class BeagleService {
       if ((value["version"] !== 1 && value["version"] !== 2) || !Array.isArray(value["projects"]) || value["projects"].length === 0 || value["projects"].length > MAX_PROJECTS) {
         throw new Error("Invalid Beagle project configuration");
       }
-      const projects = value["projects"].map((entry): BeagleProject => {
+      const parseProject = (entry: BeagleJsonValue): BeagleProject => {
         const project = object(entry, "project");
         const { id } = parseBeagleSelectProjectInput({ id: project["id"] });
         const { name } = parseBeagleCreateProjectInput({ name: project["name"] });
         const createdAt = requiredString(project["createdAt"], "project creation time");
         if (!Number.isFinite(Date.parse(createdAt))) throw new Error("Invalid Beagle project creation time");
         return { id, name, createdAt };
-      });
+      };
+      const projects = value["projects"].map(parseProject);
+      const archived = value["archivedProjects"] ?? [];
+      if (!Array.isArray(archived) || archived.length > MAX_PROJECTS) throw new Error("Invalid archived projects");
+      const archivedProjects = archived.map(parseProject);
+      if (new Set([...projects, ...archivedProjects].map((p) => p.id)).size !== projects.length + archivedProjects.length) throw new Error("Duplicate project identity");
       const selectedProjectId = requiredString(value["selectedProjectId"], "selected project");
       if (new Set(projects.map((project) => project.id)).size !== projects.length || !projects.some((project) => project.id === selectedProjectId)) {
         throw new Error("Invalid Beagle project identities");
@@ -295,12 +575,12 @@ export class BeagleService {
       if (binaryPath !== null) validateAbsolutePath(binaryPath);
       const binarySha256 = value["version"] === 1 ? null : value["binarySha256"];
       if (binarySha256 !== null && (typeof binarySha256 !== "string" || !/^[a-f0-9]{64}$/u.test(binarySha256))) throw new Error("Invalid Beagle executable pin");
-      this.configuration = { version: 2, binaryPath, binarySha256, selectedProjectId, projects };
+      this.configuration = { version: 2, binaryPath, binarySha256, selectedProjectId, projects, archivedProjects };
       return this.configuration;
     } catch (error) {
       if (!isNotFound(error)) throw error;
       const project = { id: randomUUID(), name: "Default", createdAt: new Date().toISOString() };
-      const configuration: ProjectConfiguration = { version: 2, binaryPath: null, binarySha256: null, selectedProjectId: project.id, projects: [project] };
+      const configuration: ProjectConfiguration = { version: 2, binaryPath: null, binarySha256: null, selectedProjectId: project.id, projects: [project], archivedProjects: [] };
       await this.save(configuration);
       return configuration;
     }
@@ -326,7 +606,7 @@ export class BeagleService {
       const version = await this.inspectBinary(identity);
       if (this.disposed) throw new Error("Beagle service is closed");
       this.binary = identity;
-      this.runtime = { available: true, version, source: configuration.binaryPath ? "Selected executable" : "SLIVER_BEAGLE_BINARY" };
+      this.runtime = { available: true, version, source: configuration.binaryPath ? "Selected executable" : "SLIVER_BEAGLE_BINARY", operations: this.supportedOperations };
     } catch (error) {
       const compatibility = error instanceof Error && /^(Unsupported|Incompatible) Beagle runtime/u.test(error.message) ? error.message : undefined;
       this.runtime = { available: false, version: null, source: null,
@@ -338,6 +618,7 @@ export class BeagleService {
     const client = await this.startClient(identity);
     try {
       const ready = await client.ready;
+      this.supportedOperations = [...ready.operations];
       // Probe an ephemeral database before any operator project is opened.
       await this.request(client, { type: "open", database: ":memory:", queryTimeoutMs: 3_000 }, VERSION_TIMEOUT_MS);
       const probe = object(await this.request(client, { type: "stats" }, VERSION_TIMEOUT_MS), "runtime capabilities");
@@ -369,12 +650,27 @@ export class BeagleService {
     if (client) { await client.stop(); this.clients.delete(client); }
   }
 
+  private async releaseDatabase(): Promise<void> {
+    if (!this.client || this.client.closed) { await this.closeClient(); return; }
+    if (!this.supportedOperations.includes("closeDatabase")) { await this.closeClient(); return; }
+    await this.request(this.client, { type: "closeDatabase" }, VERSION_TIMEOUT_MS);
+    this.clientDatabase = undefined;
+  }
+
   private async request(client: BeagleRuntimeClient, command: BeagleRuntimeCommand, timeout: number): Promise<BeagleJsonValue> {
     if (this.disposed) throw new Error("Beagle service is closed");
+    this.checkCancelled();
     const controller = new AbortController();
     this.controller = controller;
     try {
-      return parseBeagleJson(await client.request(command, { timeout, signal: controller.signal }), 2_000_000);
+      const value = parseBeagleJson(await client.request(command, { timeout, signal: controller.signal }), 2_000_000);
+      this.checkCancelled();
+      return value;
+    } catch (error) {
+      // A transport-level cancellation cannot know whether native code committed.
+      // This service publishes staged writes only after this call succeeds.
+      this.checkCancelled();
+      throw error;
     } finally { this.controller = null; }
   }
 
@@ -389,19 +685,36 @@ export class BeagleService {
     const stats = await lstat(path);
     if (stats.isSymbolicLink() || !stats.isFile()) throw new Error("Beagle database must be a regular file");
     if (process.platform !== "win32") await chmod(path, 0o600);
+    // Serial ownership ensures recovery finishes before this process creates a
+    // new stage. Rechecking later could remove an active backup or empty input.
+    if (!this.recoveredDirectories.has(directory)) {
+      for (const name of await readdir(directory)) {
+        if (!ABANDONED_STAGE.test(name)) continue;
+        const candidate = join(directory, name);
+        try {
+          const entry = await lstat(candidate);
+          if (entry.isFile() && !entry.isSymbolicLink()) await unlink(candidate);
+        } catch (error) { if (!isNotFound(error)) throw error; }
+      }
+      this.recoveredDirectories.add(directory);
+    }
     return path;
   }
 
   private async execute(command: BeagleRuntimeCommand, timeout = QUERY_TIMEOUT_MS): Promise<BeagleJsonValue> {
     await this.discover();
     if (!this.binary) throw new Error(this.runtime.error ?? "Beagle runtime is unavailable");
-    const path = await this.database();
-    if (this.client?.closed || this.clientDatabase !== path) await this.closeClient();
+    this.checkCancelled();
+    if (!this.supportedOperations.includes(command.type)) throw new Error(`This Beagle helper does not support ${command.type}. Choose an updated Beagle executable.`);
+    const path = this.operationDatabase ?? await this.database();
+    if (this.client?.closed || (this.clientDatabase !== undefined && this.clientDatabase !== path)) await this.closeClient();
     if (!this.client) {
-      const client = await this.startClient(this.binary);
-      try { await this.request(client, { type: "open", database: path, queryTimeoutMs: 30_000 }, VERSION_TIMEOUT_MS); }
-      catch (error) { await client.stop(); this.clients.delete(client); throw error; }
-      this.client = client; this.clientDatabase = path;
+      this.client = await this.startClient(this.binary);
+    }
+    if (this.clientDatabase !== path) {
+      try { await this.request(this.client, { type: "open", database: path, queryTimeoutMs: 30_000 }, VERSION_TIMEOUT_MS); }
+      catch (error) { await this.closeClient(); throw error; }
+      this.clientDatabase = path;
     }
     // A failed mutation is never replayed. A later explicit request can start a
     // fresh verified helper if the previous process exited or was terminated.
@@ -420,27 +733,45 @@ export class BeagleService {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") diagnostics = { version: 1, localGroupAmbiguities: [], errors: ["Saved analysis diagnostics could not be read. Analyze this project again to check ambiguous privileges."] };
     }
-    return { runtime: { ...this.runtime }, projects: configuration.projects.map((project) => ({ ...project })), selectedProjectId: configuration.selectedProjectId, stats,
+    return { runtime: { ...this.runtime }, projects: configuration.projects.map((project) => ({ ...project })), archivedProjects: configuration.archivedProjects.map((project) => ({ ...project })), projectData: await this.projectData(), selectedProjectId: configuration.selectedProjectId, stats,
       ...(diagnostics === undefined ? {} : { diagnostics }) };
   }
 
-  private async mutate(command: BeagleRuntimeCommand): Promise<BeagleMutationResult> {
-    const recordsAnalysis = command.type === "ingest" || command.type === "analyze";
+  private async mutate(command: BeagleRuntimeCommand, operation?: BeagleImportRecord["operation"], files: BeagleImportRecord["files"] = [], beforeCommit?: () => Promise<void>): Promise<BeagleMutationResult> {
+    const recordsAnalysis = ["ingest", "analyze", "cleanup", "importSnapshot", "applyAssetGroups"].includes(command.type);
     const configuration = await this.load();
     const diagnosticsPath = join(this.rootPath, configuration.selectedProjectId, "analysis-diagnostics.json");
-    if (recordsAnalysis) {
-      await this.database();
-      // A child can commit before its output is lost or rejected. Never retain an
-      // older clean report when completion of the latest analysis is uncertain.
-      await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify({ version: 1, localGroupAmbiguities: [],
-        errors: ["The latest analysis has not completed with verified diagnostics. Run Analyze again before relying on local-group privilege choices."] })));
+    const database = await this.database();
+    const staged = join(this.rootPath, configuration.selectedProjectId, `.mutation-${randomUUID()}.db`);
+    let committed = false;
+    try {
+      this.phase("Preparing recoverable project copy");
+      await this.execute({ type: "backup", path: staged }, WORKFLOW_TIMEOUT_MS);
+      await this.releaseDatabase();
+      this.operationDatabase = staged;
+      this.phase("Applying and validating changes");
+      const report = await this.execute(command, WORKFLOW_TIMEOUT_MS);
+      const diagnostics = recordsAnalysis ? normalizeBeagleAnalysisDiagnostics(report) : undefined;
+      if (diagnostics && isObject(report) && isObject(report["analysis"]) && Number(report["analysis"]["diagnostics_truncated"]) > 0) diagnostics.errors.push("Analysis diagnostics exceeded the report limit; review a smaller collection before relying on local-group privileges.");
+      normalizeStats(await this.execute({ type: "stats" }));
+      await beforeCommit?.();
+      await this.releaseDatabase();
+      this.checkCancelled();
+      this.operationDatabase = undefined;
+      if (this.operation) { this.operation.cancellable = false; this.operation.phase = "Saving project"; }
+      await rename(staged, database); committed = true;
+      if (diagnostics) await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify(diagnostics)));
+      if (operation) await this.appendHistory(beagleImportRecord(operation, files, report));
+      return { report, state: await this.state() };
+    } catch (error) {
+      if (operation && !committed) await this.appendHistory(beagleImportRecord(operation, files, undefined, { cancelled: this.operation?.controller.signal.aborted ?? false, message: error instanceof Error ? error.message : "Operation failed" })).catch(() => undefined);
+      if (committed) throw new Error("Graph changes were saved, but project metadata could not be saved. Reload the project and run Analyze to recover diagnostics.");
+      throw error;
+    } finally {
+      this.operationDatabase = undefined;
+      if (!committed) await this.closeClient();
+      for (const suffix of ["", "-wal", "-shm", "-journal"]) await unlink(staged + suffix).catch(() => undefined);
     }
-    const report = await this.execute(command, WORKFLOW_TIMEOUT_MS);
-    if (recordsAnalysis) {
-      const diagnostics = normalizeBeagleAnalysisDiagnostics(report);
-      await writePrivateFileAtomic(diagnosticsPath, Buffer.from(JSON.stringify(diagnostics)));
-    }
-    return { report, state: await this.state() };
   }
 
   private async queryCommand(command: BeagleRuntimeCommand): Promise<BeagleQueryResult> {

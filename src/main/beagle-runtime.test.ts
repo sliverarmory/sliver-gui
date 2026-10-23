@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   BEAGLE_RUNTIME_MAX_REQUEST_BYTES, BEAGLE_RUNTIME_MAX_RESPONSE_BYTES, BEAGLE_RUNTIME_OPERATIONS,
+  BEAGLE_RUNTIME_REQUIRED_OPERATIONS,
   type BeagleRuntimeCommand,
 } from "../shared/beagle-runtime-contracts.js";
 import { BeagleRuntimeOperationError, createBeagleRuntime, type BeagleRuntimeClient } from "./beagle-runtime.js";
@@ -208,7 +209,28 @@ describe("Beagle persistent runtime", () => {
     const { client, emit, written } = fixture(); emit(ready); await client.ready;
     const abort = new AbortController(); abort.abort();
     await expect(client.request({ type: "analyze" }, { timeout: 1000, signal: abort.signal })).rejects.toThrow(/canceled/u);
-    expect(written).toHaveLength(0); expect(client.closed).toBe(true);
+    expect(written).toHaveLength(0); expect(client.closed).toBe(false);
+  });
+
+  it("cancels unsent startup work without poisoning the following request", async () => {
+    const { client, emit, written, request } = fixture();
+    const abort = new AbortController();
+    const failed = expect(client.request({ type: "analyze" }, { timeout: 1000, signal: abort.signal })).rejects.toThrow(/before it was sent/u);
+    abort.abort(); await failed;
+    emit(ready); await client.ready;
+    expect(written).toHaveLength(0); expect(client.closed).toBe(false);
+    const pending = await request(); emit({ type: "response", id: pending.sent.id, ok: true, value: {} });
+    await expect(pending.result).resolves.toEqual({});
+  });
+
+  it("keeps legacy protocol1 helpers usable while gating additive operations before sending", async () => {
+    const { client, emit, written, request } = fixture();
+    emit({ ...ready, operations: [...BEAGLE_RUNTIME_REQUIRED_OPERATIONS] });
+    expect((await client.ready).operations).toEqual(BEAGLE_RUNTIME_REQUIRED_OPERATIONS);
+    await expect(client.request({ type: "backup", path: "/private/tmp/backup.db" }, { timeout: 1000 })).rejects.toThrow(/does not support/u);
+    expect(written).toHaveLength(0); expect(client.closed).toBe(false);
+    const pending = await request(); emit({ type: "response", id: pending.sent.id, ok: true, value: {} });
+    await expect(pending.result).resolves.toEqual({});
   });
 
   it.each(["error", "pipe", "fatal", "exit"])("rejects pending work on %s without exposing process diagnostics", async (kind) => {

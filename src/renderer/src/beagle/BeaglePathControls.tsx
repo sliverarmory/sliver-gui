@@ -3,6 +3,7 @@ import { Button, Checkbox, ComboBox, Disclosure, Input, Label, ListBox, TextFiel
 import { NativeSelect } from "@heroui-pro/react/native-select";
 import type { BeagleAPI, BeagleNode, BeaglePathsInput, BeagleSearchResult } from "../../../shared/beagle-contracts";
 import { BEAGLE_PATH_EDGE_CATEGORIES, BEAGLE_PATH_EDGE_KINDS } from "../../../shared/beagle-investigations";
+import { defaultBeaglePathDraft, type BeaglePathDraft } from "../../../shared/beagle-workspace";
 import { nodeKind, nodeName } from "./beagle-model";
 
 interface Props {
@@ -15,17 +16,27 @@ interface Props {
   onRun: (input: BeaglePathsInput) => void;
   disabled: boolean;
   loading: boolean;
+  draft?: BeaglePathDraft;
+  onDraftChange?: (draft: BeaglePathDraft) => void;
 }
 
-export function BeaglePathControls({ api, projectId, source, target, onSourceChange, onTargetChange, onRun, disabled, loading }: Props) {
-  const [via, setVia] = useState<string[]>([]);
-  const [all, setAll] = useState(false);
-  const [maxHops, setMaxHops] = useState("12");
-  const [kinds, setKinds] = useState<string[]>([...BEAGLE_PATH_EDGE_KINDS]);
+export function BeaglePathControls({ api, projectId, source, target, onSourceChange, onTargetChange, onRun, disabled, loading, draft, onDraftChange }: Props) {
+  const [localDraft, setLocalDraft] = useState(defaultBeaglePathDraft);
+  const value = draft ?? localDraft;
+  const { via, all, maxHops, relationshipKinds: kinds } = value;
+  function update(change: Partial<BeaglePathDraft>) {
+    const next = { ...value, source, target, ...change };
+    if (onDraftChange) onDraftChange(next); else setLocalDraft(next);
+  }
+  const setVia = (via: string[]) => update({ via });
+  const setAll = (all: boolean) => update({ all });
+  const setMaxHops = (maxHops: string) => update({ maxHops });
+  const setKinds = (relationshipKinds: string[]) => update({ relationshipKinds });
   const [error, setError] = useState<string>();
   const endpoints = [source, ...via, target];
   function setEndpoints(next: string[]) {
-    onSourceChange(next[0] ?? ""); onTargetChange(next.at(-1) ?? ""); setVia(next.slice(1, -1));
+    if (onDraftChange) update({ source: next[0] ?? "", target: next.at(-1) ?? "", via: next.slice(1, -1) });
+    else { onSourceChange(next[0] ?? ""); onTargetChange(next.at(-1) ?? ""); setVia(next.slice(1, -1)); }
   }
   function move(index: number, direction: number) {
     const next = [...endpoints];
@@ -33,7 +44,7 @@ export function BeaglePathControls({ api, projectId, source, target, onSourceCha
     setEndpoints(next);
   }
   function toggleKinds(values: readonly string[], enabled: boolean) {
-    setKinds((previous) => enabled ? [...new Set([...previous, ...values])] : previous.filter((kind) => !values.includes(kind)));
+    setKinds(enabled ? [...new Set([...kinds, ...values])] : kinds.filter((kind) => !values.includes(kind)));
   }
   return <div className="beagle-path-controls">
     <p className="beagle-muted">Search by name or enter an object ID. Paths follow the endpoint order below.</p>
