@@ -14,3 +14,14 @@ updates:
         patterns:
           - "react"
           - "react-dom"
+      react-aria:
+        patterns:
+          - "react-aria"
+          - "react-aria-components"
+          - "react-stately"
+          - "@react-aria/*"
+          - "@react-stately/*"
+          - "@react-types/*"
+          - "@react-spectrum/*"
+          - "@adobe/react-spectrum"
+          - "@internationalized/*"
