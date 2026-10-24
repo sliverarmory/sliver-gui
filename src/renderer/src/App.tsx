@@ -216,7 +216,7 @@ export function App() {
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
   const configSelectorInitializedRef = useRef(false);
-  const configSelectorHasMountedRef = useRef(false);
+  const initialSavedConfigLoadConsumedRef = useRef(false);
   const snapshotEventGenerationRef = useRef(0);
   const wasConnectedRef = useRef(false);
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
@@ -274,7 +274,9 @@ export function App() {
       // disconnected snapshot can cancel the modal's entrance before it finishes.
       if (!configSelectorInitializedRef.current && next.connection.status !== "connecting") {
         configSelectorInitializedRef.current = true;
-        setIsConfigSelectorOpen(!isUsableConnection(next.connection.status));
+        const hasConnection = isUsableConnection(next.connection.status);
+        if (hasConnection) initialSavedConfigLoadConsumedRef.current = true;
+        setIsConfigSelectorOpen(!hasConnection);
       }
     };
     const unsubscribe = window.sliver.onSnapshotChanged((next) => {
@@ -303,10 +305,10 @@ export function App() {
 
   useEffect(() => {
     if (!isConfigSelectorOpen) return;
-    // The mount effect loads the initial catalog. Reopening must pick up any
-    // directory changes that arrived while this selector was dismissed.
-    if (configSelectorHasMountedRef.current) void loadSavedConfigs(true);
-    else configSelectorHasMountedRef.current = true;
+    // Disconnected startup shares the initial catalog request. Later openings,
+    // including the first after an inherited connection, need a current scan.
+    if (initialSavedConfigLoadConsumedRef.current) void loadSavedConfigs(true);
+    else initialSavedConfigLoadConsumedRef.current = true;
 
     let active = true;
     let scheduled: number | undefined;

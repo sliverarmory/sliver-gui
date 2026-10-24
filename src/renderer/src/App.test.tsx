@@ -692,6 +692,46 @@ describe("App startup", () => {
     expect(api.onSavedConfigsChanged).toHaveBeenCalledTimes(2);
   });
 
+  it("refreshes the first manually opened selector after inheriting a connection", async () => {
+    const user = userEvent.setup();
+    const connected = disconnectedSnapshot();
+    connected.connection = {
+      managedServer: null,
+      status: "connected",
+      server: "sliver.example.test:31337",
+      operator: "alice",
+    };
+    let catalog: SavedConfigSummary[] = [];
+    const listSavedConfigs = vi.fn(async () => ({ ok: true as const, value: catalog }));
+    const api = installSliverAPI(listSavedConfigs, connected);
+
+    render(<App />);
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(listSavedConfigs).toHaveBeenCalledOnce();
+    expect(api.onSavedConfigsChanged).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+
+    catalog = [{
+      id: "46a72a10-a9ad-43ac-9db4-d108a0065e1c",
+      fileName: "new-operator.cfg",
+      displayName: "New operator",
+      operator: "new-operator",
+      lhost: "new.example.test",
+      lport: 31337,
+      transport: "mtls",
+      modifiedAt: "2026-08-09T12:00:00.000Z",
+      origin: "preexisting",
+      removal: "detach",
+      availability: "available",
+    }];
+    await user.click(screen.getAllByRole("button", { name: "Current server: alice" })[0]!);
+    await user.click(await screen.findByRole("menuitem", { name: "Switch config" }));
+
+    expect(await screen.findByRole("option", { name: /new-operator/u })).toBeInTheDocument();
+    expect(listSavedConfigs).toHaveBeenCalledTimes(2);
+    expect(api.onSavedConfigsChanged).toHaveBeenCalledOnce();
+  });
+
   it("opens the app-wide command palette and immediately adopts its saved shortcut", async () => {
     const user = userEvent.setup();
     const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
