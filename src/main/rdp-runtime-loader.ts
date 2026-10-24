@@ -37,8 +37,8 @@ async function bundledFile(root: string, path: string, limit: number, archiveMem
   const [canonicalRoot, canonicalFile] = await Promise.all([realpath(root), realpath(path)]);
   if (!canonicalFile.startsWith(`${canonicalRoot}${sep}`)) throw new Error(FAILURE);
   if (archiveMember) {
-    // ASAR lstat inodes are synthetic; an opened member has a real descriptor.
-    // Check its size/type, cap the read, and compare that descriptor to itself.
+    // ASAR path and opened-member stats can use different inode identities.
+    // Check size/type, cap the read, and compare the opened member to itself.
     const before = await lstat(path);
     if (before.isSymbolicLink() || !before.isFile() || before.size > limit) throw new Error(FAILURE);
     const handle = await open(path, constants.O_RDONLY | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW));

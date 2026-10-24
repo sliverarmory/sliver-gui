@@ -688,13 +688,24 @@ async function verifyCloudDeploymentWindow(
   const cloudDeployment = dialog.getByRole("button", { name: "Cloud Deployment" });
   const cancel = dialog.getByRole("button", { name: "Cancel" });
   const connect = dialog.getByRole("button", { name: "Connect", exact: true });
-  await Promise.all([forget, cloudDeployment, cancel, connect].map((button) => button.waitFor({ state: "visible" })));
-  const [forgetBox, cloudBox, cancelBox, connectBox] = await Promise.all([
-    forget.boundingBox(),
-    cloudDeployment.boundingBox(),
-    cancel.boundingBox(),
-    connect.boundingBox(),
-  ]);
+  const actionButtons = [forget, cloudDeployment, cancel, connect];
+  await Promise.all(actionButtons.map((button) => button.waitFor({ state: "visible" })));
+  // The buttons are visible while HeroUI still scales their modal container.
+  // Wait for that entrance state to clear, then read every rectangle in one evaluation.
+  const container = workspacePage.locator('[data-slot="modal-container"]').filter({ has: dialog });
+  await container.and(workspacePage.locator(':not([data-entering="true"])')).waitFor({ state: "visible" });
+  await container.evaluate(async (element) => {
+    await Promise.all(element.getAnimations().map((animation: { finished: Promise<unknown> }) =>
+      animation.finished.catch(() => undefined)));
+  });
+  const buttonHandles = await Promise.all(actionButtons.map((button) => button.elementHandle()));
+  const [forgetBox, cloudBox, cancelBox, connectBox] = await workspacePage.evaluate((buttons) => buttons.map((button) => {
+    if (!button) return null;
+    const { x, y, width, height } = button.getBoundingClientRect();
+    return width > 0 && height > 0 ? { x, y, width, height } : null;
+  }), buttonHandles).finally(async () => {
+    await Promise.all(buttonHandles.map((button) => button?.dispose()));
+  });
   if (!forgetBox || !cloudBox || !cancelBox || !connectBox) {
     throw new Error("Expected both saved-configuration action rows to be visible");
   }

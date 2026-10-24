@@ -210,12 +210,13 @@ export function App() {
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
+  const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(false);
   const [isLoadingSavedConfigs, setIsLoadingSavedConfigs] = useState(true);
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
-  const configSelectorHasMountedRef = useRef(false);
+  const configSelectorInitializedRef = useRef(false);
+  const initialSavedConfigLoadConsumedRef = useRef(false);
   const snapshotEventGenerationRef = useRef(0);
   const wasConnectedRef = useRef(false);
   const [dismissedCompatibilityKeys, setDismissedCompatibilityKeys] = useState<ReadonlySet<string>>(
@@ -267,18 +268,30 @@ export function App() {
   useEffect(() => {
     let mounted = true;
     let receivedEvent = false;
+    const acceptSnapshot = (next: SliverSnapshot): void => {
+      setSnapshot(next);
+      // A new window may inherit a connection. Opening against the synthetic
+      // disconnected snapshot can cancel the modal's entrance before it finishes.
+      if (!configSelectorInitializedRef.current && next.connection.status !== "connecting") {
+        configSelectorInitializedRef.current = true;
+        const hasConnection = isUsableConnection(next.connection.status);
+        if (hasConnection) initialSavedConfigLoadConsumedRef.current = true;
+        setIsConfigSelectorOpen(!hasConnection);
+      }
+    };
     const unsubscribe = window.sliver.onSnapshotChanged((next) => {
       receivedEvent = true;
       if (mounted) {
         snapshotEventGenerationRef.current += 1;
-        setSnapshot(next);
+        acceptSnapshot(next);
       }
     });
     void window.sliver.getSnapshot().then((next) => {
-      if (mounted && !receivedEvent) {
-        setSnapshot(next);
-        if (isUsableConnection(next.connection.status)) setIsConfigSelectorOpen(false);
-      }
+      if (mounted && !receivedEvent) acceptSnapshot(next);
+    }).catch(() => {
+      if (!mounted || receivedEvent || configSelectorInitializedRef.current) return;
+      configSelectorInitializedRef.current = true;
+      setIsConfigSelectorOpen(true);
     });
     void loadSavedConfigs();
     const reloadSavedConfigs = () => void loadSavedConfigs();
@@ -292,10 +305,10 @@ export function App() {
 
   useEffect(() => {
     if (!isConfigSelectorOpen) return;
-    // The mount effect loads the initial catalog. Reopening must pick up any
-    // directory changes that arrived while this selector was dismissed.
-    if (configSelectorHasMountedRef.current) void loadSavedConfigs(true);
-    else configSelectorHasMountedRef.current = true;
+    // Disconnected startup shares the initial catalog request. Later openings,
+    // including the first after an inherited connection, need a current scan.
+    if (initialSavedConfigLoadConsumedRef.current) void loadSavedConfigs(true);
+    else initialSavedConfigLoadConsumedRef.current = true;
 
     let active = true;
     let scheduled: number | undefined;
@@ -537,6 +550,9 @@ export function App() {
       !dismissedCompatibilityKeys.has(compatibilityKey),
   );
   const setConfigSelectorOpen = useCallback((isOpen: boolean) => {
+    // Explicit operator choices take precedence over pending startup state.
+    configSelectorInitializedRef.current = true;
+    initialSavedConfigLoadConsumedRef.current = true;
     setIsConfigSelectorOpen(isOpen);
   }, []);
   const setCompatibilityNoticeOpen = useCallback((isOpen: boolean) => {
@@ -733,7 +749,7 @@ export function App() {
       keywords: ["preferences"],
       isCurrent: view === "settings",
       onAction: () => {
-        setIsConfigSelectorOpen(false);
+        setConfigSelectorOpen(false);
         changeView("settings");
       },
     },
@@ -766,7 +782,7 @@ export function App() {
       label: "Saved configurations",
       description: "Connect to or manage an operator configuration.",
       keywords: ["switch server", "connect"],
-      onAction: () => setIsConfigSelectorOpen(true),
+      onAction: () => setConfigSelectorOpen(true),
     },
     {
       id: "server-console",
@@ -866,10 +882,10 @@ export function App() {
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
           onSettings={() => {
-            setIsConfigSelectorOpen(false);
+            setConfigSelectorOpen(false);
             changeView("settings");
           }}
-          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onSwitchConfig={() => setConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
         <Sidebar.Rail />
@@ -883,10 +899,10 @@ export function App() {
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
           onSettings={() => {
-            setIsConfigSelectorOpen(false);
+            setConfigSelectorOpen(false);
             changeView("settings");
           }}
-          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onSwitchConfig={() => setConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
       </Sidebar.Mobile>
@@ -950,7 +966,7 @@ export function App() {
               </Tooltip.Content>
             </Tooltip>
             {!connected ? (
-              <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
+              <Button size="sm" isPending={isConnecting} onPress={() => setConfigSelectorOpen(true)}>
                 <FontAwesomeIcon icon={faLink} /> Connect
               </Button>
             ) : null}
