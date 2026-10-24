@@ -289,7 +289,7 @@ export function App() {
     void window.sliver.getSnapshot().then((next) => {
       if (mounted && !receivedEvent) acceptSnapshot(next);
     }).catch(() => {
-      if (!mounted || receivedEvent) return;
+      if (!mounted || receivedEvent || configSelectorInitializedRef.current) return;
       configSelectorInitializedRef.current = true;
       setIsConfigSelectorOpen(true);
     });
@@ -550,6 +550,9 @@ export function App() {
       !dismissedCompatibilityKeys.has(compatibilityKey),
   );
   const setConfigSelectorOpen = useCallback((isOpen: boolean) => {
+    // Explicit operator choices take precedence over pending startup state.
+    configSelectorInitializedRef.current = true;
+    initialSavedConfigLoadConsumedRef.current = true;
     setIsConfigSelectorOpen(isOpen);
   }, []);
   const setCompatibilityNoticeOpen = useCallback((isOpen: boolean) => {
@@ -746,7 +749,7 @@ export function App() {
       keywords: ["preferences"],
       isCurrent: view === "settings",
       onAction: () => {
-        setIsConfigSelectorOpen(false);
+        setConfigSelectorOpen(false);
         changeView("settings");
       },
     },
@@ -779,7 +782,7 @@ export function App() {
       label: "Saved configurations",
       description: "Connect to or manage an operator configuration.",
       keywords: ["switch server", "connect"],
-      onAction: () => setIsConfigSelectorOpen(true),
+      onAction: () => setConfigSelectorOpen(true),
     },
     {
       id: "server-console",
@@ -879,10 +882,10 @@ export function App() {
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
           onSettings={() => {
-            setIsConfigSelectorOpen(false);
+            setConfigSelectorOpen(false);
             changeView("settings");
           }}
-          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onSwitchConfig={() => setConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
         <Sidebar.Rail />
@@ -896,10 +899,10 @@ export function App() {
           onDisconnect={() => void disconnect()}
           onExitApp={() => void window.sliver.exitApp()}
           onSettings={() => {
-            setIsConfigSelectorOpen(false);
+            setConfigSelectorOpen(false);
             changeView("settings");
           }}
-          onSwitchConfig={() => setIsConfigSelectorOpen(true)}
+          onSwitchConfig={() => setConfigSelectorOpen(true)}
           onViewChange={changeView}
         />
       </Sidebar.Mobile>
@@ -963,7 +966,7 @@ export function App() {
               </Tooltip.Content>
             </Tooltip>
             {!connected ? (
-              <Button size="sm" isPending={isConnecting} onPress={() => setIsConfigSelectorOpen(true)}>
+              <Button size="sm" isPending={isConnecting} onPress={() => setConfigSelectorOpen(true)}>
                 <FontAwesomeIcon icon={faLink} /> Connect
               </Button>
             ) : null}

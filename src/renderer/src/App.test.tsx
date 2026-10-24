@@ -1021,6 +1021,73 @@ describe("App startup", () => {
     expect(screen.getByRole("button", { name: "Open file" })).toBeEnabled();
   });
 
+  it.each(["event", "rejection"] as const)(
+    "preserves manual selector dismissal before a delayed startup %s",
+    async (delivery) => {
+      const user = userEvent.setup();
+      const initialResponse = deferred<SliverSnapshot>();
+      let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+      const api = installSliverAPI(
+        vi.fn().mockResolvedValue({ ok: true, value: [] }),
+        disconnectedSnapshot(),
+        (listener) => { emitSnapshot = listener; },
+      );
+      vi.mocked(api.getSnapshot).mockReturnValue(initialResponse.promise);
+      render(<App />);
+      if (delivery === "event") {
+        const connecting = disconnectedSnapshot();
+        connecting.connection.status = "connecting";
+        await act(async () => { initialResponse.resolve(connecting); });
+      }
+
+      await user.click(screen.getByRole("button", { name: "Connect" }));
+      const selector = await screen.findByRole("dialog", { name: "Saved configurations" });
+      await user.click(within(selector).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument());
+
+      await act(async () => {
+        if (delivery === "event") emitSnapshot?.(disconnectedSnapshot());
+        else initialResponse.reject(new Error("Snapshot lookup failed"));
+      });
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    },
+  );
+
+  it.each(["response", "event", "rejection"] as const)(
+    "preserves manual Settings navigation before a delayed startup %s",
+    async (delivery) => {
+      const user = userEvent.setup();
+      const initialResponse = deferred<SliverSnapshot>();
+      let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+      const api = installSliverAPI(
+        vi.fn().mockResolvedValue({ ok: true, value: [] }),
+        disconnectedSnapshot(),
+        (listener) => { emitSnapshot = listener; },
+      );
+      vi.mocked(api.getSnapshot).mockReturnValue(initialResponse.promise);
+      render(<App />);
+      if (delivery === "event") {
+        const connecting = disconnectedSnapshot();
+        connecting.connection.status = "connecting";
+        await act(async () => { initialResponse.resolve(connecting); });
+      }
+
+      await user.click(screen.getByRole("button", { name: "Open command palette" }));
+      const palette = await screen.findByRole("dialog", { name: "Command palette" });
+      await user.click(within(palette).getByRole("menuitem", { name: /^Settings/u }));
+      expect(await screen.findByRole("heading", { name: "Settings" })).toBeInTheDocument();
+
+      await act(async () => {
+        if (delivery === "response") initialResponse.resolve(disconnectedSnapshot());
+        else if (delivery === "event") emitSnapshot?.(disconnectedSnapshot());
+        else initialResponse.reject(new Error("Snapshot lookup failed"));
+      });
+      expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    },
+  );
+
   it("does not replace a newer connection event with the initial snapshot response", async () => {
     const initialResponse = deferred<SliverSnapshot>();
     let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
