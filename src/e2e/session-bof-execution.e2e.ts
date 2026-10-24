@@ -482,9 +482,9 @@ async function openSession(application: ElectronApplication): Promise<Page> {
 async function assertOutput(workspace: Locator, text: string): Promise<void> {
   const transcript = workspace.getByLabel("Execution output transcript");
   try {
-    await transcript.waitFor({ timeout: 10_000 });
+    await transcript.filter({ hasText: new RegExp(text, "u") }).waitFor({ timeout: 10_000 });
   } catch {
-    throw new Error(`BOF output transcript did not appear. Workspace: ${(await workspace.innerText()).slice(0, 2_000)}`);
+    throw new Error(`Expected BOF output transcript did not appear: ${text}. Workspace: ${(await workspace.innerText()).slice(0, 2_000)}`);
   }
   assert.match(await transcript.textContent() ?? "", new RegExp(text, "u"));
   await workspace.locator('[aria-label="Execution output terminal"] canvas').waitFor();
