@@ -31,9 +31,12 @@ const customScript: AdCollectorSummary = {
   source: "native-file", compatibility: "operator-supplied", collectionMethods: ["Default", "DCOnly", "ComputerOnly", "Session"], available: true,
 };
 const rustHound: AdCollectorSummary = {
-  id: RUSTHOUND_ARMORY_COLLECTOR_ID, name: "RustHound CE v2.5.27 (in memory)",
+  id: RUSTHOUND_ARMORY_COLLECTOR_ID, name: "RustHound CE v2.5.29 (in memory)",
   description: "Signed Armory extension", source: "armory", compatibility: "verified",
   collectionMethods: ["LdapOnly", "DCOnly", "All"], available: true,
+};
+const currentUserRustHound: AdCollectorSummary = {
+  ...rustHound, name: "RustHound CE v2.5.30 (in memory)", supportsCurrentUser: true,
 };
 
 const collections: AdCollectionSummary[] = [
@@ -58,14 +61,16 @@ function installAPI() {
       page: { limit: 100, total: 1, truncated: false } },
   }));
   const listAdCollectors = vi.fn(async (target: TargetRef) => ({ ok: true as const, value: { target, collectors: [collector, customCollector, customScript] } }));
+  const getAdTargetDomain = vi.fn(async (_target: TargetRef): Promise<OperationResult<{ domain?: string }>> => ({ ok: true, value: {} }));
   const runAdCollector = vi.fn(async () => ({ ok: true as const, value: {
     state: "imported" as const, collectorId: collector.id, targetId: session.id,
     domain: "corp.example.com", message: "Collection imported into AD Explorer.", projectId: "project-one",
   } }));
   const listAdCollections = vi.fn(async (): Promise<OperationResult<AdCollectionSummary[]>> => ({ ok: true, value: collections }));
   const openBeagleWindow = vi.fn(async (_input?: { projectId: string }): Promise<OperationResult> => ({ ok: true }));
-  Object.defineProperty(window, "sliver", { configurable: true, value: { listTargets, listAdCollectors, runAdCollector, listAdCollections, openBeagleWindow } });
-  return { listTargets, listAdCollectors, runAdCollector, listAdCollections, openBeagleWindow };
+  const openAdCollectorArmory = vi.fn(async (): Promise<OperationResult> => ({ ok: true }));
+  Object.defineProperty(window, "sliver", { configurable: true, value: { listTargets, listAdCollectors, getAdTargetDomain, runAdCollector, listAdCollections, openBeagleWindow, openAdCollectorArmory } });
+  return { listTargets, listAdCollectors, getAdTargetDomain, runAdCollector, listAdCollections, openBeagleWindow, openAdCollectorArmory };
 }
 
 beforeEach(() => {
@@ -189,7 +194,7 @@ describe("ADExplorerPage", () => {
     expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("");
     expect(await screen.findByRole("textbox", { name: "LDAP server FQDN (optional)" })).toHaveValue("");
     expect(screen.getByRole("switch", { name: "Use LDAPS" })).not.toBeChecked();
-    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("alice");
     expect(screen.getByLabelText("AD password")).toHaveValue("");
     expect(api.runAdCollector).not.toHaveBeenCalled();
     expect(api.openBeagleWindow).not.toHaveBeenCalled();
@@ -337,6 +342,9 @@ describe("ADExplorerPage", () => {
     expect(advanced).toHaveAttribute("aria-pressed", "false");
     await user.click(advanced);
     expect(advanced).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Other collectors" }));
+    expect(screen.getByRole("button", { name: "Other collectors" })).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("Selected: SharpHound .exe")).toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.click(screen.getByRole("button", { name: "Run user-supplied collector" }));
     expect(api.runAdCollector).toHaveBeenCalledExactlyOnceWith({
@@ -356,13 +364,232 @@ describe("ADExplorerPage", () => {
     await user.click(await screen.findByRole("button", { name: "Other collectors" }));
     const choice = await screen.findByRole("button", { name: "Use your own Invoke-BloodHound .ps1" });
     expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
-    expect(screen.getByText(/must accept the fixed domain, method, and output path/u)).toBeInTheDocument();
+    expect(screen.getByText(/must accept the selected domain, collection method, and output path/u)).toBeInTheDocument();
     await user.click(choice);
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.click(screen.getByRole("button", { name: "Run user-supplied collector" }));
     expect(api.runAdCollector).toHaveBeenCalledExactlyOnceWith({
       target: sessionRef, collectorId: "sharphound:custom:script", domain: "corp.example.com", collectionMethod: "Default",
     });
+  });
+
+  it("suggests the reported session user without guessing an AD domain or using current-user authentication", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [rustHound, collector], rustHoundSupported: true },
+    }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+
+    expect(await screen.findByRole("textbox", { name: "AD user" })).toHaveValue("alice");
+    expect(screen.getByText("Session identity: CORP\\alice")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("");
+    expect(screen.getByText(/requires AD credentials/u)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Open Armory" }));
+    expect(api.openAdCollectorArmory).toHaveBeenCalledOnce();
+  });
+
+  it("does not offer a RustHound update for a target without extension transport", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [collector], rustHoundSupported: false },
+    }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await screen.findByRole("button", { name: /Verified collector/u });
+    expect(screen.queryByRole("button", { name: "Open Armory" })).not.toBeInTheDocument();
+  });
+
+  it("restores only a saved domain and resets credentials for a different target", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const current = snapshot();
+    const upnBeacon: BeaconSummary = { ...beacon, username: "sansa@north.example" };
+    current.domains.beacons.items = [upnBeacon];
+    api.listTargets.mockImplementation(async ({ mode }) => ({
+      ok: true as const,
+      value: { items: mode === "session" ? [{ target: session, ref: sessionRef }] : [{ target: upnBeacon, ref: beaconRef }],
+        page: { limit: 100, total: 1, truncated: false } },
+    }));
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [rustHound, collector] },
+    }));
+    render(<ADExplorerPage snapshot={current} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    expect(await screen.findByRole("textbox", { name: "AD user" })).toHaveValue("alice");
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
+    await user.click(screen.getByRole("button", { name: "Assign domain" }));
+    await user.type(screen.getByLabelText("AD password"), "session-only-secret");
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(await screen.findByRole("textbox", { name: "AD user" })).toHaveValue("sansa@north.example");
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("north.example");
+    expect(screen.getByLabelText("AD password")).toHaveValue("");
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    expect(await screen.findByRole("textbox", { name: "AD user" })).toHaveValue("alice");
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("corp.example.com");
+    expect(screen.getByLabelText("AD password")).toHaveValue("");
+    expect(window.localStorage.getItem("ad-explorer.domain-assignments.v1")).not.toContain("session-only-secret");
+  });
+
+  it("preserves RustHound form edits across catalog and inventory refreshes", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [rustHound, collector] },
+    }));
+    const view = render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    const adUser = await screen.findByRole("textbox", { name: "AD user" });
+    await user.clear(adUser);
+    await user.type(adUser, "other@corp.example.com");
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
+    await user.type(screen.getByRole("textbox", { name: "LDAP server FQDN (optional)" }), "dc.corp.example.com");
+    await user.type(screen.getByLabelText("AD password"), "unsent-secret");
+    await user.click(screen.getByRole("switch", { name: "Use LDAPS" }));
+
+    await user.click(screen.getByRole("button", { name: "Refresh collectors" }));
+    await waitFor(() => expect(api.listAdCollectors).toHaveBeenCalledTimes(2));
+    const refreshed = snapshot();
+    refreshed.domains.sessions.revision = 2;
+    refreshed.domains.beacons.revision = 2;
+    view.rerender(<ADExplorerPage snapshot={refreshed} />);
+    await waitFor(() => expect(api.listTargets).toHaveBeenCalledTimes(4));
+
+    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("other@corp.example.com");
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("corp.example.com");
+    expect(screen.getByRole("textbox", { name: "LDAP server FQDN (optional)" })).toHaveValue("dc.corp.example.com");
+    expect(screen.getByLabelText("AD password")).toHaveValue("unsent-secret");
+    expect(screen.getByRole("switch", { name: "Use LDAPS" })).toBeChecked();
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeEnabled();
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+
+    api.listAdCollectors.mockRejectedValueOnce(new Error("Collector catalog refresh failed"));
+    await user.click(screen.getByRole("button", { name: "Refresh collectors" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Collector catalog refresh failed");
+    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("other@corp.example.com");
+    expect(screen.getByLabelText("AD password")).toHaveValue("unsent-secret");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
+  });
+
+  it("clears a hidden password when a refreshed RustHound build gains current-user support", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    let installed = rustHound;
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [installed], rustHoundSupported: true },
+    }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.type(await screen.findByLabelText("AD password"), "old-build-secret");
+
+    installed = currentUserRustHound;
+    await user.click(screen.getByRole("button", { name: "Refresh collectors" }));
+    expect(await screen.findByRole("button", { name: /Authentication/u })).toHaveTextContent("Current user");
+    expect(screen.queryByLabelText("AD password")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Authentication/u }));
+    await user.click(screen.getByRole("option", { name: "AD credentials" }));
+    expect(screen.getByLabelText("AD password")).toHaveValue("");
+  });
+
+  it("clears an unsent password when the backend connection identity changes", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    let currentSessionRef = sessionRef;
+    let currentBeaconRef = beaconRef;
+    api.listTargets.mockImplementation(async ({ mode }) => ({
+      ok: true as const,
+      value: { items: mode === "session" ? [{ target: session, ref: currentSessionRef }] : [{ target: beacon, ref: currentBeaconRef }],
+        page: { limit: 100, total: 1, truncated: false } },
+    }));
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [rustHound, collector] },
+    }));
+    const view = render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.type(await screen.findByLabelText("AD password"), "old-connection-secret");
+
+    const reconnected = snapshot();
+    reconnected.connection.epoch = 8;
+    reconnected.connection.incarnation = 2;
+    currentSessionRef = { ...sessionRef, backendEpoch: 8 };
+    currentBeaconRef = { ...beaconRef, backendEpoch: 8 };
+    reconnected.targetContext.selectableTargets = [currentSessionRef, currentBeaconRef];
+    view.rerender(<ADExplorerPage snapshot={reconnected} />);
+    await user.click(await screen.findByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    expect(await screen.findByLabelText("AD password")).toHaveValue("");
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("prefills the session DNS domain and runs the latest RustHound as current user by default", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [currentUserRustHound, collector] },
+    }));
+    api.getAdTargetDomain.mockResolvedValue({ ok: true, value: { domain: "corp.example.com" } });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("corp.example.com"));
+    expect(api.getAdTargetDomain).toHaveBeenCalledExactlyOnceWith(sessionRef);
+    expect(screen.getByRole("button", { name: /Verified collector/u })).toHaveTextContent("v2.5.30");
+    expect(screen.getByRole("button", { name: /Authentication/u })).toHaveTextContent("Current user");
+    expect(screen.queryByRole("button", { name: "Open Armory" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "AD user" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("AD password")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    expect(api.runAdCollector).toHaveBeenCalledExactlyOnceWith({
+      target: sessionRef, collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID,
+      domain: "corp.example.com", collectionMethod: "LdapOnly",
+    });
+  });
+
+  it("offers explicit AD credentials on the latest RustHound without requiring them in current-user mode", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({
+      ok: true as const, value: { target, collectors: [currentUserRustHound] },
+    }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
+    expect(await screen.findByRole("button", { name: /Authentication/u })).toHaveTextContent("Current user");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: /Authentication/u }));
+    await user.click(screen.getByRole("option", { name: "AD credentials" }));
+    expect(screen.getByRole("textbox", { name: "AD user" })).toHaveValue("alice");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
+    await user.type(screen.getByLabelText("AD password"), "one-use-secret");
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    expect(api.runAdCollector).toHaveBeenCalledExactlyOnceWith({
+      target: sessionRef, collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID,
+      domain: "corp.example.com", collectionMethod: "LdapOnly",
+      credentials: { username: "alice", password: "one-use-secret" },
+    });
+    expect(screen.getByLabelText("AD password")).toHaveValue("");
+  });
+
+  it("does not replace an operator-edited domain with a late session suggestion", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    let resolveLookup!: (value: OperationResult<{ domain?: string }>) => void;
+    api.getAdTargetDomain.mockImplementation(() => new Promise((resolve) => { resolveLookup = resolve; }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await waitFor(() => expect(api.getAdTargetDomain).toHaveBeenCalledExactlyOnceWith(sessionRef));
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "chosen.example.com");
+    resolveLookup({ ok: true, value: { domain: "corp.example.com" } });
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("chosen.example.com"));
+    expect(api.runAdCollector).not.toHaveBeenCalled();
   });
 
   it("passes transient RustHound credentials and clears the password after collection", async () => {
@@ -373,12 +600,13 @@ describe("ADExplorerPage", () => {
     }));
     render(<ADExplorerPage snapshot={snapshot()} />);
     await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
-    await waitFor(() => expect(screen.getAllByText("RustHound CE v2.5.27 (in memory)").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("RustHound CE v2.5.29 (in memory)").length).toBeGreaterThan(0));
     await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "corp.example.com");
     await user.type(screen.getByRole("textbox", { name: "LDAP server FQDN (optional)" }), "dc.corp.example.com");
     expect(screen.getByText(/LDAP simple bind sends the supplied password/u)).toBeInTheDocument();
     await user.click(screen.getByRole("switch", { name: "Use LDAPS" }));
     expect(screen.getByText(/does not validate the domain controller certificate/u)).toBeInTheDocument();
+    await user.clear(screen.getByRole("textbox", { name: "AD user" }));
     await user.type(screen.getByRole("textbox", { name: "AD user" }), "alice@corp.example.com");
     const password = screen.getByLabelText("AD password") as HTMLInputElement;
     await user.type(password, "one-use-secret");

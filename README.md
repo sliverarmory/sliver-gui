@@ -234,13 +234,14 @@ constraints.
 ### Active Directory Explorer (Beagle)
 
 Open **Data → AD Explorer** in the main workspace to collect from Windows
-sessions and beacons. Targets are grouped by Windows domain; assign a DNS domain
-to a target before collecting because Sliver's target inventory does not supply
-an authoritative AD domain. The first verified choice on Windows/amd64 is the
-exact GOAD-tested [sliverarmory RustHound-CE](https://github.com/sliverarmory/RustHound-CE)
-DLL when installed through Armory. It collects into target memory through
-Reflektor, returns bounded chunks, and does not create a target-side output
-file. The other verified choices are the exact
+sessions and beacons. Targets are grouped by Windows domain; the selected
+active Windows session can suggest its `USERDNSDOMAIN`, which the operator can
+edit before collecting. The first choice on Windows/amd64 is the exact signed
+[sliverarmory RustHound-CE](https://github.com/sliverarmory/RustHound-CE)
+DLL when installed through Armory. Release v2.5.30 supports the target's
+current Windows logon, with optional explicit AD credentials. It collects into
+target memory through Reflektor, returns bounded chunks, and does not create a
+target-side output file. The other verified choices are the exact
 [SharpHound CE v2.17.1](https://github.com/SpecterOps/SharpHound/releases/tag/v2.17.1)
 executable and its `Invoke-BloodHound` PowerShell script, selected through the
 native picker. An installed Armory alias appears only when its executable has

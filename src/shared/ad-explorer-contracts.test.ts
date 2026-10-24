@@ -39,20 +39,21 @@ describe("AD collector input", () => {
     expect(() => parseAdCollectorRunInput({ ...request, target: { ...request.target, fingerprint: "stale" } })).toThrow();
   });
 
-  it("requires bounded transient credentials and a supported RustHound method", () => {
+  it("accepts current-user or bounded explicit RustHound credentials and a supported method", () => {
     const rust = { ...request, collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID,
       collectionMethod: "LdapOnly", credentials: { username: "user@example.local", password: "secret" } };
     expect(parseAdCollectorRunInput(rust)).toMatchObject({
       collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID, collectionMethod: "LdapOnly",
       credentials: { username: "user@example.local", password: "secret" },
     });
+    expect(parseAdCollectorRunInput({ ...rust, credentials: undefined })).not.toHaveProperty("credentials");
     expect(parseAdCollectorRunInput({ ...rust, ldapFqdn: " DC.EXAMPLE.LOCAL " }).ldapFqdn).toBe("dc.example.local");
     expect(parseAdCollectorRunInput({ ...rust, ldaps: true }).ldaps).toBe(true);
     expect(() => parseAdCollectorRunInput({ ...rust, ldaps: "true" })).toThrow();
     expect(() => parseAdCollectorRunInput({ ...rust, ldapFqdn: "dc\u0000.example.local" })).toThrow();
     expect(() => parseAdCollectorRunInput({ ...request, ldapFqdn: "dc.example.local" })).toThrow(/does not accept/u);
     expect(() => parseAdCollectorRunInput({ ...request, ldaps: true })).toThrow(/does not accept/u);
-    expect(() => parseAdCollectorRunInput({ ...rust, credentials: undefined })).toThrow(/credentials/u);
+    expect(() => parseAdCollectorRunInput({ ...rust, credentials: {} })).toThrow(/user name and password/u);
     expect(() => parseAdCollectorRunInput({ ...rust, credentials: { username: "user", password: "" } })).toThrow();
     expect(() => parseAdCollectorRunInput({ ...rust, credentials: { username: "DOMAIN\\user", password: "secret" } })).toThrow();
     expect(() => parseAdCollectorRunInput({ ...rust, collectionMethod: "Session" })).toThrow(/method/u);

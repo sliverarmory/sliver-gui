@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { TargetSummary } from "../shared/target-contracts.js";
-import { installedRustHound, isWindowsAmd64, readInstalledRustHound } from "./rusthound-armory.js";
+import { installedRustHound, isWindowsAmd64, readInstalledRustHound, supportsRustHoundCurrentUser } from "./rusthound-armory.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -22,7 +22,7 @@ function dll(): Buffer {
   return data;
 }
 
-async function fixture(digest?: string): Promise<{ root: string; manifestPath: string; artifactPath: string }> {
+async function fixture(digest?: string, version = "v2.5.27"): Promise<{ root: string; manifestPath: string; artifactPath: string }> {
   const root = await mkdtemp(join(tmpdir(), "rusthound-armory-"));
   roots.push(root);
   const packagePath = join(root, "extensions", "rusthound-ce");
@@ -34,7 +34,7 @@ async function fixture(digest?: string): Promise<{ root: string; manifestPath: s
   const manifestPath = join(packagePath, "extension.json");
   await writeFile(manifestPath, JSON.stringify({
     name: "RustHound CE", package_name: "rusthound-ce", command_name: "rusthound-ce",
-    version: "v2.5.27", repo_url: "https://github.com/sliverarmory/RustHound-CE",
+    version, repo_url: "https://github.com/sliverarmory/RustHound-CE",
     help: "AD collection", entrypoint: "RustHoundCE",
     files: [{ os: "windows", arch: "amd64", path: "dist/rusthound-ce-windows-amd64.dll",
       sha256: digest ?? createHash("sha256").update(bytes).digest("hex") }],
@@ -47,6 +47,19 @@ describe("RustHound Armory artifact", () => {
     expect(["amd64", "x64", "x86_64"].every((arch) => isWindowsAmd64({ ...windows, arch }))).toBe(true);
     expect(isWindowsAmd64({ ...windows, arch: "386" })).toBe(false);
     expect(isWindowsAmd64({ ...windows, os: "linux" })).toBe(false);
+  });
+
+  it("enables current-user auth only for the exact signed v2.5.30 DLL", () => {
+    const entry = { packageDirectory: "/tmp/fixture", artifactPath: "dist/rusthound.dll", manifestDigest: "0".repeat(64),
+      artifactDigest: "7e072a170992d332b6f0862f706bcfeec494b6b9a9a8602e5280f90a9b42aba1", version: "2.5.30" };
+    expect(supportsRustHoundCurrentUser(entry)).toBe(true);
+    expect(supportsRustHoundCurrentUser({ ...entry, version: "2.5.29" })).toBe(false);
+    expect(supportsRustHoundCurrentUser({ ...entry, artifactDigest: "d31f7bcbc9176fa7928302cfdab72b865d9539a61e2f2350085442f0f2368c64" })).toBe(false);
+  });
+
+  it("preserves the release manifest's unprefixed version for current-user capability checks", async () => {
+    const { root } = await fixture(undefined, "2.5.30");
+    expect((await installedRustHound(root, windows))?.version).toBe("2.5.30");
   });
 
   it("locates only the fork's Windows x64 package and verifies its DLL bytes", async () => {

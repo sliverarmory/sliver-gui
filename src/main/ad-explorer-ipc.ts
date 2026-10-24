@@ -3,6 +3,7 @@ import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electro
 import { IPC, type OperationResult } from "../shared/contracts.js";
 import {
   parseAdCollectorRunInput,
+  parseAdDomain,
   parseAdTargetRef,
   parseAdExplorerOpenInput,
   RUSTHOUND_ARMORY_COLLECTOR_ID,
@@ -16,10 +17,11 @@ import type { TrustedWindowIdentity } from "./ipc.js";
 import { isSameRendererDocument } from "./security.js";
 
 export interface AdExplorerIpcServices {
-  registry: Pick<ConnectionRegistry, "listAdCollectors" | "runAdCollector">;
+  registry: Pick<ConnectionRegistry, "listAdCollectors" | "getAdTargetDomain" | "runAdCollector">;
   listCollections: () => Promise<AdCollectionSummary[]>;
   importCollectedData: (input: { domain: string; path: string }) => Promise<{ projectId?: string }>;
   openBeagleWindow: (input?: AdExplorerOpenInput) => Promise<void>;
+  openAdCollectorArmory: () => Promise<void>;
 }
 
 export function registerAdExplorerIpcHandlers(
@@ -61,6 +63,20 @@ export function registerAdExplorerIpcHandlers(
       return result;
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : "AD collector catalog unavailable" };
+    }
+  });
+
+  ipcMain.handle(IPC.getAdTargetDomain, async (event, ...args: unknown[]): Promise<OperationResult<{ domain?: string }>> => {
+    try {
+      trustedWindow(event);
+      if (args.length !== 1) throw new TypeError("Choose one AD Explorer target");
+      const target = parseAdTargetRef(args[0]);
+      const result = await services.registry.getAdTargetDomain(event.sender.id, target);
+      trustedWindow(event);
+      if (!result.ok) return result;
+      return { ok: true, value: result.value.domain ? { domain: parseAdDomain(result.value.domain) } : {} };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "AD target domain unavailable" };
     }
   });
 
@@ -147,10 +163,22 @@ export function registerAdExplorerIpcHandlers(
       return { ok: false, error: error instanceof Error ? error.message : "AD Explorer could not be opened" };
     }
   });
+
+  ipcMain.handle(IPC.openAdCollectorArmory, async (event, ...args: unknown[]): Promise<OperationResult> => {
+    try {
+      trustedWindow(event);
+      if (args.length !== 0) throw new TypeError("Opening the Armory install tab takes no arguments");
+      await services.openAdCollectorArmory();
+      trustedWindow(event);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "Armory could not be opened" };
+    }
+  });
 }
 
 export function unregisterAdExplorerIpcHandlers(): void {
-  for (const channel of [IPC.listAdCollections, IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]) ipcMain.removeHandler(channel);
+  for (const channel of [IPC.listAdCollections, IPC.listAdCollectors, IPC.getAdTargetDomain, IPC.runAdCollector, IPC.openBeagleWindow, IPC.openAdCollectorArmory]) ipcMain.removeHandler(channel);
 }
 
 function safeBeagleImportReason(error: unknown): string {

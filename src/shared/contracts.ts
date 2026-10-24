@@ -232,9 +232,11 @@ export const IPC_INVOKE = {
   listDotNetAssemblies: "sliver:dotnet:catalog",
   chooseDotNetAssemblyFile: "sliver:dotnet:choose-file",
   listAdCollectors: "sliver:ad-explorer:collectors",
+  getAdTargetDomain: "sliver:ad-explorer:target-domain",
   listAdCollections: "sliver:ad-explorer:collections",
   runAdCollector: "sliver:ad-explorer:collect",
   openBeagleWindow: "sliver:ad-explorer:open-window",
+  openAdCollectorArmory: "sliver:ad-explorer:open-armory",
   listInstalledBofs: "sliver:bof:catalog",
   chooseBofDirectory: "sliver:bof:choose-directory",
   chooseBofArgumentFile: "sliver:bof:choose-file",
@@ -1199,9 +1201,11 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.listDotNetAssemblies]: { args: []; result: OperationResult<DotNetCatalog> };
   [IPC.chooseDotNetAssemblyFile]: { args: []; result: OperationResult<DotNetFileSelection | null> };
   [IPC.listAdCollectors]: { args: [target: TargetRef]; result: OperationResult<AdCollectorCatalog> };
+  [IPC.getAdTargetDomain]: { args: [target: TargetRef]; result: OperationResult<{ domain?: string }> };
   [IPC.listAdCollections]: { args: []; result: OperationResult<AdCollectionSummary[]> };
   [IPC.runAdCollector]: { args: [input: AdCollectorRunInput]; result: OperationResult<AdCollectorRunResult> };
   [IPC.openBeagleWindow]: { args: [input?: AdExplorerOpenInput]; result: OperationResult };
+  [IPC.openAdCollectorArmory]: { args: []; result: OperationResult };
   [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
   [IPC.chooseBofDirectory]: { args: []; result: OperationResult<BofDirectorySelection | null> };
   [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };

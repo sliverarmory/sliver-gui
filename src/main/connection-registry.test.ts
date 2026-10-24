@@ -1129,6 +1129,34 @@ describe(".NET assembly execution sources", () => {
     return { manifestPath, artifactPath };
   }
 
+  it("prefills only a validated DNS domain from the selected Windows session", async () => {
+    const { registry, client } = await windowsRegistry();
+    const ref = registry.snapshot(1).targetContext.activeTarget;
+    if (!ref) throw new Error("Expected selected Windows target ref");
+    client.environmentState.set("USERDNSDOMAIN", " EXAMPLE.LOCAL ");
+    client.environmentState.set("UNRELATED_SECRET", "do-not-read");
+    expect(await registry.getAdTargetDomain(1, ref)).toEqual({ ok: true, value: { domain: "example.local" } });
+    expect(client.getEnvSession).toHaveBeenCalledWith(ref.id, "USERDNSDOMAIN", 30);
+
+    client.environmentState.set("USERDNSDOMAIN", "HOST-01");
+    expect(await registry.getAdTargetDomain(1, ref)).toEqual({ ok: true, value: {} });
+    client.getEnvSession.mockRejectedValueOnce(new Error("environment lookup failed"));
+    expect(await registry.getAdTargetDomain(1, ref)).toEqual({ ok: true, value: {} });
+  });
+
+  it("rejects a target that changes while its domain hint is in flight", async () => {
+    const { registry, client } = await windowsRegistry();
+    const ref = registry.snapshot(1).targetContext.activeTarget;
+    if (!ref) throw new Error("Expected selected Windows target ref");
+    const gate = deferred<sliverpb.EnvInfo>();
+    client.getEnvSession.mockImplementationOnce(async () => gate.promise);
+    const pending = registry.getAdTargetDomain(1, ref);
+    client.sessionState.Sessions[0]!.Hostname = "changed-host";
+    await registry.refresh(1);
+    gate.resolve(sliverpb.EnvInfo.create({ Variables: [{ Key: "USERDNSDOMAIN", Value: "example.local" }] }));
+    expect(await pending).toMatchObject({ ok: false });
+  });
+
   it("hides unverified SharpHound aliases and rejects stale or unsupported target refs", async () => {
     const directory = join(root, "aliases", "SharpHound CE");
     await mkdir(directory, { recursive: true });
@@ -1192,18 +1220,21 @@ describe(".NET assembly execution sources", () => {
       expect(entry?.artifactDigest).toBe(digest);
       expect(await readInstalledRustHound(entry!)).toEqual(dll);
       const unavailable = await registry.listAdCollectors(1, ref);
-      expect(unavailable).toMatchObject({ ok: true });
+      expect(unavailable).toMatchObject({ ok: true, value: { rustHoundSupported: false } });
       if (!unavailable.ok) throw new Error(unavailable.error);
       expect(unavailable.value.collectors.some((collector) => collector.id === RUSTHOUND_ARMORY_COLLECTOR_ID)).toBe(false);
 
       // The adapter exposes this reviewed capability; raw SDK methods are intentionally absent here.
       Object.assign(client.adapter, { nativeExtensionArtifactTransportAvailable: true });
       const available = await registry.listAdCollectors(1, ref);
-      expect(available).toMatchObject({ ok: true });
+      expect(available).toMatchObject({ ok: true, value: { rustHoundSupported: true } });
       if (!available.ok) throw new Error(available.error);
       expect(available.value.collectors[0]).toMatchObject({
-        id: RUSTHOUND_ARMORY_COLLECTOR_ID, compatibility: "verified", available: true,
+        id: RUSTHOUND_ARMORY_COLLECTOR_ID, compatibility: "verified", available: true, supportsCurrentUser: false,
       });
+      expect(await registry.runAdCollector(1, { target: ref, collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID,
+        domain: "example.local", collectionMethod: "LdapOnly" })).toMatchObject({ ok: false,
+        error: expect.stringContaining("requires a user name and password") });
     } finally {
       VERIFIED_RUSTHOUND_DLL_SHA256.delete(digest);
     }

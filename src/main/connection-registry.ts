@@ -306,9 +306,9 @@ import { installedDotNetAssemblies, MAX_DOTNET_ASSEMBLY_BYTES, readInstalledDotN
 import { collectSharpHound } from "./ad-collector.js";
 import { isVerifiedSharpHoundCeExecutable, isVerifiedSharpHoundCeScript, VERIFIED_SHARPHOUND_CE } from "./ad-collector-compatibility.js";
 import { collectRustHound, type RustHoundMethod } from "./rusthound-collector.js";
-import { installedRustHound, isVerifiedRustHoundBuild, readInstalledRustHound } from "./rusthound-armory.js";
+import { installedRustHound, isVerifiedRustHoundBuild, isWindowsAmd64, readInstalledRustHound, supportsRustHoundCurrentUser } from "./rusthound-armory.js";
 import { AD_COLLECTION_METHODS, RUSTHOUND_COLLECTION_METHODS, RUSTHOUND_ARMORY_COLLECTOR_ID,
-  type AdCollectorCatalog, type AdCollectorRunInput } from "../shared/ad-explorer-contracts.js";
+  parseAdDomain, type AdCollectorCatalog, type AdCollectorRunInput } from "../shared/ad-explorer-contracts.js";
 import {
   ExecutionArtifactStore,
   type ExecutionArtifactScope,
@@ -2573,7 +2573,38 @@ export class ConnectionRegistry {
     });
   }
 
-  /** Only collector builds that passed the Beagle compatibility gate appear as defaults. */
+  /** Resolve only the selected active Windows session's AD DNS environment hint. */
+  async getAdTargetDomain(contentsId: number, target: TargetRef): Promise<OperationResult<{ domain?: string }>> {
+    return this.withPool(contentsId, async (pool, assertBinding) => {
+      assertTargetDomainAuthoritative(pool, target.mode);
+      if (!pool.targetStore.isCurrentTargetRef(target, pool.epoch)) {
+        throw new Error("The target inventory changed; refresh AD Explorer");
+      }
+      const current = pool.targetStore.revalidateTargetRef(target, pool.epoch);
+      if (!current) throw new Error("The selected target is no longer available");
+      if (current.target.mode !== "session" || current.target.os.toLowerCase() !== "windows" ||
+          current.target.liveness !== "active") return {};
+
+      let response: sliverpb.EnvInfo | undefined;
+      try { response = await pool.client.getEnvSession(current.target.id, "USERDNSDOMAIN", 30); }
+      catch { /* A domain hint is optional; do not expose target environment errors. */ }
+      assertBinding();
+      assertTargetDomainAuthoritative(pool, "session");
+      const latest = pool.targetStore.revalidateTargetRef(target, pool.epoch);
+      if (!pool.targetStore.isCurrentTargetRef(target, pool.epoch) || !latest) {
+        throw new Error("The selected target changed while reading its domain");
+      }
+      if (latest.target.mode !== "session" || latest.target.os.toLowerCase() !== "windows" ||
+          latest.target.liveness !== "active") return {};
+      if (response?.Response?.Err || !Array.isArray(response?.Variables)) return {};
+      const matches = response.Variables.filter((variable) => variable.Key === "USERDNSDOMAIN");
+      if (matches.length !== 1) return {};
+      try { return { domain: parseAdDomain(matches[0]!.Value) }; }
+      catch { return {}; }
+    });
+  }
+
+  /** Only exact admitted Armory collector builds appear as defaults. */
   async listAdCollectors(contentsId: number, targetRef: TargetRef): Promise<OperationResult<AdCollectorCatalog>> {
     return this.withPool(contentsId, async (pool, assertBinding) => {
       assertTargetDomainAuthoritative(pool, targetRef.mode);
@@ -2611,6 +2642,7 @@ export class ConnectionRegistry {
             name: `RustHound CE ${rustHound.version} (in memory)`, source: "armory", compatibility: "verified",
             description: "Run the signed sliverarmory RustHound DLL through Reflektor and import its ZIP into Beagle.",
             collectionMethods: RUSTHOUND_COLLECTION_METHODS, available: !rustReason,
+            supportsCurrentUser: supportsRustHoundCurrentUser(rustHound),
             ...(rustReason ? { reason: rustReason } : {}),
           });
         } catch {
@@ -2661,7 +2693,8 @@ export class ConnectionRegistry {
         ...(reason ? { reason } : {}),
       });
       assertBinding();
-      return { target: { ...targetRef }, collectors };
+      return { target: { ...targetRef }, collectors,
+        rustHoundSupported: isWindowsAmd64(current.target) && Boolean(pool.client.nativeExtensionArtifactTransportAvailable) };
     });
   }
 
@@ -2684,10 +2717,12 @@ export class ConnectionRegistry {
           if (!RUSTHOUND_COLLECTION_METHODS.includes(input.collectionMethod as RustHoundMethod)) {
             throw new Error("Choose a supported RustHound collection method");
           }
-          if (!input.credentials) throw new Error("RustHound requires a user name and password");
           const installed = await installedRustHound(this.clientRootDirectory, current.target);
           if (!installed || !isVerifiedRustHoundBuild(installed)) {
             throw new Error("The compatible RustHound Armory DLL is unavailable; refresh collectors");
+          }
+          if (!input.credentials && !supportsRustHoundCurrentUser(installed)) {
+            throw new Error("This RustHound build requires a user name and password; refresh or update it in Armory");
           }
           const dll = await readInstalledRustHound(installed);
           try {
@@ -2705,7 +2740,7 @@ export class ConnectionRegistry {
               domain: input.domain, method: input.collectionMethod as RustHoundMethod,
               ...(input.ldapFqdn ? { ldapFqdn: input.ldapFqdn } : {}),
               ...(input.ldaps ? { ldaps: true } : {}),
-              username: input.credentials.username, password: input.credentials.password,
+              ...(input.credentials ? { credentials: input.credentials } : {}),
               collectionRoot: join(this.clientRootDirectory, "gui", "ad-explorer", "collections"),
               assertCurrent,
             });

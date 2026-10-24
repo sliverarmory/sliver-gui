@@ -12,11 +12,15 @@ export const RUSTHOUND_ARMORY_COMMAND = "rusthound-ce";
 export const RUSTHOUND_EXTENSION_EXPORT = "RustHoundCE";
 // The native-extension artifact RPC has a separate 32 MiB send/receive budget.
 export const RUSTHOUND_EXTENSION_MAX_BYTES = 32 * 1024 * 1024;
-/** Add only release artifact hashes proven to import into Beagle on GOAD. */
+/** Exact signed release DLLs admitted for the integrated collector. */
 export const VERIFIED_RUSTHOUND_DLL_SHA256 = new Set<string>([
   // Signed v2.5.29 GNU release: GOAD session/beacon and Beagle for LdapOnly, DCOnly, All.
   "d31f7bcbc9176fa7928302cfdab72b865d9539a61e2f2350085442f0f2368c64",
+  // Signed v2.5.30 GNU release: adds current-user GSSAPI; Beagle E2E is pending.
+  "7e072a170992d332b6f0862f706bcfeec494b6b9a9a8602e5280f90a9b42aba1",
 ]);
+const CURRENT_USER_RUSTHOUND_VERSION = "2.5.30";
+const CURRENT_USER_RUSTHOUND_DLL_SHA256 = "7e072a170992d332b6f0862f706bcfeec494b6b9a9a8602e5280f90a9b42aba1";
 
 export interface InstalledRustHound {
   readonly packageDirectory: string;
@@ -28,6 +32,12 @@ export interface InstalledRustHound {
 
 export function isVerifiedRustHoundBuild(entry: InstalledRustHound): boolean {
   return VERIFIED_RUSTHOUND_DLL_SHA256.has(entry.artifactDigest);
+}
+
+/** Never offer token authentication for the older credential-only DLL. */
+export function supportsRustHoundCurrentUser(entry: InstalledRustHound): boolean {
+  return entry.version === CURRENT_USER_RUSTHOUND_VERSION &&
+    entry.artifactDigest === CURRENT_USER_RUSTHOUND_DLL_SHA256 && isVerifiedRustHoundBuild(entry);
 }
 
 function isMissing(error: unknown): boolean {

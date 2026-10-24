@@ -3358,6 +3358,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       }
     },
     openBeagleWindow,
+    openAdCollectorArmory: () => openArmoryWindow("install"),
   }, rendererUrl, (identity, window) =>
     !shutdown.isStopping && nativeWindowSurfaces.get(window) === "workspace" &&
     windowsByContentsId.get(identity.contentsId) === window &&

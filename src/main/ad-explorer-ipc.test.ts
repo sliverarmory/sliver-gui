@@ -35,6 +35,9 @@ function services(): AdExplorerIpcServices {
   return {
     registry: {
       listAdCollectors: vi.fn(async () => ({ ok: true as const, value: { target, collectors: [] } })),
+      getAdTargetDomain: vi.fn(async () => ({ ok: true as const, value: {
+        domain: " Corp.Example.COM ", secret: "must-not-cross-ipc",
+      } })),
       runAdCollector: vi.fn(async () => ({ ok: true as const, value: {
         path: "/private/client/gui/ad-explorer/collections/example.local/collection.zip",
         domain: "example.local", collectorId: "sharphound:verified:file", targetId: "session-1",
@@ -43,6 +46,7 @@ function services(): AdExplorerIpcServices {
     listCollections: vi.fn(async () => [{ id: projectId, name: "example.local", createdAt: "2026-10-23T10:00:00.000Z" }]),
     importCollectedData: vi.fn(async () => ({ projectId })),
     openBeagleWindow: vi.fn(async () => undefined),
+    openAdCollectorArmory: vi.fn(async () => undefined),
   };
 }
 
@@ -53,6 +57,40 @@ function invoke(channel: string, fixture: IpcMainInvokeEvent, ...args: unknown[]
 beforeEach(() => { vi.resetAllMocks(); mocks.handlers.clear(); mocks.fromWebContents.mockReturnValue(window); });
 
 describe("AD Explorer IPC", () => {
+  it("returns only a validated DNS domain for a trusted, exact target reference", async () => {
+    const service = services();
+    registerAdExplorerIpcHandlers(service, url, () => true);
+    await expect(invoke(IPC.getAdTargetDomain, event(), target)).resolves.toEqual({
+      ok: true, value: { domain: "corp.example.com" },
+    });
+    expect(service.registry.getAdTargetDomain).toHaveBeenCalledExactlyOnceWith(12, target);
+    await expect(invoke(IPC.getAdTargetDomain, event(), { ...target, name: "USERDOMAIN" })).resolves.toMatchObject({ ok: false });
+    await expect(invoke(IPC.getAdTargetDomain, event(), target, "USERDOMAIN")).resolves.toMatchObject({ ok: false });
+    expect(service.registry.getAdTargetDomain).toHaveBeenCalledOnce();
+  });
+
+  it("does not expose a missing domain or read from an untrusted renderer", async () => {
+    const service = services();
+    const authorize = vi.fn().mockReturnValue(true);
+    registerAdExplorerIpcHandlers(service, url, authorize);
+    vi.mocked(service.registry.getAdTargetDomain).mockResolvedValueOnce({ ok: true, value: {} });
+    await expect(invoke(IPC.getAdTargetDomain, event(), target)).resolves.toEqual({ ok: true, value: {} });
+    authorize.mockReturnValue(false);
+    await expect(invoke(IPC.getAdTargetDomain, event(), target)).resolves.toMatchObject({ ok: false });
+    expect(service.registry.getAdTargetDomain).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a non-DNS result and drops a result when workspace trust changes", async () => {
+    const service = services();
+    const authorize = vi.fn().mockReturnValue(true);
+    registerAdExplorerIpcHandlers(service, url, authorize);
+    vi.mocked(service.registry.getAdTargetDomain).mockResolvedValueOnce({ ok: true, value: { domain: "CORP" } });
+    await expect(invoke(IPC.getAdTargetDomain, event(), target)).resolves.toMatchObject({ ok: false });
+    authorize.mockReturnValueOnce(true).mockReturnValue(false);
+    await expect(invoke(IPC.getAdTargetDomain, event(), target)).resolves.toMatchObject({ ok: false });
+    expect(service.registry.getAdTargetDomain).toHaveBeenCalledTimes(2);
+  });
+
   it("lists local collections only for a trusted workspace and rechecks trust after loading", async () => {
     const service = services();
     const authorize = vi.fn().mockReturnValue(true);
@@ -77,6 +115,19 @@ describe("AD Explorer IPC", () => {
       await expect(invoke(IPC.openBeagleWindow, event(), ...args)).resolves.toMatchObject({ ok: false });
     }
     expect(service.openBeagleWindow).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens the Armory install tab only from a trusted workspace with no arguments", async () => {
+    const service = services();
+    const authorize = vi.fn().mockReturnValue(true);
+    registerAdExplorerIpcHandlers(service, url, authorize);
+    await expect(invoke(IPC.openAdCollectorArmory, event())).resolves.toEqual({ ok: true });
+    expect(service.openAdCollectorArmory).toHaveBeenCalledOnce();
+    await expect(invoke(IPC.openAdCollectorArmory, event(), "sources")).resolves.toMatchObject({ ok: false });
+    expect(service.openAdCollectorArmory).toHaveBeenCalledOnce();
+    authorize.mockReturnValue(false);
+    await expect(invoke(IPC.openAdCollectorArmory, event())).resolves.toMatchObject({ ok: false });
+    expect(service.openAdCollectorArmory).toHaveBeenCalledOnce();
   });
 
   it("authorizes the exact workspace main frame before reading requests", async () => {

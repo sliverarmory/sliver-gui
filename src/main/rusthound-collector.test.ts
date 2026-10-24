@@ -70,7 +70,7 @@ describe("in-memory RustHound collection", () => {
     const path = await collectRustHound({
       client, target: session, dll: Buffer.from("MZtest"), domain: "example.local",
       ldapFqdn: "dc.example.local", ldaps: true,
-      method: "LdapOnly", username: "user@example.local", password: "test secret",
+      method: "LdapOnly", credentials: { username: "user@example.local", password: "test secret" },
       collectionRoot: root, assertCurrent: vi.fn(), delay: async () => undefined,
     });
     expect(await readFile(path)).toEqual(archive);
@@ -105,7 +105,7 @@ describe("in-memory RustHound collection", () => {
     } as unknown as RustHoundClient;
     await expect(collectRustHound({
       client, target: session, dll: Buffer.from("MZtest"), domain: "example.local",
-      method: "LdapOnly", username: "user", password: "secret",
+      method: "LdapOnly", credentials: { username: "user", password: "secret" },
       collectionRoot: root, assertCurrent: vi.fn(), delay: async () => undefined,
     })).rejects.toThrow(/complete, verified ZIP/u);
     expect(calls.at(-1)).toBe("abort");
@@ -116,6 +116,7 @@ describe("in-memory RustHound collection", () => {
     const archive = zip();
     const root = await collectionRoot();
     const tasks = new Map<string, clientpb.BeaconTask>();
+    const starts: Record<string, unknown>[] = [];
     tasks.set("register-1", clientpb.BeaconTask.create({
       ID: "register-1", BeaconID: beacon.id, Description: "RegisterExtensionReq", State: "completed",
       Response: Buffer.from(sliverpb.RegisterExtension.encode(sliverpb.RegisterExtension.create({ Response: {} })).finish()),
@@ -129,7 +130,7 @@ describe("in-memory RustHound collection", () => {
         const taskId = `call-${tasks.size}`;
         let result: sliverpb.CallExtension;
         switch (request["op"]) {
-          case "start": result = response({ state: "running", runId: "b11" }); break;
+          case "start": starts.push(request); result = response({ state: "running", runId: "b11" }); break;
           case "status": result = response({ state: "complete", runId: "b11", size: archive.length,
             sha256: createHash("sha256").update(archive).digest("hex") }); break;
           case "read": result = response({ state: "chunk", runId: "b11", offset: 0,
@@ -147,10 +148,13 @@ describe("in-memory RustHound collection", () => {
     } as unknown as RustHoundClient;
     const path = await collectRustHound({
       client, target: beacon, dll: Buffer.from("MZtest"), domain: "example.local",
-      method: "LdapOnly", username: "user", password: "secret",
+      method: "LdapOnly",
       collectionRoot: root, assertCurrent: vi.fn(), delay: async () => undefined,
     });
     expect(await readFile(path)).toEqual(archive);
+    expect(starts).toMatchObject([{ currentUser: true, domain: "example.local", method: "LdapOnly" }]);
+    expect(starts[0]).not.toHaveProperty("username");
+    expect(starts[0]).not.toHaveProperty("password");
     expect(client.fetchAdCollectorBeaconTask).toHaveBeenCalledTimes(5);
     expect(vi.mocked(client.fetchAdCollectorBeaconTask).mock.calls.map((call) => call[2]))
       .toEqual(["register", "call", "call", "call", "call"]);

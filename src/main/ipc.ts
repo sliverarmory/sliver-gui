@@ -977,7 +977,7 @@ export function registerIpcHandlers(
 
 export function unregisterIpcHandlers(): void {
   ipcMain.removeHandler(WEBSITE_DROPPED_IMPORT_IPC_CHANNEL);
-  const dedicatedChannels = new Set<string>([IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]);
+  const dedicatedChannels = new Set<string>([IPC.listAdCollectors, IPC.getAdTargetDomain, IPC.listAdCollections, IPC.runAdCollector, IPC.openBeagleWindow, IPC.openAdCollectorArmory]);
   for (const channel of Object.values(IPC_INVOKE)) {
     if (!dedicatedChannels.has(channel)) ipcMain.removeHandler(channel);
   }

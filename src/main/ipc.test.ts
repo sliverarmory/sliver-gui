@@ -94,7 +94,7 @@ describe("trusted Electron IPC boundary", () => {
   it("registers every generic operator invoke channel exactly once", () => {
     registerIpcHandlers(registryMock(), vi.fn(), RENDERER_URL);
 
-    const dedicatedChannels = new Set<string>([IPC.listAdCollectors, IPC.runAdCollector, IPC.openBeagleWindow]);
+    const dedicatedChannels = new Set<string>([IPC.listAdCollectors, IPC.getAdTargetDomain, IPC.listAdCollections, IPC.runAdCollector, IPC.openBeagleWindow, IPC.openAdCollectorArmory]);
     const genericChannels = Object.values(IPC_INVOKE).filter((channel) => !dedicatedChannels.has(channel));
 
     expect([...electronMocks.handlers.keys()].sort()).toEqual([

@@ -29,11 +29,15 @@ export interface AdCollectorSummary {
   collectionMethods: readonly AdCollectionMethod[];
   available: boolean;
   reason?: string;
+  /** Exact installed RustHound build can use the target process's Windows logon. */
+  supportsCurrentUser?: boolean;
 }
 
 export interface AdCollectorCatalog {
   target: TargetRef;
   collectors: AdCollectorSummary[];
+  /** Whether this target and client can execute Armory RustHound extensions. */
+  rustHoundSupported?: boolean;
 }
 
 export interface AdCollectorRunInput {
@@ -46,7 +50,7 @@ export interface AdCollectorRunInput {
   ldapFqdn?: string;
   /** Request LDAPS. The current fork does not verify the DC certificate. */
   ldaps?: boolean;
-  /** Transient credentials for the RustHound extension. Never persist or echo. */
+  /** Omit for RustHound current-user auth; explicit credentials are transient. Never persist or echo. */
   credentials?: { username: string; password: string };
 }
 
@@ -126,7 +130,7 @@ export function parseAdCollectorRunInput(value: unknown): AdCollectorRunInput {
     throw new TypeError("This collector does not accept this LDAP transport setting");
   }
   let credentials: AdCollectorRunInput["credentials"];
-  if (rustHound) {
+  if (rustHound && input["credentials"] !== undefined) {
     const raw = record(input["credentials"], "RustHound credentials", ["username", "password"]);
     if (typeof raw["username"] !== "string" || raw["username"].length < 1 ||
         new TextEncoder().encode(raw["username"]).length > 256 ||

@@ -30,8 +30,8 @@ export interface CollectRustHoundInput {
   ldapFqdn?: string;
   ldaps?: boolean;
   method: RustHoundMethod;
-  username: string;
-  password: string;
+  /** Omitted to use the target process's Windows logon. */
+  credentials?: { username: string; password: string };
   collectionRoot: string;
   assertCurrent: () => void;
   now?: () => number;
@@ -190,7 +190,9 @@ export async function collectRustHound(input: CollectRustHoundInput): Promise<st
   if (input.target.mode === "session" && input.target.liveness !== "active") {
     throw new Error("The selected Windows session is no longer active");
   }
-  if (!input.username || !input.password) throw new Error("RustHound requires a user name and password");
+  if (input.credentials && (!input.credentials.username || !input.credentials.password)) {
+    throw new Error("RustHound requires both a user name and password for explicit authentication");
+  }
   let zip: Buffer | undefined;
   let id: string | undefined;
   let finished = false;
@@ -199,8 +201,9 @@ export async function collectRustHound(input: CollectRustHoundInput): Promise<st
   try {
     const started = await call(input, extensionName, {
       op: "start", domain, method: input.method,
-      ...(input.ldapFqdn ? { ldapFqdn: input.ldapFqdn } : {}), ...(input.ldaps ? { ldaps: true } : {}), username: input.username,
-      password: input.password, maxBytes: RUSTHOUND_COLLECTION_MAX_BYTES,
+      ...(input.ldapFqdn ? { ldapFqdn: input.ldapFqdn } : {}), ...(input.ldaps ? { ldaps: true } : {}),
+      ...(input.credentials ? { username: input.credentials.username, password: input.credentials.password } : { currentUser: true }),
+      maxBytes: RUSTHOUND_COLLECTION_MAX_BYTES,
       timeoutSeconds: Math.floor(EXECUTION_DEADLINE_MS / 1000),
     }, deadline, now, delay);
     if (started.state !== "running") throw new Error("RustHound did not start collection");

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Breadcrumbs, Button, Card, Chip, Description, Disclosure, Input, Label, ListBox, Select, Switch, Tabs, TextField, toast, Tooltip } from "@heroui/react";
+import { Breadcrumbs, Button, Card, Chip, Description, Input, Label, ListBox, Select, Switch, Tabs, TextField, toast, Tooltip } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faChevronRight, faCircleNodes, faComputer, faRotate, faSatellite, faUpRightFromSquare } from "@fortawesome/free-solid-svg-icons";
@@ -9,8 +9,10 @@ import { parseAdDomain, RUSTHOUND_ARMORY_COLLECTOR_ID,
 import type { TargetCatalogEntry, TargetMode, TargetRef, TargetSummary } from "../../../shared/target-contracts";
 
 import { ADCollectionsPanel } from "./ADCollectionsPanel";
+import { OtherCollectors } from "./OtherCollectors";
 
 type CollectionMethod = AdCollectionMethod;
+type AuthenticationMode = "current-user" | "credentials";
 type PageState = { entries: TargetCatalogEntry[]; page?: PageSummary; loading: boolean; error?: string };
 
 interface TargetRow {
@@ -60,12 +62,18 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const [catalog, setCatalog] = useState<AdCollectorSummary[]>([]);
   const [catalogError, setCatalogError] = useState<string>();
   const [catalogLoading, setCatalogLoading] = useState(false);
+  const [rustHoundSupported, setRustHoundSupported] = useState(false);
   const [otherCollectorsOpen, setOtherCollectorsOpen] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [collectorId, setCollectorId] = useState("");
+  const catalogIdentityRef = useRef("");
+  const collectorAuthIdentityRef = useRef("");
+  const selectedIdentityRef = useRef("");
+  const domainEditedRef = useRef(false);
   const [method, setMethod] = useState<CollectionMethod>("Default");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [authenticationMode, setAuthenticationMode] = useState<AuthenticationMode>("current-user");
   const [runningTargetId, setRunningTargetId] = useState<string>();
   const [runResult, setRunResult] = useState<AdCollectorRunResult>();
 
@@ -97,8 +105,9 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   useEffect(() => {
     setAssignments(readDomainAssignments(domainScope));
     setSelectedKey(undefined);
+    setPassword("");
     setRunResult(undefined);
-  }, [domainScope]);
+  }, [domainScope, connectionIdentity]);
 
   const rows = useMemo(() => targetRows(snapshot, moreSessions.entries, moreBeacons.entries), [
     snapshot, moreSessions.entries, moreBeacons.entries,
@@ -110,6 +119,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const selectedIdentity = selectedRef
     ? `${connectionIdentity}:${selectedRef.mode}:${selectedRef.id}:${selectedRef.fingerprint}`
     : "";
+  selectedIdentityRef.current = selectedIdentity;
   const selectedTargetAvailable = selected?.target.mode !== "session" || selected.target.liveness === "active";
   const running = runningTargetId !== undefined;
   const verifiedCollectors = catalog.filter((item) => item.compatibility === "verified");
@@ -117,14 +127,18 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
     (item.id === "sharphound:custom:file" || item.id === "sharphound:custom:script"));
   const selectedCollector = catalog.find((item) => item.id === collectorId);
   const rustHoundSelected = collectorId === RUSTHOUND_ARMORY_COLLECTOR_ID;
+  const explicitCredentials = rustHoundSelected &&
+    (!selectedCollector?.supportsCurrentUser || authenticationMode === "credentials");
   const supportedMethods = METHOD_OPTIONS.filter((option) => selectedCollector?.collectionMethods.includes(option.id));
 
   useEffect(() => {
-    setDomainDraft(selectedKey ? assignments[selectedKey] ?? "" : "");
+    domainEditedRef.current = false;
+    setDomainDraft(selectedKey ? assignments[selectedKey] ?? suggestedAdDomain(selected?.target.username ?? "") : "");
     setLdapFqdn("");
     setLdaps(false);
-    setUsername("");
+    setUsername(suggestedAdUsername(selected?.target.username ?? ""));
     setPassword("");
+    setAuthenticationMode("current-user");
     setRunResult(undefined);
     setOtherCollectorsOpen(false);
     if (selectedKey) collectionHeading.current?.focus();
@@ -135,19 +149,43 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   }, [selectedKey]);
 
   useEffect(() => {
-    if (!rustHoundSelected) { setUsername(""); setPassword(""); }
-  }, [rustHoundSelected]);
+    if (!selectedRef || selected?.target.mode !== "session" || selected.target.liveness !== "active" ||
+        selected.target.os !== "windows" || assignments[selected.key]) return;
+    const expectedIdentity = selectedIdentity;
+    let active = true;
+    void window.sliver.getAdTargetDomain(selectedRef).then((result) => {
+      if (!active || selectedIdentityRef.current !== expectedIdentity || domainEditedRef.current ||
+          !result.ok || !result.value?.domain) return;
+      setDomainDraft(result.value.domain);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [selectedIdentity]);
 
   useEffect(() => {
+    const authIdentity = `${collectorId}:${selectedCollector?.name ?? ""}:${selectedCollector?.supportsCurrentUser ?? false}`;
+    if (collectorAuthIdentityRef.current !== authIdentity) {
+      collectorAuthIdentityRef.current = authIdentity;
+      setPassword("");
+    }
+  }, [collectorId, selectedCollector?.name, selectedCollector?.supportsCurrentUser]);
+
+  useEffect(() => {
+    const targetChanged = catalogIdentityRef.current !== selectedIdentity;
+    catalogIdentityRef.current = selectedIdentity;
     if (!selectedRef) {
       setCatalog([]);
+      setCollectorId("");
+      setRustHoundSupported(false);
       setCatalogError(undefined);
       setCatalogLoading(false);
       return;
     }
     let active = true;
-    setCatalog([]);
-    setCollectorId("");
+    if (targetChanged) {
+      setCatalog([]);
+      setCollectorId("");
+      setRustHoundSupported(false);
+    }
     setCatalogError(undefined);
     setCatalogLoading(true);
     void window.sliver.listAdCollectors(selectedRef).then((result) => {
@@ -157,7 +195,10 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
         return;
       }
       setCatalog(result.value.collectors);
-      setCollectorId(result.value.collectors.find((collector) => collector.compatibility === "verified" && collector.available)?.id ?? "");
+      setRustHoundSupported(result.value.rustHoundSupported === true);
+      setCollectorId((current) => result.value!.collectors.some((collector) => collector.id === current && collector.available)
+        ? current
+        : result.value!.collectors.find((collector) => collector.compatibility === "verified" && collector.available)?.id ?? "");
     }).catch((error: unknown) => {
       if (active) setCatalogError(errorMessage(error));
     }).finally(() => {
@@ -200,6 +241,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
 
   const saveDomain = useCallback(() => {
     if (!selected) return;
+    domainEditedRef.current = true;
     let domain = "";
     if (domainDraft.trim()) {
       try {
@@ -221,7 +263,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   }, [assignments, domainDraft, domainScope, selected]);
 
   const runCollector = useCallback(async () => {
-    if (!selectedRef || !selectedTargetAvailable || !selectedCollector?.available ||
+    if (!selectedRef || !selectedTargetAvailable || !selectedCollector?.available || catalogError ||
         !selectedCollector.collectionMethods.includes(method) || running) return;
     let domain: string;
     try {
@@ -239,7 +281,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
         ...(rustHoundSelected ? {
           ...(ldapFqdn.trim() ? { ldapFqdn: ldapFqdn.trim() } : {}),
           ...(ldaps ? { ldaps: true } : {}),
-          credentials: { username: username.trim(), password },
+          ...(explicitCredentials ? { credentials: { username: username.trim(), password } } : {}),
         } : {}),
       });
       if (!result.ok || !result.value) {
@@ -253,7 +295,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
       setPassword("");
       setRunningTargetId(undefined);
     }
-  }, [collectorId, domainDraft, ldapFqdn, ldaps, method, password, running, rustHoundSelected, saveDomain, selectedCollector, selectedRef, selectedTargetAvailable, username]);
+  }, [catalogError, collectorId, domainDraft, explicitCredentials, ldapFqdn, ldaps, method, password, running, rustHoundSelected, saveDomain, selectedCollector, selectedRef, selectedTargetAvailable, username]);
 
   const openExplorer = useCallback(async () => {
     try {
@@ -261,6 +303,15 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
       if (!result.ok) toast.danger("Could not open AD Explorer", { description: result.error });
     } catch (error) {
       toast.danger("Could not open AD Explorer", { description: errorMessage(error) });
+    }
+  }, []);
+
+  const openCollectorArmory = useCallback(async () => {
+    try {
+      const result = await window.sliver.openAdCollectorArmory();
+      if (!result.ok) toast.danger("Could not open Armory", { description: result.error });
+    } catch (error) {
+      toast.danger("Could not open Armory", { description: errorMessage(error) });
     }
   }, []);
 
@@ -313,7 +364,9 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                 <div className="flex min-w-0 items-center gap-3">
                   <FontAwesomeIcon aria-hidden icon={selected.target.mode === "session" ? faComputer : faSatellite} className="text-muted" />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-foreground">{selected.target.username || "Unknown user"}</p>
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {selected.target.mode === "session" ? "Session identity" : "Beacon identity"}: {selected.target.username || "Unknown user"}
+                    </p>
                     <p className="truncate text-xs text-muted">
                       {selected.target.name || "Unnamed target"} · {selected.target.mode === "session" ? "Session" : "Beacon"} · <span className="font-mono">{selected.target.id.slice(0, 8)}</span>
                     </p>
@@ -327,7 +380,9 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                   <div className="min-w-0 space-y-2">
                     <h2 ref={collectionHeading} tabIndex={-1} className="text-lg font-semibold text-foreground outline-none">Collect Data</h2>
                     <Card.Description>{rustHoundSelected
-                      ? "RustHound collects in memory using the AD credentials you provide."
+                      ? selectedCollector?.supportsCurrentUser
+                        ? "Use the target's current Windows identity, or provide AD credentials for this run."
+                        : "This installed RustHound build requires AD credentials. Update it in Armory for current-user authentication."
                       : "Use a domain user context on this target to collect with SharpHound."}</Card.Description>
                   </div>
                   {selectedRef ? (
@@ -342,7 +397,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                 <Card.Content className="gap-6 p-0">
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-end gap-3">
-                      <TextField className="min-w-0 flex-1 basis-64" value={domainDraft} variant="secondary" onChange={setDomainDraft}>
+                      <TextField className="min-w-0 flex-1 basis-64" value={domainDraft} variant="secondary" onChange={(value) => { domainEditedRef.current = true; setDomainDraft(value); }}>
                         <Label>Windows domain</Label>
                         <Input autoComplete="off" maxLength={77} placeholder="corp.example.com" aria-describedby="ad-domain-description" />
                       </TextField>
@@ -350,7 +405,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                         Assign domain
                       </Button>
                     </div>
-                    <p id="ad-domain-description" className="text-xs text-muted">Assignments stay on this workstation; the target does not report its AD domain.</p>
+                    <p id="ad-domain-description" className="text-xs text-muted">Suggested from the selected session when available. Confirm the AD DNS domain before running.</p>
                   </div>
                   {selectedRef ? <>
                     <div className="grid items-start gap-5 sm:grid-cols-2">
@@ -375,17 +430,43 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                     {!verifiedCollectors.some((collector) => collector.available) && !catalogLoading ? (
                       <p className="text-sm text-muted">No verified Beagle-compatible collector is available for this target.</p>
                     ) : null}
+                    {rustHoundSupported && !catalogLoading && !catalogError && !catalog.some((collector) => collector.id === RUSTHOUND_ARMORY_COLLECTOR_ID && collector.supportsCurrentUser) ? (
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl bg-surface-secondary px-4 py-3">
+                        <p className="min-w-0 flex-1 text-sm text-muted">RustHound CE 2.5.30 adds current-user authentication. Install or update it in Armory, then refresh collectors.</p>
+                        <Button size="sm" variant="outline" onPress={() => void openCollectorArmory()}>Open Armory</Button>
+                      </div>
+                    ) : null}
                     {rustHoundSelected ? <div className="space-y-5">
+                      {selectedCollector?.supportsCurrentUser ? (
+                        <Select className="min-w-56 max-w-sm" value={authenticationMode} variant="secondary" isDisabled={running}
+                          onChange={(value) => {
+                            if (value !== "current-user" && value !== "credentials") return;
+                            setAuthenticationMode(value);
+                            if (value === "current-user") setPassword("");
+                          }}>
+                          <Label>Authentication</Label>
+                          <Select.Trigger><Select.Value>{authenticationMode === "current-user" ? "Current user" : "AD credentials"}</Select.Value><Select.Indicator /></Select.Trigger>
+                          <Select.Popover><ListBox>
+                            <ListBox.Item id="current-user" textValue="Current user">Current user<ListBox.ItemIndicator /></ListBox.Item>
+                            <ListBox.Item id="credentials" textValue="AD credentials">AD credentials<ListBox.ItemIndicator /></ListBox.Item>
+                          </ListBox></Select.Popover>
+                        </Select>
+                      ) : null}
+                      {selectedCollector?.supportsCurrentUser && !explicitCredentials ? (
+                        <p className="text-sm text-muted">Runs under the selected target's current Windows logon. No AD user name or password is needed.</p>
+                      ) : null}
                       <div className="grid items-start gap-5 sm:grid-cols-2">
-                        <TextField fullWidth value={username} variant="secondary" isDisabled={running} onChange={setUsername}>
-                          <Label>AD user</Label>
-                          <Input autoComplete="off" maxLength={255} placeholder="user@corp.example.com" />
-                          <Description>Use a UPN or bare user name for this run.</Description>
-                        </TextField>
-                        <TextField fullWidth value={password} variant="secondary" isDisabled={running} onChange={setPassword}>
-                          <Label>AD password</Label>
-                          <Input autoComplete="off" type="password" />
-                        </TextField>
+                        {explicitCredentials ? <>
+                          <TextField fullWidth value={username} variant="secondary" isDisabled={running} onChange={setUsername}>
+                            <Label>AD user</Label>
+                            <Input autoComplete="off" maxLength={255} placeholder="user@corp.example.com" />
+                            <Description>Suggested from the reported target user. Edit it if needed.</Description>
+                          </TextField>
+                          <TextField fullWidth value={password} variant="secondary" isDisabled={running} onChange={setPassword}>
+                            <Label>AD password</Label>
+                            <Input autoComplete="off" type="password" />
+                          </TextField>
+                        </> : null}
                         <TextField fullWidth value={ldapFqdn} variant="secondary" isDisabled={running} onChange={setLdapFqdn}>
                           <Label>LDAP server FQDN (optional)</Label>
                           <Input autoComplete="off" placeholder="dc.corp.example.com" />
@@ -398,41 +479,20 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                           </Switch>
                           <p className="text-xs text-warning">{ldaps
                             ? "LDAPS encrypts the connection, but this RustHound build does not validate the domain controller certificate."
-                            : "LDAP simple bind sends the supplied password to the domain controller on port 389 without TLS. Use LDAPS when available."}</p>
+                            : explicitCredentials
+                              ? "LDAP simple bind sends the supplied password to the domain controller on port 389 without TLS. Use LDAPS when available."
+                              : "Current-user authentication uses the target's Windows logon. Enable LDAPS if your directory requires encrypted LDAP transport."}</p>
                         </div>
                       </div>
                     </div> : null}
-                    {customCollectors.length ? (
-                      <Disclosure isExpanded={otherCollectorsOpen} onExpandedChange={setOtherCollectorsOpen}>
-                        <Disclosure.Heading>
-                          <Button slot="trigger" variant="ghost" className="-ml-3">
-                            Other collectors <Disclosure.Indicator />
-                          </Button>
-                        </Disclosure.Heading>
-                        <Disclosure.Content>
-                          <Disclosure.Body className="space-y-3 pt-3">
-                            <div className="flex flex-wrap gap-2">
-                              {customCollectors.map((collector) => (
-                                <Button key={collector.id} className="h-auto min-h-10 whitespace-normal text-left" variant={collectorId === collector.id ? "secondary" : "outline"} aria-pressed={collectorId === collector.id} isDisabled={!collector.available || catalogLoading || running} onPress={() => setCollectorId(collector.id)}>
-                                  {collector.id === "sharphound:custom:script" ? "Use your own Invoke-BloodHound .ps1" : "Use your own SharpHound-compatible .exe"}
-                                </Button>
-                              ))}
-                            </div>
-                            {customCollectors.filter((collector) => !collector.available && collector.reason).map((collector) => (
-                              <p key={collector.id} className="text-xs text-muted">{collector.name}: {collector.reason}</p>
-                            ))}
-                            <p className="text-xs text-muted">Choose a file when you run. It must accept the fixed domain, method, and output path. The saved ZIP is validated during import.</p>
-                          </Disclosure.Body>
-                        </Disclosure.Content>
-                      </Disclosure>
-                    ) : null}
-                    {selectedCollector?.compatibility === "operator-supplied" ? (
-                      <p className="text-sm text-muted">Selected: {selectedCollector.name}. Choose a verified collector above to switch back.</p>
-                    ) : null}
+                    <OtherCollectors collectors={customCollectors} selectedCollectorId={collectorId} isExpanded={otherCollectorsOpen}
+                      isBusy={catalogLoading || running} onExpandedChange={setOtherCollectorsOpen} onSelect={setCollectorId} />
                     {catalogError ? <p role="alert" className="text-sm text-danger">{catalogError}</p> : null}
                     {selected.target.mode === "beacon" ? (
                       <p className="text-sm text-muted">{rustHoundSelected
-                        ? "Sliver stores beacon task requests and responses on its server, including the credentials supplied for this run. The collector does not save its ZIP on the target."
+                        ? explicitCredentials
+                          ? "Sliver stores beacon task requests and responses on its server, including the credentials supplied for this run. The collector does not save its ZIP on the target."
+                          : "Sliver stores beacon task requests and responses on its server. The collector does not save its ZIP on the target."
                         : "Beacon collection ZIPs are limited to 12 MiB and remain on the target. Use an active session for larger collections."}</p>
                     ) : null}
                     {!selectedTargetAvailable ? <p className="text-sm text-muted">This session is no longer active.</p> : null}
@@ -442,8 +502,8 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                 </Card.Content>
                 <Card.Footer className="flex flex-wrap gap-3 p-0">
                   {selectedRef ? (
-                    <Button isDisabled={!domainDraft.trim() || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading ||
-                      running || (rustHoundSelected && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
+                    <Button isDisabled={!domainDraft.trim() || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading || !!catalogError ||
+                      running || (explicitCredentials && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
                       {selectedCollector?.compatibility === "operator-supplied" ? "Run user-supplied collector" : "Run collector"}
                     </Button>
                   ) : null}
@@ -568,6 +628,20 @@ function appendEntries(previous: TargetCatalogEntry[], incoming: TargetCatalogEn
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "The request failed.";
+}
+
+function suggestedAdUsername(reportedUsername: string): string {
+  const username = reportedUsername.trim();
+  const separator = username.lastIndexOf("\\");
+  return separator < 0 ? username : username.slice(separator + 1).trim();
+}
+
+function suggestedAdDomain(reportedUsername: string): string {
+  const username = reportedUsername.trim();
+  const separator = username.lastIndexOf("@");
+  if (separator <= 0 || username.includes("\\")) return "";
+  try { return parseAdDomain(username.slice(separator + 1)); }
+  catch { return ""; }
 }
 
 function readDomainAssignments(scope: string): Record<string, string> {

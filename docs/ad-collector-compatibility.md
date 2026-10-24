@@ -1,9 +1,10 @@
 # AD collector compatibility
 
-AD Explorer's default collector list contains only artifacts whose output has
-been collected on GOAD and imported by Beagle through the desktop workflow.
-This is a point-in-time compatibility record, not a claim that every mode or
-future release of the collector works.
+AD Explorer's default collector list pins exact artifacts. The SharpHound CE
+and RustHound-CE v2.5.29 artifacts below passed GOAD collection and Beagle
+import through the desktop workflow. The newer signed RustHound-CE v2.5.30
+default has not yet passed that live acceptance. This is a point-in-time
+compatibility record, not a claim that every mode or future release works.
 
 ## Verified collectors
 
@@ -25,7 +26,7 @@ the executable is selected first among SharpHound choices. Other versions of eit
 explicit operator-supplied choices.
 
 The installed [sliverarmory RustHound-CE v2.5.29 release](https://github.com/sliverarmory/RustHound-CE/releases/tag/v2.5.29)
-is the first verified picker choice on Windows/amd64 when its DLL matches the
+was the first verified picker choice on Windows/amd64 when its DLL matches the
 signed v2.5.29 release DLL SHA-256
 `d31f7bcbc9176fa7928302cfdab72b865d9539a61e2f2350085442f0f2368c64`.
 This 15,363,072-byte GNU Windows DLL came from the tag-built release Actions
@@ -33,6 +34,19 @@ artifact and was confirmed byte for byte inside the signed Armory archive.
 All three exposed methods passed GOAD session and beacon collection followed
 by automatic Beagle import. The GUI test manually staged files extracted from
 the signed archive; it did not exercise Armory installation itself.
+
+The newer [sliverarmory RustHound-CE v2.5.30 release](https://github.com/sliverarmory/RustHound-CE/releases/tag/v2.5.30)
+is the default when installed. Its Armory archive SHA-256 is
+`5f9e9542fe9fbd0e2887b9f6944637bc5ae86b01c1a80117ceaad05e79347062`.
+The archive's Minisign signature and trusted manifest verified against the
+package key in the signed default Armory index; the Windows GNU DLL matches
+the manifest SHA-256
+`7e072a170992d332b6f0862f706bcfeec494b6b9a9a8602e5280f90a9b42aba1`.
+This release adds current-user authentication through the target process's
+Windows logon. The GUI only enables that mode for this exact version and DLL
+digest. A v2.5.30 GOAD collection and Beagle import have not yet been run, so
+the signature and hash checks establish artifact identity but not output
+compatibility or live authentication success.
 
 A SharpHound Armory alias appears in the default list only when its executable
 bytes match the pinned SharpHound digest above. The installed [SharpHound3](https://github.com/sliverarmory/SharpHound3)
@@ -61,7 +75,7 @@ it is not a trust check on operator-supplied code.
 | Collector | Current decision | Reason |
 | --- | --- | --- |
 | [BloodHound.py CE](https://github.com/dirkjanm/BloodHound.py/tree/bloodhound-ce) | Next candidate for an operator-host network collector | Its CE branch emits SharpHound-compatible AD data, but needs its own credential, DC, and network workflow plus an exact GOAD ZIP-to-Beagle test. |
-| [sliverarmory/RustHound-CE](https://github.com/sliverarmory/RustHound-CE) | Integrated in-memory Sliver extension on Windows/amd64 | The exact signed v2.5.29 GNU DLL passed GOAD collection and automatic Beagle import for LdapOnly, DCOnly, and All on both a session and a beacon. |
+| [sliverarmory/RustHound-CE](https://github.com/sliverarmory/RustHound-CE) | Integrated in-memory Sliver extension on Windows/amd64 | The exact signed v2.5.29 GNU DLL passed GOAD collection and automatic Beagle import for LdapOnly, DCOnly, and All on both a session and a beacon. The newer signed v2.5.30 DLL adds current-user authentication; its live GOAD/Beagle acceptance remains pending. |
 | [NetExec BloodHound CE](https://github.com/Pennyw0rth/NetExec/releases) | Lower priority network integration | Its release supports a BloodHound CE collector, but it adds a larger tool and credential workflow around collection; test its exact ZIP with Beagle before showing it by default. |
 | [BOFHound](https://github.com/coffeegist/bofhound#versions) | Candidate for future BOF-log ingestion | Current releases support CE output and ADCS, but parse separate ldapsearch BOF logs. It needs a log capture/import workflow and exact GOAD-to-Beagle validation. |
 | [SOAPHound](https://github.com/FalconForceTeam/SOAPHound#collecting-bloodhound-data) | Exclude from defaults | Its documented BloodHound v4 output is outside Beagle's currently accepted schema versions. |
@@ -81,21 +95,26 @@ The older SharpHound `.exe` and `.ps1` choices use their own target-side output
 paths. RustHound is the collector with the in-memory, no-target-output-file
 workflow.
 
-The first extension build targets Windows/amd64. It accepts explicit user name
-and password authentication; current-token SSPI is not available in the fork's
-LDAP stack. These credentials are not saved in GUI preferences or collector
+The extension targets Windows/amd64. The signed v2.5.30 GNU DLL supports
+current-user authentication through the target process's domain logon, with
+Kerberos for LDAP and the same Windows identity for SMB and Remote Registry.
+That mode sends no user name or password in the Start request. Explicit user
+name and password authentication remains available, including on the verified
+v2.5.29 DLL. These credentials are not saved in GUI preferences or collector
 results. Sliver persists beacon task requests and responses on its server,
-which includes the extension's credential-bearing Start request. That is a
-server-side data boundary even though the collector does not write its code or
-output to the target disk. Other platforms need their own build and loader
-validation before appearing in the picker.
+which includes an explicit-credential Start request. That is a server-side
+data boundary even though the collector does not write its code or output to
+the target disk. Other platforms need their own build and loader validation
+before appearing in the picker.
 
-The tested default is LDAP simple bind on port 389: the supplied password
-travels from target to DC without TLS. AD Explorer also offers an LDAPS switch,
-which encrypts that connection, but this RustHound fork currently disables DC
-certificate verification for LDAPS. The UI discloses both conditions before
-credential submission. Operators can specify a DC FQDN when the target cannot
-resolve the domain. The GOAD run used `winterfell.north.sevenkingdoms.local`.
+With explicit credentials, the default is LDAP simple bind on port 389: the
+supplied password travels from target to DC without TLS. AD Explorer also
+offers an LDAPS switch, which encrypts that connection, but this RustHound
+fork currently disables DC certificate verification for LDAPS. The UI
+discloses these conditions before explicit credential submission. Current-user
+mode uses the target's Kerberos logon and does not supply a password. Operators
+can specify a DC FQDN when the target cannot resolve the domain. The GOAD run
+used `winterfell.north.sevenkingdoms.local`.
 
 ## Fork DLL GOAD and Beagle validation
 
