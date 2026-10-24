@@ -119,7 +119,7 @@
     "motion": "14.0.0",
     "nice-grpc": "2.1.17",
     "playwright-core": "1.63.0",
-    "react": "19.3.0",
+    "react": "19.3.1",
     "react-aria": "^3.52.1",
     "react-aria-components": "^1.21.1",
     "react-dom": "19.3.1",
