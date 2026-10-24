@@ -210,11 +210,12 @@ export function App() {
   const [sessionWorkspaceRoute, setSessionWorkspaceRoute] = useState<SessionWorkspaceRoute>();
   const [beaconWorkspaceRoute, setBeaconWorkspaceRoute] = useState<BeaconWorkspaceRoute>();
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(true);
+  const [isConfigSelectorOpen, setIsConfigSelectorOpen] = useState(false);
   const [isLoadingSavedConfigs, setIsLoadingSavedConfigs] = useState(true);
   const [savedConfigs, setSavedConfigs] = useState<SavedConfigSummary[]>([]);
   const [savedConfigError, setSavedConfigError] = useState<string>();
   const savedConfigLoadRef = useRef<Promise<void> | null>(null);
+  const configSelectorInitializedRef = useRef(false);
   const configSelectorHasMountedRef = useRef(false);
   const snapshotEventGenerationRef = useRef(0);
   const wasConnectedRef = useRef(false);
@@ -267,18 +268,28 @@ export function App() {
   useEffect(() => {
     let mounted = true;
     let receivedEvent = false;
+    const acceptSnapshot = (next: SliverSnapshot): void => {
+      setSnapshot(next);
+      // A new window may inherit a connection. Opening against the synthetic
+      // disconnected snapshot can cancel the modal's entrance before it finishes.
+      if (!configSelectorInitializedRef.current && next.connection.status !== "connecting") {
+        configSelectorInitializedRef.current = true;
+        setIsConfigSelectorOpen(!isUsableConnection(next.connection.status));
+      }
+    };
     const unsubscribe = window.sliver.onSnapshotChanged((next) => {
       receivedEvent = true;
       if (mounted) {
         snapshotEventGenerationRef.current += 1;
-        setSnapshot(next);
+        acceptSnapshot(next);
       }
     });
     void window.sliver.getSnapshot().then((next) => {
-      if (mounted && !receivedEvent) {
-        setSnapshot(next);
-        if (isUsableConnection(next.connection.status)) setIsConfigSelectorOpen(false);
-      }
+      if (mounted && !receivedEvent) acceptSnapshot(next);
+    }).catch(() => {
+      if (!mounted || receivedEvent) return;
+      configSelectorInitializedRef.current = true;
+      setIsConfigSelectorOpen(true);
     });
     void loadSavedConfigs();
     const reloadSavedConfigs = () => void loadSavedConfigs();

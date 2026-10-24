@@ -53,10 +53,12 @@ afterEach(() => {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function lootCountResult(total: number) {
@@ -539,7 +541,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.getByRole("row", { name: "Overview" })).toHaveAttribute("data-current", "true");
     expect(screen.queryByRole("heading", { name: "Jobs & listeners" })).not.toBeInTheDocument();
     const navigation = within(screen.getByRole("navigation", { name: "Window navigation" }));
@@ -600,16 +603,20 @@ describe("App startup", () => {
     expect(navigation.getByRole("button", { name: "Collapse sidebar" })).toBeVisible();
   });
 
-  it("opens the saved configuration selector immediately and keeps a dismissal closed", async () => {
+  it("opens the saved configuration selector after a disconnected snapshot and keeps a dismissal closed", async () => {
     const user = userEvent.setup();
+    const initialSnapshot = deferred<SliverSnapshot>();
     const initialCatalog = deferred<OperationResult<SavedConfigSummary[]>>();
     const listSavedConfigs = vi.fn()
       .mockReturnValueOnce(initialCatalog.promise)
       .mockResolvedValue({ ok: true, value: [] });
-    installSliverAPI(listSavedConfigs);
+    const api = installSliverAPI(listSavedConfigs);
+    vi.mocked(api.getSnapshot).mockReturnValue(initialSnapshot.promise);
 
     render(<App />);
 
+    expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+    await act(async () => { initialSnapshot.resolve(disconnectedSnapshot()); });
     expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
     expect(screen.getByText("Finding configurations")).toBeInTheDocument();
     expect(listSavedConfigs).toHaveBeenCalledOnce();
@@ -658,6 +665,7 @@ describe("App startup", () => {
 
     render(<App />);
     expect(listSavedConfigs).toHaveBeenCalledOnce();
+    await screen.findByRole("dialog", { name: "Saved configurations" });
     act(() => { notifyChanged?.(); notifyChanged?.(); notifyChanged?.(); });
     expect(listSavedConfigs).toHaveBeenCalledOnce();
 
@@ -921,6 +929,58 @@ describe("App startup", () => {
     await waitFor(() => expect(api.connectSavedConfig).toHaveBeenCalledWith(freshImportedConfig.id));
   });
 
+  it.each(["response", "event"] as const)(
+    "never mounts the startup selector for an inherited connection delivered by %s",
+    async (delivery) => {
+      const initialResponse = deferred<SliverSnapshot>();
+      let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
+      const api = installSliverAPI(
+        vi.fn().mockResolvedValue({ ok: true, value: [] }),
+        disconnectedSnapshot(),
+        (listener) => { emitSnapshot = listener; },
+      );
+      vi.mocked(api.getSnapshot).mockReturnValue(initialResponse.promise);
+      render(<App />);
+
+      expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+      await act(async () => {});
+      expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+
+      const connected = disconnectedSnapshot();
+      connected.connection = {
+        status: "connected",
+        managedServer: null,
+        operator: "inherited-operator",
+        server: "current.example.test:31337",
+      };
+      await act(async () => {
+        if (delivery === "response") initialResponse.resolve(connected);
+        else emitSnapshot?.(connected);
+      });
+      expect(screen.getAllByRole("button", { name: "Current server: inherited-operator" })).not.toHaveLength(0);
+      expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+
+      if (delivery === "event") {
+        await act(async () => { initialResponse.resolve(disconnectedSnapshot()); });
+        expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+      }
+      expect(api.onSavedConfigsChanged).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps connection recovery available when the initial snapshot lookup fails", async () => {
+    const initialResponse = deferred<SliverSnapshot>();
+    const api = installSliverAPI(vi.fn().mockResolvedValue({ ok: true, value: [] }));
+    vi.mocked(api.getSnapshot).mockReturnValue(initialResponse.promise);
+    render(<App />);
+
+    expect(document.querySelector('[data-slot="modal-backdrop"]')).not.toBeInTheDocument();
+    await act(async () => { initialResponse.reject(new Error("Snapshot lookup failed")); });
+
+    expect(screen.getByRole("dialog", { name: "Saved configurations" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open file" })).toBeEnabled();
+  });
+
   it("does not replace a newer connection event with the initial snapshot response", async () => {
     const initialResponse = deferred<SliverSnapshot>();
     let emitSnapshot: ((snapshot: SliverSnapshot) => void) | undefined;
@@ -1047,7 +1107,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     expect(screen.queryByRole("dialog", { name: "Server version mismatch" })).not.toBeInTheDocument();
     expect(screen.queryByText("Backend degraded")).not.toBeInTheDocument();
     await waitFor(() => {
@@ -1157,7 +1218,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -1186,6 +1248,7 @@ describe("App startup", () => {
     vi.mocked(api.openConsoleWindow).mockResolvedValue({ ok: true });
 
     render(<App />);
+    await screen.findAllByRole("button", { name: "Current server: alice" });
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -1266,7 +1329,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -1304,7 +1368,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -1342,7 +1407,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
@@ -1388,7 +1454,8 @@ describe("App startup", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Overview" })).toBeInTheDocument();
+    await screen.findAllByRole("button", { name: "Current server: alice" });
+    expect(screen.getByRole("heading", { name: "Overview" })).toBeInTheDocument();
     await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "Saved configurations" })).not.toBeInTheDocument();
     });
