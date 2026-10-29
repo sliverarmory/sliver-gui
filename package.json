@@ -174,7 +174,7 @@
     "ghostty-web": "0.4.0",
     "monaco-editor": "0.57.0",
     "node-pty": "1.1.0",
-    "sliver-script": "2.0.0-rc.5",
+    "sliver-script": "2.0.0-rc.6",
     "ssh2": "1.17.0"
   }
 }
