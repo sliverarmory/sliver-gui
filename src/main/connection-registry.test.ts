@@ -1136,7 +1136,7 @@ describe(".NET assembly execution sources", () => {
     client.environmentState.set("USERDNSDOMAIN", " EXAMPLE.LOCAL ");
     client.environmentState.set("UNRELATED_SECRET", "do-not-read");
     expect(await registry.getAdTargetDomain(1, ref)).toEqual({ ok: true, value: { domain: "example.local" } });
-    expect(client.getEnvSession).toHaveBeenCalledWith(ref.id, "USERDNSDOMAIN", 30);
+    expect(client.getEnvSession).toHaveBeenCalledWith(ref.id, "USERDNSDOMAIN", 15);
 
     client.environmentState.set("USERDNSDOMAIN", "HOST-01");
     expect(await registry.getAdTargetDomain(1, ref)).toEqual({ ok: true, value: {} });

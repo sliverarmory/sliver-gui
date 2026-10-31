@@ -1,8 +1,8 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { disconnectedSnapshot, type OperationResult, type SliverSnapshot } from "../../../shared/contracts";
-import { RUSTHOUND_ARMORY_COLLECTOR_ID, type AdCollectorSummary, type AdCollectionSummary } from "../../../shared/ad-explorer-contracts";
+import { RUSTHOUND_ARMORY_COLLECTOR_ID, type AdCollectionArtifact, type AdCollectorProgress, type AdCollectorRunResult, type AdCollectorSummary, type AdCollectionSummary } from "../../../shared/ad-explorer-contracts";
 import type { BeaconSummary, SessionSummary, TargetCatalogEntry, TargetCatalogPage, TargetRef } from "../../../shared/target-contracts";
 import { ADExplorerPage } from "./ADExplorerPage";
 
@@ -62,15 +62,32 @@ function installAPI() {
   }));
   const listAdCollectors = vi.fn(async (target: TargetRef) => ({ ok: true as const, value: { target, collectors: [collector, customCollector, customScript] } }));
   const getAdTargetDomain = vi.fn(async (_target: TargetRef): Promise<OperationResult<{ domain?: string }>> => ({ ok: true, value: {} }));
-  const runAdCollector = vi.fn(async () => ({ ok: true as const, value: {
+  const runAdCollector = vi.fn(async (): Promise<OperationResult<AdCollectorRunResult>> => ({ ok: true as const, value: {
     state: "imported" as const, collectorId: collector.id, targetId: session.id,
     domain: "corp.example.com", message: "Collection imported into AD Explorer.", projectId: "project-one",
   } }));
   const listAdCollections = vi.fn(async (): Promise<OperationResult<AdCollectionSummary[]>> => ({ ok: true, value: collections }));
   const openBeagleWindow = vi.fn(async (_input?: { projectId: string }): Promise<OperationResult> => ({ ok: true }));
   const openAdCollectorArmory = vi.fn(async (): Promise<OperationResult> => ({ ok: true }));
-  Object.defineProperty(window, "sliver", { configurable: true, value: { listTargets, listAdCollectors, getAdTargetDomain, runAdCollector, listAdCollections, openBeagleWindow, openAdCollectorArmory } });
-  return { listTargets, listAdCollectors, getAdTargetDomain, runAdCollector, listAdCollections, openBeagleWindow, openAdCollectorArmory };
+  const catalogListeners = new Set<() => void>();
+  const progressListeners = new Set<(progress: AdCollectorProgress) => void>();
+  const onAdCollectorsChanged = vi.fn((listener: () => void) => { catalogListeners.add(listener); return () => { catalogListeners.delete(listener); }; });
+  const onAdCollectorProgress = vi.fn((listener: (progress: AdCollectorProgress) => void) => {
+    progressListeners.add(listener); return () => { progressListeners.delete(listener); };
+  });
+  const getAdCollectorProgress = vi.fn(async (): Promise<OperationResult<AdCollectorProgress | null>> => ({ ok: true, value: null }));
+  const cancelAdCollector = vi.fn(async (_input: { runId: string }): Promise<OperationResult> => ({ ok: true }));
+  const listAdCollectionArtifacts = vi.fn(async (): Promise<OperationResult<AdCollectionArtifact[]>> => ({ ok: true, value: [] }));
+  const retryAdCollectionImport = vi.fn(async (_input: { collectionId: string }): Promise<OperationResult<AdCollectorRunResult>> => ({
+    ok: true, value: { state: "imported", collectorId: rustHound.id, targetId: session.id, domain: "corp.example.com", message: "Saved collection imported.", projectId: "project-one" },
+  }));
+  const revealAdCollection = vi.fn(async (_input: { collectionId: string }): Promise<OperationResult> => ({ ok: true }));
+  const api = { listTargets, listAdCollectors, getAdTargetDomain, runAdCollector, listAdCollections, openBeagleWindow,
+    openAdCollectorArmory, onAdCollectorsChanged, onAdCollectorProgress, getAdCollectorProgress, cancelAdCollector,
+    listAdCollectionArtifacts, retryAdCollectionImport, revealAdCollection };
+  Object.defineProperty(window, "sliver", { configurable: true, value: api });
+  return { ...api, emitCatalogChanged: () => catalogListeners.forEach((listener) => listener()),
+    emitProgress: (progress: AdCollectorProgress) => progressListeners.forEach((listener) => listener(progress)) };
 }
 
 beforeEach(() => {
@@ -618,5 +635,243 @@ describe("ADExplorerPage", () => {
     });
     await waitFor(() => expect(password).toHaveValue(""));
     expect(window.localStorage.getItem("ad-explorer.domain-assignments.v1")).not.toContain("one-use-secret");
+  });
+
+  it("refreshes automatically after Armory installation and selects RustHound over the untouched fallback", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    let installed = false;
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: {
+      target, collectors: installed ? [currentUserRustHound, collector] : [collector], rustHoundSupported: true,
+    } }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    expect(await screen.findByRole("button", { name: /Verified collector/u })).toHaveTextContent(collector.name);
+    installed = true;
+    act(() => api.emitCatalogChanged());
+    await waitFor(() => expect(screen.getByRole("button", { name: /Verified collector/u })).toHaveTextContent(currentUserRustHound.name));
+    expect(screen.getByRole("button", { name: /Authentication/u })).toHaveTextContent("Current user");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeEnabled();
+    expect(api.listAdCollectors).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves an explicitly chosen alternative when Armory changes", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound, collector] } }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    const picker = await screen.findByRole("button", { name: /Verified collector/u });
+    await user.click(picker);
+    await user.click(screen.getByRole("option", { name: /^Verified SharpHound CE/u }));
+    act(() => api.emitCatalogChanged());
+    await waitFor(() => expect(api.listAdCollectors).toHaveBeenCalledTimes(2));
+    expect(picker).toHaveTextContent(collector.name);
+    expect(screen.queryByRole("button", { name: /Authentication/u })).not.toBeInTheDocument();
+  });
+
+  it("uses a beacon domain hint when available and permits native discovery when it is unavailable", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    api.runAdCollector.mockResolvedValue({ ok: true, value: { state: "imported", collectorId: rustHound.id,
+      targetId: beacon.id, domain: "discovered.example.com", message: "Beacon collection imported." } });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    await screen.findByRole("button", { name: /Authentication/u });
+    expect(api.getAdTargetDomain).toHaveBeenCalledExactlyOnceWith(beaconRef);
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("");
+    expect(screen.getByText(/Leave empty to discover its AD domain/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    expect(api.runAdCollector).toHaveBeenCalledExactlyOnceWith({ target: beaconRef, collectorId: rustHound.id, collectionMethod: "LdapOnly" });
+    expect(await screen.findByText("Beacon collection imported.")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("discovered.example.com");
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("discovered.example.com");
+  });
+
+  it("requires a domain when switching from discovery to explicit credentials", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.click(await screen.findByRole("button", { name: /Authentication/u }));
+    await user.click(screen.getByRole("option", { name: "AD credentials" }));
+    await user.type(screen.getByLabelText("AD password"), "ephemeral-secret");
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("restores an active collection after navigation and cancels its exact run", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const progress: AdCollectorProgress = { runId: "12345678-1234-4123-8123-123456789abc", targetId: beacon.id,
+      phase: "transferring", message: "Downloading collection ZIP", transferredBytes: 32_768, totalBytes: 65_536, cancellable: true };
+    api.getAdCollectorProgress.mockResolvedValue({ ok: true, value: progress });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    const bar = await screen.findByRole("progressbar", { name: /Downloading collection ZIP/u });
+    expect(bar).toHaveAttribute("aria-valuenow", "32768");
+    expect(bar).toHaveAttribute("aria-valuemax", "65536");
+    expect(screen.getByText("32,768 of 65,536 bytes")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel collection" }));
+    expect(api.cancelAdCollector).toHaveBeenCalledExactlyOnceWith({ runId: progress.runId });
+    expect(screen.getByRole("button", { name: "Cancelling…" })).toBeDisabled();
+    act(() => api.emitProgress({ ...progress, phase: "cancelled", message: "Collection cancelled.", cancellable: false,
+      result: { state: "cancelled", collectorId: rustHound.id, targetId: beacon.id, domain: "", message: "Collection cancelled." } }));
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(await screen.findByText("Collection cancelled.")).toBeInTheDocument();
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("reattaches after unmounting and persists the discovered domain without its original invoke handler", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    let finishOriginal!: (result: OperationResult<AdCollectorRunResult>) => void;
+    api.runAdCollector.mockImplementation(() => new Promise((resolve) => { finishOriginal = resolve; }));
+    const progress: AdCollectorProgress = { runId: "12345678-1234-4123-8123-123456789abc", targetId: beacon.id,
+      phase: "collecting", message: "Collecting after navigation", transferredBytes: 0, cancellable: true };
+    const original = render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    await screen.findByRole("button", { name: /Authentication/u });
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    act(() => api.emitProgress(progress));
+    original.unmount();
+
+    api.getAdCollectorProgress.mockResolvedValue({ ok: true, value: progress });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await screen.findByRole("progressbar", { name: /Collecting after navigation/u });
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(screen.getByRole("progressbar", { name: /Collecting after navigation/u })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel collection" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("");
+
+    const result: AdCollectorRunResult = { state: "imported", collectorId: rustHound.id, targetId: beacon.id,
+      domain: "discovered.example.com", message: "Beacon collection imported after navigation." };
+    act(() => api.emitProgress({ ...progress, phase: "complete", message: result.message, cancellable: false, result }));
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue(result.domain));
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("link", { name: "Windows targets" }));
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await user.type(screen.getByRole("textbox", { name: "Windows domain" }), "operator.example.com");
+    await user.click(screen.getByRole("button", { name: "Assign domain" }));
+    await act(async () => finishOriginal({ ok: true, value: result }));
+    const stored = window.localStorage.getItem("ad-explorer.domain-assignments.v1");
+    expect(stored).toContain(result.domain);
+    expect(stored).toContain("operator.example.com");
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue("operator.example.com");
+    expect(api.runAdCollector).toHaveBeenCalledTimes(1);
+  });
+
+  it("persists a discovered domain when collection finishes while the page is closed", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const result: AdCollectorRunResult = { state: "imported", collectorId: rustHound.id, targetId: beacon.id,
+      domain: "discovered.example.com", message: "Collection completed while away." };
+    api.getAdCollectorProgress.mockResolvedValue({ ok: true, value: {
+      runId: "12345678-1234-4123-8123-123456789abc", targetId: beacon.id, phase: "complete",
+      message: result.message, transferredBytes: 512, totalBytes: 512, cancellable: false, result,
+    } });
+    const view = render(<ADExplorerPage snapshot={snapshot()} />);
+    await screen.findByRole("region", { name: "Domain discovered.example.com" });
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue(result.domain);
+    expect(screen.getByText(result.message)).toBeInTheDocument();
+    view.unmount();
+
+    api.getAdCollectorProgress.mockResolvedValue({ ok: true, value: null });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select beacon server-1 (beacon-one)" }));
+    expect(screen.getByRole("textbox", { name: "Windows domain" })).toHaveValue(result.domain);
+    expect(api.getAdTargetDomain).not.toHaveBeenCalled();
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("retains an actionable collector failure next to its target", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const message = "Current-user authentication needs a Windows domain logon with usable Kerberos credentials. Choose AD credentials or use a domain-logon target.";
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    api.runAdCollector.mockResolvedValue({ ok: false, error: message });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await screen.findByRole("button", { name: /Authentication/u });
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByRole("button", { name: "Run collector" })).toBeEnabled();
+  });
+
+  it("offers immediate retry and reveal actions for a saved ZIP without exposing its path", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const collectionId = "12345678-1234-4123-8123-123456789abc";
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    api.runAdCollector.mockResolvedValue({ ok: true, value: { state: "saved", collectorId: rustHound.id, targetId: session.id,
+      domain: "corp.example.com", message: "Collection saved; import could not finish.", collectionId } });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await screen.findByRole("button", { name: /Authentication/u });
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    await user.click(await screen.findByRole("button", { name: "Show saved collection" }));
+    expect(api.revealAdCollection).toHaveBeenCalledExactlyOnceWith({ collectionId });
+    await user.click(screen.getByRole("button", { name: "Retry import" }));
+    expect(api.retryAdCollectionImport).toHaveBeenCalledExactlyOnceWith({ collectionId });
+    expect(await screen.findByText("Saved collection imported.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry import" })).not.toBeInTheDocument();
+    expect(api.runAdCollector).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers saved imports from an earlier application run", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    const artifact: AdCollectionArtifact = { collectionId: "12345678-1234-4123-8123-123456789abc", domain: "corp.example.com",
+      createdAt: "2026-10-24T12:00:00.000Z", collectorId: rustHound.id, targetId: session.id };
+    api.listAdCollectionArtifacts.mockResolvedValue({ ok: true, value: [artifact] });
+    api.retryAdCollectionImport.mockImplementation(async () => {
+      api.listAdCollectionArtifacts.mockResolvedValue({ ok: true, value: [] });
+      return { ok: true, value: { state: "imported", collectorId: rustHound.id, targetId: session.id,
+        domain: artifact.domain, message: "Saved collection imported.", projectId: "recovered-project" } };
+    });
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("tab", { name: "Collections" }));
+    const list = await screen.findByRole("list", { name: "Saved collections awaiting import" });
+    expect(within(list).getByText(artifact.domain)).toBeInTheDocument();
+    await user.click(within(list).getByRole("button", { name: "Retry import" }));
+    expect(api.retryAdCollectionImport).toHaveBeenCalledExactlyOnceWith({ collectionId: artifact.collectionId });
+    await waitFor(() => expect(screen.queryByRole("list", { name: "Saved collections awaiting import" })).not.toBeInTheDocument());
+    expect(api.runAdCollector).not.toHaveBeenCalled();
+  });
+
+  it("does not let an earlier invocation clear progress for a newer run", async () => {
+    const user = userEvent.setup();
+    const api = installAPI();
+    api.listAdCollectors.mockImplementation(async (target) => ({ ok: true, value: { target, collectors: [currentUserRustHound] } }));
+    let finishFirst!: (result: OperationResult<AdCollectorRunResult>) => void;
+    let finishSecond!: (result: OperationResult<AdCollectorRunResult>) => void;
+    api.runAdCollector.mockImplementationOnce(() => new Promise((resolve) => { finishFirst = resolve; }))
+      .mockImplementationOnce(() => new Promise((resolve) => { finishSecond = resolve; }));
+    const firstResult: AdCollectorRunResult = { state: "imported", collectorId: rustHound.id, targetId: session.id,
+      domain: "corp.example.com", message: "First collection imported." };
+    const firstProgress: AdCollectorProgress = { runId: "11111111-1111-4111-8111-111111111111", targetId: session.id,
+      phase: "complete", message: firstResult.message, transferredBytes: 1, totalBytes: 1, cancellable: false, result: firstResult };
+    render(<ADExplorerPage snapshot={snapshot()} />);
+    await user.click(screen.getByRole("button", { name: "Select session workstation-1 (session-one)" }));
+    await screen.findByRole("button", { name: /Authentication/u });
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    act(() => api.emitProgress(firstProgress));
+    await user.click(screen.getByRole("button", { name: "Run collector" }));
+    const secondProgress: AdCollectorProgress = { runId: "22222222-2222-4222-8222-222222222222", targetId: session.id,
+      phase: "collecting", message: "Collecting the second dataset", transferredBytes: 0, cancellable: true };
+    act(() => api.emitProgress(secondProgress));
+    await act(async () => finishFirst({ ok: true, value: firstResult }));
+    expect(screen.getByRole("progressbar", { name: /Collecting the second dataset/u })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cancel collection" }));
+    expect(api.cancelAdCollector).toHaveBeenCalledExactlyOnceWith({ runId: secondProgress.runId });
+    await act(async () => finishSecond({ ok: true, value: { ...firstResult, state: "cancelled", message: "Second collection cancelled." } }));
   });
 });

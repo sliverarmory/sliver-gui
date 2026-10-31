@@ -37,6 +37,11 @@ import type { BeagleOperationState } from "../../shared/beagle-projects";
 import "./beagle/beagle.css";
 
 const DEFAULT_QUERY = "MATCH (n:Domain) RETURN n LIMIT 100";
+const DIRECTORY_OVERVIEW_QUERY = "MATCH p=(a)-[r]->(b) RETURN p LIMIT 40";
+const DIRECTORY_OVERVIEW_FALLBACK = "MATCH (n) RETURN n LIMIT 40";
+const DIRECTORY_OVERVIEW_TITLE = "Directory overview";
+const isDirectoryOverview = (title: string, cypher: string) => title === DIRECTORY_OVERVIEW_TITLE &&
+  (cypher === DIRECTORY_OVERVIEW_QUERY || cypher === DIRECTORY_OVERVIEW_FALLBACK);
 type SidebarTab = "search" | "queries" | "paths";
 type ResultTab = "graph" | "table" | "objects";
 type QueryAction = () => Promise<OperationResult<BeagleQueryResult>>;
@@ -75,6 +80,9 @@ export function BeagleWindowApp(): React.JSX.Element {
   const [queryBusy, setQueryBusy] = useState<string>();
   const [result, setResult] = useState<BeagleQueryResult>();
   const [resultTitle, setResultTitle] = useState("Query results");
+  const [collectionRevision, setCollectionRevision] = useState(0);
+  const overviewActive = useRef(false);
+  const overviewChecked = useRef("");
   const [selection, setSelection] = useState<BeagleSelection>(null);
   const [pathDraft, setPathDraft] = useState(defaultBeaglePathDraft);
   const pathSource = pathDraft.source, pathTarget = pathDraft.target;
@@ -130,6 +138,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   function restoreEntry(entry: BeagleHistoryEntry) {
     querySequence.current++; neighborhoodSequence.current++; setQueryBusy(undefined); setNeighborhood(undefined); setNeighborhoodBusy(false);
     restoring.current = true;
+    overviewActive.current = isDirectoryOverview(entry.title, entry.editor.cypher);
     setResult(entry.result); resultRef.current = entry.result; setResultTitle(entry.title); setSelection(entry.selection);
     setSidebarTab(entry.sidebarTab); setResultTab(entry.resultTab); setCypher(entry.editor.cypher); setParameters(entry.editor.parameters);
     setQueryName(entry.editor.name); setQueryDescription(entry.editor.description); setQueryCategory(entry.editor.category); setSelectedSavedId(entry.editor.savedId);
@@ -177,6 +186,7 @@ export function BeagleWindowApp(): React.JSX.Element {
   }, [busy, queryBusy, neighborhoodBusy, operation?.id, operation?.phase, operation?.cancellable]);
   useEffect(() => () => { if (progressToast.current) toast.close(progressToast.current); }, []);
   function showResult(next: BeagleQueryResult, title: string, nextSelection: BeagleSelection = null, tab: ResultTab = next.graph.nodes.length ? "graph" : "table", snapshot = context.current) {
+    overviewActive.current = isDirectoryOverview(title, snapshot.editor.cypher);
     const table = normalizeTableView(next, context.current.table);
     setResult(next); resultRef.current = next; setResultTitle(title); setSelection(nextSelection); setResultTab(tab);
     setTableView(table);
@@ -190,6 +200,7 @@ export function BeagleWindowApp(): React.JSX.Element {
 
   const resetProjectView = useCallback(() => {
     generation.current++; querySequence.current++; searchSequence.current++; neighborhoodSequence.current++;
+    overviewActive.current = false; overviewChecked.current = ""; resultRef.current = undefined;
     setResult(undefined); setSelection(null); setSearch(""); setSearchResults([]); setSearchPage(undefined); setSearched(false); setSearchError(undefined);
     setQueryBusy(undefined); setSearchBusy(false); clearNotifications(); setDiagnosticsOpen(false); setRulesDraft(undefined);
     setPathDraft(defaultBeaglePathDraft()); setGraphView(defaultBeagleGraphView()); setTableView({ columns: [], sort: null }); restoredProject.current = ""; setReport(undefined); setReportOpen(false);
@@ -200,17 +211,67 @@ export function BeagleWindowApp(): React.JSX.Element {
   useEffect(() => {
     if (!api) return;
     let active = true;
+    let refreshSequence = 0;
     const unsubscribe = api.onCollectionImported(() => {
+      const epoch = generation.current;
+      const sequence = ++refreshSequence;
+      const current = () => active && mounted.current && epoch === generation.current && sequence === refreshSequence;
       void api.getState().then((response) => {
-        if (!active || !mounted.current) return;
+        if (!current()) return;
         if (!response.ok) { showError(response.error); return; }
-        resetProjectView();
+        if (response.value.selectedProjectId !== projectRef.current) resetProjectView();
         setState(response.value);
-        showNotice("Collected AD data imported and analyzed.");
-      }).catch((cause: unknown) => { if (active && mounted.current) showError(errorText(cause)); });
+        setCollectionRevision((revision) => revision + 1);
+        showNotice(resultRef.current && !overviewActive.current
+          ? "Collected AD data imported and analyzed. Your investigation is preserved; run its query to refresh the saved snapshot."
+          : "Collected AD data imported and analyzed.");
+      }).catch((cause: unknown) => { if (current()) showError(errorText(cause)); });
     });
     return () => { active = false; unsubscribe(); };
   }, [api, resetProjectView, showError, showNotice]);
+
+  // Open populated datasets with a small, executable overview. A saved custom
+  // investigation is an intentional snapshot and is never replaced by import.
+  useEffect(() => {
+    const workspace = investigation.workspace;
+    if (!api || loading || investigation.loading || !workspace || workspace.projectId !== state?.selectedProjectId ||
+        !state.runtime.available || !state.stats?.nodes || busy || queryBusy) return;
+    if (!collectionRevision && !state.projectData?.history.some((entry) => entry.status === "complete" && entry.files.length > 0)) return;
+    const identity = `${workspace.projectId}:${collectionRevision}`;
+    if (overviewChecked.current === identity) return;
+    overviewChecked.current = identity;
+    if ((resultRef.current || workspace.history.entries.length) && !overviewActive.current) return;
+    const epoch = generation.current;
+    const sequence = ++querySequence.current;
+    const projectId = workspace.projectId;
+    const snapshot = context.current;
+    setQueryBusy("Opening directory overview");
+    void (async () => {
+      let overviewQuery = DIRECTORY_OVERVIEW_QUERY;
+      let response = await api.query({ cypher: overviewQuery });
+      if (!mounted.current || epoch !== generation.current || sequence !== querySequence.current || projectId !== projectRef.current) return;
+      if (!response.ok) throw new Error(response.error);
+      if (response.value.projectId !== projectId) return;
+      if (!response.value.graph.nodes.length) {
+        overviewQuery = DIRECTORY_OVERVIEW_FALLBACK;
+        response = await api.query({ cypher: overviewQuery });
+      }
+      if (!mounted.current || epoch !== generation.current || sequence !== querySequence.current || projectId !== projectRef.current) return;
+      if (!response.ok) throw new Error(response.error);
+      if (response.value.projectId !== projectId) return;
+      // Keep any draft typed while the initial query was running.
+      if (context.current.editor.cypher === snapshot.editor.cypher && context.current.editor.parameters === snapshot.editor.parameters) {
+        setCypher(overviewQuery); setParameters("{}"); setSelectedSavedId(undefined);
+      }
+      showResult(response.value, DIRECTORY_OVERVIEW_TITLE, null, "graph", { ...snapshot,
+        editor: { cypher: overviewQuery, parameters: "{}", name: "", description: "", category: "" } });
+    })().catch((cause: unknown) => {
+      if (mounted.current && epoch === generation.current && sequence === querySequence.current) showError(errorText(cause));
+    }).finally(() => {
+      if (mounted.current && epoch === generation.current && sequence === querySequence.current) setQueryBusy(undefined);
+    });
+  }, [api, loading, investigation.loading, investigation.workspace, state?.selectedProjectId, state?.runtime.available,
+    state?.stats?.nodes, state?.projectData, collectionRevision, busy, queryBusy]);
 
   async function updateState(label: string, action: () => Promise<OperationResult<BeagleState>>, switchProject = false, reloadCatalog = false) {
     if (mutationPending.current) return;

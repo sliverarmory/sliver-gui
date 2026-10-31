@@ -1,3 +1,4 @@
+import { parseAdCollectorProgress } from "../shared/ad-explorer-contracts.js";
 import type { GhosttySettingsAPI, GhosttySettingsSnapshot } from "../shared/ghostty-settings-contracts.js";
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 
@@ -232,6 +233,16 @@ const api: SliverDesktopAPI = {
     return ipcRenderer.invoke(SESSION_DROPPED_UPLOAD_IPC_CHANNEL, request);
   },
   onSavedConfigsChanged: (listener) => onFixedEvent(IPC.savedConfigsChanged, listener),
+  onAdCollectorsChanged: (listener) => onFixedEvent(IPC.adCollectorsChanged, listener),
+  onAdCollectorProgress: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown): void => {
+      let progress;
+      try { progress = parseAdCollectorProgress(value); } catch { return; }
+      listener(progress);
+    };
+    ipcRenderer.on(IPC.adCollectorProgress, handler);
+    return () => ipcRenderer.removeListener(IPC.adCollectorProgress, handler);
+  },
   openStream,
   openConsoleStream,
   onSnapshotChanged: (listener) => {

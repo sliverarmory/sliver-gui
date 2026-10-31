@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Breadcrumbs, Button, Card, Chip, Description, Input, Label, ListBox, Select, Switch, Tabs, TextField, toast, Tooltip } from "@heroui/react";
+import { Breadcrumbs, Button, Card, Chip, Description, Input, Label, ListBox, ProgressBar, Select, Switch, Tabs, TextField, toast, Tooltip } from "@heroui/react";
 import { EmptyState } from "@heroui-pro/react/empty-state";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faChevronRight, faCircleNodes, faComputer, faRotate, faSatellite, faUpRightFromSquare } from "@fortawesome/free-solid-svg-icons";
 import type { SliverSnapshot, PageSummary } from "../../../shared/contracts";
 import { parseAdDomain, RUSTHOUND_ARMORY_COLLECTOR_ID,
-  type AdCollectionMethod, type AdCollectorSummary, type AdCollectorRunResult } from "../../../shared/ad-explorer-contracts";
+  type AdCollectionArtifact, type AdCollectionMethod, type AdCollectorProgress, type AdCollectorSummary, type AdCollectorRunResult } from "../../../shared/ad-explorer-contracts";
 import type { TargetCatalogEntry, TargetMode, TargetRef, TargetSummary } from "../../../shared/target-contracts";
 
 import { ADCollectionsPanel } from "./ADCollectionsPanel";
@@ -48,9 +48,13 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   ]);
   const identityRef = useRef(inventoryIdentity);
   identityRef.current = inventoryIdentity;
+  const connectionIdentityRef = useRef(connectionIdentity);
+  connectionIdentityRef.current = connectionIdentity;
   const [moreSessions, setMoreSessions] = useState<PageState>(EMPTY_PAGE);
   const [moreBeacons, setMoreBeacons] = useState<PageState>(EMPTY_PAGE);
   const [assignments, setAssignments] = useState<Record<string, string>>({});
+  const assignmentsRef = useRef(assignments);
+  assignmentsRef.current = assignments;
   const [activeTab, setActiveTab] = useState("targets");
   const [selectedKey, setSelectedKey] = useState<string>();
   const collectionHeading = useRef<HTMLHeadingElement>(null);
@@ -67,6 +71,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const [catalogRevision, setCatalogRevision] = useState(0);
   const [collectorId, setCollectorId] = useState("");
   const catalogIdentityRef = useRef("");
+  const collectorEditedRef = useRef(false);
   const collectorAuthIdentityRef = useRef("");
   const selectedIdentityRef = useRef("");
   const domainEditedRef = useRef(false);
@@ -76,6 +81,58 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const [authenticationMode, setAuthenticationMode] = useState<AuthenticationMode>("current-user");
   const [runningTargetId, setRunningTargetId] = useState<string>();
   const [runResult, setRunResult] = useState<AdCollectorRunResult>();
+  const [runError, setRunError] = useState<{ targetId: string; message: string }>();
+  const [progress, setProgress] = useState<AdCollectorProgress>();
+  const [cancelling, setCancelling] = useState(false);
+  const [savedArtifacts, setSavedArtifacts] = useState<AdCollectionArtifact[]>([]);
+  const [savedArtifactsError, setSavedArtifactsError] = useState<string>();
+  const [recoveryBusy, setRecoveryBusy] = useState<string>();
+  const progressGeneration = useRef(0);
+  const appliedDomainResult = useRef<AdCollectorRunResult | undefined>(undefined);
+
+  useEffect(() => () => { progressGeneration.current += 1; }, []);
+
+  const refreshSavedArtifacts = useCallback(async () => {
+    try {
+      const result = await window.sliver.listAdCollectionArtifacts();
+      if (!result.ok || !result.value) throw new Error(result.error ?? "Saved collections are unavailable.");
+      setSavedArtifacts(result.value);
+      setSavedArtifactsError(undefined);
+    } catch (error) { setSavedArtifactsError(errorMessage(error)); }
+  }, []);
+
+  useEffect(() => {
+    void refreshSavedArtifacts();
+    const onFocus = () => { void refreshSavedArtifacts(); };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshSavedArtifacts]);
+
+  useEffect(() => {
+    let active = true;
+    let eventReceived = false;
+    const generation = progressGeneration.current;
+    const receive = (value: AdCollectorProgress) => {
+      if (!active) return;
+      eventReceived = true;
+      setProgress(value);
+      if (isCollectionActive(value)) {
+        setRunningTargetId(value.targetId);
+        setCancelling(value.phase === "cancelling");
+      } else {
+        setRunningTargetId(undefined);
+        setCancelling(false);
+        if (value.result) setRunResult(value.result);
+        if (value.phase === "failed") setRunError({ targetId: value.targetId, message: value.message });
+        void refreshSavedArtifacts();
+      }
+    };
+    const unsubscribe = window.sliver.onAdCollectorProgress(receive);
+    void window.sliver.getAdCollectorProgress().then((result) => {
+      if (active && !eventReceived && generation === progressGeneration.current && result.ok && result.value) receive(result.value);
+    }).catch(() => undefined);
+    return () => { active = false; unsubscribe(); };
+  }, [connectionIdentity, refreshSavedArtifacts]);
 
   useEffect(() => {
     let active = true;
@@ -107,6 +164,10 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
     setSelectedKey(undefined);
     setPassword("");
     setRunResult(undefined);
+    setRunError(undefined);
+    setProgress(undefined);
+    setRunningTargetId(undefined);
+    setCancelling(false);
   }, [domainScope, connectionIdentity]);
 
   const rows = useMemo(() => targetRows(snapshot, moreSessions.entries, moreBeacons.entries), [
@@ -129,17 +190,18 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   const rustHoundSelected = collectorId === RUSTHOUND_ARMORY_COLLECTOR_ID;
   const explicitCredentials = rustHoundSelected &&
     (!selectedCollector?.supportsCurrentUser || authenticationMode === "credentials");
+  const discoverDomain = rustHoundSelected && selectedCollector?.supportsCurrentUser === true && !explicitCredentials;
   const supportedMethods = METHOD_OPTIONS.filter((option) => selectedCollector?.collectionMethods.includes(option.id));
 
   useEffect(() => {
     domainEditedRef.current = false;
+    collectorEditedRef.current = false;
     setDomainDraft(selectedKey ? assignments[selectedKey] ?? suggestedAdDomain(selected?.target.username ?? "") : "");
     setLdapFqdn("");
     setLdaps(false);
     setUsername(suggestedAdUsername(selected?.target.username ?? ""));
     setPassword("");
     setAuthenticationMode("current-user");
-    setRunResult(undefined);
     setOtherCollectorsOpen(false);
     if (selectedKey) collectionHeading.current?.focus();
     else if (returnFocusKey.current) {
@@ -149,7 +211,32 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
   }, [selectedKey]);
 
   useEffect(() => {
-    if (!selectedRef || selected?.target.mode !== "session" || selected.target.liveness !== "active" ||
+    if (!runResult?.domain || appliedDomainResult.current === runResult) return;
+    const matches = rows.filter((row) => row.target.id === runResult.targetId && row.ref);
+    if (matches.length !== 1) return;
+    const target = matches[0]!;
+    appliedDomainResult.current = runResult;
+    if (assignmentsRef.current[target.key]) return;
+    let domain: string;
+    try { domain = parseAdDomain(runResult.domain); }
+    catch { return; }
+    const next = { ...readDomainAssignments(domainScope), ...assignmentsRef.current, [target.key]: domain };
+    assignmentsRef.current = next;
+    setAssignments(next);
+    try { writeDomainAssignments(domainScope, next); }
+    catch { toast.warning("Domain assignment not saved", { description: "This workstation could not store the discovered domain for future visits." }); }
+    if (selectedKey === target.key && (!domainDraft.trim() || !domainEditedRef.current)) {
+      domainEditedRef.current = true;
+      setDomainDraft(domain);
+    }
+  }, [domainDraft, domainScope, rows, runResult, selectedKey]);
+
+  useEffect(() => window.sliver.onAdCollectorsChanged(() => {
+    setCatalogRevision((revision) => revision + 1);
+  }), []);
+
+  useEffect(() => {
+    if (!selectedRef || !selected || (selected.target.mode === "session" && selected.target.liveness !== "active") ||
         selected.target.os !== "windows" || assignments[selected.key]) return;
     const expectedIdentity = selectedIdentity;
     let active = true;
@@ -196,9 +283,12 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
       }
       setCatalog(result.value.collectors);
       setRustHoundSupported(result.value.rustHoundSupported === true);
-      setCollectorId((current) => result.value!.collectors.some((collector) => collector.id === current && collector.available)
-        ? current
-        : result.value!.collectors.find((collector) => collector.compatibility === "verified" && collector.available)?.id ?? "");
+      setCollectorId((current) => {
+        const available = result.value!.collectors.filter((collector) => collector.available);
+        if (collectorEditedRef.current && available.some((collector) => collector.id === current)) return current;
+        return available.find((collector) => collector.id === RUSTHOUND_ARMORY_COLLECTOR_ID)?.id ??
+          available.find((collector) => collector.compatibility === "verified")?.id ?? "";
+      });
     }).catch((error: unknown) => {
       if (active) setCatalogError(errorMessage(error));
     }).finally(() => {
@@ -264,38 +354,94 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
 
   const runCollector = useCallback(async () => {
     if (!selectedRef || !selectedTargetAvailable || !selectedCollector?.available || catalogError ||
-        !selectedCollector.collectionMethods.includes(method) || running) return;
-    let domain: string;
+        !selectedCollector.collectionMethods.includes(method) || running || recoveryBusy) return;
+    let domain: string | undefined;
     try {
-      domain = parseAdDomain(domainDraft);
+      domain = domainDraft.trim() || !discoverDomain ? parseAdDomain(domainDraft) : undefined;
     } catch (error) {
       toast.warning("Domain required", { description: errorMessage(error) });
       return;
     }
     saveDomain();
+    const expectedConnection = connectionIdentity;
+    const generation = ++progressGeneration.current;
     setRunResult(undefined);
+    setRunError(undefined);
+    setProgress(undefined);
     setRunningTargetId(selectedRef.id);
     try {
       const result = await window.sliver.runAdCollector({
-        target: selectedRef, collectorId, domain, collectionMethod: method,
+        target: selectedRef, collectorId, ...(domain ? { domain } : {}), collectionMethod: method,
         ...(rustHoundSelected ? {
           ...(ldapFqdn.trim() ? { ldapFqdn: ldapFqdn.trim() } : {}),
           ...(ldaps ? { ldaps: true } : {}),
           ...(explicitCredentials ? { credentials: { username: username.trim(), password } } : {}),
         } : {}),
       });
+      if (connectionIdentityRef.current !== expectedConnection || progressGeneration.current !== generation) return;
       if (!result.ok || !result.value) {
-        toast.danger("Collection failed", { description: result.error ?? "The collector could not be started." });
+        const message = result.error ?? "The collector could not be started.";
+        setRunError({ targetId: selectedRef.id, message });
+        toast.danger("Collection failed", { description: message });
         return;
       }
       setRunResult(result.value);
     } catch (error) {
-      toast.danger("Collection failed", { description: errorMessage(error) });
+      if (connectionIdentityRef.current !== expectedConnection || progressGeneration.current !== generation) return;
+      const message = errorMessage(error);
+      setRunError({ targetId: selectedRef.id, message });
+      toast.danger("Collection failed", { description: message });
     } finally {
-      setPassword("");
-      setRunningTargetId(undefined);
+      if (connectionIdentityRef.current === expectedConnection && progressGeneration.current === generation) {
+        setPassword("");
+        setRunningTargetId(undefined);
+        setProgress(undefined);
+        setCancelling(false);
+        void refreshSavedArtifacts();
+      }
     }
-  }, [catalogError, collectorId, domainDraft, explicitCredentials, ldapFqdn, ldaps, method, password, running, rustHoundSelected, saveDomain, selectedCollector, selectedRef, selectedTargetAvailable, username]);
+  }, [catalogError, collectorId, connectionIdentity, discoverDomain, domainDraft, explicitCredentials, ldapFqdn, ldaps, method, password, recoveryBusy, refreshSavedArtifacts, running, rustHoundSelected, saveDomain, selectedCollector, selectedRef, selectedTargetAvailable, username]);
+
+  const cancelCollection = useCallback(async () => {
+    if (!progress?.cancellable || cancelling) return;
+    setCancelling(true);
+    try {
+      const result = await window.sliver.cancelAdCollector({ runId: progress.runId });
+      if (!result.ok) throw new Error(result.error ?? "The collection could not be cancelled.");
+    } catch (error) {
+      setCancelling(false);
+      toast.danger("Could not cancel collection", { description: errorMessage(error) });
+    }
+  }, [cancelling, progress]);
+
+  const retryImport = useCallback(async (collectionId: string) => {
+    if (running || recoveryBusy) return;
+    setRecoveryBusy(collectionId);
+    setRunError(undefined);
+    progressGeneration.current += 1;
+    try {
+      const result = await window.sliver.retryAdCollectionImport({ collectionId });
+      if (!result.ok || !result.value) throw new Error(result.error ?? "The saved collection could not be imported.");
+      setRunResult(result.value);
+    } catch (error) {
+      toast.danger("Import failed", { description: errorMessage(error) });
+    } finally {
+      setRecoveryBusy(undefined);
+      void refreshSavedArtifacts();
+    }
+  }, [recoveryBusy, refreshSavedArtifacts, running]);
+
+  const revealCollection = useCallback(async (collectionId: string) => {
+    try {
+      const result = await window.sliver.revealAdCollection({ collectionId });
+      if (!result.ok) throw new Error(result.error ?? "The saved collection could not be shown.");
+    } catch (error) { toast.danger("Could not show collection", { description: errorMessage(error) }); }
+  }, []);
+
+  const chooseCollector = useCallback((id: string) => {
+    collectorEditedRef.current = true;
+    setCollectorId(id);
+  }, []);
 
   const openExplorer = useCallback(async () => {
     try {
@@ -338,6 +484,25 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
           <FontAwesomeIcon aria-hidden icon={faUpRightFromSquare} /> Open Explorer
         </Button>
       </header>
+
+      {progress && isCollectionActive(progress) ? (
+        <section aria-label="Active AD collection" className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-4">
+          <ProgressBar className="min-w-64 flex-1" aria-label="AD collection progress"
+            isIndeterminate={!progress.totalBytes || progress.phase !== "transferring"}
+            value={progress.transferredBytes} maxValue={progress.totalBytes || 1}
+            valueLabel={progress.totalBytes ? `${progress.transferredBytes.toLocaleString()} of ${progress.totalBytes.toLocaleString()} bytes` : undefined}>
+            <Label>{progress.message}</Label>
+            {progress.totalBytes && progress.phase === "transferring" ? <ProgressBar.Output className="text-xs tabular-nums text-muted" /> : null}
+            <ProgressBar.Track><ProgressBar.Fill /></ProgressBar.Track>
+          </ProgressBar>
+          <span className="text-sm text-muted">{rows.find((row) => row.target.id === progress.targetId)?.target.hostname ?? progress.targetId.slice(0, 8)}</span>
+          {progress.cancellable || cancelling ? (
+            <Button variant="outline" isDisabled={cancelling} isPending={cancelling} onPress={() => void cancelCollection()}>
+              {cancelling ? "Cancelling…" : "Cancel collection"}
+            </Button>
+          ) : null}
+        </section>
+      ) : null}
 
       <Tabs className="mx-auto w-full max-w-5xl" selectedKey={activeTab} onSelectionChange={(key) => setActiveTab(String(key))} variant="secondary">
         <Tabs.ListContainer className="w-fit max-w-full self-start">
@@ -397,19 +562,21 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                 <Card.Content className="gap-6 p-0">
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-end gap-3">
-                      <TextField className="min-w-0 flex-1 basis-64" value={domainDraft} variant="secondary" onChange={(value) => { domainEditedRef.current = true; setDomainDraft(value); }}>
+                      <TextField className="min-w-0 flex-1 basis-64" value={domainDraft} variant="secondary" isDisabled={running} onChange={(value) => { domainEditedRef.current = true; setDomainDraft(value); }}>
                         <Label>Windows domain</Label>
                         <Input autoComplete="off" maxLength={77} placeholder="corp.example.com" aria-describedby="ad-domain-description" />
                       </TextField>
-                      <Button variant="outline" isDisabled={domainDraft.trim() === (assignments[selected.key] ?? "")} onPress={saveDomain}>
+                      <Button variant="outline" isDisabled={running || domainDraft.trim() === (assignments[selected.key] ?? "")} onPress={saveDomain}>
                         Assign domain
                       </Button>
                     </div>
-                    <p id="ad-domain-description" className="text-xs text-muted">Suggested from the selected session when available. Confirm the AD DNS domain before running.</p>
+                    <p id="ad-domain-description" className="text-xs text-muted">{discoverDomain
+                      ? "Suggested from the selected target when available. Leave empty to discover its AD domain during collection."
+                      : "Suggested from the selected session when available. Confirm the AD DNS domain before running."}</p>
                   </div>
                   {selectedRef ? <>
                     <div className="grid items-start gap-5 sm:grid-cols-2">
-                      <Select fullWidth isDisabled={catalogLoading || running || !verifiedCollectors.length} value={selectedCollector?.compatibility === "verified" ? collectorId : ""} variant="secondary" onChange={(value) => setCollectorId(value === null ? "" : String(value))}>
+                      <Select fullWidth isDisabled={catalogLoading || running || !verifiedCollectors.length} value={selectedCollector?.compatibility === "verified" ? collectorId : ""} variant="secondary" onChange={(value) => chooseCollector(value === null ? "" : String(value))}>
                         <Label>Verified collector</Label>
                         <Select.Trigger><Select.Value>{catalogLoading ? "Loading collectors…" : selectedCollector?.compatibility === "verified" ? selectedCollector.name : "Select a verified collector"}</Select.Value><Select.Indicator /></Select.Trigger>
                         <Select.Popover><ListBox>{verifiedCollectors.map((collector) => (
@@ -432,7 +599,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                     ) : null}
                     {rustHoundSupported && !catalogLoading && !catalogError && !catalog.some((collector) => collector.id === RUSTHOUND_ARMORY_COLLECTOR_ID && collector.supportsCurrentUser) ? (
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl bg-surface-secondary px-4 py-3">
-                        <p className="min-w-0 flex-1 text-sm text-muted">RustHound CE 2.5.30 adds current-user authentication. Install or update it in Armory, then refresh collectors.</p>
+                        <p className="min-w-0 flex-1 text-sm text-muted">RustHound CE 2.5.30 adds current-user authentication. Install or update it in Armory; this list refreshes automatically.</p>
                         <Button size="sm" variant="outline" onPress={() => void openCollectorArmory()}>Open Armory</Button>
                       </div>
                     ) : null}
@@ -453,7 +620,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                         </Select>
                       ) : null}
                       {selectedCollector?.supportsCurrentUser && !explicitCredentials ? (
-                        <p className="text-sm text-muted">Runs under the selected target's current Windows logon. No AD user name or password is needed.</p>
+                        <p className="text-sm text-muted">Uses the selected target's Windows domain logon. It needs usable Kerberos credentials; a domain user name alone does not establish them.</p>
                       ) : null}
                       <div className="grid items-start gap-5 sm:grid-cols-2">
                         {explicitCredentials ? <>
@@ -486,7 +653,7 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                       </div>
                     </div> : null}
                     <OtherCollectors collectors={customCollectors} selectedCollectorId={collectorId} isExpanded={otherCollectorsOpen}
-                      isBusy={catalogLoading || running} onExpandedChange={setOtherCollectorsOpen} onSelect={setCollectorId} />
+                      isBusy={catalogLoading || running} onExpandedChange={setOtherCollectorsOpen} onSelect={chooseCollector} />
                     {catalogError ? <p role="alert" className="text-sm text-danger">{catalogError}</p> : null}
                     {selected.target.mode === "beacon" ? (
                       <p className="text-sm text-muted">{rustHoundSelected
@@ -498,12 +665,20 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
                     {!selectedTargetAvailable ? <p className="text-sm text-muted">This session is no longer active.</p> : null}
                     {running && runningTargetId !== selected.target.id ? <p role="status" className="text-sm text-muted">A collection is running on another target.</p> : null}
                   </> : <p className="text-sm text-muted">This target cannot be selected for collection from the current inventory. Refresh the server snapshot.</p>}
-                  {runResult?.targetId === selected.target.id ? <p role="status" className="text-sm text-muted">{runResult.message}</p> : null}
+                  {runError?.targetId === selected.target.id ? <p role="alert" className="text-sm text-danger">{runError.message}</p> : null}
+                  {runResult?.targetId === selected.target.id ? <div className="space-y-3">
+                    <p role="status" className="text-sm text-muted">{runResult.message}</p>
+                    {runResult.state === "saved" && runResult.collectionId ? <div className="flex flex-wrap gap-3">
+                      <Button variant="secondary" isDisabled={running || Boolean(recoveryBusy)} isPending={recoveryBusy === runResult.collectionId}
+                        onPress={() => void retryImport(runResult.collectionId!)}>Retry import</Button>
+                      <Button variant="outline" onPress={() => void revealCollection(runResult.collectionId!)}>Show saved collection</Button>
+                    </div> : null}
+                  </div> : null}
                 </Card.Content>
                 <Card.Footer className="flex flex-wrap gap-3 p-0">
                   {selectedRef ? (
-                    <Button isDisabled={!domainDraft.trim() || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading || !!catalogError ||
-                      running || (explicitCredentials && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
+                    <Button isDisabled={(!domainDraft.trim() && !discoverDomain) || !selectedCollector?.available || !selectedCollector.collectionMethods.includes(method) || !selectedTargetAvailable || catalogLoading || !!catalogError ||
+                      running || Boolean(recoveryBusy) || (explicitCredentials && (!username.trim() || !password))} isPending={runningTargetId === selected.target.id} onPress={() => void runCollector()}>
                       {selectedCollector?.compatibility === "operator-supplied" ? "Run user-supplied collector" : "Run collector"}
                     </Button>
                   ) : null}
@@ -572,12 +747,39 @@ export function ADExplorerPage({ snapshot }: { snapshot: SliverSnapshot }): Reac
             </Card>
           )}
         </Tabs.Panel>
-        <Tabs.Panel id="collections" className="pt-6">
-          <ADCollectionsPanel onChooseTarget={() => setActiveTab("targets")} />
+        <Tabs.Panel id="collections" className="space-y-6 pt-6">
+          {savedArtifacts.length || savedArtifactsError ? <Card className="gap-4 p-6 sm:p-8">
+            <Card.Header className="p-0">
+              <Card.Title>Saved collections awaiting import</Card.Title>
+              <Card.Description>These ZIPs are saved on this workstation and can be imported without collecting again.</Card.Description>
+            </Card.Header>
+            <Card.Content className="gap-4 p-0">
+              {savedArtifactsError ? <div className="space-y-3">
+                <p role="alert" className="text-sm text-danger">{savedArtifactsError}</p>
+                <Button variant="outline" onPress={() => void refreshSavedArtifacts()}>Refresh saved collections</Button>
+              </div> : null}
+              {savedArtifacts.length ? <ul aria-label="Saved collections awaiting import" className="divide-y divide-separator">
+                {savedArtifacts.map((artifact) => <li key={artifact.collectionId} className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0">
+                  <div className="min-w-0 flex-1 basis-64">
+                    <p className="truncate text-sm font-medium">{artifact.domain}</p>
+                    <p className="text-xs text-muted">{new Date(artifact.createdAt).toLocaleString()}</p>
+                  </div>
+                  <Button variant="secondary" isDisabled={running || Boolean(recoveryBusy)} isPending={recoveryBusy === artifact.collectionId}
+                    onPress={() => void retryImport(artifact.collectionId)}>Retry import</Button>
+                  <Button variant="outline" onPress={() => void revealCollection(artifact.collectionId)}>Show saved collection</Button>
+                </li>)}
+              </ul> : null}
+            </Card.Content>
+          </Card> : null}
+          <ADCollectionsPanel key={runResult?.projectId ?? "collections"} onChooseTarget={() => setActiveTab("targets")} />
         </Tabs.Panel>
       </Tabs>
     </section>
   );
+}
+
+function isCollectionActive(progress: AdCollectorProgress): boolean {
+  return progress.phase !== "complete" && progress.phase !== "failed" && progress.phase !== "cancelled";
 }
 
 function TargetStatus({ target }: { target: TargetSummary }): React.JSX.Element {

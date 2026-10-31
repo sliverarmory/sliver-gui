@@ -1,3 +1,5 @@
+import { discoverAdTargetDomain } from "./ad-target-domain.js";
+import type { RustHoundProgress } from "./rusthound-collector.js";
 import type { RdpSocks5Proxy, RdpSocks5Session } from "../shared/rdp-contracts.js";
 import { rdpString } from "../shared/rdp-validation.js";
 import type { RdpSocksProxyLease } from "./rdp-socks-transport.js";
@@ -308,7 +310,7 @@ import { isVerifiedSharpHoundCeExecutable, isVerifiedSharpHoundCeScript, VERIFIE
 import { collectRustHound, type RustHoundMethod } from "./rusthound-collector.js";
 import { installedRustHound, isVerifiedRustHoundBuild, isWindowsAmd64, readInstalledRustHound, supportsRustHoundCurrentUser } from "./rusthound-armory.js";
 import { AD_COLLECTION_METHODS, RUSTHOUND_COLLECTION_METHODS, RUSTHOUND_ARMORY_COLLECTOR_ID,
-  parseAdDomain, type AdCollectorCatalog, type AdCollectorRunInput } from "../shared/ad-explorer-contracts.js";
+  type AdCollectorCatalog, type AdCollectorRunInput } from "../shared/ad-explorer-contracts.js";
 import {
   ExecutionArtifactStore,
   type ExecutionArtifactScope,
@@ -2582,25 +2584,14 @@ export class ConnectionRegistry {
       }
       const current = pool.targetStore.revalidateTargetRef(target, pool.epoch);
       if (!current) throw new Error("The selected target is no longer available");
-      if (current.target.mode !== "session" || current.target.os.toLowerCase() !== "windows" ||
-          current.target.liveness !== "active") return {};
-
-      let response: sliverpb.EnvInfo | undefined;
-      try { response = await pool.client.getEnvSession(current.target.id, "USERDNSDOMAIN", 30); }
-      catch { /* A domain hint is optional; do not expose target environment errors. */ }
-      assertBinding();
-      assertTargetDomainAuthoritative(pool, "session");
-      const latest = pool.targetStore.revalidateTargetRef(target, pool.epoch);
-      if (!pool.targetStore.isCurrentTargetRef(target, pool.epoch) || !latest) {
-        throw new Error("The selected target changed while reading its domain");
-      }
-      if (latest.target.mode !== "session" || latest.target.os.toLowerCase() !== "windows" ||
-          latest.target.liveness !== "active") return {};
-      if (response?.Response?.Err || !Array.isArray(response?.Variables)) return {};
-      const matches = response.Variables.filter((variable) => variable.Key === "USERDNSDOMAIN");
-      if (matches.length !== 1) return {};
-      try { return { domain: parseAdDomain(matches[0]!.Value) }; }
-      catch { return {}; }
+      const assertCurrent = (): void => {
+        assertBinding();
+        assertTargetDomainAuthoritative(pool, target.mode);
+        if (!pool.targetStore.isCurrentTargetRef(target, pool.epoch) || !pool.targetStore.revalidateTargetRef(target, pool.epoch)) {
+          throw new Error("The selected target changed while reading its domain");
+        }
+      };
+      return discoverAdTargetDomain(pool.client, current.target, assertCurrent);
     });
   }
 
@@ -2700,7 +2691,7 @@ export class ConnectionRegistry {
 
   /** Main-only collection result. The absolute saved path is consumed by Beagle
    * in main and is never returned to the renderer bridge. */
-  async runAdCollector(contentsId: number, input: AdCollectorRunInput, nativeFilePath?: string): Promise<OperationResult<{ path: string; domain: string; collectorId: string; targetId: string }>> {
+  async runAdCollector(contentsId: number, input: AdCollectorRunInput, nativeFilePath?: string, controls?: { signal?: AbortSignal; onProgress?: (progress: RustHoundProgress) => void; onCancelled?: () => void }): Promise<OperationResult<{ path: string; domain: string; collectorId: string; targetId: string }>> {
     const admissionId = `${input.target.backendEpoch}:${input.target.mode}:${input.target.id}`;
     if (this.adCollectorAdmissions.has(admissionId)) return { ok: false, error: "A collection is already running on this target" };
     this.adCollectorAdmissions.add(admissionId);
@@ -2735,18 +2726,24 @@ export class ConnectionRegistry {
                 throw new Error("The selected target changed during AD collection");
               }
             };
-            const path = await collectRustHound({
+            const collected = await collectRustHound({
               client: pool.client, target: current.target, dll,
-              domain: input.domain, method: input.collectionMethod as RustHoundMethod,
+              ...(input.domain ? { domain: input.domain } : {}), method: input.collectionMethod as RustHoundMethod,
+              ...(controls?.signal ? { signal: controls.signal } : {}),
+              ...(controls?.onProgress ? { onProgress: controls.onProgress } : {}),
               ...(input.ldapFqdn ? { ldapFqdn: input.ldapFqdn } : {}),
               ...(input.ldaps ? { ldaps: true } : {}),
               ...(input.credentials ? { credentials: input.credentials } : {}),
               collectionRoot: join(this.clientRootDirectory, "gui", "ad-explorer", "collections"),
               assertCurrent,
             });
-            return { path, domain: input.domain, collectorId: input.collectorId, targetId: input.target.id };
+            return { ...collected, collectorId: input.collectorId, targetId: input.target.id };
+          } catch (error) {
+            if (error instanceof Error && error.name === "AbortError") controls?.onCancelled?.();
+            throw error;
           } finally { dll.fill(0); }
         }
+        if (!input.domain) throw new Error("Enter an AD DNS domain for SharpHound");
         assertExecutionOperationSupported("execution.assembly", current.target);
         if (!AD_COLLECTION_METHODS.includes(input.collectionMethod as (typeof AD_COLLECTION_METHODS)[number])) {
           throw new Error("Choose a supported SharpHound collection method");

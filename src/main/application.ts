@@ -1,3 +1,5 @@
+import type { AdCollectorLifecycle } from "./ad-explorer-ipc.js";
+import { AdCollectionStore } from "./ad-collection-store.js";
 import { GhosttyConfigStore } from "./ghostty-config.js";
 import { registerGhosttySettingsIpc } from "./ghostty-settings-ipc.js";
 import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
@@ -452,6 +454,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let cloudDeploymentMenuRefreshSequence = 0;
   let unsubscribeCloudDeployment: (() => void) | undefined;
   let cloudDeploymentDisposed = false;
+  let adCollectorLifecycle: AdCollectorLifecycle | undefined;
   const shutdown = new ApplicationShutdownCoordinator({
     stopReleaseDownloads: () => {
       releaseDownloader?.stop();
@@ -741,6 +744,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         });
       });
     }
+    let closingAfterCollection = false;
+    window.on("close", (event) => {
+      if (nativeWindowSurfaces.get(window) !== "workspace" || !adCollectorLifecycle?.hasActive(contentsId)) return;
+      event.preventDefault();
+      if (closingAfterCollection) return;
+      closingAfterCollection = true;
+      const cleanup = adCollectorLifecycle.cancelAndWait(contentsId).finally(() => {
+        closingAfterCollection = false;
+        if (isQuitRequested) app.quit();
+        else if (!window.isDestroyed()) window.close();
+      });
+      trackPendingCleanup(cleanup);
+    });
     window.on("closed", () => {
       shortcutRecordingWindows.delete(window);
       windows.delete(window);
@@ -870,8 +886,14 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   }
 
   function publishArmoryChanged(): void {
-    if (shutdown.isStopping || !armoryWindow || armoryWindow.isDestroyed() || armoryWindow.webContents.isDestroyed()) return;
-    try { armoryWindow.webContents.send(ARMORY_IPC_EVENTS.changed); } catch { /* Closing renderer. */ }
+    if (shutdown.isStopping) return;
+    if (armoryWindow && !armoryWindow.isDestroyed() && !armoryWindow.webContents.isDestroyed()) {
+      try { armoryWindow.webContents.send(ARMORY_IPC_EVENTS.changed); } catch { /* Closing renderer. */ }
+    }
+    for (const window of windowsByContentsId.values()) {
+      if (nativeWindowSurfaces.get(window) !== "workspace" || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try { window.webContents.send(IPC.adCollectorsChanged); } catch { /* Closing renderer. */ }
+    }
   }
 
   async function openArmoryWindow(tab: ArmoryTabId): Promise<void> {
@@ -3344,8 +3366,10 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     !shutdown.isStopping && beagleWorkspaces.has(window) && nativeWindowSurfaces.get(window) === "beagle" &&
     sameWindowIdentity(identity, identityForWindow(window)),
   );
-  registerAdExplorerIpcHandlers({
+  adCollectorLifecycle = registerAdExplorerIpcHandlers({
     registry,
+    artifacts: new AdCollectionStore(join(consoleClientRootDirectory, "gui", "ad-explorer", "collections")),
+    revealCollectedFile: (path) => shell.showItemInFolder(path),
     listCollections: () => beagleService.listCollections(),
     importCollectedData: async (input) => {
       try {
@@ -3448,6 +3472,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       await rdpWindows.openFiles(paths);
     },
     async stop(): Promise<void> {
+      await adCollectorLifecycle?.cancelAndWait();
       captureWorkspaceZoom(BrowserWindow.getFocusedWindow());
       beginShutdown();
       // A real application quit keeps the updater subscription alive through

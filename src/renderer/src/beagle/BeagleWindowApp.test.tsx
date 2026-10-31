@@ -30,6 +30,12 @@ function graphResult(projectId = projectA): BeagleQueryResult {
   return { projectId, columns: ["p"], rows: [{ p: "one path" }], elapsedMs: 8, totalRows: 1, truncated: false,
     limits: { rows: 5_000, nodes: 1_500, edges: 3_000 }, graph: { nodes: [userNode, groupNode], edges: [{ id: "edge-1", source: userNode.objectid, target: groupNode.objectid, kind: "MemberOf", properties: {}, derived: null }] } };
 }
+function markImported(): void {
+  currentState = { ...currentState, projectData: { version: 1, historyLimit: 50, history: [{
+    id: "33333333-3333-4333-8333-333333333333", at: "2026-10-24T00:00:00Z", operation: "merge", status: "complete",
+    files: [{ name: "collection.zip", sha256: "0".repeat(64), bytes: 100 }], warnings: [], warningCount: 0, retainedFields: 0, coverage: {}, collectors: [],
+  }] } };
+}
 function scalarResult(value = 42, projectId = projectA): BeagleQueryResult {
   return { ...graphResult(projectId), columns: ["count"], rows: [{ count: value }], graph: { nodes: [], edges: [] } };
 }
@@ -125,10 +131,123 @@ describe("BeagleWindowApp", () => {
     await mount();
     currentState = { ...currentState, selectedProjectId: projectB,
       stats: { ...currentState.stats!, nodes: 321 } };
+    api.query.mockResolvedValue({ ok: true, value: graphResult(projectB) });
     act(() => collectionImported?.());
     await waitFor(() => expect(api.getState).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
     expect(screen.getByLabelText("Project summary")).toHaveTextContent("321 objects");
+  });
+
+  it("automatically opens a bounded populated graph for a newly imported project", async () => {
+    markImported();
+    currentState = { ...currentState, stats: { nodes: 100, edges: 250, labels: { User: 50 }, relationships: { MemberOf: 250 } } };
+    await mount();
+    expect(await screen.findByLabelText("Active Directory graph")).toBeVisible();
+    expect(api.query).toHaveBeenCalledExactlyOnceWith({ cypher: "MATCH p=(a)-[r]->(b) RETURN p LIMIT 40" });
+    expect(screen.getByRole("tab", { name: "Graph" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(workspaces.get(projectA)?.history.entries[0]?.title).toBe("Directory overview"));
+  });
+
+  it("discards a collection refresh started before the operator switches projects", async () => {
+    await mount();
+    const previousState = currentState;
+    let resolveRefresh!: (value: OperationResult<BeagleState>) => void;
+    api.getState.mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+    act(() => collectionImported?.());
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    await act(async () => resolveRefresh({ ok: true, value: previousState }));
+    expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB);
+    expect(api.query).not.toHaveBeenCalled();
+    expect(screen.queryByText("Collected AD data imported and analyzed.")).not.toBeInTheDocument();
+  });
+
+  it("keeps the latest collection state when refresh responses arrive out of order", async () => {
+    await mount();
+    const previousState = currentState;
+    let resolveRefresh!: (value: OperationResult<BeagleState>) => void;
+    api.getState.mockReturnValueOnce(new Promise((resolve) => { resolveRefresh = resolve; }));
+    act(() => collectionImported?.());
+    currentState = { ...currentState, stats: { ...currentState.stats!, nodes: 321 } };
+    act(() => collectionImported?.());
+    await waitFor(() => expect(screen.getByLabelText("Project summary")).toHaveTextContent("321 objects"));
+    await act(async () => resolveRefresh({ ok: true, value: previousState }));
+    expect(screen.getByLabelText("Project summary")).toHaveTextContent("321 objects");
+  });
+
+  it("falls back to a bounded object graph when the imported dataset has no relationships", async () => {
+    markImported();
+    currentState = { ...currentState, stats: { nodes: 1, edges: 0, labels: { User: 1 }, relationships: {} } };
+    api.query.mockResolvedValueOnce({ ok: true, value: { ...graphResult(), graph: { nodes: [], edges: [] }, rows: [], totalRows: 0 } });
+    api.query.mockResolvedValueOnce({ ok: true, value: { ...graphResult(), graph: { nodes: [userNode], edges: [] } } });
+    await mount();
+    expect(await screen.findByRole("button", { name: `Graph ${userNode.properties["name"]}` })).toBeVisible();
+    expect(api.query).toHaveBeenNthCalledWith(2, { cypher: "MATCH (n) RETURN n LIMIT 40" });
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (n) RETURN n LIMIT 40");
+  });
+
+  it("refreshes an already open overview automatically after a new collection", async () => {
+    markImported();
+    currentState = { ...currentState, stats: { nodes: 100, edges: 250, labels: {}, relationships: {} } };
+    await mount();
+    await screen.findByLabelText("Active Directory graph");
+    await waitFor(() => expect(api.query).toHaveBeenCalledTimes(1));
+    const newNode = { ...userNode, objectid: "new-user", properties: { name: "NEW@NORTH.EXAMPLE" } };
+    api.query.mockResolvedValueOnce({ ok: true, value: { ...graphResult(), graph: { nodes: [newNode], edges: [] } } });
+    currentState = { ...currentState, stats: { ...currentState.stats!, nodes: 101 } };
+    act(() => collectionImported?.());
+    expect(await screen.findByRole("button", { name: "Graph NEW@NORTH.EXAMPLE" })).toBeVisible();
+    expect(api.query).toHaveBeenCalledTimes(2);
+    expect(screen.getByLabelText("Project summary")).toHaveTextContent("101 objects");
+  });
+
+  it("preserves an active custom investigation and editor draft when collection finishes", async () => {
+    await mount();
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "MATCH (u:User) RETURN u LIMIT 5" } });
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await screen.findByLabelText("Active Directory graph");
+    fireEvent.change(screen.getByLabelText("Cypher query"), { target: { value: "RETURN 123" } });
+    currentState = { ...currentState, stats: { nodes: 200, edges: 300, labels: {}, relationships: {} } };
+    act(() => collectionImported?.());
+    await waitFor(() => expect(screen.getByLabelText("Project summary")).toHaveTextContent("200 objects"));
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("RETURN 123");
+    expect(screen.getByLabelText("Active Directory graph")).toBeVisible();
+    expect(api.query).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Your investigation is preserved/)).toBeVisible();
+  });
+
+  it("preserves a saved query named Directory overview", async () => {
+    api.getQueries.mockResolvedValue({ ok: true, value: [{ id: "named-overview", name: "Directory overview",
+      description: "A saved user investigation.", category: "Active Directory", cypher: "MATCH (u:User) RETURN u LIMIT 5", parameters: [] }] });
+    await mount();
+    await userEvent.click(screen.getByRole("tab", { name: "Queries" }));
+    await userEvent.click(screen.getByRole("button", { name: "Load query Directory overview" }));
+    await userEvent.click(screen.getByRole("button", { name: "Run query" }));
+    await screen.findByLabelText("Active Directory graph");
+    currentState = { ...currentState, stats: { ...currentState.stats!, nodes: 200 } };
+    act(() => collectionImported?.());
+    await waitFor(() => expect(screen.getByLabelText("Project summary")).toHaveTextContent("200 objects"));
+    expect(screen.getByLabelText("Cypher query")).toHaveValue("MATCH (u:User) RETURN u LIMIT 5");
+    expect(api.runSavedQuery).toHaveBeenCalledExactlyOnceWith({ id: "named-overview", parameters: {} });
+    expect(api.query).not.toHaveBeenCalled();
+    expect(screen.getByText(/Your investigation is preserved/)).toBeVisible();
+  });
+
+  it("discards an automatic overview after a project switch", async () => {
+    markImported();
+    let resolveOverview!: (value: OperationResult<BeagleQueryResult>) => void;
+    api.query.mockReturnValueOnce(new Promise((resolve) => { resolveOverview = resolve; }));
+    await mount();
+    await waitFor(() => expect(api.query).toHaveBeenCalledTimes(1));
+    api.selectProject.mockImplementationOnce(async ({ id }) => {
+      const { projectData: _projectData, ...previous } = currentState;
+      currentState = { ...previous, selectedProjectId: id };
+      return { ok: true, value: currentState };
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "Project" }), { target: { value: projectB } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Project" })).toHaveValue(projectB));
+    await act(async () => resolveOverview({ ok: true, value: graphResult() }));
+    expect(screen.queryByLabelText("Active Directory graph")).not.toBeInTheDocument();
   });
 
   it("runs real bridge queries with JSON parameters and renders scalar rows", async () => {

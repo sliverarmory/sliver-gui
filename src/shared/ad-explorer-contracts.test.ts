@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseAdCollectorRunInput, parseAdExplorerOpenInput, RUSTHOUND_ARMORY_COLLECTOR_ID } from "./ad-explorer-contracts.js";
+import { parseAdCollectorRunInput, parseAdCollectorProgress, parseAdExplorerOpenInput, RUSTHOUND_ARMORY_COLLECTOR_ID } from "./ad-explorer-contracts.js";
 
 const request = {
   target: { mode: "beacon", id: "beacon-1", backendEpoch: 1, domainRevision: 2, fingerprint: "a".repeat(64) },
@@ -59,4 +59,23 @@ describe("AD collector input", () => {
     expect(() => parseAdCollectorRunInput({ ...rust, collectionMethod: "Session" })).toThrow(/method/u);
     expect(() => parseAdCollectorRunInput({ ...request, credentials: rust.credentials })).toThrow(/does not accept/u);
   });
+});
+
+
+it("allows automatic domain discovery only for current-user RustHound", () => {
+  const input = { target: request.target, collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID, collectionMethod: "LdapOnly" };
+  expect(parseAdCollectorRunInput(input)).not.toHaveProperty("domain");
+  expect(parseAdCollectorRunInput({ ...input, domain: "" })).not.toHaveProperty("domain");
+  expect(() => parseAdCollectorRunInput({ ...input, credentials: { username: "user", password: "secret" } })).toThrow(/domain/u);
+  expect(() => parseAdCollectorRunInput({ ...request, domain: undefined })).toThrow(/domain/u);
+});
+it("validates bounded progress and rejects paths, secrets, forged IDs and invalid counters", () => {
+  const value = { runId: "11111111-1111-4111-8111-111111111111", targetId: "target-1", phase: "transferring", message: "Transferring collection ZIP", transferredBytes: 20, totalBytes: 100, cancellable: true };
+  expect(parseAdCollectorProgress(value)).toEqual(value);
+  for (const invalid of [{ ...value, runId: "../file" }, { ...value, transferredBytes: 101 }, { ...value, transferredBytes: -1 },
+    { ...value, path: "/private/file.zip" }, { ...value, credentials: { password: "secret" } }, { ...value, totalBytes: 2**40 },
+    { ...value, result: { state: "saved", collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID, targetId: "other", domain: "example.local", message: "Saved" } },
+    { ...value, result: { state: ["imported"], collectorId: RUSTHOUND_ARMORY_COLLECTOR_ID, targetId: value.targetId, domain: "example.local", message: "Imported" } }]) {
+    expect(() => parseAdCollectorProgress(invalid)).toThrow();
+  }
 });
