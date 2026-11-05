@@ -2,7 +2,7 @@
 
 import { execFile } from "node:child_process";
 import { X509Certificate } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -340,8 +340,10 @@ function Remove-Item {
 `;
 
   async function powershellFixture() {
-    const root = await mkdtemp(join(tmpdir(), "updater-pwsh-"));
-    roots.push(root);
+    const temporaryRoot = await mkdtemp(join(tmpdir(), "updater-pwsh-"));
+    roots.push(temporaryRoot);
+    // PowerShell expands Windows short-path aliases when resolving fixture files.
+    const root = await realpath(temporaryRoot);
     const log = join(root, "calls.jsonl");
     const environment = join(root, "environment");
     await writeFile(environment, "");
