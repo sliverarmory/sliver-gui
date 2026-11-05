@@ -72,6 +72,74 @@ describe("packaged mTLS cleanup", () => {
     expect(steps).toEqual(["application", "fixture", "directory", "detach"]);
   });
 
+  it("waits for delayed Windows inspector close after the owned process has exited", async () => {
+    vi.useFakeTimers();
+    let finishClose!: () => void;
+    const close = vi.fn(() => new Promise<void>((resolve) => { finishClose = resolve; }));
+    const kill = vi.fn(() => true);
+    const destroy = vi.fn();
+    const closeFixture = vi.fn(async () => undefined);
+    const removeTemporaryRoot = vi.fn(async () => undefined);
+    const detachAbortListener = vi.fn();
+    const cleanup = createPackagedMtlsCleanup({
+      application: () => ({
+        close,
+        process: () => ({ exitCode: 0, signalCode: null, stdio: [{ destroy }], kill }),
+      }),
+      closeFixture, removeTemporaryRoot, detachAbortListener,
+    }, "win32");
+    let completed = false;
+    const operation = cleanup().then(() => { completed = true; });
+
+    // CI observed process exit before the browser inspector finished closing at 12.5s.
+    await vi.advanceTimersByTimeAsync(12_500);
+    expect(destroy).toHaveBeenCalledOnce();
+    expect(kill).not.toHaveBeenCalled();
+    expect(completed).toBe(false);
+    expect(closeFixture).not.toHaveBeenCalled();
+    finishClose();
+    await operation;
+
+    expect(close).toHaveBeenCalledOnce();
+    expect(closeFixture).toHaveBeenCalledOnce();
+    expect(removeTemporaryRoot).toHaveBeenCalledOnce();
+    expect(detachAbortListener).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([false, true])("bounds a stuck Windows transport and drains cleanup (process exited: %s)", async (exited) => {
+    vi.useFakeTimers();
+    const kill = vi.fn(() => false);
+    const destroy = vi.fn();
+    const closeFixture = vi.fn(async () => undefined);
+    const removeTemporaryRoot = vi.fn(async () => undefined);
+    const detachAbortListener = vi.fn();
+    const cleanup = createPackagedMtlsCleanup({
+      application: () => ({
+        close: () => new Promise<void>(() => undefined),
+        process: () => ({ exitCode: exited ? 0 : null, signalCode: null, stdio: [{ destroy }], kill }),
+      }),
+      closeFixture, removeTemporaryRoot, detachAbortListener,
+    }, "win32");
+    const assertion = expect(cleanup()).rejects.toMatchObject({
+      errors: [expect.objectContaining({
+        message: `packaged mTLS application cleanup failed: timed out after the transport fallback${exited ? "" : "; owned process kill returned false"}`,
+      })],
+    });
+
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(closeFixture).not.toHaveBeenCalled();
+    expect(destroy).toHaveBeenCalledOnce();
+    if (exited) expect(kill).not.toHaveBeenCalled();
+    else expect(kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+    expect(closeFixture).toHaveBeenCalledOnce();
+    expect(removeTemporaryRoot).toHaveBeenCalledOnce();
+    expect(detachAbortListener).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("attempts remaining cleanup and detaches after application and fixture failures", async () => {
     const closeFixture = vi.fn(async () => { throw new Error("fixture failed"); });
     const removeTemporaryRoot = vi.fn(async () => undefined);

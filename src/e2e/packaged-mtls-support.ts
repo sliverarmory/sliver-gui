@@ -51,7 +51,10 @@ export function createPackagedMtlsCleanup(resources: {
   closeFixture(): Promise<void>;
   removeTemporaryRoot(): Promise<void>;
   detachAbortListener(): void;
-}): () => Promise<void> {
+}, platform: NodeJS.Platform = process.platform): () => Promise<void> {
+  // Windows can retain the browser inspector socket after the shell process exits.
+  // Allow both bounded phases to finish while still requiring Playwright close to settle.
+  const applicationCleanupTimeoutMs = platform === "win32" ? 10_000 : 5_000;
   let cleanupPromise: Promise<void> | undefined;
   return () => {
     cleanupPromise ??= (async () => {
@@ -59,7 +62,7 @@ export function createPackagedMtlsCleanup(resources: {
       try {
         const application = resources.application();
         if (application) {
-          await cleanupOwnedApplication(application, "packaged mTLS", 5_000).catch((error) => failures.push(error));
+          await cleanupOwnedApplication(application, "packaged mTLS", applicationCleanupTimeoutMs).catch((error) => failures.push(error));
         }
         await resources.closeFixture().catch((error) => failures.push(error));
         await resources.removeTemporaryRoot().catch((error) => failures.push(error));

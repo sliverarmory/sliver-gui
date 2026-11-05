@@ -46,7 +46,7 @@ test("packaged production app completes current mTLS read and mutation flows", {
     removeTemporaryRoot: () => rm(temporaryRoot, { recursive: true, force: true }),
     detachAbortListener: () => detachAbortListener(),
   });
-  context.after(cleanupResources, { timeout: 20_000 });
+  context.after(cleanupResources, { timeout: process.platform === "win32" ? 30_000 : 20_000 });
   const diagnosticRedactions = [
     PACKAGED_FIXTURE_TOKEN,
     PACKAGED_FIXTURE_EVENT_SECRET,
