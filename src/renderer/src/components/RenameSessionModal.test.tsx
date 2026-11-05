@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { SessionSummary, TargetCapabilityState } from "../../../shared/target-contracts";
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
@@ -12,20 +14,12 @@ vi.mock("@heroui/react", async (importOriginal) => {
   return { ...original, toast: { ...original.toast, success: toastSuccess } };
 });
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
-});
+useRendererTestEnvironment();
 
 beforeEach(() => toastSuccess.mockClear());
-afterEach(() => cleanup());
-afterAll(() => {
+afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
 });
 
 const session: SessionSummary = {
@@ -62,12 +56,6 @@ const operation: TargetOperationRecord = {
   updatedAt: "2026-09-16T20:00:00.000Z",
 };
 type SubmitResult = Awaited<ReturnType<SliverDesktopAPI["submitTargetOperation"]>>;
-
-function deferred(): { promise: Promise<SubmitResult>; resolve: (value: SubmitResult) => void } {
-  let resolve!: (value: SubmitResult) => void;
-  const promise = new Promise<SubmitResult>((complete) => { resolve = complete; });
-  return { promise, resolve };
-}
 
 function setup(submitTargetOperation = vi.fn<SliverDesktopAPI["submitTargetOperation"]>()) {
   vi.stubGlobal("sliver", { submitTargetOperation });
@@ -108,7 +96,7 @@ describe("RenameSessionModal", () => {
 
   it("blocks duplicate submissions and dismissal while pending, and retains the draft after rejection", async () => {
     const user = userEvent.setup();
-    const gate = deferred();
+    const gate = deferred<SubmitResult>();
     const submitTargetOperation = vi.fn<SliverDesktopAPI["submitTargetOperation"]>().mockReturnValue(gate.promise);
     const { onClose, onSubmitted } = setup(submitTargetOperation);
     const input = screen.getByRole("textbox", { name: "Session name" });
@@ -155,7 +143,7 @@ describe("RenameSessionModal", () => {
   });
 
   it.each(["unmount", "identity change"])("ignores a late response after %s", async (change) => {
-    const gate = deferred();
+    const gate = deferred<SubmitResult>();
     const { props, rerender, unmount, onSubmitted, onClose } = setup(vi.fn().mockReturnValue(gate.promise));
     const input = screen.getByRole("textbox", { name: "Session name" });
     fireEvent.change(input, { target: { value: "payments-new" } });

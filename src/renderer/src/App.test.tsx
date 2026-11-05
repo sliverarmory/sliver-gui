@@ -4,6 +4,8 @@ import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../tests/renderer-test-helpers";
+
 import { disconnectedSnapshot, SLIVER_PROTOCOL_BASELINE_COMMIT, SLIVER_PROTOCOL_COMPATIBILITY } from "../../shared/contracts";
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
@@ -50,16 +52,6 @@ afterAll(() => {
 afterEach(() => {
   cleanup();
 });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
 
 function lootCountResult(total: number) {
   return {

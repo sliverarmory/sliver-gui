@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "@heroui/react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import type { BofCatalog, BofDirectorySelection, BofExecutionRecord } from "../../../shared/bof-contracts";
 import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
@@ -15,26 +17,11 @@ vi.mock("../components/ExecutionOutputTerminal", () => ({
   ),
 }));
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
-  Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
-  Object.defineProperty(Element.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
-  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
-});
+useRendererTestEnvironment({ pointerCapture: true });
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   Reflect.deleteProperty(window, "sliver");
   Reflect.deleteProperty(navigator, "clipboard");
 });
@@ -149,12 +136,6 @@ function installApi(initialRows: BofExecutionRecord[] = []) {
 
 function renderView(): void {
   render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 async function chooseBof(
@@ -637,6 +618,7 @@ describe("BOF execution view", () => {
   });
 
   it("automatically refreshes a selected submitted BOF and stops polling after completion", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const pending: BofExecutionRecord = {
       id: "beacon-run-1", startedAt: "2026-09-25T11:00:00.000Z",
       commandId: "sa-dir/sa-dir", commandName: "sa-dir", state: "submitted", taskId: "task-1",
@@ -653,36 +635,35 @@ describe("BOF execution view", () => {
         value: { ...completed, stdout: { ...completed.stdout!, data: Uint8Array.from(completed.stdout!.data) } },
       };
     });
-    renderView();
-    expect(await screen.findByRole("button", { name: "Refresh result" })).toBeInTheDocument();
-    await waitFor(() => expect(api.getBofExecutionResult).toHaveBeenCalledWith({ id: pending.id }), { timeout: 6_000 });
-    expect(await screen.findByLabelText("Execution output transcript")).toHaveTextContent("beacon BOF completed");
-    const callsAfterCompletion = api.getBofExecutionResult.mock.calls.length;
+    await act(async () => { renderView(); });
+    expect(screen.getByRole("button", { name: "Refresh result" })).toBeInTheDocument();
+    expect(api.getBofExecutionResult).not.toHaveBeenCalled();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(api.getBofExecutionResult).toHaveBeenCalledExactlyOnceWith({ id: pending.id });
+    expect(screen.getByLabelText("Execution output transcript")).toHaveTextContent("beacon BOF completed");
     expect(screen.queryByRole("button", { name: "Refresh result" })).not.toBeInTheDocument();
-    expect(callsAfterCompletion).toBe(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getBofExecutionResult).toHaveBeenCalledTimes(1);
   });
 
-  it("cancels a submitted BOF polling timer when its view unmounts", async () => {
+  it("does not poll a submitted BOF after its view unmounts", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const pending: BofExecutionRecord = {
       id: "beacon-run-2", startedAt: "2026-09-25T11:00:00.000Z",
       commandId: "sa-dir/sa-dir", commandName: "sa-dir", state: "submitted", taskId: "task-2",
     };
     const { api } = installApi([pending]);
-    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
-    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
-    try {
-      const view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
-      expect(await screen.findByRole("button", { name: "Refresh result" })).toBeInTheDocument();
-      const pollingTimer = setTimeoutSpy.mock.results.find((result, index) =>
-        setTimeoutSpy.mock.calls[index]?.[1] === 3_000 && result.type === "return")?.value;
-      expect(pollingTimer).toBeDefined();
-      view.unmount();
-      expect(clearTimeoutSpy).toHaveBeenCalledWith(pollingTimer);
-      expect(api.getBofExecutionResult).not.toHaveBeenCalled();
-    } finally {
-      setTimeoutSpy.mockRestore();
-      clearTimeoutSpy.mockRestore();
-    }
+    let view!: ApplicationContextMenuTestRender;
+    await act(async () => {
+      view = render(<BofExecutionView isRefreshing={false} target={target} targetRef={targetRef} />);
+    });
+    expect(screen.getByRole("button", { name: "Refresh result" })).toBeInTheDocument();
+    view.unmount();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(api.getBofExecutionResult).not.toHaveBeenCalled();
   });
 
   it("replaces high-revision target history with a lower-revision new target without exposing old output", async () => {

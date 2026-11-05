@@ -76,43 +76,46 @@ let externalDirectory: string;
 let managedDirectory: string;
 const registries: ConnectionRegistry[] = [];
 
-beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), "sliver-gui-registry-fake-"));
-  externalDirectory = join(root, "external");
-  managedDirectory = join(root, "managed");
-  await mkdir(externalDirectory);
-  await writeFile(join(externalDirectory, "operator.cfg"), validConfig(), { mode: 0o600 });
-  electronMocks.fromWebContents.mockReset();
-  electronMocks.fromWebContents.mockReturnValue({ isDestroyed: () => false });
-  electronMocks.fromId.mockReset();
-  electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: vi.fn() });
-  electronMocks.showOpenDialog.mockReset();
-  electronMocks.showSaveDialog.mockReset();
-  electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
-  electronMocks.showMessageBox.mockReset();
-  electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
-  electronMocks.clipboardText = "";
-  electronMocks.clipboardReadText.mockReset();
-  electronMocks.clipboardReadText.mockImplementation(async () => electronMocks.clipboardText);
-  electronMocks.clipboardWriteText.mockReset();
-  electronMocks.clipboardWriteText.mockImplementation(async (value: string) => { electronMocks.clipboardText = value; });
-  electronMocks.clipboardClear.mockReset();
-  electronMocks.clipboardClear.mockImplementation(() => { electronMocks.clipboardText = ""; });
-  terminalRuntimeMocks.loadTerminalRuntime.mockReset();
-  terminalRuntimeMocks.loadTerminalRuntime.mockResolvedValue(terminalRuntimeAsset());
-});
+function setupRegistryFixtures(): void {
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "sliver-gui-registry-fake-"));
+    externalDirectory = join(root, "external");
+    managedDirectory = join(root, "managed");
+    await mkdir(externalDirectory);
+    await writeFile(join(externalDirectory, "operator.cfg"), validConfig(), { mode: 0o600 });
+    electronMocks.fromWebContents.mockReset();
+    electronMocks.fromWebContents.mockReturnValue({ isDestroyed: () => false });
+    electronMocks.fromId.mockReset();
+    electronMocks.fromId.mockReturnValue({ isDestroyed: () => false, send: vi.fn() });
+    electronMocks.showOpenDialog.mockReset();
+    electronMocks.showSaveDialog.mockReset();
+    electronMocks.showSaveDialog.mockResolvedValue({ canceled: true });
+    electronMocks.showMessageBox.mockReset();
+    electronMocks.showMessageBox.mockResolvedValue({ response: 0 });
+    electronMocks.clipboardText = "";
+    electronMocks.clipboardReadText.mockReset();
+    electronMocks.clipboardReadText.mockImplementation(async () => electronMocks.clipboardText);
+    electronMocks.clipboardWriteText.mockReset();
+    electronMocks.clipboardWriteText.mockImplementation(async (value: string) => { electronMocks.clipboardText = value; });
+    electronMocks.clipboardClear.mockReset();
+    electronMocks.clipboardClear.mockImplementation(() => { electronMocks.clipboardText = ""; });
+    terminalRuntimeMocks.loadTerminalRuntime.mockReset();
+    terminalRuntimeMocks.loadTerminalRuntime.mockResolvedValue(terminalRuntimeAsset());
+  });
 
-afterEach(async () => {
-  vi.useRealTimers();
-  for (const registry of registries.splice(0)) {
-    await registry.unregisterWindow(1);
-    await registry.unregisterWindow(2);
-    await registry.unregisterWindow(3);
-  }
-  await rm(root, { recursive: true, force: true });
-});
+  afterEach(async () => {
+    vi.useRealTimers();
+    for (const registry of registries.splice(0)) {
+      await registry.unregisterWindow(1);
+      await registry.unregisterWindow(2);
+      await registry.unregisterWindow(3);
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+}
 
 describe("RDP managed SOCKS inventory", () => {
+  setupRegistryFixtures();
   async function setupSessionChoices() {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("rdp-pivot", "Pivot name")];
@@ -319,6 +322,7 @@ describe("RDP managed SOCKS inventory", () => {
 });
 
 describe("temporary RDP forwarding", () => {
+  setupRegistryFixtures();
   function forwarding(client: FakeSliverClient) {
     const state: LocalForwardState = { status: "listening", activeConnections: 0, totalConnections: 0, bytesToTarget: 0, bytesFromTarget: 0 };
     const close = vi.fn(async () => undefined);
@@ -407,6 +411,7 @@ describe("temporary RDP forwarding", () => {
 });
 
 describe("BOF execution records", () => {
+  setupRegistryFixtures();
   async function writeLocalBof(directory: string): Promise<{ manifestPath: string; objectPath: string; manifest: Record<string, unknown> }> {
     await mkdir(join(directory, "dist"), { recursive: true });
     const objectPath = join(directory, "dist", "probe.o");
@@ -1076,6 +1081,7 @@ describe("BOF execution records", () => {
 });
 
 describe(".NET assembly execution sources", () => {
+  setupRegistryFixtures();
   function draft(args: string[] = ["first", "two words", "--count=3"]): ExecuteAssemblyDraft {
     return {
       operationId: "execution.assembly",
@@ -1403,6 +1409,7 @@ describe(".NET assembly execution sources", () => {
 });
 
 describe("passive infrastructure service inventory", () => {
+  setupRegistryFixtures();
   function services(client: FakeSliverClient) {
     const getExternalBuilders = vi.fn().mockResolvedValue(clientpb.Builders.create({ Builders: [
       { Name: "linux-builder", GOOS: "linux", GOARCH: "amd64", OperatorName: "builder-operator", Templates: ["excluded-template"] },
@@ -1525,6 +1532,7 @@ describe("passive infrastructure service inventory", () => {
 });
 
 describe("passive pivot topology inventory", () => {
+  setupRegistryFixtures();
   function graph(childPeer = "3"): clientpb.PivotGraph {
     return clientpb.PivotGraph.create({ Children: [{
       PeerID: "1", Name: "parent", Session: { ID: "session-parent", Name: "parent" },
@@ -1670,6 +1678,7 @@ describe("passive pivot topology inventory", () => {
 });
 
 describe("managed server connection metadata", () => {
+  setupRegistryFixtures();
   const managedServer: ManagedServerReference = {
     deploymentId: "6f0a80ed-bdd5-4ec0-aa53-7ecca9df0010",
     provider: "aws",
@@ -1975,6 +1984,7 @@ describe("managed server connection metadata", () => {
 });
 
 describe("connection registry with an injected Sliver client", () => {
+  setupRegistryFixtures();
   it("manages hosted websites without leaking content into inventory and uses distinct content and MIME RPCs", async () => {
     const client = new FakeSliverClient();
     const web = attachWebsiteBackend(client);
@@ -8618,6 +8628,7 @@ describe("connection registry with an injected Sliver client", () => {
 });
 
 describe("M3 session shell registry boundary", () => {
+  setupRegistryFixtures();
   it("binds a prepared shell to the exact window and renderer document while preserving early output", async () => {
     const client = new FakeSliverClient();
     client.sessionState.Sessions = [session("session_m3", "m3-interactive")];

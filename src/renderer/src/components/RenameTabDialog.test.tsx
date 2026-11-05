@@ -1,7 +1,9 @@
 import { useState } from "react";
 import { cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import {
   RenameTabDialog,
@@ -9,22 +11,7 @@ import {
   normalizeTerminalTabName,
 } from "./RenameTabDialog";
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe(): void {}
-    unobserve(): void {}
-    disconnect(): void {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", {
-    configurable: true,
-    value: () => [],
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-});
+useRendererTestEnvironment();
 
 afterEach(() => cleanup());
 

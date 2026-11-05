@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
 import type { ApplicationContextMenuItem } from "../../../shared/application-context-menu-contracts";
 import type { TextEditorDocument } from "../../../shared/text-editor-contracts";
@@ -471,12 +473,6 @@ function nativeOverlayItems(): readonly ApplicationContextMenuItem[] {
       kind: "inspect", label: "Inspect Element", enabled: true,
     },
   ];
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 function languageTrigger(): HTMLElement {

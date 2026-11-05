@@ -14,6 +14,7 @@ import {
   E2E_AZURE_SUBSCRIPTION_ID,
 } from "./cloud-deployment-fixture.js";
 import { attachCleanupFailure, cleanupOwnedApplication } from "./packaged-application-update-support.js";
+import { waitForOverviewSettings } from "./overview-settings-support.js";
 
 const APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
 const SSH_IDENTITY_PRIVATE_KEY_MARKER = "E2E_SSH_IDENTITY_PRIVATE_KEY_DO_NOT_RENDER";
@@ -453,10 +454,7 @@ test("Overview toolbar choices survive an application restart", { timeout: 90_00
     await page.getByText("Lightning", { exact: true }).click();
     await page.getByText("Disable sidebar", { exact: true }).click();
     await page.getByRole("button", { name: "List", exact: true }).click();
-    await page.waitForFunction(async (target) => {
-      const state = await (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver.getApplicationSettings();
-      return JSON.stringify(state.overview) === JSON.stringify(target);
-    }, expected);
+    await page.evaluate(waitForOverviewSettings, { overview: expected });
     const settingsPath = join(clientRoot, "gui", "application-settings.json");
     assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")).overview, expected);
     await cleanupOwnedApplication(application, "Overview preferences restart", APPLICATION_CLEANUP_TIMEOUT_MS);

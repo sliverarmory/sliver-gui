@@ -18,6 +18,8 @@ const electronMocks = vi.hoisted(() => ({
 
 vi.mock("electron", () => ({
   contextBridge: { exposeInMainWorld: electronMocks.exposeInMainWorld },
+  webFrame: { getZoomFactor: () => 1, setZoomFactor: vi.fn() },
+  webUtils: { getPathForFile: vi.fn() },
   ipcRenderer: {
     invoke: electronMocks.invoke,
     send: electronMocks.send,
@@ -41,11 +43,14 @@ interface TestNode {
 }
 
 describe.each([
-  { name: "Armory", bridge: "armory", load: () => import("./armory.js") },
-  { name: "Network", bridge: "network", load: () => import("./network.js") },
-  { name: "Cloud Deployment", bridge: "cloudDeployment", load: () => import("./cloud-deployment.js") },
-  { name: "Text Editor", bridge: "textEditor", load: () => import("./text-editor.js") },
-])("$name context-menu preload", ({ bridge, load }) => {
+  { name: "Armory", surfaces: ["armory", "applicationContextMenu"], load: () => import("./armory.js") },
+  { name: "Network", surfaces: ["network", "applicationContextMenu"], load: () => import("./network.js") },
+  { name: "Cloud Deployment", surfaces: ["cloudDeployment", "applicationContextMenu"], load: () => import("./cloud-deployment.js") },
+  { name: "Text Editor", surfaces: ["textEditor", "applicationContextMenu"], load: () => import("./text-editor.js") },
+  { name: "Main", surfaces: ["sliver", "applicationZoom", "applicationContextMenu", "ghosttySettings"], load: () => import("./index.js") },
+  { name: "SSH", surfaces: ["ssh", "applicationContextMenu", "ghosttySettings"], load: () => import("./ssh.js") },
+  { name: "RDP", surfaces: ["rdp", "applicationContextMenu"], load: () => import("./rdp.js") },
+])("$name context-menu preload", ({ surfaces, load }) => {
   const addEventListener = vi.fn();
   const observe = vi.fn();
   let notifyMutation: ((records: readonly Record<string, unknown>[]) => void) | undefined;
@@ -59,6 +64,7 @@ describe.each([
     restrictedRoot = node("inspect-only");
     restrictedChild = node(null, restrictedRoot);
     restrictedRoot.childNodes.push(restrictedChild);
+    vi.stubGlobal("window", { addEventListener: vi.fn(), removeEventListener: vi.fn() });
     vi.stubGlobal("document", {
       addEventListener,
       querySelectorAll: () => [restrictedRoot],
@@ -80,9 +86,7 @@ describe.each([
   });
 
   it("adds only the frozen context-menu capability beside its window API", () => {
-    expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual([
-      bridge, "applicationContextMenu",
-    ]);
+    expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual(surfaces);
     const api = contextMenuApi();
     expect(Object.isFrozen(api)).toBe(true);
     expect(Object.keys(api)).toEqual(["onMenuRequested", "executeAction", "setOpen"]);
@@ -187,6 +191,16 @@ describe.each([
     const handler = registration?.[1] as (event: { isTrusted: boolean; target: unknown }) => void;
     const addedChild = node(null, restrictedRoot);
     notifyMutation?.([{ type: "childList", target: restrictedRoot, addedNodes: [addedChild] }]);
+    // A policy introduced after preload initialization must also stick to descendants.
+    const dynamicRoot = node("inspect-only");
+    const dynamicChild = node(null, dynamicRoot);
+    dynamicRoot.childNodes.push(dynamicChild);
+    notifyMutation?.([{
+      type: "attributes", target: dynamicRoot, attributeName: policyAttribute,
+      oldValue: null, addedNodes: [],
+    }]);
+    dynamicRoot.policy = null;
+    dynamicChild.parentNode = node(null);
     const removedPolicyRoot = node(null);
     notifyMutation?.([{
       type: "attributes", target: removedPolicyRoot, attributeName: policyAttribute,
@@ -195,12 +209,12 @@ describe.each([
     restrictedRoot.policy = null;
     restrictedChild.parentNode = node(null);
     addedChild.parentNode = null;
-    for (const target of [restrictedRoot, restrictedChild, addedChild, removedPolicyRoot]) {
+    for (const target of [restrictedRoot, restrictedChild, addedChild, dynamicRoot, dynamicChild, removedPolicyRoot]) {
       handler({ isTrusted: true, target });
     }
     handler({ isTrusted: false, target: restrictedChild });
     handler({ isTrusted: true, target: node(null) });
-    expect(electronMocks.send.mock.calls).toEqual(Array.from({ length: 4 }, () => [
+    expect(electronMocks.send.mock.calls).toEqual(Array.from({ length: 6 }, () => [
       APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
     ]));
   });

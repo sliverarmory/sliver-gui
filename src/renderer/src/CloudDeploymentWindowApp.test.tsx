@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../tests/renderer-test-helpers";
+
 import type {
   AwsCloudDeploymentRecord,
   AwsFirewallSnapshot,
@@ -4357,14 +4359,6 @@ function runningCloudSnapshot(): CloudDeploymentSnapshot {
     azureAccountDiscoveryError: null,
     provisioningTranscripts: [],
   };
-}
-
-function deferred<T>(): { readonly promise: Promise<T>; readonly resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
 }
 
 function awsProvisioningDeployment(): AwsCloudDeploymentRecord {

@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { OperationResult, SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
 import { WEBSITE_LIMITS, type ListWebsitesInput, type WebsiteCatalogPage, type WebsiteContentDetail, type WebsiteContentSummary, type WebsiteDetail } from "../../../shared/website-contracts";
@@ -66,11 +68,6 @@ function installWebsiteChoices(overrides: Partial<SliverDesktopAPI> = {}) {
     getWebsite: vi.fn().mockImplementation(async ({ name }: { name: string }) => ({ ok: true, value: name === "other" ? OTHER_SITE : SITE })),
     ...overrides,
   });
-}
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => { resolve = res; });
-  return { promise, resolve };
 }
 async function inspect(user: ReturnType<typeof userEvent.setup>) {
   await user.click(await screen.findByRole("button", { name: "Inspect /index.html" }));

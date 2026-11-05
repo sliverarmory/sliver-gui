@@ -367,18 +367,22 @@ describe("application settings contracts", () => {
     expect(() => parseApplicationSettingsValues(value)).toThrow("Invalid application settings");
   });
 
+  it.each([APPLICATION_SETTINGS_VERSION - 1, APPLICATION_SETTINGS_VERSION + 1])(
+    "rejects noncurrent state version %s outside the migration parser", (v) => {
+      expect(() => parseApplicationSettingsState({ v, revision: 0, ...settings }))
+        .toThrow("Invalid application settings state");
+    },
+  );
+
   it.each([
-    { v: APPLICATION_SETTINGS_VERSION + 1, revision: 0, ...settings },
-    { v: 7, revision: 0, ...settings },
-    { v: 5, revision: -1, ...settings },
-    { v: 5, revision: 1.5, ...settings },
-    { v: 5, revision: 0, ...settings, extra: true },
-    { v: 5, revision: 0, ...settings, theme: "sepia" },
-    { v: 5, revision: 0, ...settings, appIcon: "system" },
-    { v: 2, revision: 0, ...settings },
-    { v: 1, revision: 0, ...settings },
-  ])("rejects invalid persisted state %#", (value) => {
-    expect(() => parseApplicationSettingsState(value)).toThrow("Invalid application settings state");
+    { name: "negative revision", patch: { revision: -1 } },
+    { name: "fractional revision", patch: { revision: 1.5 } },
+    { name: "extra field", patch: { extra: true } },
+    { name: "unknown theme", patch: { theme: "sepia" } },
+    { name: "unknown icon", patch: { appIcon: "system" } },
+  ])("rejects current state with $name", ({ patch }) => {
+    expect(() => parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: 0, ...settings, ...patch }))
+      .toThrow("Invalid application settings state");
   });
 
   it.each([
