@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+import { deferred } from "../../../tests/renderer-test-helpers";
 import { disconnectedSnapshot, type SliverDesktopAPI, type SliverSnapshot } from "../../../shared/contracts";
 import type { TargetOperationRecord } from "../../../shared/operation-contracts";
 import type { BeaconSummary, SessionSummary, TargetActionPlan, TargetMode, TargetRef } from "../../../shared/target-contracts";
@@ -44,12 +46,6 @@ function snapshot(active = false, mode: TargetMode = "session"): SliverSnapshot 
 function plan(actionId: "session.close" | "target.kill" = "session.close"): TargetActionPlan {
   return { token: "review-token", expiresAt: new Date(Date.now() + 60_000).toISOString(),
     impact: { actionId, backend, targets: [session], totalTargets: 1, truncated: false, warning: "Review this session before continuing." } };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((complete) => { resolve = complete; });
-  return { promise, resolve };
 }
 
 type TestAPI = Pick<SliverDesktopAPI, "selectTarget" | "prepareTargetAction" | "executeTargetActionPlan" | "submitTargetOperation" | "refresh" | "openInteractionWindow">;

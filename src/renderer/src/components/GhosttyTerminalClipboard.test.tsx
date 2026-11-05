@@ -4,6 +4,8 @@ import { createRef, StrictMode } from "react";
 import type { Terminal } from "ghostty-web";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { ApplicationContextMenuItem } from "../../../shared/application-context-menu-contracts";
 import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
 import { GhosttyTerminalClipboard } from "./GhosttyTerminalClipboard";
@@ -337,10 +339,4 @@ function nativeItems(): readonly ApplicationContextMenuItem[] {
     { type: "action", actionId: "10000000-0000-4000-8000-000000000003", kind: "select-all", label: "Select All", enabled: true },
     { type: "action", actionId: "10000000-0000-4000-8000-000000000004", kind: "inspect", label: "Inspect Element", enabled: true },
   ];
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => { resolve = settle; });
-  return { promise, resolve };
 }

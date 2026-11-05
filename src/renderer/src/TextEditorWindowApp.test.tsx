@@ -2,6 +2,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../tests/renderer-test-helpers";
+
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import {
   DEFAULT_TEXT_EDITOR_SETTINGS_STATE,
@@ -298,9 +300,3 @@ describe("TextEditorWindowApp remote overwrite review", () => {
     expect(respondToRemoteOverwrite).not.toHaveBeenCalled();
   });
 });
-
-function deferred<T>(): { readonly promise: Promise<T>; resolve(value: T): void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => { resolve = accept; });
-  return { promise, resolve };
-}

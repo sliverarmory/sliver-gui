@@ -1,7 +1,6 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RDP_IPC, RDP_PORT_MESSAGE, type RdpConnectInput, type RdpTab, type RdpWindowAPI, type RdpWindowState } from "../shared/rdp-contracts.js";
-import { APPLICATION_CONTEXT_MENU_IPC, type ApplicationContextMenuAPI } from "../shared/application-context-menu-contracts.js";
 import { DEFAULT_APPLICATION_SETTINGS_STATE, DEFAULT_APPLICATION_SETTINGS_VALUES } from "../shared/application-settings-contracts.js";
 import { RDP_PREVIEW_FIXTURE } from "../tests/rdp-preview-fixture.js";
 
@@ -12,7 +11,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock("electron", () => ({ webUtils: { getPathForFile: mocks.pathForFile }, contextBridge: { exposeInMainWorld: mocks.expose }, ipcRenderer: { invoke: mocks.invoke, on: mocks.on, removeListener: mocks.removeListener, postMessage: mocks.postMessage, send: mocks.send } }));
 await import("./rdp.js");
 const bridge = (): RdpWindowAPI => mocks.expose.mock.calls.find(([name]) => name === "rdp")![1] as RdpWindowAPI;
-const contextMenu = (): ApplicationContextMenuAPI => mocks.expose.mock.calls.find(([name]) => name === "applicationContextMenu")![1] as ApplicationContextMenuAPI;
 const token = "a".repeat(43);
 const correlationId = "11111111-1111-4111-8111-111111111111";
 const tab: RdpTab = { id: "tab", attempt: 1, label: "Desktop", host: "desktop.test", port: 3389, username: "operator", domain: "LAB", width: 1280, height: 800, clipboard: false, scaleMode: "fit", state: "connecting", clipboardReady: true, clipboardAvailable: false };
@@ -183,10 +181,9 @@ describe("RDP sandbox preload", () => {
     handler({}, { ...fileState, tabs: [{ ...fileState.tabs[0], files: ["/private/file"] }] });
     expect(listener).toHaveBeenCalledExactlyOnceWith(fileState);
   });
-  it("exposes only frozen dedicated desktop and context-menu bridges", () => {
+  it("exposes the frozen desktop capability API", () => {
     expect(mocks.expose.mock.calls.map(([name]) => name)).toEqual(["rdp", "applicationContextMenu"]);
     expect(Object.isFrozen(bridge())).toBe(true);
-    expect(Object.isFrozen(contextMenu())).toBe(true);
     expect(Object.keys(bridge())).not.toContain("invoke");
     expect(Object.keys(bridge())).not.toContain("send");
   });
@@ -292,15 +289,5 @@ describe("RDP sandbox preload", () => {
     postMessage.mockImplementationOnce(() => { throw new Error("closed"); });
     expect(() => bridge().openRdpStream(token, correlationId)).toThrow("closed");
     expect(port1.close).toHaveBeenCalledOnce(); expect(port2.close).toHaveBeenCalledOnce();
-  });
-
-  it("retains the shared context-menu capability boundary", () => {
-    const listener = vi.fn();
-    contextMenu().onMenuRequested(listener);
-    const handler = mocks.on.mock.calls.find(([channel]) => channel === APPLICATION_CONTEXT_MENU_IPC.menuRequested)![1] as (event: unknown, ...args: unknown[]) => void;
-    const value = { v: 1, requestId: correlationId, x: 20, y: 30, items: [{ type: "action", actionId: "22222222-2222-4222-8222-222222222222", kind: "copy", label: "Copy", enabled: true }] };
-    handler({}, value); handler({}, { ...value, path: "/tmp/extra" });
-    expect(listener).toHaveBeenCalledExactlyOnceWith(value);
-    expect(() => contextMenu().executeAction({ requestId: correlationId, actionId: "copy" })).toThrow();
   });
 });

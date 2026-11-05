@@ -1,6 +1,8 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import type { TextEditorRemoteOverwriteRequest } from "../../../shared/text-editor-contracts";
 import { RemoteOverwriteDialog } from "./RemoteOverwriteDialog";
@@ -19,22 +21,7 @@ const request: TextEditorRemoteOverwriteRequest = {
   warning: "Remote overwrite warning.",
 };
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", {
-    configurable: true,
-    value: () => [],
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-});
+useRendererTestEnvironment();
 
 afterEach(cleanup);
 

@@ -2,6 +2,8 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../tests/renderer-test-helpers";
+
 import type { SessionWorkspacePanelContext } from "./pages/SessionWorkspacePage";
 import { useConnection } from "./components/ConnectionProvider";
 
@@ -238,12 +240,6 @@ function connectedSnapshot(summary: SessionSummary = session): SliverSnapshot {
 
 function panelContext(panel: Extract<WindowLaunchContext, { kind: "session-panel" }>["panel"], snapshot: SliverSnapshot): Extract<WindowLaunchContext, { kind: "session-panel" }> {
   return { kind: "session-panel", panel, snapshot, target };
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 function installAPI(claim: Promise<OperationResult<WindowLaunchContext>>): {

@@ -6,15 +6,96 @@ import {
   CLOUD_DEPLOYMENT_IPC_EVENTS,
   CLOUD_DEPLOYMENT_IPC_INVOKE,
   type CloudDeploymentAPI,
+  type CloudDeploymentInvokeMethod,
 } from "../shared/cloud-deployment-ipc.js";
-import {
-  APPLICATION_CONTEXT_MENU_IPC,
-  type ApplicationContextMenuAPI,
-} from "../shared/application-context-menu-contracts.js";
+
+type InvokeArgumentCases = {
+  [Method in CloudDeploymentInvokeMethod]: readonly Parameters<CloudDeploymentAPI[Method]>[];
+};
+
+const credentialId = "11111111-1111-4111-8111-111111111111";
+const deploymentId = "22222222-2222-4222-8222-222222222222";
+const installationId = "33333333-3333-4333-8333-333333333333";
+const rule = {
+  direction: "ingress" as const, protocol: "tcp", fromPort: 443, toPort: 443,
+  peerType: "ipv4" as const, peer: "203.0.113.0/24", description: "HTTPS",
+};
+const dnsIdentity = { credentialId, zoneId: "ZEXAMPLE" };
+const dnsExisting = { ...dnsIdentity, recordId: "www.example.test.|A", expectedVersion: "a".repeat(64) };
+const dnsRecord = { name: "www", type: "A" as const, ttl: 300, values: ["203.0.113.10"] };
+// Exhaustiveness and argument shapes are checked independently against the shared API.
+const invokeArguments = {
+  getSnapshot: [[]],
+  refreshDeployments: [[]],
+  copyInstanceId: [[{ deploymentId }]],
+  copyIpAddress: [[{ deploymentId, kind: "public" }], [{ deploymentId, kind: "private" }]],
+  getProvisioningTranscripts: [[]],
+  getTerminalRuntime: [[]],
+  detectCurrentEgressIpv4: [[]],
+  chooseSshPrivateKey: [[]],
+  createCredential: [[{
+    provider: "aws", label: "Fixture profile", defaultRegion: "us-west-2", profileName: "fixture",
+    sshUsername: "ubuntu", sshPrivateKeyToken: null, sshPassphrase: null,
+  }]],
+  openAwsConsole: [[{ region: "us-west-2" }]],
+  loginAwsCredential: [[{ credentialId }]],
+  copyAwsLoginLink: [[]],
+  cancelAwsLogin: [[]],
+  beginAzureLogin: [[{ tenantId: null, clientId: null }]],
+  loginAzureCredential: [[{ credentialId }]],
+  cancelAzureLogin: [[]],
+  deleteCredential: [[{ credentialId }]],
+  testCredential: [[{ credentialId }]],
+  copyAwsPermissionsTerraform: [[]],
+  discoverAwsOptions: [[{ credentialId, region: "us-west-2" }]],
+  discoverAzureAccounts: [[]],
+  discoverAzureOptions: [[{ credentialId, location: "westus2" }]],
+  listDnsZones: [[{ credentialId }]],
+  listDnsRecords: [[{ credentialId, zoneId: null }]],
+  createDnsRecord: [[{ ...dnsIdentity, record: dnsRecord }]],
+  updateDnsRecord: [[{ ...dnsExisting, record: dnsRecord }]],
+  deleteDnsRecord: [[dnsExisting]],
+  createDeployment: [[{
+    provider: "aws", expectedRevision: 3, credentialId, name: "Fixture deployment",
+    spec: {
+      region: "us-west-2", imageId: "ami-0123456789abcdef0", instanceType: "t3.small",
+      networkMode: "managed", subnetId: null, vpcId: null, managedVpcCidr: "10.0.0.0/16",
+      managedSubnetCidr: "10.0.1.0/24", sshKeyMode: "managed", existingKeyPairName: null,
+      sshUsername: "ubuntu", keyPairName: "fixture-key", operatorName: "operator",
+      sshPort: 22, multiplayerPort: 31337, volumeSizeGiB: 20, useElasticIp: false,
+      sshCidrs: ["203.0.113.10/32"], operatorCidrs: ["203.0.113.10/32"],
+    },
+  }]],
+  getSoftwareState: [[]],
+  getSoftwareInstallProgress: [[{ deploymentId }]],
+  listSoftwareListeners: [[{ deploymentId }]],
+  installLocalRedirector: [[{
+    deploymentId, expectedRevision: 0, recipeId: "caddy", publicIp: "203.0.113.10",
+    domains: [], listener: { mode: "create", port: 8000 },
+  }]],
+  removeLocalRedirector: [[{ deploymentId, installationId, expectedRevision: 1 }]],
+  renameDeployment: [[{ deploymentId, expectedRevision: 4, name: "Production Control" }]],
+  createOperatorConfig: [[{
+    deploymentId, expectedRevision: 7, operatorName: "red-team-2", publicIp: "203.0.113.80",
+    port: 44331, permissions: "crackstation",
+  }]],
+  runLifecycleAction: [[{ deploymentId, expectedRevision: 4, action: "stop" }]],
+  updateFirewall: [[{ deploymentId, expectedRevision: 4, sshCidrs: ["203.0.113.10/32"], operatorCidrs: ["203.0.113.10/32"] }]],
+  listFirewallRules: [[{ deploymentId }]],
+  createFirewallRule: [[{ deploymentId, expectedRevision: 4, rule }]],
+  updateFirewallRule: [[{ deploymentId, expectedRevision: 5, ruleId: "sgr-0123456789abcdef0", rule }]],
+  deleteFirewallRule: [[{ deploymentId, expectedRevision: 6, ruleId: "sgr-0123456789abcdef0" }]],
+  prepareDestroyDeployment: [[{ deploymentId, expectedRevision: 4 }]],
+  executeDestroyDeployment: [[{ token: "a".repeat(43) }]],
+  openSshWindow: [[{ deploymentId }]],
+  approveSshHostKey: [[{ token: "a".repeat(43) }]],
+} satisfies InvokeArgumentCases;
+const invokeCases = (Object.keys(CLOUD_DEPLOYMENT_IPC_INVOKE) as CloudDeploymentInvokeMethod[])
+  .flatMap((method) => invokeArguments[method].map((args, variant) => ({ method, args, variant })));
 
 const electronMocks = vi.hoisted(() => ({
   exposeInMainWorld: vi.fn<(name: string, api: CloudDeploymentAPI) => void>(),
-  invoke: vi.fn(async () => ({ ok: true })),
+  invoke: vi.fn<(channel: string, ...args: unknown[]) => Promise<unknown>>(async () => ({ ok: true })),
   send: vi.fn(),
   on: vi.fn(),
   removeListener: vi.fn(),
@@ -30,28 +111,25 @@ vi.mock("electron", () => ({
   },
 }));
 
-const documentAddEventListener = vi.fn();
-const documentQuerySelectorAll = vi.fn(() => []);
-const mutationObserverCallbacks: Array<(records: readonly Record<string, unknown>[]) => void> = [];
-const mutationObserverObserve = vi.fn();
-class TestMutationObserver {
-  public constructor(callback: (records: readonly Record<string, unknown>[]) => void) {
-    mutationObserverCallbacks.push(callback);
-  }
-
-  public observe(target: unknown, options: unknown): void {
-    mutationObserverObserve(target, options);
-  }
-}
-vi.stubGlobal("MutationObserver", TestMutationObserver);
-vi.stubGlobal("document", {
-  addEventListener: documentAddEventListener,
-  querySelectorAll: documentQuerySelectorAll,
-});
-
 await import("./cloud-deployment.js");
 
 describe("Cloud Deployment preload bridge", () => {
+  it.each(invokeCases)("preserves $method arguments, replies, and rejections (case $variant)", async ({ method, args }) => {
+    const api = exposedApi();
+    const channel = CLOUD_DEPLOYMENT_IPC_INVOKE[method];
+    const reply = { ok: true, value: { method } };
+    electronMocks.invoke.mockClear();
+    electronMocks.invoke.mockResolvedValueOnce(reply);
+    await expect(Reflect.apply(api[method], api, args)).resolves.toBe(reply);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(channel, ...args);
+
+    const failure = new Error(`Main rejected ${method}`);
+    electronMocks.invoke.mockClear();
+    electronMocks.invoke.mockRejectedValueOnce(failure);
+    await expect(Reflect.apply(api[method], api, args)).rejects.toBe(failure);
+    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(channel, ...args);
+  });
+
   it("accepts only credential-free login progress and removes its listener", () => {
     const api = exposedApi();
     const listener = vi.fn();
@@ -100,28 +178,7 @@ describe("Cloud Deployment preload bridge", () => {
     expect(electronMocks.removeListener).toHaveBeenCalledWith(CLOUD_DEPLOYMENT_IPC_EVENTS.softwareInstallProgress, handler);
   });
 
-  it("routes managed software calls through fixed IPC channels", async () => {
-    const api = exposedApi();
-    const deploymentId = "22222222-2222-4222-8222-222222222222";
-    const installationId = "33333333-3333-4333-8333-333333333333";
-    await api.getSoftwareState();
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareState);
-    await api.getSoftwareInstallProgress({ deploymentId });
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareInstallProgress, { deploymentId });
-    const listInput = { deploymentId };
-    await api.listSoftwareListeners(listInput);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.listSoftwareListeners, listInput);
-    const installInput = { deploymentId, expectedRevision: 0, recipeId: "caddy" as const,
-      publicIp: "203.0.113.10", domains: [], listener: { mode: "create" as const, port: 8000 } };
-    await api.installLocalRedirector(installInput);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.installLocalRedirector, installInput);
-    const removeInput = { deploymentId, installationId, expectedRevision: 1 };
-    await api.removeLocalRedirector(removeInput);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.removeLocalRedirector, removeInput);
-    electronMocks.invoke.mockClear();
-  });
-
-  it("exposes only the narrow frozen cloud API and maps every invoke to its fixed channel", async () => {
+  it("exposes only the narrow frozen cloud API", () => {
     const api = exposedApi();
     expect(Object.keys(api)).toEqual([
       "getSnapshot",
@@ -177,241 +234,6 @@ describe("Cloud Deployment preload bridge", () => {
     ]);
     expect(Object.isFrozen(api)).toBe(true);
 
-    await api.getSnapshot();
-    await api.refreshDeployments();
-    await api.getProvisioningTranscripts();
-    await api.getTerminalRuntime();
-    await api.detectCurrentEgressIpv4();
-    await api.chooseSshPrivateKey();
-    await api.discoverAwsOptions({
-      credentialId: "11111111-1111-4111-8111-111111111111",
-      region: "us-west-2",
-    });
-    await api.discoverAzureAccounts();
-    await api.discoverAzureOptions({
-      credentialId: "11111111-1111-4111-8111-111111111111",
-      location: "westus2",
-    });
-    const deploymentId = "22222222-2222-4222-8222-222222222222";
-    const rule = {
-      direction: "ingress" as const,
-      protocol: "tcp",
-      fromPort: 443,
-      toPort: 443,
-      peerType: "ipv4" as const,
-      peer: "203.0.113.0/24",
-      description: "HTTPS",
-    };
-    await api.listFirewallRules({ deploymentId });
-    await api.createFirewallRule({ deploymentId, expectedRevision: 4, rule });
-    await api.updateFirewallRule({
-      deploymentId,
-      expectedRevision: 5,
-      ruleId: "sgr-0123456789abcdef0",
-      rule,
-    });
-    await api.deleteFirewallRule({
-      deploymentId,
-      expectedRevision: 6,
-      ruleId: "sgr-0123456789abcdef0",
-    });
-    await api.openSshWindow({ deploymentId });
-    await api.approveSshHostKey({ token: "a".repeat(43) });
-    expect(electronMocks.invoke.mock.calls.slice(0, 15)).toEqual([
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.getSnapshot],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.refreshDeployments],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.getProvisioningTranscripts],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.getTerminalRuntime],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.detectCurrentEgressIpv4],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.chooseSshPrivateKey],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAwsOptions, {
-        credentialId: "11111111-1111-4111-8111-111111111111",
-        region: "us-west-2",
-      }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureOptions, {
-        credentialId: "11111111-1111-4111-8111-111111111111",
-        location: "westus2",
-      }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.listFirewallRules, { deploymentId }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.createFirewallRule, {
-        deploymentId,
-        expectedRevision: 4,
-        rule,
-      }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateFirewallRule, {
-        deploymentId,
-        expectedRevision: 5,
-        ruleId: "sgr-0123456789abcdef0",
-        rule,
-      }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteFirewallRule, {
-        deploymentId,
-        expectedRevision: 6,
-        ruleId: "sgr-0123456789abcdef0",
-      }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.openSshWindow, { deploymentId }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.approveSshHostKey, { token: "a".repeat(43) }],
-    ]);
-  });
-
-  it("keeps AWS Console opening, sign-in, link copying, and cancellation on fixed channels", async () => {
-    const api = exposedApi();
-    const consoleInput = { region: "us-west-2" };
-    await api.openAwsConsole(consoleInput);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.openAwsConsole, consoleInput);
-    const input = { credentialId: "11111111-1111-4111-8111-111111111111" };
-    await api.loginAwsCredential(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAwsCredential, input);
-    await api.copyAwsLoginLink();
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsLoginLink);
-    await api.cancelAwsLogin();
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAwsLogin);
-  });
-
-  it("requests the fixed Terraform policy without forwarding renderer-supplied content", async () => {
-    const api = exposedApi();
-    await api.copyAwsPermissionsTerraform();
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyAwsPermissionsTerraform);
-  });
-
-  it("copies an instance ID using only its deployment reference and fixed channel", async () => {
-    const api = exposedApi();
-    const input = { deploymentId: "22222222-2222-4222-8222-222222222222" };
-    await api.copyInstanceId(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyInstanceId, input);
-  });
-
-  it("creates an operator config through only its fixed narrow channel", async () => {
-    const api = exposedApi();
-    const input = {
-      deploymentId: "22222222-2222-4222-8222-222222222222",
-      expectedRevision: 7,
-      operatorName: "red-team-2",
-      publicIp: "203.0.113.80",
-      port: 44_331,
-      permissions: "crackstation" as const,
-    };
-    await api.createOperatorConfig(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(
-      CLOUD_DEPLOYMENT_IPC_INVOKE.createOperatorConfig,
-      input,
-    );
-  });
-
-  it.each(["public", "private"] as const)("copies a %s IP using only its deployment reference and address kind", async (kind) => {
-    const api = exposedApi();
-    const input = { deploymentId: "22222222-2222-4222-8222-222222222222", kind };
-    await api.copyIpAddress(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.copyIpAddress, input);
-  });
-
-  it("exposes only fixed Azure login and subscription-selection channels", async () => {
-    const api = exposedApi();
-    const input = { tenantId: null, clientId: null };
-    await api.beginAzureLogin(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.beginAzureLogin, input);
-    const credential = { credentialId: "11111111-1111-4111-8111-111111111111" };
-    await api.loginAzureCredential(credential);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.loginAzureCredential, credential);
-    await api.cancelAzureLogin();
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.cancelAzureLogin);
-  });
-
-  it("also exposes the frozen validated application context-menu bridge", async () => {
-    const contextMenu = exposedContextMenuApi();
-    expect(Object.keys(contextMenu)).toEqual(["onMenuRequested", "executeAction", "setOpen"]);
-    expect(Object.isFrozen(contextMenu)).toBe(true);
-    const requestId = "00000000-0000-4000-8000-000000000001";
-    const actionId = "00000000-0000-4000-8000-000000000002";
-    const listener = vi.fn();
-    const unsubscribe = contextMenu.onMenuRequested(listener);
-    const handler = eventRegistration(APPLICATION_CONTEXT_MENU_IPC.menuRequested)[1] as (
-      event: unknown,
-      ...payload: unknown[]
-    ) => void;
-    handler({}, { v: 1, requestId, x: 7, y: 9, items: [{
-      type: "action",
-      actionId,
-      kind: "inspect",
-      label: "Inspect Element",
-      enabled: true,
-    }] });
-    handler({}, { v: 1, requestId, x: 7, y: 9, items: [{ type: "separator" }] });
-    expect(listener).toHaveBeenCalledOnce();
-
-    electronMocks.invoke.mockClear();
-    await contextMenu.executeAction({ requestId, actionId });
-    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
-      APPLICATION_CONTEXT_MENU_IPC.executeAction,
-      { requestId, actionId },
-    );
-    expect(() => contextMenu.executeAction({ requestId, actionId: "inspect" })).toThrow(
-      /Invalid application context menu action request/u,
-    );
-
-    electronMocks.invoke.mockClear();
-    await contextMenu.setOpen({ requestId, open: false });
-    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
-      APPLICATION_CONTEXT_MENU_IPC.setOpen,
-      { requestId, open: false },
-    );
-    expect(() => contextMenu.setOpen({ requestId: "menu", open: true })).toThrow(
-      /Invalid application context menu visibility request/u,
-    );
-    unsubscribe();
-    expect(electronMocks.removeListener).toHaveBeenCalledWith(
-      APPLICATION_CONTEXT_MENU_IPC.menuRequested,
-      handler,
-    );
-  });
-
-  it("sticks restricted classification across attribute removal and descendant moves", () => {
-    const registration = documentAddEventListener.mock.calls.find(([type]) => type === "contextmenu");
-    if (!registration) throw new Error("Expected the restricted-target capture listener");
-    expect(registration[2]).toBe(true);
-    expect(mutationObserverObserve).toHaveBeenCalledWith(
-      (globalThis as { document?: unknown }).document,
-      expect.objectContaining({ attributes: true, childList: true, subtree: true }),
-    );
-    const handler = registration[1] as (event: { isTrusted: boolean; target: unknown }) => void;
-    const observe = mutationObserverCallbacks[0];
-    if (!observe) throw new Error("Expected the restricted-target mutation observer");
-    let rootPolicy: string | null = "inspect-only";
-    const root = {
-      childNodes: [] as unknown[],
-      getAttribute: () => rootPolicy,
-      parentNode: null,
-    };
-    const textarea = { childNodes: [], parentNode: root as object | null };
-
-    observe([{
-      addedNodes: [],
-      attributeName: "data-application-context-menu-policy",
-      oldValue: null,
-      target: root,
-      type: "attributes",
-    }]);
-    root.childNodes.push(textarea);
-    observe([{ addedNodes: [textarea], target: root, type: "childList" }]);
-    rootPolicy = null;
-    textarea.parentNode = {};
-
-    electronMocks.send.mockClear();
-    handler({ isTrusted: true, target: root });
-    handler({ isTrusted: true, target: textarea });
-    handler({ isTrusted: false, target: textarea });
-    handler({ isTrusted: true, target: {} });
-
-    expect(electronMocks.send).toHaveBeenCalledTimes(2);
-    expect(electronMocks.send).toHaveBeenNthCalledWith(
-      1,
-      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
-    );
-    expect(electronMocks.send).toHaveBeenNthCalledWith(
-      2,
-      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
-    );
   });
 
   it("accepts only typed change signals and removes the exact handler", () => {
@@ -433,26 +255,6 @@ describe("Cloud Deployment preload bridge", () => {
       CLOUD_DEPLOYMENT_IPC_EVENTS.changed,
       handler,
     );
-  });
-
-  it("forwards DNS operations on fixed channels without exposing provider credentials", async () => {
-    const credentialId = "11111111-1111-4111-8111-111111111111";
-    const identity = { credentialId, zoneId: "ZEXAMPLE" };
-    const existing = { ...identity, recordId: "www.example.test.|A", expectedVersion: "a".repeat(64) };
-    const record = { name: "www", type: "A" as const, ttl: 300, values: ["203.0.113.10"] };
-    const api = exposedApi();
-    await api.listDnsZones({ credentialId });
-    await api.listDnsRecords({ credentialId, zoneId: null });
-    await api.createDnsRecord({ ...identity, record });
-    await api.updateDnsRecord({ ...existing, record });
-    await api.deleteDnsRecord(existing);
-    expect(electronMocks.invoke.mock.calls.slice(-5)).toEqual([
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsZones, { credentialId }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.listDnsRecords, { credentialId, zoneId: null }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.createDnsRecord, { ...identity, record }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.updateDnsRecord, { ...existing, record }],
-      [CLOUD_DEPLOYMENT_IPC_INVOKE.deleteDnsRecord, existing],
-    ]);
   });
 
   it("validates and replays native theme events", async () => {
@@ -561,12 +363,6 @@ describe("Cloud Deployment preload bridge", () => {
     unsubscribe();
   });
 
-  it("forwards a deployment rename on its fixed channel without exposing arbitrary IPC", async () => {
-    const input = { deploymentId: "22222222-2222-4222-8222-222222222222", expectedRevision: 4, name: "Production Control" };
-    await exposedApi().renameDeployment(input);
-    expect(electronMocks.invoke).toHaveBeenLastCalledWith(CLOUD_DEPLOYMENT_IPC_INVOKE.renameDeployment, input);
-  });
-
   it("retains an early navigation request across a subscribe-cleanup-resubscribe cycle", async () => {
     const handler = eventRegistration(CLOUD_DEPLOYMENT_IPC_EVENTS.navigationRequested)[1] as (
       event: unknown,
@@ -614,14 +410,6 @@ function exposedApi(): CloudDeploymentAPI {
   if (!call) throw new Error("Expected the Cloud Deployment bridge to be installed");
   expect(call[0]).toBe("cloudDeployment");
   return call[1];
-}
-
-function exposedContextMenuApi(): ApplicationContextMenuAPI {
-  const call = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => (
-    name === "applicationContextMenu"
-  ));
-  if (!call) throw new Error("Expected the application context-menu bridge to be installed");
-  return call[1] as unknown as ApplicationContextMenuAPI;
 }
 
 function eventRegistration(channel: string): unknown[] {

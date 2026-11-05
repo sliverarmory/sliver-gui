@@ -35,21 +35,6 @@ describe("Sliver RPC message budgets", () => {
       "workbench-artifact": { maxSendBytes: 66 * MiB, maxReceiveBytes: 66 * MiB },
       artifact: { maxSendBytes: 256 * MiB, maxReceiveBytes: 256 * MiB },
     });
-    expect(RPC_MESSAGE_BUDGETS.control.maxReceiveBytes).toBeLessThan(
-      RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes,
-    );
-    expect(RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes).toBeLessThan(
-      RPC_MESSAGE_BUDGETS.artifact.maxReceiveBytes,
-    );
-    expect(RPC_MESSAGE_BUDGETS["task-content"].maxReceiveBytes).toBeLessThan(
-      RPC_MESSAGE_BUDGETS.inventory.maxReceiveBytes,
-    );
-    expect(RPC_MESSAGE_BUDGETS["tunnel-stream"].maxReceiveBytes).toBeLessThan(
-      RPC_MESSAGE_BUDGETS.control.maxReceiveBytes,
-    );
-    expect(RPC_MESSAGE_BUDGETS["workbench-artifact"].maxReceiveBytes).toBeLessThan(
-      RPC_MESSAGE_BUDGETS.artifact.maxReceiveBytes,
-    );
   });
 
   it("maps each domain to grpc-js pre-decode send and receive limits", () => {

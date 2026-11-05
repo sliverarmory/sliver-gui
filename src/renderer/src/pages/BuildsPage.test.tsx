@@ -1,7 +1,9 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type {
@@ -14,36 +16,13 @@ import type {
 } from "../../../shared/contracts";
 import { BuildsPage } from "./BuildsPage";
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", {
-    configurable: true,
-    value: () => [],
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-});
+useRendererTestEnvironment();
 
 afterEach(() => {
   cleanup();
   toast.clear();
   Reflect.deleteProperty(window, "sliver");
 });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
 
 function profileGenerationSnapshot() {
   const snapshot = disconnectedSnapshot();

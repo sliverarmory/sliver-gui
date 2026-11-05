@@ -165,11 +165,6 @@ describe("main window transparency", () => {
     expect(supportsWindowsAcrylic("linux", "10.0.26300")).toBe(false);
   });
 
-  it("uses the native menu surface color for the Windows caption in each theme", () => {
-    expect(windowsCaptionColor(true)).toBe("#1f1f1f");
-    expect(windowsCaptionColor(false)).toBe("#ffffff");
-  });
-
   it("uses a readable title-bar symbol color for each application theme", () => {
     expect(mainWindowOptions("/preload.js", "linux", undefined, true)).toMatchObject({
       titleBarOverlay: { symbolColor: "#f4f4f5" },

@@ -16,11 +16,14 @@ import {
   verifyFixtureAuthenticationBoundary,
 } from "./mtls-fixture.js";
 import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic-redaction.js";
-import { cleanupOwnedApplication } from "./packaged-application-update-support.js";
+import {
+  abortPackagedApplicationOnSignal,
+  createPackagedMtlsCleanup,
+  packagedMtlsLaunchOptions,
+} from "./packaged-mtls-support.js";
 import { observeConsoleInput, type ConsoleProbeBrowser } from "./console-input-probe.js";
 
 const PACKAGED_MTLS_TEST_TIMEOUT_MS = process.platform === "darwin" ? 300_000 : 120_000;
-const PACKAGED_APPLICATION_CLEANUP_TIMEOUT_MS = 5_000;
 
 test("packaged production app completes current mTLS read and mutation flows", {
   timeout: PACKAGED_MTLS_TEST_TIMEOUT_MS,
@@ -36,32 +39,13 @@ test("packaged production app completes current mTLS read and mutation flows", {
   const artifactDirectory = join(repositoryRoot, "artifacts", "e2e");
   const fixture = await startMtlsFixture(repositoryRoot);
   let electronApplication: ElectronApplication | undefined;
-  let abortElectronApplication: (() => void) | undefined;
-  let cleanupPromise: Promise<void> | undefined;
-  const cleanupResources = (): Promise<void> => {
-    cleanupPromise ??= (async (): Promise<void> => {
-      const failures: unknown[] = [];
-      try {
-        if (electronApplication) {
-          await cleanupOwnedApplication(
-            electronApplication,
-            "packaged mTLS",
-            PACKAGED_APPLICATION_CLEANUP_TIMEOUT_MS,
-          ).catch((error) => failures.push(error));
-        }
-        await fixture.close().catch((error) => failures.push(error));
-        await rm(temporaryRoot, { recursive: true, force: true }).catch((error) => failures.push(error));
-      } finally {
-        if (abortElectronApplication) {
-          context.signal.removeEventListener("abort", abortElectronApplication);
-        }
-      }
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Packaged mTLS E2E cleanup failed");
-      }
-    })();
-    return cleanupPromise;
-  };
+  let detachAbortListener = (): void => undefined;
+  const cleanupResources = createPackagedMtlsCleanup({
+    application: () => electronApplication,
+    closeFixture: () => fixture.close(),
+    removeTemporaryRoot: () => rm(temporaryRoot, { recursive: true, force: true }),
+    detachAbortListener: () => detachAbortListener(),
+  });
   context.after(cleanupResources, { timeout: 20_000 });
   const diagnosticRedactions = [
     PACKAGED_FIXTURE_TOKEN,
@@ -90,43 +74,12 @@ test("packaged production app completes current mTLS read and mutation flows", {
   const consoleMessages: string[] = [];
   const pageErrors: string[] = [];
   try {
-    const cleanEnvironment = Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
     try {
       electronApplication = await electron.launch({
         executablePath,
-        args: [
-          "--enable-sandbox",
-          // The isolated test HOME intentionally has no login keychain. Keep
-          // Chromium from opening an interactive Keychain prompt for its
-          // profile-encryption key on macOS runners and developer machines.
-          ...(process.platform === "darwin"
-            ? ["--password-store=basic", "--use-mock-keychain"]
-            : []),
-          `--user-data-dir=${userDataDirectory}`,
-        ],
-        bypassCSP: false,
-        chromiumSandbox: true,
-        cwd: repositoryRoot,
-        env: {
-          ...cleanEnvironment,
-          HOME: isolatedHome,
-          ...(process.platform === "darwin" ? { CFFIXED_USER_HOME: isolatedHome } : {}),
-          USERPROFILE: isolatedHome,
-          XDG_CONFIG_HOME: join(isolatedHome, ".config"),
-          // A packaged application must ignore this development-only redirect.
-          ELECTRON_RENDERER_URL: "http://127.0.0.1:65535/",
-        },
-      } as Parameters<typeof electron.launch>[0] & { chromiumSandbox: true });
-      const electronProcess = electronApplication.process();
-      abortElectronApplication = (): void => {
-        if (electronProcess.exitCode === null && electronProcess.signalCode === null) {
-          electronProcess.kill("SIGKILL");
-        }
-      };
-      if (context.signal.aborted) abortElectronApplication();
-      else context.signal.addEventListener("abort", abortElectronApplication, { once: true });
+        ...packagedMtlsLaunchOptions(repositoryRoot, isolatedHome, userDataDirectory, process.platform),
+      });
+      detachAbortListener = abortPackagedApplicationOnSignal(context.signal, electronApplication.process());
     } catch (error) {
       await writePackagedDiagnosticArtifact(
         artifactDirectory,

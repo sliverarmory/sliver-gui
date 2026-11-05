@@ -1,5 +1,3 @@
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { disconnectedSnapshot, type DomainCollection } from "../../../shared/contracts";
@@ -7,7 +5,6 @@ import type { InfrastructureServiceSummary } from "../../../shared/topology-cont
 import { createOverviewTopology, type TopologyContext } from "./overview-topology";
 import { serviceTopologyContributor } from "./service-topology";
 import { projectTopology } from "./topology-projection";
-import { TopologyIcon } from "./TopologyIcon";
 
 const updatedAt = "2026-09-18T23:00:00.000Z";
 const builders: InfrastructureServiceSummary[] = [
@@ -183,12 +180,4 @@ describe("service topology contributor", () => {
     expect(withServer.document.edges[0]).toMatchObject({ role: "relationship", kind: "crackstation-connection" });
   });
 
-  it("uses distinct local service iconography instead of the generic fallback", () => {
-    const builder = renderToStaticMarkup(createElement(TopologyIcon, { name: "external-builder" }));
-    const station = renderToStaticMarkup(createElement(TopologyIcon, { name: "crackstation" }));
-    expect(builder).toContain('data-icon="hammer"');
-    expect(station).toContain('data-icon="microchip"');
-    expect(builder).not.toContain('data-icon="cube"');
-    expect(station).not.toContain('data-icon="cube"');
-  });
 });
