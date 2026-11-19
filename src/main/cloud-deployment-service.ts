@@ -28,6 +28,13 @@ import {
   type DeleteCloudDnsRecordInput,
 } from "../shared/cloud-dns-contracts.js";
 import { AwsDnsProvider } from "./cloud/aws-dns-provider.js";
+import { AwsAlbAliasChangeAcceptedError, AwsAlbAliasProvider } from "./cloud/aws-alb-alias.js";
+import { AwsAcmCertificateDiscovery } from "./cloud/aws-acm-certificates.js";
+import {
+  AwsAlbRedirectorProvider,
+  type AwsAlbRedirectorDestroyResource,
+  type AwsAlbRedirectorMutationEvent,
+} from "./cloud/aws-alb-provider.js";
 import { AzureDnsProvider } from "./cloud/azure-dns-provider.js";
 import { publicDnsPointsToServer } from "./cloud/public-dns-resolver.js";
 
@@ -63,12 +70,18 @@ import {
   type AzureLoginSelection,
   type AwsConsoleLoginSession,
   parseCreateCloudDeploymentInput,
+  parseCreateAwsCrackstationDeploymentInput,
+  parseCreateAwsAlbRedirectorDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
   parseRenameCloudDeploymentInput,
   parseUpdateCloudFirewallRuleInput,
   parseUpdateCloudFirewallInput,
   type AwsCloudDeploymentRecord,
+  type AwsCrackstationDeploymentRecord,
+  type AwsAlbRedirectorDeploymentRecord,
+  type CreateAwsAlbRedirectorDeploymentInput,
+  type CreateAwsCrackstationDeploymentInput,
   type AwsCliProfileSummary,
   type AwsCredentialSecret,
   type AwsFirewallRule,
@@ -83,7 +96,9 @@ import {
   type AzureFirewallSnapshot,
   type AzureManagedAssetType,
   type CloudCredentialSummary,
+  type CloudManagedAsset,
   type CloudDeploymentActionInput,
+  type CloudDependentDeploymentRecord,
   type CloudDeploymentPhase,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
@@ -122,7 +137,14 @@ import type { TerminalRuntimeAsset } from "../shared/stream-contracts.js";
 import type { CloudPermissionEvaluation } from "../shared/cloud-provider-permissions.js";
 import {
   parseDiscoverAwsOptionsInput,
+  parseDiscoverAwsCrackstationOptionsInput,
+  parseDiscoverAwsAlbRedirectorOptionsInput,
   type AwsDeploymentOptions,
+  type AwsCrackstationOptions,
+  type DiscoverAwsCrackstationOptionsInput,
+  type AwsAlbRedirectorOptions,
+  type AwsAlbCertificateOption,
+  type DiscoverAwsAlbRedirectorOptionsInput,
   type AzureDeploymentOptions,
   type DiscoverAwsOptionsInput,
   parseDiscoverAzureOptionsInput,
@@ -130,6 +152,9 @@ import {
 } from "../shared/cloud-provider-inventory.js";
 import { CloudCredentialVault, type CloudSafeStorageAdapter } from "./cloud-credential-vault.js";
 import { CloudDeploymentStore } from "./cloud-deployment-store.js";
+import { CrackstationReleaseDownloader } from "./sliver-release-download.js";
+import { CrackstationDeployer, crackstationStationName } from "./cloud/crackstation-deployer.js";
+import { applyCrackstationCreateMutation, applyCrackstationResource, crackstationDestroyResourceFromRecord, crackstationResourceFromRecord } from "./cloud/crackstation-state.js";
 import { SoftwareDeploymentStore } from "./software-deployment-store.js";
 import {
   LocalRedirectorDeployer,
@@ -256,7 +281,14 @@ export interface CloudSliverProvisioner {
 
 export interface CloudAwsProvider {
   preflight(): Promise<{ readonly region: string; readonly availabilityZones: readonly unknown[] }>;
-  discover(input?: { readonly vpcId?: string }): Promise<AwsEc2DiscoveryResult>;
+  discover(input?: { readonly vpcId?: string; readonly architecture?: "x86_64" | "arm64" }): Promise<AwsEc2DiscoveryResult>;
+  discoverCrackstationInstanceTypes?(): ReturnType<AwsEc2Provider["discoverCrackstationInstanceTypes"]>;
+  discoverCrackstationImages?(): ReturnType<AwsEc2Provider["discoverCrackstationImages"]>;
+  discoverCrackstationPublicSubnetIds?(vpcId: string): Promise<readonly string[]>;
+  createCrackstation?(
+    input: Parameters<AwsEc2Provider["createCrackstation"]>[0],
+    onMutation?: Parameters<AwsEc2Provider["createCrackstation"]>[1],
+  ): ReturnType<AwsEc2Provider["createCrackstation"]>;
   create(
     input: Parameters<AwsEc2Provider["create"]>[0],
     onMutation?: Parameters<AwsEc2Provider["create"]>[1],
@@ -318,6 +350,12 @@ export interface CloudAzureProvider {
 }
 
 export type CloudAwsProviderFactory = (connection: AwsEc2ProviderConnection) => CloudAwsProvider;
+export type CloudAwsAlbProviderFactory = (connection: AwsEc2ProviderConnection) => Pick<
+  AwsAlbRedirectorProvider,
+  "discoverNetworkOptions" | "create" | "destroy" | "refresh" | "dispose"
+>;
+export type CloudAwsAcmDiscoveryFactory = (connection: AwsEc2ProviderConnection) => Pick<AwsAcmCertificateDiscovery, "listIssued">;
+export type CloudAwsAlbAliasFactory = (connection: AwsEc2ProviderConnection) => Pick<AwsAlbAliasProvider, "create" | "deleteIfMatches" | "matches" | "dispose">;
 export interface CloudAwsPermissionChecker {
   check(): Promise<CloudPermissionEvaluation>;
 }
@@ -326,6 +364,7 @@ export type CloudAwsPermissionCheckerFactory = (
 ) => CloudAwsPermissionChecker;
 export type CloudAzureProviderFactory = (connection: AzureVmProviderConnection) => CloudAzureProvider;
 export type CloudSliverListenerClient = Pick<SliverClient, "connect" | "disconnect" | "getJobs" | "startHTTPListenerWithOptions" | "killJob">;
+export type CloudCrackstationClient = Pick<SliverClient, "connect" | "disconnect" | "rpc">;
 export interface CloudLocalRedirectorDeployer {
   install(input: LocalRedirectorInstallInput, onOutput?: LocalRedirectorOutputHandler): ReturnType<LocalRedirectorDeployer["install"]>;
   verify(input: LocalRedirectorVerifyInput, onOutput?: LocalRedirectorOutputHandler): ReturnType<LocalRedirectorDeployer["verify"]>;
@@ -333,6 +372,8 @@ export interface CloudLocalRedirectorDeployer {
   probeLoopbackListener(input: LocalRedirectorProbeInput): ReturnType<LocalRedirectorDeployer["probeLoopbackListener"]>;
   checkFrontendPortsAvailable(input: { readonly ssh: LocalRedirectorInstallInput["ssh"]; readonly ports: readonly number[] }): Promise<boolean>;
 }
+export type CloudAwsAlbListenerProbe = Pick<LocalRedirectorDeployer, "probePrivateHttpListener"> &
+  Partial<Pick<LocalRedirectorDeployer, "probeExistingPrivateHttpListener">>;
 
 export interface CloudAwsProfileSource {
   list(): Promise<readonly AwsCliProfileSummary[]>;
@@ -399,7 +440,11 @@ export interface CloudDeploymentServiceOptions {
   readonly store?: CloudDeploymentStore;
   readonly softwareStore?: SoftwareDeploymentStore;
   readonly softwareDeployer?: CloudLocalRedirectorDeployer;
+  readonly awsAlbListenerProbe?: CloudAwsAlbListenerProbe;
   readonly sliverListenerClientFactory?: (config: SliverClientConfig) => CloudSliverListenerClient;
+  readonly crackstationClientFactory?: (config: SliverClientConfig) => CloudCrackstationClient;
+  readonly crackstationDeployer?: Pick<CrackstationDeployer, "install">;
+  readonly crackstationReleaseDownloader?: Pick<CrackstationReleaseDownloader, "stagePrivate" | "stop">;
   readonly resolveDomainAddresses?: (domain: string) => Promise<readonly string[]>;
   readonly publicDnsPointsToServer?: (domain: string, publicIp: string) => Promise<boolean>;
   /** Bounded test seams for managed redirector DNS propagation. */
@@ -415,6 +460,9 @@ export interface CloudDeploymentServiceOptions {
   readonly awsDnsProviderFactory?: (connection: AwsEc2ProviderConnection) => CloudDnsProvider;
   readonly azureDnsProviderFactory?: (connection: AzureVmProviderConnection) => CloudDnsProvider;
   readonly awsProviderFactory?: CloudAwsProviderFactory;
+  readonly awsAlbProviderFactory?: CloudAwsAlbProviderFactory;
+  readonly awsAcmDiscoveryFactory?: CloudAwsAcmDiscoveryFactory;
+  readonly awsAlbAliasFactory?: CloudAwsAlbAliasFactory;
   readonly awsPermissionCheckerFactory?: CloudAwsPermissionCheckerFactory;
   readonly awsProfileSource?: CloudAwsProfileSource;
   readonly awsConsoleLogin?: CloudAwsConsoleLogin;
@@ -483,7 +531,11 @@ export class CloudDeploymentService {
   readonly #store: CloudDeploymentStore;
   readonly #softwareStore: SoftwareDeploymentStore;
   readonly #softwareDeployer: CloudLocalRedirectorDeployer;
+  readonly #awsAlbListenerProbe: CloudAwsAlbListenerProbe;
   readonly #sliverListenerClientFactory: (config: SliverClientConfig) => CloudSliverListenerClient;
+  readonly #crackstationClientFactory: (config: SliverClientConfig) => CloudCrackstationClient;
+  readonly #crackstationDeployer: Pick<CrackstationDeployer, "install">;
+  readonly #crackstationReleaseDownloader: Pick<CrackstationReleaseDownloader, "stagePrivate" | "stop">;
   readonly #resolveDomainAddresses: (domain: string) => Promise<readonly string[]>;
   readonly #publicDnsPointsToServer: (domain: string, publicIp: string) => Promise<boolean>;
   readonly #softwareDnsPropagationTimeoutMs: number;
@@ -497,6 +549,9 @@ export class CloudDeploymentService {
   readonly #awsDnsProviderFactory: (connection: AwsEc2ProviderConnection) => CloudDnsProvider;
   readonly #azureDnsProviderFactory: (connection: AzureVmProviderConnection) => CloudDnsProvider;
   readonly #awsProviderFactory: CloudAwsProviderFactory;
+  readonly #awsAlbProviderFactory: CloudAwsAlbProviderFactory;
+  readonly #awsAcmDiscoveryFactory: CloudAwsAcmDiscoveryFactory;
+  readonly #awsAlbAliasFactory: CloudAwsAlbAliasFactory;
   readonly #awsPermissionCheckerFactory: CloudAwsPermissionCheckerFactory;
   readonly #awsProfiles: CloudAwsProfileSource;
   readonly #awsConsoleLogin: CloudAwsConsoleLogin;
@@ -551,7 +606,13 @@ export class CloudDeploymentService {
     this.#store = store;
     this.#softwareStore = softwareStore;
     this.#softwareDeployer = options.softwareDeployer ?? new LocalRedirectorDeployer();
+    this.#awsAlbListenerProbe = options.awsAlbListenerProbe ?? new LocalRedirectorDeployer();
     this.#sliverListenerClientFactory = options.sliverListenerClientFactory ?? ((config) => new SliverClient(config));
+    this.#crackstationClientFactory = options.crackstationClientFactory ?? ((config) => new SliverClient(config));
+    this.#crackstationDeployer = options.crackstationDeployer ?? new CrackstationDeployer();
+    this.#crackstationReleaseDownloader = options.crackstationReleaseDownloader ?? new CrackstationReleaseDownloader({
+      downloadsDirectory: join(options.rootDirectory, "staging"), fetch,
+    });
     this.#resolveDomainAddresses = options.resolveDomainAddresses ?? (async (domain) =>
       (await lookup(domain, { all: true })).map(({ address }) => address));
     this.#publicDnsPointsToServer = options.publicDnsPointsToServer ?? publicDnsPointsToServer;
@@ -567,6 +628,9 @@ export class CloudDeploymentService {
     this.#awsDnsProviderFactory = options.awsDnsProviderFactory ?? ((connection) => new AwsDnsProvider(connection));
     this.#azureDnsProviderFactory = options.azureDnsProviderFactory ?? ((connection) => new AzureDnsProvider(connection));
     this.#awsProviderFactory = options.awsProviderFactory ?? ((connection) => new AwsEc2Provider(connection));
+    this.#awsAlbProviderFactory = options.awsAlbProviderFactory ?? ((connection) => new AwsAlbRedirectorProvider(connection));
+    this.#awsAcmDiscoveryFactory = options.awsAcmDiscoveryFactory ?? ((connection) => new AwsAcmCertificateDiscovery(connection.region, connection.credentials));
+    this.#awsAlbAliasFactory = options.awsAlbAliasFactory ?? ((connection) => new AwsAlbAliasProvider(connection));
     this.#awsPermissionCheckerFactory = options.awsPermissionCheckerFactory ?? (
       (connection) => new AwsEc2PermissionChecker(connection)
     );
@@ -643,7 +707,30 @@ export class CloudDeploymentService {
         listener: record.listener,
         lastCheckedAt: record.lastCheckedAt,
       }));
-    return Object.freeze({ ...resolved, overview: Object.freeze({ ...resolved.overview, redirectors }) });
+    const dependentDeployments = this.#store.getState().dependentDeployments
+      .filter(({ serverDeploymentId }) => serverDeploymentId === resolved.deploymentId)
+      .map((deployment) => deployment.kind === "crackstation"
+        ? Object.freeze({
+            kind: deployment.kind, id: deployment.id, name: deployment.name,
+            serverDeploymentId: deployment.serverDeploymentId, status: deployment.status,
+            phase: deployment.phase, updatedAt: deployment.updatedAt,
+            instanceId: deployment.runtime.instanceId,
+            instanceType: deployment.spec.instanceType,
+            hostUuid: deployment.runtime.stationHostUuid,
+            privateIpAddress: deployment.runtime.privateIpAddress,
+          })
+        : Object.freeze({
+            kind: deployment.kind, id: deployment.id, name: deployment.name,
+            serverDeploymentId: deployment.serverDeploymentId, status: deployment.status,
+            phase: deployment.phase, updatedAt: deployment.updatedAt,
+            loadBalancerArn: deployment.runtime.loadBalancerArn,
+            dnsName: deployment.runtime.dnsName,
+            domain: deployment.spec.domain,
+            backendPort: deployment.spec.backendPort,
+            listenerJobId: deployment.runtime.listenerJobId,
+            targetHealth: deployment.runtime.targetHealth,
+          }));
+    return Object.freeze({ ...resolved, overview: Object.freeze({ ...resolved.overview, redirectors, dependentDeployments }) });
   }
 
   getSoftwareState(): OperationResult<SoftwareDeploymentState> {
@@ -1341,7 +1428,8 @@ export class CloudDeploymentService {
   }
 
   #refreshErrorSnapshot(): readonly CloudDeploymentRefreshError[] {
-    const existing = new Set(this.#store.getState().deployments.map(({ id }) => id));
+    const state = this.#store.getState();
+    const existing = new Set([...state.deployments, ...state.dependentDeployments].map(({ id }) => id));
     return Object.freeze([...this.#refreshErrors]
       .filter(([id]) => existing.has(id))
       .map(([deploymentId, message]) => Object.freeze({ deploymentId, message }))
@@ -1398,10 +1486,114 @@ export class CloudDeploymentService {
           await this.#refreshDeployment(record);
         }
       }));
+      const dependents = this.#store.getState().dependentDeployments.filter((record) =>
+        (all || credentials.has(record.credentialId)) &&
+        record.status !== "provisioning" && record.status !== "deleting" &&
+        !this.#busyDeployments.has(record.id));
+      let nextDependent = 0;
+      await Promise.all(Array.from({ length: Math.min(DEPLOYMENT_REFRESH_CONCURRENCY, dependents.length) }, async () => {
+        while (!this.#disposed) {
+          const record = dependents[nextDependent++];
+          if (!record) return;
+          await this.#refreshDependentDeployment(record);
+        }
+      }));
       this.#refreshingAll = false;
-      const existing = new Set(this.#store.getState().deployments.map(({ id }) => id));
+      const state = this.#store.getState();
+      const existing = new Set([...state.deployments, ...state.dependentDeployments].map(({ id }) => id));
       for (const id of this.#refreshErrors.keys()) {
         if (!existing.has(id)) this.#refreshErrors.delete(id);
+      }
+    }
+  }
+
+  async #refreshDependentDeployment(record: CloudDependentDeploymentRecord): Promise<void> {
+    const generation = this.#credentialRefreshGenerations.get(record.credentialId) ?? 0;
+    const deploymentGeneration = this.#deploymentRefreshGenerations.get(record.id) ?? 0;
+    const fingerprint = JSON.stringify(record);
+    const canApply = () => !this.#disposed && !this.#busyDeployments.has(record.id) &&
+      (this.#credentialRefreshGenerations.get(record.credentialId) ?? 0) === generation &&
+      (this.#deploymentRefreshGenerations.get(record.id) ?? 0) === deploymentGeneration &&
+      JSON.stringify(this.#store.getState().dependentDeployments.find(({ id }) => id === record.id)) === fingerprint;
+    try {
+      const observed = await this.#vault.withCredential(record.credentialId, "aws", async (secret) => {
+        const connection = await this.#awsConnection(record.spec.region, secret, record.credentialId);
+        if (record.kind === "crackstation") {
+          let resource: AwsEc2DeploymentResource;
+          try { resource = crackstationResourceFromRecord(record); } catch { return null; }
+          const provider = this.#awsProviderFactory(connection);
+          const signal = AbortSignal.any([this.#authLifetime.signal, AbortSignal.timeout(this.#deploymentRefreshTimeoutMs)]);
+          const refreshed = await provider.refresh(resource, signal);
+          if (refreshed.guid !== record.id || refreshed.instanceId !== resource.instanceId ||
+            refreshed.region !== record.spec.region) throw new Error("AWS returned a different Crackstation identity");
+          const phase = refreshed.state === "stopped" ? "stopped" : record.status === "failed" ? "failed" : "ready";
+          const applied = applyCrackstationResource(record, refreshed, phase);
+          return { ...applied,
+            status: record.status === "failed" ? "failed" : refreshed.state === "stopped" ? "stopped" : "running",
+            lastError: record.status === "failed" ? record.lastError : null,
+          } as AwsCrackstationDeploymentRecord;
+        }
+        if (!record.runtime.loadBalancerArn || !record.runtime.targetGroupArn) return null;
+        const server = this.#requireDeployment(record.serverDeploymentId);
+        const serverVpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+        if (server.provider !== "aws" || !server.runtime.instanceId || !serverVpcId ||
+          serverVpcId !== record.spec.vpcId || server.runtime.securityGroupIds.length !== 1) {
+          throw new Error("The ALB parent server identity changed");
+        }
+        const asset = (type: CloudManagedAsset["resourceType"]) =>
+          record.managedAssets.find((item) => item.resourceType === type)?.resourceId;
+        const additionalSubnetId = asset("ec2-subnet");
+        const associationId = asset("ec2-route-table-association");
+        const resource: AwsAlbRedirectorDestroyResource = {
+          guid: record.id, name: record.name, region: record.spec.region,
+          serverGuid: server.id, serverInstanceId: server.runtime.instanceId,
+          serverSecurityGroupId: server.runtime.securityGroupIds[0]!, vpcId: record.spec.vpcId,
+          subnetIds: additionalSubnetId ? [...record.spec.subnetIds, additionalSubnetId] : [...record.spec.subnetIds],
+          ...(record.spec.additionalSubnet ? { additionalRouteTableId: record.spec.additionalSubnet.routeTableId } : {}),
+          ...(additionalSubnetId ? { additionalSubnetId } : {}),
+          ...(associationId ? { additionalRouteTableAssociationId: associationId } : {}),
+          ...(record.runtime.securityGroupId ? { securityGroupId: record.runtime.securityGroupId } : {}),
+          ...(record.runtime.serverIngressRuleId ? { serverIngressRuleId: record.runtime.serverIngressRuleId } : {}),
+          loadBalancerArn: record.runtime.loadBalancerArn, targetGroupArn: record.runtime.targetGroupArn,
+          ...(record.runtime.listenerArn ? { listenerArn: record.runtime.listenerArn } : {}),
+          certificateArn: record.spec.certificateArn, backendPort: record.spec.backendPort,
+          healthCheckPath: "/", healthCheckSuccessCodes: "404",
+        };
+        const alb = this.#awsAlbProviderFactory(connection);
+        const alias = this.#awsAlbAliasFactory(connection);
+        try {
+          const refreshed = await alb.refresh(resource);
+          if (record.runtime.aliasRecordOwned && !await alias.matches({
+            hostedZoneId: record.spec.hostedZoneId, domain: record.spec.domain,
+            loadBalancerDnsName: refreshed.dnsName, loadBalancerHostedZoneId: refreshed.canonicalHostedZoneId,
+          })) throw new Error("The managed Route 53 ALB alias no longer matches its expected target");
+          return { ...record, runtime: { ...record.runtime,
+            dnsName: refreshed.dnsName, canonicalHostedZoneId: refreshed.canonicalHostedZoneId,
+            targetHealth: refreshed.targetHealth,
+          } } as AwsAlbRedirectorDeploymentRecord;
+        } finally {
+          alias.dispose();
+          alb.dispose();
+        }
+      });
+      if (!observed || !canApply()) return;
+      await this.#serializeStateMutation(async () => {
+        if (!canApply()) return;
+        if (JSON.stringify(observed) !== fingerprint) {
+          const updated = await this.#store.updateDependent({
+            expectedRevision: this.#store.getState().revision, deployment: observed,
+          });
+          if (!updated.ok) throw new Error(updated.error);
+          this.#refreshErrors.delete(record.id);
+          this.#emitChanged();
+        } else if (this.#refreshErrors.delete(record.id)) this.#emitChanged();
+      });
+    } catch (error) {
+      if (!canApply()) return;
+      const message = cloudErrorMessage(error, "Dependent deployment status could not be read");
+      if (this.#refreshErrors.get(record.id) !== message) {
+        this.#refreshErrors.set(record.id, message);
+        this.#emitChanged();
       }
     }
   }
@@ -2045,6 +2237,198 @@ export class CloudDeploymentService {
     }
   }
 
+  async createAlbRedirectorDeployment(
+    input: CreateAwsAlbRedirectorDeploymentInput,
+  ): Promise<OperationResult<AwsAlbRedirectorDeploymentRecord>> {
+    try {
+      this.#assertActive();
+      const parsed = parseCreateAwsAlbRedirectorDeploymentInput(input);
+      return await this.#serializeDeployment(parsed.serverDeploymentId, async () => {
+        let createdId: string | null = null;
+        try {
+          const server = this.#requireDeploymentAtRevision(parsed.serverDeploymentId, parsed.expectedRevision);
+          const serverVpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+          const serverSubnetId = server.provider === "aws" ? server.runtime.subnetId ?? server.spec.subnetId : null;
+          if (server.provider !== "aws" || !hasStableRunningRuntime(server) ||
+              !server.runtime.instanceId || !server.runtime.privateIpAddress || !serverVpcId ||
+              !serverSubnetId || server.runtime.securityGroupIds.length !== 1 ||
+              server.spec.region !== parsed.spec.region || serverVpcId !== parsed.spec.vpcId) {
+            throw new Error("Choose a running managed AWS Sliver server with a confirmed private VPC address and security group.");
+          }
+          if (parsed.spec.listener.mode === "create" &&
+              (parsed.spec.backendPort === 80 || parsed.spec.backendPort === 443)) {
+            throw new Error("Choose an ALB backend port other than 80 or 443.");
+          }
+          if (this.#store.getState().dependentDeployments.some((candidate) =>
+            candidate.kind === "alb-redirector" && candidate.serverDeploymentId === server.id &&
+            (candidate.spec.domain.toLowerCase() === parsed.spec.domain.toLowerCase() ||
+              candidate.spec.backendPort === parsed.spec.backendPort))) {
+            throw new Error("This server already has an ALB redirector for that hostname or backend port.");
+          }
+          const options = await this.discoverAlbRedirectorOptions({ credentialId: server.credentialId, serverDeploymentId: server.id });
+          if (!options.ok) throw new Error(options.error);
+          const selectedExistingListener = parsed.spec.listener.mode === "existing" ? parsed.spec.listener : null;
+          if (selectedExistingListener &&
+              !options.value.existingHttpListeners.some((job) =>
+                job.jobId === selectedExistingListener.jobId && job.port === parsed.spec.backendPort)) {
+            throw new Error("The selected existing Sliver HTTP job is no longer active on that port.");
+          }
+          const cert = options.value.certificates.find(({ arn }) => arn === parsed.spec.certificateArn);
+          if (!cert || !certificateCoversHostname(cert, parsed.spec.domain)) {
+            throw new Error("Choose an issued ACM certificate that covers the redirector hostname.");
+          }
+          const zone = options.value.hostedZones.find(({ id }) => id === parsed.spec.hostedZoneId);
+          if (!zone || !hostnameBelongsToZone(parsed.spec.domain, zone.name)) {
+            throw new Error("Choose a public Route 53 zone containing the redirector hostname.");
+          }
+          if (parsed.spec.additionalSubnet) {
+            const proposed = options.value.suggestedAdditionalSubnet;
+            if (server.spec.networkMode !== "managed" || parsed.spec.subnetIds.length !== 1 ||
+                parsed.spec.subnetIds[0] !== serverSubnetId || !proposed ||
+                proposed.cidrBlock !== parsed.spec.additionalSubnet.cidrBlock ||
+                proposed.availabilityZone !== parsed.spec.additionalSubnet.availabilityZone ||
+                proposed.routeTableId !== parsed.spec.additionalSubnet.routeTableId) {
+              throw new Error("The managed VPC subnet plan changed. Refresh ALB options before deploying.");
+            }
+          } else {
+            const selected = parsed.spec.subnetIds.map((id) => options.value.publicSubnets.find((subnet) => subnet.id === id));
+            if (selected.length !== 2 || selected.some((subnet) => !subnet) ||
+                selected[0]!.availabilityZone === selected[1]!.availabilityZone ||
+                (server.runtime.availabilityZone && !selected.some((subnet) =>
+                  subnet?.availabilityZone === server.runtime.availabilityZone))) {
+              throw new Error("Choose two public subnets in different availability zones, including the Sliver server's zone.");
+            }
+          }
+
+          const intent = await this.#serializeStateMutation(() => this.#store.createDependent({
+            kind: "alb-redirector", credentialId: server.credentialId, ...parsed,
+          }));
+          if (!intent.ok || intent.value.deployment.kind !== "alb-redirector") {
+            throw new Error(intent.ok ? "The ALB deployment intent is invalid." : intent.error);
+          }
+          createdId = intent.value.deployment.id;
+          this.#emitChanged();
+          if (parsed.spec.listener.mode === "existing") {
+            const { jobId } = parsed.spec.listener;
+            await this.#withSoftwareSliverClient(server, async (client) => {
+              const matches = (await client.getJobs()).Active.filter((job) =>
+                job.ID === jobId && job.Name === "http" &&
+                job.Protocol === "tcp" && job.Port === parsed.spec.backendPort);
+              if (matches.length !== 1) throw new Error("The existing Sliver HTTP job changed before ALB provisioning.");
+            });
+            await this.#persistDependentPatch(createdId, (current) => {
+              if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+              return { ...current, phase: "starting-listener", runtime: {
+                ...current.runtime, listenerOwnership: "existing", listenerJobId: jobId,
+              } };
+            });
+          } else {
+            await this.#persistDependentPatch(createdId, (current) => {
+              if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+              return { ...current, phase: "starting-listener", runtime: { ...current.runtime, listenerOwnership: "managed" } };
+            });
+            const started = await this.#withSoftwareSliverClient(server, async (client) => {
+              const jobs = (await client.getJobs()).Active;
+              if (jobs.some(({ Port }) => Port === parsed.spec.backendPort)) {
+                throw new Error("The selected ALB backend port is already used by a Sliver job.");
+              }
+              return client.startHTTPListenerWithOptions({
+                host: server.runtime.privateIpAddress!, port: parsed.spec.backendPort,
+                domain: "", website: "", enforceOTP: true,
+              });
+            });
+            if (!Number.isSafeInteger(started.JobID) || started.JobID < 1) {
+              throw new Error("Sliver did not confirm the new private HTTP listener job. Inspect the selected port before removal.");
+            }
+            await this.#persistDependentPatch(createdId, (current) => {
+              if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+              return { ...current, runtime: { ...current.runtime, listenerJobId: started.JobID } };
+            });
+          }
+          const httpStatus = await this.#withSoftwareSsh(server, async (ssh) => {
+            for (let attempt = 0; attempt < 5; attempt += 1) {
+              const probe = parsed.spec.listener.mode === "existing"
+                ? this.#awsAlbListenerProbe.probeExistingPrivateHttpListener
+                : this.#awsAlbListenerProbe.probePrivateHttpListener;
+              if (!probe) throw new Error("Existing Sliver HTTP listener probing is unavailable.");
+              const status = await probe.call(this.#awsAlbListenerProbe, {
+                ssh, privateIp: server.runtime.privateIpAddress!, port: parsed.spec.backendPort,
+              });
+              if (status !== null) return status;
+              if (attempt < 4) await delay(500);
+            }
+            return null;
+          });
+          if (httpStatus === null) throw new Error("The Sliver HTTP listener is not reachable on the server's private VPC address.");
+
+          const deployed = await this.#vault.withCredential(server.credentialId, "aws", async (secret) => {
+            const connection = await this.#awsConnection(server.spec.region, secret, server.credentialId);
+            const alb = this.#awsAlbProviderFactory(connection);
+            try {
+              const resource = await alb.create({
+                guid: createdId!, name: parsed.name, serverGuid: server.id,
+                serverInstanceId: server.runtime.instanceId!,
+                serverSecurityGroupId: server.runtime.securityGroupIds[0]!,
+                vpcId: parsed.spec.vpcId, subnetIds: parsed.spec.subnetIds,
+                ...(parsed.spec.additionalSubnet ? { additionalSubnet: parsed.spec.additionalSubnet } : {}),
+                certificateArn: parsed.spec.certificateArn, backendPort: parsed.spec.backendPort,
+                healthCheckSuccessCodes: String(httpStatus),
+              }, async (event) => this.#persistAlbMutation(createdId!, event));
+              await this.#persistDependentPatch(createdId!, (current) => {
+                if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+                return { ...current, phase: "configuring-dns", runtime: {
+                  ...current.runtime, loadBalancerArn: resource.loadBalancerArn,
+                  targetGroupArn: resource.targetGroupArn, listenerArn: resource.listenerArn,
+                  dnsName: resource.dnsName, canonicalHostedZoneId: resource.canonicalHostedZoneId,
+                  securityGroupId: resource.securityGroupId, serverIngressRuleId: resource.serverIngressRuleId,
+                  targetHealth: "healthy", aliasRecordName: parsed.spec.domain, aliasRecordOwned: false,
+                } };
+              });
+              const alias = this.#awsAlbAliasFactory(connection);
+              try {
+                try {
+                  const result = await alias.create({
+                    hostedZoneId: parsed.spec.hostedZoneId, domain: parsed.spec.domain,
+                    loadBalancerDnsName: resource.dnsName,
+                    loadBalancerHostedZoneId: resource.canonicalHostedZoneId,
+                  });
+                  return { resource, aliasOwned: result.owned };
+                } catch (error) {
+                  if (error instanceof AwsAlbAliasChangeAcceptedError) {
+                    await this.#persistDependentPatch(createdId!, (current) => {
+                      if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+                      return { ...current, runtime: { ...current.runtime, aliasRecordOwned: true } };
+                    });
+                  }
+                  throw error;
+                }
+              } finally {
+                alias.dispose();
+              }
+            } catch (error) {
+              throw new Error(cloudErrorMessage(error, "The ALB redirector could not be created", credentialValues(secret)));
+            } finally {
+              alb.dispose();
+            }
+          });
+          const finished = await this.#persistDependentPatch(createdId, (current) => {
+            if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+            return { ...current, status: "running", phase: "ready", lastError: null,
+              runtime: { ...current.runtime, aliasRecordOwned: deployed.aliasOwned } };
+          });
+          if (finished.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+          return { ok: true, value: finished };
+        } catch (error) {
+          const message = cloudErrorMessage(error, "The ALB redirector could not be created");
+          if (createdId) await this.#markDependentFailed(createdId, message);
+          return { ok: false, error: message };
+        }
+      });
+    } catch (error) {
+      return failure(error, "The ALB redirector request was rejected");
+    }
+  }
+
   async testCredential(
     input: CloudCredentialIdInput,
   ): Promise<OperationResult<CloudCredentialTestResult>> {
@@ -2122,6 +2506,104 @@ export class CloudDeploymentService {
       });
     } catch (error) {
       return failure(error, "The AWS option discovery request was rejected");
+    }
+  }
+
+  async discoverCrackstationOptions(
+    input: DiscoverAwsCrackstationOptionsInput,
+  ): Promise<OperationResult<AwsCrackstationOptions>> {
+    try {
+      this.#assertActive();
+      const parsed = parseDiscoverAwsCrackstationOptionsInput(input);
+      const server = this.#requireDeployment(parsed.serverDeploymentId);
+      const vpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+      const subnetId = server.provider === "aws" ? server.runtime.subnetId ?? server.spec.subnetId : null;
+      if (server.provider !== "aws" || server.credentialId !== parsed.credentialId ||
+        !hasStableRunningRuntime(server) || !vpcId || !subnetId) {
+        return { ok: false, error: "Choose a running managed AWS Sliver server with a confirmed VPC and subnet." };
+      }
+      return await this.#vault.withCredential(parsed.credentialId, "aws", async (secret) => {
+        try {
+          const provider = this.#awsProviderFactory(await this.#awsConnection(server.spec.region, secret, parsed.credentialId));
+          if (!provider.discoverCrackstationInstanceTypes || !provider.discoverCrackstationImages ||
+            !provider.discoverCrackstationPublicSubnetIds) {
+            throw new Error("AWS Crackstation discovery is unavailable");
+          }
+          const [inventory, instanceTypes, images, publicSubnetIds] = await Promise.all([
+            provider.discover({ vpcId, architecture: "x86_64" }),
+            provider.discoverCrackstationInstanceTypes(),
+            provider.discoverCrackstationImages(),
+            provider.discoverCrackstationPublicSubnetIds(vpcId),
+          ]);
+          if (inventory.region !== server.spec.region) throw new Error("AWS returned inventory for a different region");
+          const options = toAwsDeploymentOptions(server.spec.region, inventory, publicKeyForCredential(secret));
+          const publicIds = new Set(publicSubnetIds);
+          return { ok: true, value: Object.freeze({ ...options, instanceTypes, images,
+            subnets: Object.freeze(options.subnets.filter(({ id, vpcId: subnetVpc }) => subnetVpc === vpcId && publicIds.has(id))),
+          }) };
+        } catch (error) {
+          return failure(error, "AWS Crackstation options could not be discovered", credentialValues(secret));
+        }
+      });
+    } catch (error) {
+      return failure(error, "The AWS Crackstation option request was rejected");
+    }
+  }
+
+  async discoverAlbRedirectorOptions(
+    input: DiscoverAwsAlbRedirectorOptionsInput,
+  ): Promise<OperationResult<AwsAlbRedirectorOptions>> {
+    try {
+      this.#assertActive();
+      const parsed = parseDiscoverAwsAlbRedirectorOptionsInput(input);
+      const server = this.#requireDeployment(parsed.serverDeploymentId);
+      const serverVpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+      const serverSubnetId = server.provider === "aws" ? server.runtime.subnetId ?? server.spec.subnetId : null;
+      if (server.provider !== "aws" || server.credentialId !== parsed.credentialId ||
+          !hasStableRunningRuntime(server) || !serverVpcId || !serverSubnetId) {
+        return { ok: false, error: "Choose a running managed AWS Sliver server with a confirmed VPC and subnet." };
+      }
+      return await this.#vault.withCredential(parsed.credentialId, "aws", async (secret) => {
+        const connection = await this.#awsConnection(server.spec.region, secret, parsed.credentialId);
+        const alb = this.#awsAlbProviderFactory(connection);
+        const dns = this.#awsDnsProviderFactory(connection);
+        try {
+          const [network, certificates, zones, existingHttpListeners] = await Promise.all([
+            alb.discoverNetworkOptions({
+              vpcId: serverVpcId, serverSubnetId, serverGuid: server.id,
+            }),
+            this.#awsAcmDiscoveryFactory(connection).listIssued(),
+            dns.listZones(),
+            this.#withSoftwareSliverClient(server, async (client) => {
+              const jobs = (await client.getJobs()).Active.filter((job) =>
+                job.Name === "http" && job.Protocol === "tcp" &&
+                Number.isSafeInteger(job.ID) && job.ID > 0 &&
+                Number.isSafeInteger(job.Port) && job.Port > 0 && job.Port <= 65535);
+              if (jobs.length > 32) throw new Error("Too many HTTP listener jobs to inspect safely.");
+              return jobs.map((job) => Object.freeze({
+                jobId: job.ID, port: job.Port,
+                description: job.Description?.trim().slice(0, 160) || "Sliver HTTP listener",
+              }));
+            }),
+          ]);
+          return { ok: true, value: Object.freeze({
+            region: server.spec.region, vpcId: serverVpcId,
+            publicSubnets: Object.freeze(network.publicSubnets),
+            suggestedAdditionalSubnet: network.suggestedAdditionalSubnet,
+            certificates: Object.freeze(certificates),
+            existingHttpListeners: Object.freeze(existingHttpListeners),
+            hostedZones: Object.freeze(zones.filter((zone) => zone.provider === "aws" && !zone.private)
+              .map(({ id, name }) => ({ id, name }))),
+          }) };
+        } catch (error) {
+          return failure(error, "ALB redirector options could not be discovered", credentialValues(secret));
+        } finally {
+          alb.dispose();
+          dns.dispose();
+        }
+      });
+    } catch (error) {
+      return failure(error, "The ALB redirector option request was rejected");
     }
   }
 
@@ -2317,6 +2799,200 @@ export class CloudDeploymentService {
     }
   }
 
+  async createCrackstationDeployment(
+    input: CreateAwsCrackstationDeploymentInput,
+  ): Promise<OperationResult<AwsCrackstationDeploymentRecord>> {
+    try {
+      this.#assertActive();
+      const parsed = parseCreateAwsCrackstationDeploymentInput(input);
+      const server = this.#requireDeploymentAtRevision(parsed.serverDeploymentId, parsed.expectedRevision);
+      const serverVpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+      const serverSubnetId = server.provider === "aws" ? server.runtime.subnetId ?? server.spec.subnetId : null;
+      if (server.provider !== "aws" || !hasStableRunningRuntime(server) ||
+        !serverVpcId || !serverSubnetId || !server.runtime.privateIpAddress ||
+        server.runtime.securityGroupIds.length !== 1 ||
+        parsed.spec.region !== server.spec.region || parsed.spec.vpcId !== serverVpcId ||
+        parsed.spec.sshCidrs.length === 0 ||
+        server.operatorConfigFileName === null || server.operatorConfigDigest === null ||
+        !this.#sshHostKeys.get(server.id)) {
+        return { ok: false, error: "Crackstation requires a running managed AWS Sliver server, a confirmed same-VPC network, and reachable SSH." };
+      }
+      const discovered = await this.discoverCrackstationOptions({
+        credentialId: server.credentialId, serverDeploymentId: server.id,
+      });
+      if (!discovered.ok) return discovered;
+      if (!discovered.value.instanceTypes.some(({ name }) => name === parsed.spec.instanceType) ||
+        !discovered.value.images.some(({ id, sshUsername }) => id === parsed.spec.imageId && sshUsername === parsed.spec.sshUsername) ||
+        !discovered.value.subnets.some(({ id, vpcId }) => id === parsed.spec.subnetId && vpcId === serverVpcId)) {
+        return { ok: false, error: "The selected GPU instance, official image, or subnet is no longer available in the server VPC." };
+      }
+      const created = await this.#serializeStateMutation(() => this.#store.createDependent({
+        ...parsed, kind: "crackstation", credentialId: server.credentialId,
+      }));
+      if (!created.ok) return created;
+      const worker = created.value.deployment;
+      if (worker.kind !== "crackstation") throw new Error("Crackstation state identity changed unexpectedly");
+      this.#emitChanged();
+      return await this.#serializeDeployment(worker.id, async () => {
+        try {
+          return { ok: true, value: await this.#provisionCrackstation(worker) };
+        } catch (error) {
+          const message = cloudErrorMessage(error, "Crackstation deployment failed");
+          await this.#markDependentFailed(worker.id, message);
+          return { ok: false, error: message };
+        }
+      });
+    } catch (error) {
+      return failure(error, "The Crackstation deployment could not be created");
+    }
+  }
+
+  async #provisionCrackstation(deployment: AwsCrackstationDeploymentRecord): Promise<AwsCrackstationDeploymentRecord> {
+    return this.#vault.withCredential(deployment.credentialId, "aws", async (secret, summary) => {
+      let stagedPath: string | undefined;
+      let operatorConfig: Buffer | undefined;
+      try {
+        const server = this.#requireDeployment(deployment.serverDeploymentId);
+        if (server.provider !== "aws" || !hasStableRunningRuntime(server) ||
+          (server.runtime.vpcId ?? server.spec.vpcId) !== deployment.spec.vpcId || !server.runtime.privateIpAddress) {
+          throw new Error("The managed Sliver server is no longer available in the worker VPC");
+        }
+        const connection = await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId);
+        const provider = this.#awsProviderFactory(connection);
+        if (!provider.createCrackstation) throw new Error("AWS Crackstation creation is unavailable");
+        stagedPath = join(this.#store.rootDirectory, "staging", `${deployment.id}-${randomUUID()}.bin`);
+        const staged = await this.#crackstationReleaseDownloader.stagePrivate(
+          { artifact: "crackstation", os: "linux", arch: "amd64" }, stagedPath,
+        );
+        if (!staged.sha256) throw new Error("The Crackstation release did not include a verified SHA-256 digest");
+        await this.#persistDependentPatch(deployment.id, (current) => {
+          if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+          return { ...current, phase: "creating-instance", runtime: {
+            ...current.runtime, releaseVersion: staged.version, releaseSha256: staged.sha256!,
+          } };
+        });
+        const resource = await provider.createCrackstation({
+          guid: deployment.id, name: deployment.name,
+          imageId: deployment.spec.imageId, instanceType: deployment.spec.instanceType,
+          network: { mode: "existing", vpcId: deployment.spec.vpcId, subnetId: deployment.spec.subnetId },
+          sshPublicKey: publicKeyForCredential(secret),
+          sshKeyPair: { mode: "managed" },
+          ...(deployment.spec.volumeSizeGiB === null ? {} : { rootVolumeSizeGiB: deployment.spec.volumeSizeGiB }),
+          firewall: { sshPort: deployment.spec.sshPort, sshSourceCidrs: deployment.spec.sshCidrs },
+          allocateElasticIp: true,
+        }, async (event) => {
+          await this.#persistDependentPatch(deployment.id, (current) => {
+            if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+            return applyCrackstationCreateMutation(current, event);
+          });
+        });
+        assertAwsReadyForSsh(resource);
+        const sshHost = resource.publicIpAddress;
+        if (!sshHost) throw new Error("AWS did not report a worker public SSH address");
+        await this.#persistDependentPatch(deployment.id, (current) => {
+          if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+          return applyCrackstationResource(current, resource, "configuring-firewall");
+        });
+        const ingressRule = crackstationServerIngressRule(server.spec.multiplayerPort, resource.securityGroupId, deployment.id);
+        const rule = await provider.createFirewallRule(awsResourceFromRecord(server), ingressRule);
+        await this.#persistDependentPatch(deployment.id, (current) => ({ ...current,
+          phase: "creating-operator",
+          managedAssets: [...current.managedAssets, { resourceType: "ec2-security-group-rule", resourceId: rule.id, displayName: null, tagged: false }],
+        }));
+        const serverKey = this.#sshHostKeys.get(server.id);
+        if (!serverKey) throw new Error("The managed Sliver server SSH host key is unavailable");
+        const target = this.#requireCurrentSshTarget(server.id, server.credentialId, summary, managedSshTarget(server, summary));
+        const generated = await this.#provisioner.createOperator({
+          deploymentId: server.id, operatorEndpointHost: server.runtime.privateIpAddress,
+          multiplayerPort: server.spec.multiplayerPort, operatorName: deployment.spec.operatorName,
+          permissions: "crackstation",
+          assertOperatorNameAvailable: () => this.#assertOperatorNameAvailable(server, deployment.spec.operatorName),
+          ssh: { ...sshTerminalTarget(target, secret, serverKey), hostKeySha256: serverKey },
+        });
+        operatorConfig = generated.operatorConfig;
+        const digest = createHash("sha256").update(operatorConfig).digest("hex");
+        if (digest !== generated.operatorConfigSha256 || generated.operatorName !== deployment.spec.operatorName) {
+          throw new Error("The generated Crackstation operator profile failed verification");
+        }
+        await this.#persistDependentPatch(deployment.id, (current) => {
+          if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+          return { ...current, phase: "installing-crackstation", runtime: {
+            ...current.runtime, operatorConfigSha256: digest,
+          } };
+        });
+        await this.#crackstationDeployer.install({
+          deploymentId: deployment.id, binaryPath: staged.path, binarySha256: staged.sha256,
+          operatorConfig,
+          ssh: {
+            host: sshHost, port: deployment.spec.sshPort, username: deployment.spec.sshUsername,
+            privateKey: secret.sshPrivateKey,
+            ...(secret.sshPassphrase === null ? {} : { passphrase: secret.sshPassphrase }),
+            ...(this.#sshHostKeys.get(deployment.id) ? { hostKeySha256: this.#sshHostKeys.get(deployment.id)! } : {}),
+          },
+          onHostKey: async (fingerprint) => { await this.#sshHostKeys.remember(deployment.id, fingerprint); },
+        });
+        await this.#persistDependentPatch(deployment.id, (current) => ({ ...current, phase: "connecting-crackstation" }));
+        const stationUuid = await this.#waitForCrackstationRegistration(server, deployment.id);
+        const ready = await this.#persistDependentPatch(deployment.id, (current) => {
+          if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+          return { ...current, status: "running", phase: "ready", lastError: null,
+            runtime: { ...current.runtime, stationHostUuid: stationUuid },
+          };
+        });
+        if (ready.kind !== "crackstation") throw new Error("Crackstation identity changed");
+        return ready;
+      } catch (error) {
+        const message = cloudErrorMessage(error, "AWS Crackstation deployment failed", credentialValues(secret));
+        const current = this.#store.getState().dependentDeployments.find(({ id }) => id === deployment.id);
+        if (current?.kind === "crackstation" && current.runtime.instanceId && current.runtime.securityGroupIds.length === 1) {
+          try {
+            const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
+            const stopped = await provider.stop(crackstationResourceFromRecord(current));
+            await this.#persistDependentPatch(deployment.id, (latest) => {
+              if (latest.kind !== "crackstation") throw new Error("Crackstation identity changed");
+              return { ...applyCrackstationResource(latest, stopped, latest.phase), status: latest.status };
+            });
+          } catch (stopError) {
+            throw new Error(`${message} Automatic GPU stop also failed: ${cloudErrorMessage(stopError, "AWS could not stop the GPU instance", credentialValues(secret))}`);
+          }
+        }
+        throw new Error(message);
+      } finally {
+        operatorConfig?.fill(0);
+        if (stagedPath) await unlink(stagedPath).catch(() => undefined);
+      }
+    });
+  }
+
+  async #waitForCrackstationRegistration(server: AwsCloudDeploymentRecord, deploymentId: string): Promise<string> {
+    const expected = operatorConfigFileName(server.id);
+    if (server.operatorConfigFileName !== expected || !server.operatorConfigDigest) throw new Error("The Sliver server operator profile is unavailable");
+    const loaded = await readBoundedRegularFile(join(this.#operatorConfigDirectory, expected), {
+      label: "Cloud operator configuration", maxBytes: MAX_OPERATOR_CONFIG_BYTES, requirePrivateMode: true,
+    });
+    let client: CloudCrackstationClient | undefined;
+    try {
+      if (createHash("sha256").update(loaded.data).digest("hex") !== server.operatorConfigDigest) {
+        throw new Error("The Sliver server operator profile changed after deployment");
+      }
+      client = this.#crackstationClientFactory({ ...parseConfig(loaded.data),
+        lhost: managedOperatorDirectoryHost(server), lport: server.spec.multiplayerPort,
+      });
+      await client.connect();
+      const deadline = performance.now() + 180_000;
+      while (performance.now() < deadline) {
+        const stations = await client.rpc.crackstations({});
+        const station = stations.Crackstations.find(({ Name }) => Name === crackstationStationName(deploymentId));
+        if (station?.HostUUID && station.CUDA.length > 0 && station.HashcatVersion) return station.HostUUID;
+        await new Promise((resolve) => setTimeout(resolve, 3_000));
+      }
+      throw new Error("The Crackstation did not register with a CUDA Hashcat backend before the timeout");
+    } finally {
+      loaded.data.fill(0);
+      await client?.disconnect().catch(() => undefined);
+    }
+  }
+
   async renameDeployment(input: RenameCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>> {
     try {
       this.#assertActive();
@@ -2365,13 +3041,23 @@ export class CloudDeploymentService {
 
   async runLifecycleAction(
     input: CloudDeploymentActionInput,
-  ): Promise<OperationResult<CloudDeploymentRecord>> {
+  ): Promise<OperationResult<CloudDeploymentRecord | CloudDependentDeploymentRecord>> {
     try {
       this.#assertActive();
       const parsed = parseCloudDeploymentActionInput(input);
       return await this.#serializeDeployment(parsed.deploymentId, async () => {
         let operationStarted = false;
         try {
+          const dependent = this.#store.getState().dependentDeployments.some(({ id }) => id === parsed.deploymentId);
+          if (dependent) {
+            const deployment = this.#requireDependentAtRevision(parsed.deploymentId, parsed.expectedRevision);
+            if (deployment.kind !== "crackstation") return { ok: false, error: "ALB redirectors do not support EC2 lifecycle actions" };
+            if (deployment.status === "provisioning" || deployment.status === "deleting") {
+              return { ok: false, error: "The deployment is busy" };
+            }
+            operationStarted = true;
+            return { ok: true, value: await this.#runCrackstationLifecycle(deployment, parsed.action) };
+          }
           let deployment = this.#requireDeploymentAtRevision(parsed.deploymentId, parsed.expectedRevision);
           if (deployment.status === "provisioning" || deployment.status === "deleting") {
             return { ok: false, error: "The deployment is busy" };
@@ -2383,7 +3069,13 @@ export class CloudDeploymentService {
           return { ok: true, value: deployment };
         } catch (error) {
           const message = cloudErrorMessage(error, "The lifecycle action failed");
-          if (operationStarted) await this.#markFailed(parsed.deploymentId, message);
+          if (operationStarted) {
+            if (this.#store.getState().dependentDeployments.some(({ id }) => id === parsed.deploymentId)) {
+              await this.#markDependentFailed(parsed.deploymentId, message);
+            } else {
+              await this.#markFailed(parsed.deploymentId, message);
+            }
+          }
           return { ok: false, error: message };
         }
       });
@@ -2725,7 +3417,13 @@ export class CloudDeploymentService {
   ): OperationResult<DestroyCloudDeploymentPlan> {
     try {
       this.#assertActive();
-      const deployment = this.#requireDeploymentAtRevision(input.deploymentId, input.expectedRevision);
+      const deployment = this.#store.getState().dependentDeployments.some(({ id }) => id === input.deploymentId)
+        ? this.#requireDependentAtRevision(input.deploymentId, input.expectedRevision)
+        : this.#requireDeploymentAtRevision(input.deploymentId, input.expectedRevision);
+      if (!('kind' in deployment) &&
+        this.#store.getState().dependentDeployments.some(({ serverDeploymentId }) => serverDeploymentId === deployment.id)) {
+        return { ok: false, error: "Remove dependent deployments before terminating this server." };
+      }
       const token = this.#idFactory();
       if (!isUuidV4(token) || this.#destroyPlans.has(token)) {
         throw new Error("A deployment termination plan could not be created");
@@ -2770,6 +3468,20 @@ export class CloudDeploymentService {
       return await this.#serializeDeployment(plan.deploymentId, async () => {
         let operationStarted = false;
         try {
+          if (this.#store.getState().dependentDeployments.some(({ id }) => id === plan.deploymentId)) {
+            let deployment = this.#requireDependentAtRevision(plan.deploymentId, plan.expectedRevision);
+            deployment = await this.#persistDependentPatch(deployment.id, (current) => ({
+              ...current, status: "deleting", phase: "deleting", lastError: null,
+            }));
+            operationStarted = true;
+            if (deployment.kind === "crackstation") await this.#destroyCrackstationDependent(deployment);
+            else await this.#destroyAlbDependent(deployment);
+            const deleted = await this.#serializeStateMutation(() => this.#store.deleteDependent({
+              deploymentId: deployment.id, expectedRevision: this.#store.getState().revision,
+            }));
+            if (deleted.ok) this.#emitChanged();
+            return deleted;
+          }
           let deployment = this.#requireDeploymentAtRevision(plan.deploymentId, plan.expectedRevision);
           deployment = await this.#persistPatch(deployment.id, (current) => ({
             ...current,
@@ -2793,7 +3505,13 @@ export class CloudDeploymentService {
           return { ok: true, value: deleted.value };
         } catch (error) {
           const message = cloudErrorMessage(error, "The cloud instance could not be terminated");
-          if (operationStarted) await this.#markFailed(plan.deploymentId, message);
+          if (operationStarted) {
+            if (this.#store.getState().dependentDeployments.some(({ id }) => id === plan.deploymentId)) {
+              await this.#markDependentFailed(plan.deploymentId, message);
+            } else {
+              await this.#markFailed(plan.deploymentId, message);
+            }
+          }
           return { ok: false, error: message };
         }
       });
@@ -3205,6 +3923,29 @@ export class CloudDeploymentService {
     });
   }
 
+  async #runCrackstationLifecycle(
+    deployment: AwsCrackstationDeploymentRecord,
+    action: CloudDeploymentActionInput["action"],
+  ): Promise<AwsCrackstationDeploymentRecord> {
+    return this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      try {
+        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
+        const resource = crackstationResourceFromRecord(deployment);
+        const updated = action === "start" ? await provider.start(resource)
+          : action === "stop" ? await provider.stop(resource) : await provider.reboot(resource);
+        const next = await this.#persistDependentPatch(deployment.id, (current) => {
+          if (current.kind !== "crackstation") throw new Error("Crackstation identity changed");
+          const applied = applyCrackstationResource(current, updated, updated.state === "stopped" ? "stopped" : "ready");
+          return { ...applied, status: updated.state === "stopped" ? "stopped" : "running", lastError: null };
+        });
+        if (next.kind !== "crackstation") throw new Error("Crackstation identity changed");
+        return next;
+      } catch (error) {
+        throw new Error(cloudErrorMessage(error, "Crackstation lifecycle action failed", credentialValues(secret)));
+      }
+    });
+  }
+
   async #runAzureLifecycle(
     deployment: AzureCloudDeploymentRecord,
     action: CloudDeploymentActionInput["action"],
@@ -3316,6 +4057,30 @@ export class CloudDeploymentService {
           .destroy(azureDestroyResourceFromRecord(deployment, secret));
       } catch (error) {
         throw new Error(cloudErrorMessage(error, "Azure resource termination failed", credentialValues(secret)));
+      }
+    });
+  }
+
+  async #destroyCrackstationDependent(deployment: AwsCrackstationDeploymentRecord): Promise<void> {
+    await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      try {
+        const provider = this.#awsProviderFactory(await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId));
+        const server = this.#requireDeployment(deployment.serverDeploymentId);
+        if (server.provider !== "aws" || (server.runtime.vpcId ?? server.spec.vpcId) !== deployment.spec.vpcId) {
+          throw new Error("The Crackstation parent server VPC changed");
+        }
+        const ingress = deployment.managedAssets.find((asset) => asset.resourceType === "ec2-security-group-rule");
+        const workerSecurityGroup = deployment.runtime.securityGroupIds[0];
+        if (ingress && workerSecurityGroup) {
+          await provider.deleteFirewallRuleIfMatches(
+            awsResourceFromRecord(server), ingress.resourceId,
+            crackstationServerIngressRule(server.spec.multiplayerPort, workerSecurityGroup, deployment.id),
+          );
+        }
+        const resource = crackstationDestroyResourceFromRecord(deployment);
+        if (resource) await provider.destroy(resource);
+      } catch (error) {
+        throw new Error(cloudErrorMessage(error, "Crackstation resource termination failed", credentialValues(secret)));
       }
     });
   }
@@ -3838,6 +4603,45 @@ export class CloudDeploymentService {
     return deployment;
   }
 
+  #requireDependentAtRevision(deploymentId: string, expectedRevision: number): CloudDependentDeploymentRecord {
+    if (!isUuidV4(deploymentId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new TypeError("Invalid dependent deployment identity or revision");
+    }
+    const state = this.#store.getState();
+    if (state.revision !== expectedRevision) {
+      throw new Error("Cloud deployment state changed in another window. Review the latest state and try again.");
+    }
+    const deployment = state.dependentDeployments.find(({ id }) => id === deploymentId);
+    if (!deployment) throw new Error("The dependent deployment no longer exists");
+    return deployment;
+  }
+
+  async #persistDependentPatch(
+    deploymentId: string,
+    mutate: (current: CloudDependentDeploymentRecord) => CloudDependentDeploymentRecord,
+  ): Promise<CloudDependentDeploymentRecord> {
+    return this.#serializeStateMutation(async () => {
+      this.#assertActive();
+      const state = this.#store.getState();
+      const current = state.dependentDeployments.find(({ id }) => id === deploymentId);
+      if (!current) throw new Error("The dependent deployment no longer exists");
+      const updated = await this.#store.updateDependent({ expectedRevision: state.revision, deployment: mutate(current) });
+      if (!updated.ok) throw new Error(updated.error);
+      this.#emitChanged();
+      return updated.value.deployment;
+    });
+  }
+
+  async #markDependentFailed(deploymentId: string, message: string): Promise<void> {
+    if (!this.#store.getState().dependentDeployments.some(({ id }) => id === deploymentId)) return;
+    await this.#persistDependentPatch(deploymentId, (current) => ({
+      ...current,
+      status: "failed",
+      phase: "failed",
+      lastError: message,
+    })).catch(() => undefined);
+  }
+
   async #persistPhase(deploymentId: string, phase: CloudDeploymentPhase): Promise<CloudDeploymentRecord> {
     return this.#persistPatch(deploymentId, (current) => ({ ...current, phase, lastError: null }));
   }
@@ -4091,6 +4895,119 @@ export class CloudDeploymentService {
 
   #assertActive(): void {
     if (this.#disposed) throw new Error("Cloud deployment service is disposed");
+  }
+
+  async #persistAlbMutation(deploymentId: string, event: AwsAlbRedirectorMutationEvent): Promise<void> {
+    await this.#persistDependentPatch(deploymentId, (current) => {
+      if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+      const assets: CloudManagedAsset[] = [...current.managedAssets];
+      const add = (resourceType: CloudManagedAsset["resourceType"], resourceId: string | undefined): void => {
+        if (!resourceId || assets.some((asset) => asset.resourceType === resourceType && asset.resourceId === resourceId)) return;
+        assets.push({ resourceType, resourceId, displayName: null, tagged: true });
+      };
+      const resources = event.resources;
+      add("ec2-subnet", resources.additionalSubnetId);
+      add("ec2-route-table-association", resources.additionalRouteTableAssociationId);
+      add("ec2-security-group", resources.securityGroupId);
+      add("elbv2-target-group", resources.targetGroupArn);
+      add("elbv2-load-balancer", resources.loadBalancerArn);
+      add("elbv2-listener", resources.listenerArn);
+      const phase = event.phase === "target-group" ? "configuring-target-group" :
+        event.phase === "load-balancer" || event.phase === "listener" ? "creating-load-balancer" :
+          event.phase === "healthy" ? "waiting-target-health" : "configuring-firewall";
+      return { ...current, phase, managedAssets: assets, runtime: {
+        ...current.runtime,
+        loadBalancerArn: resources.loadBalancerArn ?? current.runtime.loadBalancerArn,
+        targetGroupArn: resources.targetGroupArn ?? current.runtime.targetGroupArn,
+        listenerArn: resources.listenerArn ?? current.runtime.listenerArn,
+        canonicalHostedZoneId: resources.canonicalHostedZoneId ?? current.runtime.canonicalHostedZoneId,
+        securityGroupId: resources.securityGroupId ?? current.runtime.securityGroupId,
+        serverIngressRuleId: resources.serverIngressRuleId ?? current.runtime.serverIngressRuleId,
+      } };
+    });
+  }
+
+  async #destroyAlbDependent(deployment: AwsAlbRedirectorDeploymentRecord): Promise<void> {
+    const server = this.#requireDeployment(deployment.serverDeploymentId);
+    const serverVpcId = server.provider === "aws" ? server.runtime.vpcId ?? server.spec.vpcId : null;
+    if (server.provider !== "aws" || !server.runtime.instanceId || !serverVpcId || !server.runtime.privateIpAddress ||
+        server.runtime.securityGroupIds.length !== 1 || serverVpcId !== deployment.spec.vpcId) {
+      throw new Error("The parent AWS Sliver server identity is unavailable for ALB cleanup.");
+    }
+    await this.#vault.withCredential(deployment.credentialId, "aws", async (secret) => {
+      const connection = await this.#awsConnection(deployment.spec.region, secret, deployment.credentialId);
+      const alb = this.#awsAlbProviderFactory(connection);
+      const alias = this.#awsAlbAliasFactory(connection);
+      try {
+        if (deployment.runtime.aliasRecordOwned) {
+          if (!deployment.runtime.dnsName || !deployment.runtime.canonicalHostedZoneId) {
+            throw new Error("The managed Route 53 alias target is incomplete. Inspect DNS before retrying removal.");
+          }
+          await alias.deleteIfMatches({
+            hostedZoneId: deployment.spec.hostedZoneId, domain: deployment.spec.domain,
+            loadBalancerDnsName: deployment.runtime.dnsName,
+            loadBalancerHostedZoneId: deployment.runtime.canonicalHostedZoneId,
+          });
+          const patched = await this.#persistDependentPatch(deployment.id, (current) => {
+            if (current.kind !== "alb-redirector") throw new Error("The ALB deployment changed type.");
+            return { ...current, runtime: { ...current.runtime, aliasRecordOwned: false } };
+          });
+          if (patched.kind === "alb-redirector") deployment = patched;
+        }
+        const asset = (resourceType: CloudManagedAsset["resourceType"]): string | undefined =>
+          deployment.managedAssets.find((item) => item.resourceType === resourceType)?.resourceId;
+        const additionalSubnetId = asset("ec2-subnet");
+        const additionalRouteTableAssociationId = asset("ec2-route-table-association");
+        const resource: AwsAlbRedirectorDestroyResource = {
+          guid: deployment.id, name: deployment.name, region: deployment.spec.region,
+          serverGuid: server.id, serverInstanceId: server.runtime.instanceId!,
+          serverSecurityGroupId: server.runtime.securityGroupIds[0]!, vpcId: deployment.spec.vpcId,
+          subnetIds: deployment.spec.additionalSubnet && additionalSubnetId
+            ? [...deployment.spec.subnetIds, additionalSubnetId] : [...deployment.spec.subnetIds],
+          ...(deployment.spec.additionalSubnet ? { additionalRouteTableId: deployment.spec.additionalSubnet.routeTableId } : {}),
+          ...(additionalSubnetId ? { additionalSubnetId } : {}),
+          ...(additionalRouteTableAssociationId ? { additionalRouteTableAssociationId } : {}),
+          ...(deployment.runtime.securityGroupId ? { securityGroupId: deployment.runtime.securityGroupId } : {}),
+          ...(deployment.runtime.serverIngressRuleId ? { serverIngressRuleId: deployment.runtime.serverIngressRuleId } : {}),
+          ...(deployment.runtime.targetGroupArn ? { targetGroupArn: deployment.runtime.targetGroupArn } : {}),
+          ...(deployment.runtime.loadBalancerArn ? { loadBalancerArn: deployment.runtime.loadBalancerArn } : {}),
+          ...(deployment.runtime.listenerArn ? { listenerArn: deployment.runtime.listenerArn } : {}),
+          certificateArn: deployment.spec.certificateArn, backendPort: deployment.spec.backendPort,
+          healthCheckPath: "/", healthCheckSuccessCodes: "404",
+        };
+        if (resource.securityGroupId || resource.targetGroupArn || resource.loadBalancerArn || resource.listenerArn || resource.additionalSubnetId) {
+          await alb.destroy(resource);
+        }
+      } catch (error) {
+        throw new Error(cloudErrorMessage(error, "The ALB redirector could not be removed", credentialValues(secret)));
+      } finally {
+        alias.dispose();
+        alb.dispose();
+      }
+    });
+    if (deployment.runtime.listenerOwnership === "managed") {
+      await this.#withSoftwareSliverClient(server, async (client) => {
+        const jobs = (await client.getJobs()).Active;
+        const job = deployment.runtime.listenerJobId === null ? undefined :
+          jobs.find(({ ID }) => ID === deployment.runtime.listenerJobId);
+        if (!job) {
+          if (jobs.some(({ Port }) => Port === deployment.spec.backendPort) && deployment.runtime.listenerJobId === null) {
+            throw new Error("The ALB listener job ID was never confirmed. Inspect the private HTTP listener before removing this record.");
+          }
+          return;
+        }
+        if (job.Name !== "http" || job.Port !== deployment.spec.backendPort) {
+          throw new Error("The managed ALB listener job changed; refusing to stop it.");
+        }
+        const validBinding = await this.#withSoftwareSsh(server, async (ssh) =>
+          (await this.#awsAlbListenerProbe.probePrivateHttpListener({
+            ssh, privateIp: server.runtime.privateIpAddress!, port: deployment.spec.backendPort,
+          })) !== null);
+        if (!validBinding) throw new Error("The ALB listener binding changed; refusing to stop it.");
+        const killed = await client.killJob(job.ID);
+        if (!killed.Success) throw new Error("Sliver did not confirm that the ALB listener stopped.");
+      });
+    }
   }
 
   async #awsConnection(
@@ -4350,6 +5267,23 @@ function applyAzureStatusObservation(
       privateIpAddress: resource.privateIpAddress ?? null,
     },
   };
+}
+
+function hostnameBelongsToZone(hostname: string, zoneName: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/u, "");
+  const zone = zoneName.toLowerCase().replace(/\.$/u, "");
+  return host === zone || host.endsWith(`.${zone}`);
+}
+
+function certificateCoversHostname(certificate: AwsAlbCertificateOption, hostname: string): boolean {
+  const host = hostname.toLowerCase().replace(/\.$/u, "");
+  return [certificate.domainName, ...certificate.subjectAlternativeNames].some((name) => {
+    const canonical = name.toLowerCase().replace(/\.$/u, "");
+    if (canonical === host) return true;
+    if (!canonical.startsWith("*.")) return false;
+    const suffix = canonical.slice(2);
+    return host.endsWith(`.${suffix}`) && host.slice(0, -(suffix.length + 1)).indexOf(".") < 0;
+  });
 }
 
 function managedSshTarget(
@@ -4778,6 +5712,14 @@ function awsFirewall(deployment: AwsCloudDeploymentRecord) {
   };
 }
 
+function crackstationServerIngressRule(port: number, workerSecurityGroupId: string, deploymentId: string): AwsFirewallRuleSpec {
+  return Object.freeze({
+    direction: "ingress", protocol: "tcp", fromPort: port, toPort: port,
+    peerType: "security-group", peer: workerSecurityGroupId,
+    description: `sliver-gui:${deploymentId}:crackstation`,
+  });
+}
+
 function azureFirewall(deployment: AzureCloudDeploymentRecord) {
   return {
     sshPort: deployment.spec.sshPort,
@@ -4949,8 +5891,8 @@ function applyAwsCreateMutation(
         : deployment.runtime.securityGroupIds,
       publicIpAddress: resources.elasticIpPublicAddress ?? deployment.runtime.publicIpAddress,
       elasticIpAllocationId: resources.elasticIpAllocationId ?? deployment.runtime.elasticIpAllocationId,
-      vpcId: resources.vpcId ?? deployment.runtime.vpcId,
-      subnetId: resources.subnetId ?? deployment.runtime.subnetId,
+      vpcId: resources.vpcId ?? deployment.runtime.vpcId ?? deployment.spec.vpcId,
+      subnetId: resources.subnetId ?? deployment.runtime.subnetId ?? deployment.spec.subnetId,
       internetGatewayId: resources.internetGatewayId ?? deployment.runtime.internetGatewayId,
       routeTableId: resources.routeTableId ?? deployment.runtime.routeTableId,
       routeTableAssociationId: resources.routeTableAssociationId ??
@@ -5062,8 +6004,8 @@ function applyAwsResource(
       privateIpAddress: resource.privateIpAddress ?? null,
       availabilityZone: resource.availabilityZone ?? null,
       elasticIpAllocationId: resource.elasticIp?.allocationId ?? null,
-      vpcId: resource.managedNetwork?.vpcId ?? null,
-      subnetId: resource.managedNetwork?.subnetId ?? null,
+      vpcId: resource.managedNetwork?.vpcId ?? deployment.runtime.vpcId ?? deployment.spec.vpcId,
+      subnetId: resource.managedNetwork?.subnetId ?? deployment.runtime.subnetId ?? deployment.spec.subnetId,
       internetGatewayId: resource.managedNetwork?.internetGatewayId ?? null,
       routeTableId: resource.managedNetwork?.routeTableId ?? null,
       routeTableAssociationId: resource.managedNetwork?.routeTableAssociationId ?? null,
@@ -5175,6 +6117,7 @@ function singleAwsManagedAsset(
 function partialAwsManagedNetworkFromRecord(
   deployment: AwsCloudDeploymentRecord,
 ): NonNullable<AwsEc2DestroyResource["managedNetwork"]> | undefined {
+  if (deployment.spec.networkMode === "existing") return undefined;
   const vpcId = consistentAwsResourceId(
     deployment.runtime.vpcId,
     singleAwsManagedAsset(deployment, "ec2-vpc")?.resourceId,

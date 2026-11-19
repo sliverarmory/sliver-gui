@@ -53,6 +53,8 @@ export interface StagedSliverRelease {
   readonly fileName: string;
   readonly path: string;
   readonly size: number;
+  /** Present for Crackstation assets whose GitHub release records a SHA-256 digest. */
+  readonly sha256?: string;
 }
 
 interface SliverReleaseDownloadOptions {
@@ -68,18 +70,21 @@ interface ReleaseSource {
   readonly latestReleaseUrl: string;
   readonly parseLatestRelease: (value: unknown) => SliverReleaseCatalog;
   readonly failureMessage: string;
+  readonly privateStageVerification: "minisign" | "sha256";
 }
 
 const SLIVER_RELEASE_SOURCE: ReleaseSource = {
   latestReleaseUrl: LATEST_RELEASE_URL,
   parseLatestRelease,
   failureMessage: "The Sliver release download failed",
+  privateStageVerification: "minisign",
 };
 
 const CRACKSTATION_RELEASE_SOURCE: ReleaseSource = {
   latestReleaseUrl: CRACKSTATION_LATEST_RELEASE_URL,
   parseLatestRelease: parseLatestCrackstationRelease,
   failureMessage: "The Crackstation release download failed",
+  privateStageVerification: "sha256",
 };
 
 export class SliverReleaseDownloader {
@@ -221,10 +226,14 @@ export class SliverReleaseDownloader {
       const catalog = await this.latestRelease(true);
       const asset = catalog.assets.find((candidate) => sameTarget(candidate, target));
       if (!asset) throw new ReleaseDownloadError("That OS and architecture are not available in the latest release");
-      if (!asset.signature) {
+      if (this.source.privateStageVerification === "minisign" && !asset.signature) {
         throw new ReleaseDownloadError("The official Sliver release is missing its Minisign signature");
       }
-      const signature = await this.fetchReleaseSignature(asset.signature, controller.signal);
+      if (this.source.privateStageVerification === "sha256" && !asset.sha256) {
+        throw new ReleaseDownloadError("The Crackstation release is missing its SHA-256 digest");
+      }
+      const signature = asset.signature && this.source.privateStageVerification === "minisign"
+        ? await this.fetchReleaseSignature(asset.signature, controller.signal) : null;
       await mkdir(dirname(destinationPath), { recursive: true, mode: 0o700 });
       temporaryPath = join(
         dirname(destinationPath),
@@ -245,6 +254,7 @@ export class SliverReleaseDownloader {
       validateDownloadResponse(response, asset);
       const file = await open(temporaryPath, "wx", 0o600);
       let receivedBytes = 0;
+      const sha256 = this.source.privateStageVerification === "sha256" ? createHash("sha256") : null;
       try {
         const reader = response.body.getReader();
         for (;;) {
@@ -257,6 +267,7 @@ export class SliverReleaseDownloader {
             throw new ReleaseDownloadError("The release download exceeded its advertised size");
           }
           await writeAll(file, chunk.value);
+          sha256?.update(chunk.value);
           onProgress(receivedBytes, asset.size);
         }
         if (receivedBytes !== asset.size) {
@@ -266,15 +277,20 @@ export class SliverReleaseDownloader {
       } finally {
         await file.close();
       }
-      try {
-        await verifySliverReleaseMinisign(
-          temporaryPath,
-          signature,
-          asset.fileName,
-          this.trustedMinisignPublicKey,
-        );
-      } catch {
-        throw new ReleaseDownloadError("The Sliver release failed Minisign verification");
+      if (signature) {
+        try {
+          await verifySliverReleaseMinisign(
+            temporaryPath,
+            signature,
+            asset.fileName,
+            this.trustedMinisignPublicKey,
+          );
+        } catch {
+          throw new ReleaseDownloadError("The Sliver release failed Minisign verification");
+        }
+      }
+      if (sha256 && sha256.digest("hex") !== asset.sha256) {
+        throw new ReleaseDownloadError("The Crackstation release failed SHA-256 verification");
       }
       if (process.platform !== "win32") await setPrivateExecutableMode(temporaryPath);
       await commitPrivateStage(temporaryPath, destinationPath);
@@ -284,6 +300,7 @@ export class SliverReleaseDownloader {
         fileName: asset.fileName,
         path: destinationPath,
         size: asset.size,
+        ...(this.source.privateStageVerification === "sha256" && asset.sha256 ? { sha256: asset.sha256 } : {}),
       };
     } catch (error) {
       if (error instanceof ReleaseDownloadError) throw error;
@@ -364,6 +381,15 @@ export class CrackstationReleaseDownloader {
     onEvent: (event: SliverReleaseDownloadEvent) => void,
   ): Promise<void> {
     return this.delegate.download(target, onEvent);
+  }
+
+  stagePrivate(
+    target: SliverReleaseTarget,
+    destinationPath: string,
+    onProgress?: (receivedBytes: number, totalBytes: number) => void,
+  ): Promise<StagedSliverRelease> {
+    if (target.artifact !== "crackstation") throw new ReleaseDownloadError("Expected a Crackstation release target");
+    return this.delegate.stagePrivate(target, destinationPath, onProgress);
   }
 
   stop(): void {

@@ -13,6 +13,7 @@ import type {
 } from "../shared/cloud-deployment-contracts.js";
 import {
   CLOUD_DEPLOYMENT_STATE_FILE,
+  CLOUD_DEPLOYMENT_V1_ARCHIVE_FILE,
   CloudDeploymentStore,
   RETIRED_PROXMOX_STATE_ARCHIVE_FILE,
   STALE_CLOUD_DEPLOYMENT_STATE_ERROR,
@@ -20,6 +21,7 @@ import {
 
 const CREDENTIAL_ID = "22222222-2222-4222-8222-222222222222";
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
+const CRACKSTATION_ID = "44444444-4444-4444-8444-444444444444";
 const NOW = new Date("2026-09-06T18:00:00.000Z");
 
 let temporaryDirectory = "";
@@ -43,7 +45,7 @@ describe("CloudDeploymentStore", () => {
     expect(result).toMatchObject({
       ok: true,
       value: {
-        state: { v: 1, revision: 1 },
+        state: { v: 2, revision: 1, dependentDeployments: [] },
         deployment: {
           id: DEPLOYMENT_ID,
           provider: "aws",
@@ -78,6 +80,56 @@ describe("CloudDeploymentStore", () => {
     expect(second).toEqual({ ok: false, error: STALE_CLOUD_DEPLOYMENT_STATE_ERROR });
     expect(store.getState()).toMatchObject({ revision: 1 });
     expect(store.getState().deployments).toHaveLength(1);
+  });
+
+  it("tracks a Crackstation separately and blocks its parent server deletion", async () => {
+    let identity = 0;
+    const store = await CloudDeploymentStore.load(stateRoot, {
+      idFactory: () => identity++ === 0 ? DEPLOYMENT_ID : CRACKSTATION_ID,
+      clock: () => NOW,
+    });
+    const server = await store.create(awsCreateInput());
+    expect(server.ok).toBe(true);
+    const worker = await store.createDependent({
+      kind: "crackstation", expectedRevision: 1, credentialId: CREDENTIAL_ID,
+      serverDeploymentId: DEPLOYMENT_ID, name: "GPU worker",
+      spec: {
+        region: "us-west-2", vpcId: "vpc-0123456789abcdef0",
+        subnetId: "subnet-0123456789abcdef0", imageId: "ami-0123456789abcdef0",
+        instanceType: "g4dn.xlarge", sshUsername: "ubuntu", sshPort: 22,
+        sshCidrs: ["192.0.2.10/32"], operatorName: "gpu-operator", volumeSizeGiB: 100,
+      },
+    });
+    if (!worker.ok) throw new Error(worker.error);
+    expect(worker.value.deployment).toMatchObject({
+      id: CRACKSTATION_ID, kind: "crackstation", serverDeploymentId: DEPLOYMENT_ID,
+      status: "provisioning", runtime: { instanceId: null },
+    });
+    expect(store.getState().deployments).toHaveLength(1);
+    expect(store.getState().dependentDeployments).toHaveLength(1);
+    await expect(store.delete({ expectedRevision: 2, deploymentId: DEPLOYMENT_ID }))
+      .resolves.toEqual({ ok: false, error: "Remove dependent deployments before terminating this server." });
+    const updated = await store.updateDependent({ expectedRevision: 2, deployment: {
+      ...worker.value.deployment, phase: "creating-instance",
+    } });
+    expect(updated).toMatchObject({ ok: true, value: { deployment: { phase: "creating-instance" } } });
+    await expect(store.deleteDependent({ expectedRevision: 2, deploymentId: CRACKSTATION_ID }))
+      .resolves.toEqual({ ok: false, error: STALE_CLOUD_DEPLOYMENT_STATE_ERROR });
+    expect((await store.deleteDependent({ expectedRevision: 3, deploymentId: CRACKSTATION_ID })).ok).toBe(true);
+    expect((await store.delete({ expectedRevision: 4, deploymentId: DEPLOYMENT_ID })).ok).toBe(true);
+  });
+
+  it("archives the exact v1 document while upgrading it to v2", async () => {
+    const store = await createStore();
+    expect((await store.create(awsCreateInput())).ok).toBe(true);
+    const { dependentDeployments: _dependents, ...current } = store.getState();
+    const legacy = { ...current, v: 1 };
+    await writeFile(store.filePath, JSON.stringify(legacy), { mode: 0o600 });
+
+    const upgraded = await CloudDeploymentStore.load(stateRoot);
+
+    expect(upgraded.getState()).toMatchObject({ v: 2, revision: 1, dependentDeployments: [] });
+    expect(JSON.parse(await readFile(join(stateRoot, CLOUD_DEPLOYMENT_V1_ARCHIVE_FILE), "utf8"))).toEqual(legacy);
   });
 
   it("discards a cancelled status update before replacing persisted state", async () => {
@@ -145,7 +197,7 @@ describe("CloudDeploymentStore", () => {
 
     const store = await CloudDeploymentStore.load(stateRoot);
 
-    expect(store.getState()).toEqual({ v: 1, revision: 7, deployments: [] });
+    expect(store.getState()).toEqual({ v: 2, revision: 7, deployments: [], dependentDeployments: [] });
     expect(JSON.parse(await readFile(
       join(stateRoot, RETIRED_PROXMOX_STATE_ARCHIVE_FILE),
       "utf8",
@@ -200,7 +252,7 @@ describe("CloudDeploymentStore", () => {
 
     expect(deleted).toEqual({
       ok: true,
-      value: { v: 1, revision: 2, deployments: [] },
+      value: { v: 2, revision: 2, deployments: [], dependentDeployments: [] },
     });
     expect(JSON.parse(await readFile(store.filePath, "utf8"))).toEqual(deleted.ok ? deleted.value : undefined);
   });

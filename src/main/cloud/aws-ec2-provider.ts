@@ -111,7 +111,9 @@ import {
   type AwsFirewallRuleSpec,
   type AwsFirewallSnapshot,
 } from "../../shared/cloud-deployment-contracts.js";
+import type { AwsGpuInstanceTypeOption, AwsImageOption } from "../../shared/cloud-provider-inventory.js";
 import { openSshPublicKeysEqual } from "./aws-inventory.js";
+import { AwsGpuPricing } from "./aws-gpu-pricing.js";
 
 const MANAGED_TAG_KEY = "SliverGUIManaged";
 const GUID_TAG_KEY = "SliverGUID";
@@ -144,6 +146,17 @@ const MAX_DISCOVERY_PAGES = 100;
 const MAX_PAGINATION_TOKEN_LENGTH = 4_096;
 
 export const AWS_EC2_DEFAULT_INSTANCE_TYPES = AWS_SUPPORTED_INSTANCE_TYPES;
+// G6f provides only a fractional GRID device; Crackstation's embedded Hashcat
+// requires a CUDA compute device on the current Linux/amd64 release.
+const CUDA_GPU_INSTANCE_FAMILY_PATTERNS = [
+  "g4dn.*", "g5.*", "g6.*", "gr6.*", "g6e.*", "g7.*", "g7e.*",
+  "p4d.*", "p4de.*", "p5.*", "p5e.*", "p5en.*", "p6-b200.*", "p6-b300.*",
+] as const;
+const CUDA_GPU_INSTANCE_TYPE = /^(?:g4dn|g5|g6|gr6|g6e|g7|g7e|p4d|p4de|p5|p5e|p5en|p6-b200|p6-b300)\.[a-z0-9]+$/u;
+
+function isCudaCapableCrackstationInstanceType(value: string): boolean {
+  return CUDA_GPU_INSTANCE_TYPE.test(value) && !value.startsWith("g6f.");
+}
 
 export type AwsEc2Architecture = "x86_64" | "arm64";
 export type AwsEc2ImageDistribution = "ubuntu" | "amazon-linux";
@@ -210,6 +223,7 @@ export interface AwsEc2Waiters {
 export interface AwsEc2ProviderDependencies {
   readonly clientFactory?: AwsEc2ClientFactory;
   readonly waiters?: AwsEc2Waiters;
+  readonly gpuPricing?: Pick<AwsGpuPricing, "hourlyUsd">;
 }
 
 export interface AwsEc2PreflightResult {
@@ -287,6 +301,13 @@ export interface AwsEc2CreateInput {
   readonly rootVolumeKmsKeyId?: string;
   readonly firewall: AwsEc2FirewallInput;
   readonly allocateElasticIp: boolean;
+}
+
+export interface AwsEc2CrackstationCreateInput extends Omit<AwsEc2CreateInput, "firewall"> {
+  readonly firewall: {
+    readonly sshPort: number;
+    readonly sshSourceCidrs: readonly string[];
+  };
 }
 
 export interface AwsEc2KeyPairResource {
@@ -420,6 +441,7 @@ export class AwsEc2Provider {
   private readonly region: string;
   private readonly client: AwsEc2ClientLike;
   private readonly waiters: AwsEc2Waiters;
+  private readonly gpuPricing: Pick<AwsGpuPricing, "hourlyUsd">;
 
   constructor(connection: AwsEc2ProviderConnection, dependencies: AwsEc2ProviderDependencies = {}) {
     this.region = validateRegion(connection.region);
@@ -427,6 +449,7 @@ export class AwsEc2Provider {
     const clientFactory = dependencies.clientFactory ?? defaultClientFactory;
     this.client = clientFactory({ region: this.region, credentials });
     this.waiters = dependencies.waiters ?? defaultWaiters;
+    this.gpuPricing = dependencies.gpuPricing ?? new AwsGpuPricing(credentials);
   }
 
   async preflight(): Promise<AwsEc2PreflightResult> {
@@ -513,13 +536,147 @@ export class AwsEc2Provider {
     };
   }
 
+  /** A worker with a public SSH address needs an active route to this VPC's internet gateway. */
+  async discoverCrackstationPublicSubnetIds(vpcId: string): Promise<readonly string[]> {
+    requireAwsId(vpcId, "VPC", AWS_ID_PATTERNS.vpc);
+    const filters = [{ Name: "vpc-id", Values: [vpcId] }];
+    const [subnetPages, tablePages, gatewayPages] = await Promise.all([
+      this.paginate<DescribeSubnetsCommandOutput>("discover worker subnets", (nextToken) =>
+        new DescribeSubnetsCommand({ Filters: filters, ...(nextToken ? { NextToken: nextToken } : {}) })),
+      this.paginate<DescribeRouteTablesCommandOutput>("discover worker subnet routes", (nextToken) =>
+        new DescribeRouteTablesCommand({ Filters: filters, ...(nextToken ? { NextToken: nextToken } : {}) })),
+      this.paginate<DescribeInternetGatewaysCommandOutput>("discover worker internet gateways", (nextToken) =>
+        new DescribeInternetGatewaysCommand({
+          Filters: [{ Name: "attachment.vpc-id", Values: [vpcId] }],
+          ...(nextToken ? { NextToken: nextToken } : {}),
+        })),
+    ]);
+    const gateways = new Set(gatewayPages.flatMap((page) => page.InternetGateways ?? [])
+      .filter((gateway) => gateway.Attachments?.some((attachment) =>
+        attachment.VpcId === vpcId && attachment.State === "attached"))
+      .flatMap((gateway) => gateway.InternetGatewayId ? [gateway.InternetGatewayId] : []));
+    const tables = tablePages.flatMap((page) => page.RouteTables ?? [])
+      .filter((table) => table.VpcId === vpcId);
+    const defaultTable = tables.find((table) => table.Associations?.some((association) => association.Main));
+    const publicRoute = (subnetId: string): boolean => {
+      const table = tables.find((candidate) => candidate.Associations?.some((association) =>
+        association.SubnetId === subnetId)) ?? defaultTable;
+      return table?.Routes?.some((route) => route.DestinationCidrBlock === "0.0.0.0/0" &&
+        route.State === "active" && !!route.GatewayId && gateways.has(route.GatewayId)) === true;
+    };
+    return Object.freeze([...new Set(subnetPages.flatMap((page) => page.Subnets ?? [])
+      .filter((subnet) => subnet.VpcId === vpcId && subnet.State === "available" && subnet.SubnetId)
+      .flatMap((subnet) => subnet.SubnetId && publicRoute(subnet.SubnetId) ? [subnet.SubnetId] : []))].sort());
+  }
+
+  /** Two cheapest offered, priced Linux/x86-64 NVIDIA CUDA instance types in this region. */
+  async discoverCrackstationInstanceTypes(): Promise<readonly AwsGpuInstanceTypeOption[]> {
+    const offerings = await this.paginate<DescribeInstanceTypeOfferingsCommandOutput>(
+      "discover regional CUDA GPU offerings",
+      (nextToken) => new DescribeInstanceTypeOfferingsCommand({
+        LocationType: "region",
+        Filters: [
+          { Name: "location", Values: [this.region] },
+          { Name: "instance-type", Values: [...CUDA_GPU_INSTANCE_FAMILY_PATTERNS] },
+        ],
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }),
+    );
+    const offered = [...new Set(offerings.flatMap((page) => page.InstanceTypeOfferings ?? [])
+      .flatMap((item) => item.InstanceType ? [item.InstanceType] : []))]
+      .filter(isCudaCapableCrackstationInstanceType).sort();
+    if (offered.length === 0) return [];
+    const descriptions: InstanceTypeInfo[] = [];
+    for (let start = 0; start < offered.length; start += 100) {
+      const batch = offered.slice(start, start + 100);
+      const response = await this.send<DescribeInstanceTypesCommandOutput>(
+        "inspect offered CUDA GPU instance types",
+        new DescribeInstanceTypesCommand({ InstanceTypes: batch }),
+      );
+      descriptions.push(...response.InstanceTypes ?? []);
+    }
+    const eligible = descriptions.flatMap(normalizeCrackstationInstanceType);
+    const priced: AwsGpuInstanceTypeOption[] = [];
+    for (let start = 0; start < eligible.length; start += 4) {
+      const batch = eligible.slice(start, start + 4);
+      const prices = await Promise.all(batch.map(async (type) => this.gpuPricing.hourlyUsd(this.region, type.name)));
+      batch.forEach((type, index) => {
+        const priceHourlyUsd = prices[index];
+        if (priceHourlyUsd === null || priceHourlyUsd === undefined) return;
+        priced.push(Object.freeze({
+          ...type,
+          priceHourlyUsd,
+          estimatedCostPerDayUsd: Math.round(priceHourlyUsd * 24 * 100) / 100,
+        }));
+      });
+    }
+    return Object.freeze(priced.sort((left, right) =>
+      left.priceHourlyUsd - right.priceHourlyUsd || left.name.localeCompare(right.name)).slice(0, 2));
+  }
+
+  /** Latest Amazon-owned Ubuntu 24.04 GPU base image with NVIDIA driver and CUDA 12.9. */
+  async discoverCrackstationImages(): Promise<readonly AwsImageOption[]> {
+    const pages = await this.paginate<DescribeImagesCommandOutput>(
+      "discover Amazon GPU images",
+      (nextToken) => new DescribeImagesCommand({
+        Owners: ["amazon"],
+        Filters: [
+          { Name: "name", Values: ["Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04) *"] },
+          { Name: "state", Values: ["available"] },
+          { Name: "architecture", Values: ["x86_64"] },
+        ],
+        ...(nextToken ? { NextToken: nextToken } : {}),
+      }),
+    );
+    const images = pages.flatMap((page) => page.Images ?? [])
+      .filter((image) => image.ImageId && AWS_ID_PATTERNS.image.test(image.ImageId) &&
+        image.State === "available" && image.Architecture === "x86_64" &&
+        image.RootDeviceType === "ebs" && image.RootDeviceName &&
+        /^Deep Learning Base OSS Nvidia Driver GPU AMI \(Ubuntu 24\.04\) [0-9]{8}$/u.test(image.Name ?? ""))
+      .sort((left, right) => (right.CreationDate ?? "").localeCompare(left.CreationDate ?? ""));
+    const latest = images[0];
+    if (!latest) return [];
+    return Object.freeze([Object.freeze({
+      id: latest.ImageId!, name: latest.Name ?? null, description: latest.Description ?? null,
+      architecture: "x86_64" as const, rootDeviceName: latest.RootDeviceName ?? null,
+      distribution: "ubuntu" as const, version: "24.04 GPU base", creationDate: latest.CreationDate ?? null,
+      sshUsername: "ubuntu",
+    })]);
+  }
+
   async create(
     input: AwsEc2CreateInput,
     onMutation?: AwsEc2CreateMutationListener,
   ): Promise<AwsEc2DeploymentResource> {
-    const validated = validateCreateInput(input);
+    return this.createValidated(input, onMutation, "server");
+  }
+
+  async createCrackstation(
+    input: AwsEc2CrackstationCreateInput,
+    onMutation?: AwsEc2CreateMutationListener,
+  ): Promise<AwsEc2DeploymentResource> {
+    if (input.network.mode !== "existing") {
+      throw new AwsEc2ProviderError("Crackstation must join the existing Sliver server VPC.");
+    }
+    const choices = await this.discoverCrackstationInstanceTypes();
+    if (!choices.some(({ name }) => name === input.instanceType)) {
+      throw new AwsEc2ProviderError("The selected CUDA GPU instance type is no longer one of this region's two lowest-priced compatible choices.");
+    }
+    const publicSubnets = await this.discoverCrackstationPublicSubnetIds(input.network.vpcId);
+    if (!publicSubnets.includes(input.network.subnetId)) {
+      throw new AwsEc2ProviderError("The selected Crackstation subnet no longer has a public internet-gateway route for restricted SSH.");
+    }
+    return this.createValidated(input, onMutation, "crackstation");
+  }
+
+  private async createValidated(
+    input: AwsEc2CreateInput | AwsEc2CrackstationCreateInput,
+    onMutation: AwsEc2CreateMutationListener | undefined,
+    role: "server" | "crackstation",
+  ): Promise<AwsEc2DeploymentResource> {
+    const validated = validateCreateInput(input, role);
     const image = await this.lookupLaunchImage(validated.imageId);
-    const expectedArchitecture = supportedInstanceArchitecture(validated.instanceType);
+    const expectedArchitecture = supportedInstanceArchitecture(validated.instanceType, role);
     if (expectedArchitecture && image.architecture !== expectedArchitecture) {
       throw new AwsEc2ProviderError(
         `The selected EC2 image architecture must be ${expectedArchitecture} for ${validated.instanceType}.`,
@@ -689,7 +846,14 @@ export class AwsEc2Provider {
       );
       securityGroupId = requireAwsId(group.GroupId, "security group", AWS_ID_PATTERNS.securityGroup);
       await notifyCreateMutation(onMutation, "security-group", mutationResources());
-      await this.authorizeManagedFirewall(securityGroupId, validated.guid, validated.name, validated.firewall);
+      if (role === "server") {
+        await this.authorizeManagedFirewall(securityGroupId, validated.guid, validated.name, validated.firewall as AwsEc2FirewallInput);
+      } else {
+        const firewall = validateCrackstationFirewall(validated.firewall);
+        await this.authorizeManagedFirewallPermissions(securityGroupId, validated.guid, validated.name, [
+          permissionForCidrs(firewall.sshPort, firewall.sshSourceCidrs, `sliver-gui:${validated.guid}:ssh`),
+        ]);
+      }
 
       const runInput: RunInstancesCommandInput = {
         ImageId: validated.imageId,
@@ -1926,18 +2090,22 @@ function canonicalOwnerForRegion(region: string): string {
   return "099720109477";
 }
 
-type ValidatedAwsEc2CreateInput = Omit<AwsEc2CreateInput, "network" | "sshKeyPair"> & {
+type ValidatedAwsEc2CreateInput = Omit<AwsEc2CreateInput, "network" | "sshKeyPair" | "firewall"> & {
   readonly network: AwsEc2NetworkInput;
   readonly sshKeyPair: AwsEc2SshKeyPairInput;
+  readonly firewall: AwsEc2FirewallInput | AwsEc2CrackstationCreateInput["firewall"];
 };
 
-function validateCreateInput(input: AwsEc2CreateInput): ValidatedAwsEc2CreateInput {
+function validateCreateInput(
+  input: AwsEc2CreateInput | AwsEc2CrackstationCreateInput,
+  role: "server" | "crackstation",
+): ValidatedAwsEc2CreateInput {
   const guid = validateGuid(input.guid);
   const name = validateName(input.name);
   const imageId = requireAwsId(input.imageId, "image", AWS_ID_PATTERNS.image);
   const network = validateNetworkInput(input.network);
   const sshKeyPair = validateSshKeyPairInput(input.sshKeyPair);
-  if (!isSupportedAwsInstanceType(input.instanceType)) {
+  if (role === "server" ? !isSupportedAwsInstanceType(input.instanceType) : !isCudaCapableCrackstationInstanceType(input.instanceType)) {
     throw new AwsEc2ProviderError("The EC2 instance type is not supported.");
   }
   const sshPublicKey = validateSshPublicKey(input.sshPublicKey);
@@ -1964,7 +2132,9 @@ function validateCreateInput(input: AwsEc2CreateInput): ValidatedAwsEc2CreateInp
     network,
     sshKeyPair,
     sshPublicKey,
-    firewall: validateFirewall(input.firewall),
+    firewall: role === "server"
+      ? validateFirewall(input.firewall as AwsEc2FirewallInput)
+      : validateCrackstationFirewall(input.firewall as AwsEc2CrackstationCreateInput["firewall"]),
   };
 }
 
@@ -1990,7 +2160,8 @@ function validateNetworkInput(
   return { mode: "managed", vpcCidrBlock, subnetCidrBlock };
 }
 
-function supportedInstanceArchitecture(instanceType: string): AwsEc2Architecture | undefined {
+function supportedInstanceArchitecture(instanceType: string, role: "server" | "crackstation"): AwsEc2Architecture | undefined {
+  if (role === "crackstation") return isCudaCapableCrackstationInstanceType(instanceType) ? "x86_64" : undefined;
   if (!isSupportedAwsInstanceType(instanceType)) return undefined;
   return INSTANCE_TYPE_FALLBACKS[instanceType].architecture;
 }
@@ -2087,6 +2258,13 @@ function validateFirewall(input: AwsEc2FirewallInput): AwsEc2FirewallInput {
     sshSourceCidrs: validateCidrs(input.sshSourceCidrs, "SSH"),
     multiplayerPort,
     multiplayerSourceCidrs: validateCidrs(input.multiplayerSourceCidrs, "multiplayer"),
+  };
+}
+
+function validateCrackstationFirewall(input: AwsEc2CrackstationCreateInput["firewall"]): AwsEc2CrackstationCreateInput["firewall"] {
+  return {
+    sshPort: validatePort(input.sshPort, "SSH"),
+    sshSourceCidrs: validateCidrs(input.sshSourceCidrs, "SSH"),
   };
 }
 
@@ -2615,6 +2793,23 @@ function normalizeInstanceTypeOptions(
       description: `${vCpuCount} vCPU · ${formatMemory(memoryMiB)} RAM · ${fallback.processor}`,
     }];
   });
+}
+
+function normalizeCrackstationInstanceType(value: InstanceTypeInfo): AwsEc2InstanceTypeOption[] {
+  const name = value.InstanceType;
+  if (!name || !isCudaCapableCrackstationInstanceType(name) || value.SupportedInRegion === false ||
+      !value.ProcessorInfo?.SupportedArchitectures?.includes("x86_64")) return [];
+  const gpus = value.GpuInfo?.Gpus?.filter((gpu) => gpu.Manufacturer?.toLowerCase() === "nvidia") ?? [];
+  const gpuCount = gpus.reduce((total, gpu) => total + (positiveInteger(gpu.Count) ?? 0), 0);
+  if (gpuCount < 1) return [];
+  const vCpuCount = positiveInteger(value.VCpuInfo?.DefaultVCpus);
+  const memoryMiB = positiveInteger(value.MemoryInfo?.SizeInMiB);
+  if (!vCpuCount || !memoryMiB) return [];
+  const gpuLabel = gpus.map((gpu) => `${gpu.Count ?? 1} ${gpu.Name ?? "NVIDIA GPU"}`).join(" + ");
+  return [{
+    name, architecture: "x86_64", vCpuCount, memoryMiB, processor: gpuLabel,
+    description: `${vCpuCount} vCPU · ${formatMemory(memoryMiB)} RAM · ${gpuLabel}`,
+  }];
 }
 
 function positiveInteger(value: number | undefined): number | undefined {
