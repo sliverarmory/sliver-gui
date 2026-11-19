@@ -5604,7 +5604,7 @@ describe("CloudDeploymentService local redirectors", () => {
     } finally { f.service.dispose(); }
   });
 
-  it("exposes the saved redirector in Overview and blocks server termination until it is removed", async () => {
+  it("terminates an AWS server with managed software without uninstalling it over SSH", async () => {
     const f = await softwareLifecycleFixture();
     try {
       const installed = await f.service.installLocalRedirector(ipInput);
@@ -5618,9 +5618,58 @@ describe("CloudDeploymentService local redirectors", () => {
           listener: { host: "127.0.0.1", jobId: 8 },
         }] },
       });
-      expect(f.service.prepareDestroyDeployment({
+      const plan = f.service.prepareDestroyDeployment({
         deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
-      })).toMatchObject({ ok: false, error: expect.stringContaining("Remove managed software") });
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.provider.destroy).toHaveBeenCalledOnce();
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("terminates an Azure server when managed software appears after the review", async () => {
+    const f = await softwareLifecycleFixture("azure");
+    try {
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      const installed = softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID);
+      const unrelated = softwareRecord("fb94b349-b76a-435c-923e-2b185b2a1dd1", SECOND_DEPLOYMENT_ID);
+      await f.softwareStore.put(installed);
+      await f.softwareStore.put(unrelated);
+
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.azureProvider.destroy).toHaveBeenCalledOnce();
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([unrelated]);
+      expect((await SoftwareDeploymentStore.load(rootDirectory)).getState().records).toEqual([unrelated]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reports confirmed termination even if local software record cleanup fails", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      await f.softwareStore.put(softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID));
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      vi.spyOn(f.softwareStore, "removeDeployment").mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.provider.destroy).toHaveBeenCalledOnce();
+      expect(f.softwareStore.getState().records).toHaveLength(1);
     } finally { f.service.dispose(); }
   });
 });

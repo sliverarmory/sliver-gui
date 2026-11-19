@@ -2726,9 +2726,6 @@ export class CloudDeploymentService {
     try {
       this.#assertActive();
       const deployment = this.#requireDeploymentAtRevision(input.deploymentId, input.expectedRevision);
-      if (this.#softwareStore.getState().records.some((record) => record.deploymentId === deployment.id)) {
-        throw new Error("Remove managed software from this server before terminating it");
-      }
       const token = this.#idFactory();
       if (!isUuidV4(token) || this.#destroyPlans.has(token)) {
         throw new Error("A deployment termination plan could not be created");
@@ -2774,9 +2771,6 @@ export class CloudDeploymentService {
         let operationStarted = false;
         try {
           let deployment = this.#requireDeploymentAtRevision(plan.deploymentId, plan.expectedRevision);
-          if (this.#softwareStore.getState().records.some((record) => record.deploymentId === deployment.id)) {
-            throw new Error("Remove managed software from this server before terminating it");
-          }
           deployment = await this.#persistPatch(deployment.id, (current) => ({
             ...current,
             status: "deleting",
@@ -2791,6 +2785,9 @@ export class CloudDeploymentService {
             expectedRevision: this.#store.getState().revision,
           }));
           if (!deleted.ok) return deleted;
+          // The instance is gone; its local software record no longer has a server to manage.
+          // A local bookkeeping failure must not turn confirmed cloud termination into a failure.
+          await this.#softwareStore.removeDeployment(deployment.id).catch(() => undefined);
           this.#discardProvisioningTranscript(deployment.id);
           this.#emitChanged();
           return { ok: true, value: deleted.value };
