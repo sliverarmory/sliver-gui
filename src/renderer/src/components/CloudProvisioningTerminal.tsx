@@ -105,6 +105,7 @@ export function CloudProvisioningTerminal({
           ariaLabel={labels?.terminalAriaLabel ?? `Read-only SSH provisioning output for ${deploymentId}`}
           className="h-64 min-h-64 w-full overflow-hidden rounded-xl border border-default bg-black"
           disableInput
+          onReady={() => transport.ready()}
           transport={transport}
           wasmBytes={runtime.bytes}
         />
@@ -119,7 +120,9 @@ export function CloudProvisioningTerminal({
 
 export class ReadonlyProvisioningTransport implements GhosttyTerminalTransport {
   #subscription: GhosttyTerminalTransportSubscription | undefined;
+  #ready = false;
   #lastSequence = -1;
+  #lastOriginalByte: number | undefined;
   #history: Array<{ readonly sequence: number; readonly bytes: Uint8Array }> = [];
   #closeReason: string | undefined;
 
@@ -132,25 +135,35 @@ export class ReadonlyProvisioningTransport implements GhosttyTerminalTransport {
   }
 
   subscribe(subscription: GhosttyTerminalTransportSubscription): () => void {
-    for (const { bytes } of this.#history) subscription.onOutput(Uint8Array.from(bytes));
-    this.#lastSequence = this.#history.at(-1)?.sequence ?? this.#lastSequence;
-    if (this.#closeReason) {
-      subscription.onClose(this.#closeReason);
-      return () => undefined;
-    }
     this.#subscription = subscription;
+    this.#ready = false;
+    this.#lastSequence = -1;
+    this.#lastOriginalByte = undefined;
     return () => {
       if (this.#subscription === subscription) this.#subscription = undefined;
     };
   }
 
+  ready(): void {
+    if (!this.#subscription || this.#ready) return;
+    this.#ready = true;
+    for (const { sequence, bytes } of this.#history) {
+      this.#lastSequence = sequence;
+      this.#subscription.onOutput(this.#displayBytes(bytes));
+    }
+    if (this.#closeReason) {
+      this.#subscription.onClose(this.#closeReason);
+      this.#subscription = undefined;
+    }
+  }
+
   update(transcript: CloudProvisioningTranscript | undefined): void {
     if (!transcript || this.#closeReason) return;
-    if (this.#subscription) {
+    if (this.#ready && this.#subscription) {
       for (const chunk of transcript.chunks) {
         if (chunk.sequence <= this.#lastSequence) continue;
         this.#lastSequence = chunk.sequence;
-        this.#subscription.onOutput(Uint8Array.from(chunk.bytes));
+        this.#subscription.onOutput(this.#displayBytes(chunk.bytes));
       }
     }
     for (const { bytes } of this.#history) bytes.fill(0);
@@ -162,9 +175,34 @@ export class ReadonlyProvisioningTransport implements GhosttyTerminalTransport {
       this.#closeReason = transcript.status === "failed"
         ? "SSH provisioning failed"
         : "SSH provisioning complete";
-      this.#subscription?.onClose(this.#closeReason);
-      this.#subscription = undefined;
+      if (this.#ready && this.#subscription) {
+        this.#subscription.onClose(this.#closeReason);
+        this.#subscription = undefined;
+      }
     }
+  }
+
+  #displayBytes(bytes: Uint8Array): Uint8Array {
+    // A VT terminal's LF advances a row without returning to column zero.
+    // SSH exec stdout is not a PTY stream, so normalize bare LF only for this
+    // display. Keep the original byte across chunks to preserve split CRLF.
+    const lastOriginalByte = this.#lastOriginalByte;
+    let previous = lastOriginalByte;
+    let bareLineFeeds = 0;
+    for (const byte of bytes) {
+      if (byte === 0x0a && previous !== 0x0d) bareLineFeeds += 1;
+      previous = byte;
+    }
+    const display = new Uint8Array(bytes.byteLength + bareLineFeeds);
+    previous = lastOriginalByte;
+    let offset = 0;
+    for (const byte of bytes) {
+      if (byte === 0x0a && previous !== 0x0d) display[offset++] = 0x0d;
+      display[offset++] = byte;
+      previous = byte;
+    }
+    this.#lastOriginalByte = previous;
+    return display;
   }
 }
 
