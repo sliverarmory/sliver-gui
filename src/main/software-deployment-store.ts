@@ -84,6 +84,13 @@ export class SoftwareDeploymentStore {
     });
   }
 
+  removeDeployment(deploymentId: string): Promise<SoftwareDeploymentState> {
+    return this.#serialize(async () => {
+      const records = this.#state.records.filter((record) => record.deploymentId !== deploymentId);
+      return records.length === this.#state.records.length ? this.#state : this.#commit(records);
+    });
+  }
+
   async #commit(records: readonly LocalRedirectorRecord[]): Promise<SoftwareDeploymentState> {
     const state = parseSoftwareDeploymentState({
       v: SOFTWARE_DEPLOYMENT_STATE_VERSION,
