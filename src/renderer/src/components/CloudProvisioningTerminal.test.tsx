@@ -49,6 +49,7 @@ describe("CloudProvisioningTerminal", () => {
     expect(terminal).toHaveAttribute("data-disable-input", "true");
     expect(getTerminalRuntime).toHaveBeenCalledOnce();
     expect(mockedTerminal.props?.wasmBytes).toEqual(new Uint8Array([0, 97, 115, 109]));
+    expect(mockedTerminal.props?.onReady).toBeTypeOf("function");
   });
 
   it("delivers each sequenced stdout chunk once and never sends input", () => {
@@ -61,6 +62,8 @@ describe("CloudProvisioningTerminal", () => {
       { sequence: 4, bytes: new TextEncoder().encode("before subscribe\n") },
     ]));
     const unsubscribe = transport.subscribe({ onOutput, onClose });
+    expect(onOutput).not.toHaveBeenCalled();
+    transport.ready();
     transport.update(provisioningTranscript([
       { sequence: 4, bytes: new TextEncoder().encode("duplicate\n") },
       { sequence: 5, bytes: new TextEncoder().encode("live\n") },
@@ -68,7 +71,7 @@ describe("CloudProvisioningTerminal", () => {
     transport.send(new TextEncoder().encode("ignored"), "operator");
     transport.resize(120, 40);
 
-    expect(output).toEqual(["before subscribe\n", "live\n"]);
+    expect(output).toEqual(["before subscribe\r\n", "live\r\n"]);
     expect(onClose).not.toHaveBeenCalled();
     unsubscribe();
     transport.update(provisioningTranscript([
@@ -76,8 +79,62 @@ describe("CloudProvisioningTerminal", () => {
     ]));
     const laterOutput = vi.fn();
     transport.subscribe({ onOutput: laterOutput, onClose });
+    expect(laterOutput).not.toHaveBeenCalled();
+    transport.ready();
     expect(laterOutput).toHaveBeenCalledOnce();
-    expect(new TextDecoder().decode(laterOutput.mock.calls[0]?.[0])).toBe("queued\n");
+    expect(new TextDecoder().decode(laterOutput.mock.calls[0]?.[0])).toBe("queued\r\n");
+  });
+
+  it("normalizes bare LF for live and replayed output while preserving CRLF and bare CR", () => {
+    const transport = new ReadonlyProvisioningTransport();
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const initialChunks = [
+      { sequence: 0, bytes: encoder.encode("one\ntwo\r") },
+    ];
+    transport.update(provisioningTranscript(initialChunks));
+
+    const liveOutput = vi.fn();
+    const unsubscribe = transport.subscribe({ onOutput: liveOutput, onClose: vi.fn() });
+    transport.ready();
+    const allChunks = [
+      ...initialChunks,
+      { sequence: 1, bytes: encoder.encode("\nthree\n\r80%\rDone\r\n") },
+      { sequence: 2, bytes: encoder.encode("café\n") },
+    ];
+    transport.update(provisioningTranscript(allChunks));
+
+    expect(liveOutput.mock.calls.map(([bytes]) => decoder.decode(bytes))).toEqual([
+      "one\r\ntwo\r",
+      "\nthree\r\n\r80%\rDone\r\n",
+      "café\r\n",
+    ]);
+    expect(decoder.decode(allChunks[1]!.bytes)).toBe("\nthree\n\r80%\rDone\r\n");
+
+    unsubscribe();
+    const replayOutput = vi.fn();
+    transport.subscribe({ onOutput: replayOutput, onClose: vi.fn() });
+    expect(replayOutput).not.toHaveBeenCalled();
+    transport.ready();
+    expect(replayOutput.mock.calls.map(([bytes]) => decoder.decode(bytes))).toEqual(
+      liveOutput.mock.calls.map(([bytes]) => decoder.decode(bytes)),
+    );
+  });
+
+  it("waits for terminal readiness before replaying a transcript that expands beyond the startup queue", () => {
+    const transport = new ReadonlyProvisioningTransport();
+    const chunks = Array.from({ length: 16 }, (_, sequence) => ({
+      sequence,
+      bytes: new Uint8Array(16 * 1024).fill(0x0a),
+    }));
+    transport.update(provisioningTranscript(chunks));
+    const onOutput = vi.fn();
+    transport.subscribe({ onOutput, onClose: vi.fn() });
+
+    expect(onOutput).not.toHaveBeenCalled();
+    transport.ready();
+    expect(onOutput).toHaveBeenCalledTimes(16);
+    expect(onOutput.mock.calls.reduce((sum, [bytes]) => sum + bytes.byteLength, 0)).toBe(512 * 1024);
   });
 
   it("replays bounded history and closes completed or failed terminals exactly once", () => {
@@ -93,14 +150,18 @@ describe("CloudProvisioningTerminal", () => {
     const firstOutput = vi.fn();
     const firstClose = vi.fn();
     transport.subscribe({ onOutput: firstOutput, onClose: firstClose });
-    expect(new TextDecoder().decode(firstOutput.mock.calls[0]?.[0])).toBe("final output\n");
+    expect(firstOutput).not.toHaveBeenCalled();
+    expect(firstClose).not.toHaveBeenCalled();
+    transport.ready();
+    expect(new TextDecoder().decode(firstOutput.mock.calls[0]?.[0])).toBe("final output\r\n");
     expect(firstClose).toHaveBeenCalledOnce();
     expect(firstClose).toHaveBeenCalledWith("SSH provisioning complete");
 
     const replayOutput = vi.fn();
     const replayClose = vi.fn();
     transport.subscribe({ onOutput: replayOutput, onClose: replayClose });
-    expect(new TextDecoder().decode(replayOutput.mock.calls[0]?.[0])).toBe("final output\n");
+    transport.ready();
+    expect(new TextDecoder().decode(replayOutput.mock.calls[0]?.[0])).toBe("final output\r\n");
     expect(replayClose).toHaveBeenCalledOnce();
   });
 
