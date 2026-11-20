@@ -1667,10 +1667,11 @@ async function verifyApplicationSettings(
       .some((ref) => ref.mode === target.mode && ref.id === target.id));
   assert.equal(
     await commandPalette.getByRole("menuitem").count(),
-    21 + paletteTargets.length,
+    22 + paletteTargets.length,
     "the connected workspace should expose app commands and the current selectable targets",
   );
   await commandPalette.getByRole("menuitem", { name: /^Overview\b/u }).waitFor();
+  await commandPalette.getByRole("menuitem", { name: /^AD Explorer\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /^Go back\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /^Go forward\b/u }).waitFor();
   await commandPalette.getByRole("menuitem", { name: /Cloud Deployment/u }).waitFor();
