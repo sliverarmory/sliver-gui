@@ -2,7 +2,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { crc32 } from "node:zlib";
 import { clientpb, sliverpb } from "sliver-script";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -88,7 +88,8 @@ describe("in-memory RustHound collection", () => {
     });
     expect(await readFile(path)).toEqual(archive);
     expect(domain).toBe("example.local");
-    expect(path).toMatch(/\/example\.local\/rusthound-[0-9a-f-]+\.zip$/u);
+    expect(dirname(path)).toBe(join(root, "example.local"));
+    expect(basename(path)).toMatch(/^rusthound-[0-9a-f-]+\.zip$/u);
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(calls.map((call) => call["op"])).toEqual(["start", "status", "read", "finish"]);
     expect(calls[0]).toMatchObject({ domain: "example.local", ldapFqdn: "dc.example.local", ldaps: true,

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { crc32, gzipSync } from "node:zlib";
 import { clientpb, sliverpb } from "sliver-script";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -122,14 +122,16 @@ describe("SharpHound collection", () => {
       rmSession: vi.fn(async () => { throw new Error("remote cleanup denied"); }),
     } as unknown as AdCollectionClient;
     const path = await collectSharpHound(input(client, session, root));
-    expect(path).toMatch(/\/example\.local\/sliver-ad-[0-9a-f-]+\.zip$/u);
+    const filename = basename(path);
+    expect(dirname(path)).toBe(join(root, "example.local"));
+    expect(filename).toMatch(/^sliver-ad-[0-9a-f-]+\.zip$/u);
     expect(await readFile(path)).toEqual(archive);
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
     const args = vi.mocked(client.executeAssemblySession).mock.calls[0]![2]?.arguments ?? [];
     expect(args).toEqual(expect.arrayContaining(["--collectionmethods", "Default", "--domain", "example.local", "--memcache"]));
-    expect(args[args.indexOf("--zipfilename") + 1]).toBe(path.split("/").at(-1));
+    expect(args[args.indexOf("--zipfilename") + 1]).toBe(filename);
     expect(client.lsSession).toHaveBeenCalledExactlyOnceWith(session.id, outputDirectory, 120);
-    expect(vi.mocked(client.downloadFileSession).mock.calls[0]![1]).toBe(`${outputDirectory}\\${timestamp}_${path.split("/").at(-1)}`);
+    expect(vi.mocked(client.downloadFileSession).mock.calls[0]![1]).toBe(`${outputDirectory}\\${timestamp}_${filename}`);
     expect(vi.mocked(client.rmSession).mock.calls[0]![1]).toBe(vi.mocked(client.downloadFileSession).mock.calls[0]![1]);
     expect(output.every((byte) => byte === 0)).toBe(true);
     expect(received.Data.every((byte) => byte === 0)).toBe(true);
@@ -349,7 +351,8 @@ describe("SharpHound collection", () => {
     expect(options.args?.slice(0, 5)).toEqual(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]);
     const command = Buffer.from(options.args![5]!, "base64").toString("utf16le");
     expect(command).toContain("Invoke-BloodHound -CollectionMethods 'DCOnly' -Domain 'example.local'");
-    expect(command).toContain(`-ZipFilename '${path.split("/").at(-1)}' -MemCache`);
+    const filename = basename(path);
+    expect(command).toContain(`-ZipFilename '${filename}' -MemCache`);
     expect(command).toContain(vi.mocked(client.uploadSession).mock.calls[0]![1]);
     expect(calls[0]).toBe("upload");
     expect(calls[1]).toBe("execute");
@@ -357,7 +360,7 @@ describe("SharpHound collection", () => {
     expect(calls[3]).toBe("list");
     expect(calls[4]).toBe("download");
     expect(calls[5]).toMatch(/^remove:.*\.zip$/u);
-    expect(vi.mocked(client.downloadFileSession).mock.calls[0]![1]).toBe(`${outputDirectory}\\${timestamp}_${path.split("/").at(-1)}`);
+    expect(vi.mocked(client.downloadFileSession).mock.calls[0]![1]).toBe(`${outputDirectory}\\${timestamp}_${filename}`);
     expect(stdout.every((byte) => byte === 0)).toBe(true);
     expect(stderr.every((byte) => byte === 0)).toBe(true);
   });
