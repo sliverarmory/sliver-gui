@@ -30,11 +30,10 @@ describe("AWS EC2 permission checker", () => {
     const result = await checker.check();
 
     expect(result.missing).toEqual([]);
-    expect(result.unverifiable).toEqual([
-      "ec2:ModifyVpcAttribute",
-      "ec2:ModifySubnetAttribute",
-    ]);
-    expect(result.verified).toHaveLength(cloudRequiredPermissions("aws").length - 2);
+    const unprobeable = cloudRequiredPermissions("aws").map(({ id }) => id).filter((id) =>
+      !id.startsWith("ec2:") || id === "ec2:ModifyVpcAttribute" || id === "ec2:ModifySubnetAttribute");
+    expect(result.unverifiable).toEqual(unprobeable);
+    expect(result.verified).toHaveLength(cloudRequiredPermissions("aws").length - unprobeable.length);
     expect(result.verified).toContain("ec2:CreateTags");
     expect(client.calls.some(({ name }) => name === "RunInstancesCommand")).toBe(true);
     expect(client.calls.filter(({ name }) => !name.startsWith("Describe"))

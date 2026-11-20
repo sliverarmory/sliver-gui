@@ -14,6 +14,12 @@ export interface AwsInstanceTypeOption {
   readonly description: string;
 }
 
+/** Region-specific EC2 On-Demand Linux estimate; excludes attached storage and transfer. */
+export interface AwsGpuInstanceTypeOption extends AwsInstanceTypeOption {
+  readonly priceHourlyUsd: number;
+  readonly estimatedCostPerDayUsd: number;
+}
+
 export interface AwsImageOption {
   readonly id: string;
   readonly name: string | null;
@@ -65,6 +71,66 @@ export interface AwsDeploymentOptions {
   readonly subnets: readonly AwsSubnetOption[];
   readonly keyPairs: readonly AwsKeyPairOption[];
   readonly credentialKey: AwsCredentialKeySummary;
+}
+
+export interface DiscoverAwsCrackstationOptionsInput {
+  readonly credentialId: string;
+  readonly serverDeploymentId: string;
+}
+
+export interface AwsCrackstationOptions extends Omit<AwsDeploymentOptions, "instanceTypes"> {
+  readonly instanceTypes: readonly AwsGpuInstanceTypeOption[];
+}
+
+export interface DiscoverAwsAlbRedirectorOptionsInput {
+  readonly credentialId: string;
+  readonly serverDeploymentId: string;
+}
+
+export interface AwsAlbCertificateOption {
+  readonly arn: string;
+  readonly domainName: string;
+  readonly subjectAlternativeNames: readonly string[];
+}
+
+export interface AwsAlbAdditionalSubnetOption {
+  readonly cidrBlock: string;
+  readonly availabilityZone: string;
+  readonly routeTableId: string;
+}
+
+export interface AwsAlbRedirectorOptions {
+  readonly region: string;
+  readonly vpcId: string;
+  readonly publicSubnets: readonly { readonly id: string; readonly availabilityZone: string }[];
+  readonly suggestedAdditionalSubnet: AwsAlbAdditionalSubnetOption | null;
+  readonly certificates: readonly AwsAlbCertificateOption[];
+  readonly hostedZones: readonly { readonly id: string; readonly name: string }[];
+  readonly existingHttpListeners: readonly { readonly jobId: number; readonly port: number; readonly description: string }[];
+}
+
+export function parseDiscoverAwsCrackstationOptionsInput(value: unknown): DiscoverAwsCrackstationOptionsInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Invalid AWS Crackstation option discovery request");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 2 ||
+      !isUuidV4(record["credentialId"]) || !isUuidV4(record["serverDeploymentId"])) {
+    throw new TypeError("Invalid AWS Crackstation option discovery request");
+  }
+  return Object.freeze({ credentialId: record["credentialId"], serverDeploymentId: record["serverDeploymentId"] });
+}
+
+export function parseDiscoverAwsAlbRedirectorOptionsInput(value: unknown): DiscoverAwsAlbRedirectorOptionsInput {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Invalid AWS ALB option discovery request");
+  }
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).length !== 2 ||
+      !isUuidV4(record["credentialId"]) || !isUuidV4(record["serverDeploymentId"])) {
+    throw new TypeError("Invalid AWS ALB option discovery request");
+  }
+  return Object.freeze({ credentialId: record["credentialId"], serverDeploymentId: record["serverDeploymentId"] });
 }
 
 export interface DiscoverAzureOptionsInput {

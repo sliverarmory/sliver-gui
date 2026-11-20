@@ -855,7 +855,7 @@ async function verifyManagedServerOperatorControls(
     fullPage: true,
   });
   await cloudPage.getByRole("button", { name: "Back to managed servers", exact: true }).click();
-  await cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor();
+  await cloudPage.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor();
 }
 
 async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string): Promise<void> {
@@ -874,7 +874,7 @@ async function verifyAzureLoginForm(cloudPage: Page, artifactDirectory: string):
   assert.equal(await cloudPage.getByRole("combobox", { name: "Azure Authentication", exact: true }).isEnabled(), true);
   await cloudPage.screenshot({ path: join(artifactDirectory, "azure-login-form.png"), fullPage: true });
   await cloudPage.getByRole("button", { name: "Close Form", exact: true }).click();
-  await cloudPage.getByRole("tab", { name: /^Servers/u }).click();
+  await cloudPage.getByRole("tab", { name: /^Deployments/u }).click();
 }
 
 async function assertAwsFirewallDetails(cloudPage: Page, artifactDirectory?: string): Promise<void> {
@@ -1083,13 +1083,13 @@ async function assertCloudDeploymentSurface(
   cloudPage: Page,
 ): Promise<void> {
   await cloudPage.getByRole("heading", { name: "Cloud Deployment", exact: true }).waitFor();
-  const deploymentsTab = cloudPage.getByRole("tab", { name: /^Servers\b/ });
+  const deploymentsTab = cloudPage.getByRole("tab", { name: /^Deployments\b/u });
   const credentialsTab = cloudPage.getByRole("tab", { name: /^Credentials\b/ });
   await Promise.all([deploymentsTab.waitFor(), credentialsTab.waitFor()]);
   assert.equal(await deploymentsTab.getAttribute("aria-selected"), "true");
   const newDeploymentButtons = cloudPage.getByRole("button", { name: "New Deployment", exact: true });
   await Promise.all([
-    cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor(),
+    cloudPage.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor(),
     cloudPage.getByRole("heading", { name: E2E_AWS_DEPLOYMENT_NAME, exact: true }).waitFor(),
     cloudPage.getByRole("heading", { name: E2E_AZURE_DEPLOYMENT_NAME, exact: true }).waitFor(),
     newDeploymentButtons.first().waitFor(),
@@ -1140,9 +1140,10 @@ async function assertCloudDeploymentSurface(
     ok: true,
     value: {
       state: {
-        v: 1,
+        v: 2,
         revision: 1,
         deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT],
+        dependentDeployments: [],
       },
       credentials: [
         {
@@ -1189,7 +1190,7 @@ async function assertCloudDeploymentSurface(
   assert.deepEqual(refreshedCloud, {
     ok: true,
     value: {
-      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT] },
+      state: { v: 2, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT], dependentDeployments: [] },
       refreshErrors: [],
     },
   });

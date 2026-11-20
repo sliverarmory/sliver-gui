@@ -7,6 +7,8 @@ import { deferred } from "../../tests/renderer-test-helpers";
 
 import type {
   AwsCloudDeploymentRecord,
+  AwsCrackstationDeploymentRecord,
+  AwsAlbRedirectorDeploymentRecord,
   AwsFirewallSnapshot,
   AzureCloudDeploymentRecord,
   AzureFirewallSnapshot,
@@ -22,7 +24,7 @@ import type {
   CloudDeploymentSnapshot,
   CurrentEgressIpv4,
 } from "../../shared/cloud-deployment-ipc";
-import type { AwsDeploymentOptions, AzureDeploymentOptions, DiscoverAwsOptionsInput } from "../../shared/cloud-provider-inventory";
+import type { AwsAlbRedirectorOptions, AwsCrackstationOptions, AwsDeploymentOptions, AzureDeploymentOptions, DiscoverAwsOptionsInput } from "../../shared/cloud-provider-inventory";
 import type { OperationResult } from "../../shared/contracts";
 import type { SshHostKeyReview, SshOpenTabResult } from "../../shared/ssh-contracts";
 import { CloudDeploymentWindowApp } from "./CloudDeploymentWindowApp";
@@ -346,6 +348,59 @@ const awsDeploymentOptions: AwsDeploymentOptions = {
   },
 };
 
+const crackstationOptions: AwsCrackstationOptions = {
+  ...awsDeploymentOptions,
+  instanceTypes: [
+    { name: "g4dn.xlarge", architecture: "x86_64", vCpuCount: 4, memoryMiB: 16_384, processor: "NVIDIA T4", description: "GPU compute", priceHourlyUsd: 0.526, estimatedCostPerDayUsd: 12.624 },
+    { name: "g5.xlarge", architecture: "x86_64", vCpuCount: 4, memoryMiB: 16_384, processor: "NVIDIA A10G", description: "GPU compute", priceHourlyUsd: 1.006, estimatedCostPerDayUsd: 24.144 },
+  ],
+};
+
+const albOptions: AwsAlbRedirectorOptions = {
+  region: "us-east-1",
+  vpcId: "vpc-0123456789abcdef0",
+  publicSubnets: [
+    { id: "subnet-0123456789abcdef0", availabilityZone: "us-east-1a" },
+    { id: "subnet-22222222222222222", availabilityZone: "us-east-1b" },
+  ],
+  suggestedAdditionalSubnet: null,
+  certificates: [{ arn: "arn:aws:acm:us-east-1:123456789012:certificate/11111111-1111-4111-8111-111111111111", domainName: "c2.example.test", subjectAlternativeNames: ["c2.example.test"] }],
+  hostedZones: [{ id: "Z1234567890", name: "example.test." }],
+  existingHttpListeners: [],
+};
+
+const runningCrackstation: AwsCrackstationDeploymentRecord = {
+  id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", kind: "crackstation", provider: "aws",
+  serverDeploymentId: DEPLOYMENT_ID, credentialId: CREDENTIAL_ID, name: "gpu-worker", status: "running", phase: "ready",
+  createdAt: "2026-09-06T19:00:00.000Z", updatedAt: "2026-09-06T19:05:00.000Z", lastError: null, managedAssets: [],
+  spec: {
+    region: "us-east-1", vpcId: "vpc-0123456789abcdef0", subnetId: "subnet-0123456789abcdef0",
+    imageId: "ami-11111111111111111", instanceType: "g4dn.xlarge", sshUsername: "ubuntu", sshPort: 22,
+    sshCidrs: ["203.0.113.8/32"], operatorName: "crackstation", volumeSizeGiB: 80,
+  },
+  runtime: {
+    ...runningDeployment.runtime, instanceId: "i-gpu123", stationHostUuid: "gpu-host-uuid", releaseVersion: "1.0.0",
+    releaseSha256: "a".repeat(64), operatorConfigSha256: "b".repeat(64),
+  },
+};
+
+const runningAlbRedirector: AwsAlbRedirectorDeploymentRecord = {
+  id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", kind: "alb-redirector", provider: "aws",
+  serverDeploymentId: DEPLOYMENT_ID, credentialId: CREDENTIAL_ID, name: "edge-redirector", status: "running", phase: "ready",
+  createdAt: "2026-09-06T19:00:00.000Z", updatedAt: "2026-09-06T19:05:00.000Z", lastError: null, managedAssets: [],
+  spec: {
+    region: "us-east-1", vpcId: "vpc-0123456789abcdef0", subnetIds: ["subnet-0123456789abcdef0", "subnet-22222222222222222"],
+    additionalSubnet: null, certificateArn: albOptions.certificates[0]!.arn, hostedZoneId: albOptions.hostedZones[0]!.id,
+    domain: "c2.example.test", backendPort: 8080, listener: { mode: "create", port: 8080 },
+  },
+  runtime: {
+    loadBalancerArn: "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/test/123", targetGroupArn: null,
+    listenerArn: null, dnsName: "edge.us-east-1.elb.amazonaws.com", securityGroupId: "sg-alb", serverIngressRuleId: "sgr-1",
+    listenerJobId: 8, listenerOwnership: "managed", targetHealth: "healthy", aliasRecordName: "c2.example.test", aliasRecordOwned: true,
+    canonicalHostedZoneId: "Z1234567890",
+  },
+};
+
 const azureDeploymentOptions: AzureDeploymentOptions = {
   location: "eastus",
   vmSizes: [{ name: "Standard_B2s", vCpuCount: 2, memoryMiB: 4_096 }],
@@ -372,7 +427,7 @@ const azureDeploymentOptions: AzureDeploymentOptions = {
 };
 
 const emptySnapshot: CloudDeploymentSnapshot = {
-  state: { v: 1, revision: 0, deployments: [] },
+  state: { v: 2, dependentDeployments: [], revision: 0, deployments: [] },
   credentials: [],
   refreshErrors: [],
   secureCredentialStorage: true,
@@ -464,12 +519,16 @@ const api: CloudDeploymentAPI = {
   })),
   copyAwsPermissionsTerraform: vi.fn(async () => ({ ok: true as const })),
   discoverAwsOptions,
+  discoverCrackstationOptions: vi.fn(async () => ({ ok: true as const, value: crackstationOptions })),
+  discoverAlbRedirectorOptions: vi.fn(async () => ({ ok: true as const, value: albOptions })),
   discoverAzureAccounts: vi.fn(async () => ({ ok: true as const, value: [azureAccount] })),
   discoverAzureOptions: vi.fn(async () => ({ ok: true as const, value: azureDeploymentOptions })),
   createDeployment: vi.fn(async (input) => {
     capturedDeployment = structuredClone(input);
     return { ok: true as const, value: input.provider === "azure" ? runningAzureDeployment : runningDeployment };
   }),
+  createCrackstationDeployment: vi.fn(async () => ({ ok: true as const, value: runningCrackstation })),
+  createAlbRedirectorDeployment: vi.fn(async () => ({ ok: true as const, value: runningAlbRedirector })),
   createOperatorConfig: vi.fn(async () => ({
     ok: true as const,
     value: { saved: true as const, fileName: "new-operator.cfg", mutationState: "created" as const },
@@ -594,6 +653,10 @@ beforeEach(() => {
   });
   discoverAwsOptions.mockClear();
   discoverAwsOptions.mockResolvedValue({ ok: true, value: awsDeploymentOptions });
+  vi.mocked(api.discoverCrackstationOptions).mockReset().mockResolvedValue({ ok: true, value: crackstationOptions });
+  vi.mocked(api.discoverAlbRedirectorOptions).mockReset().mockResolvedValue({ ok: true, value: albOptions });
+  vi.mocked(api.createCrackstationDeployment).mockReset().mockResolvedValue({ ok: true, value: runningCrackstation });
+  vi.mocked(api.createAlbRedirectorDeployment).mockReset().mockResolvedValue({ ok: true, value: runningAlbRedirector });
   vi.mocked(api.discoverAzureAccounts).mockClear();
   vi.mocked(api.discoverAzureAccounts).mockResolvedValue({ ok: true, value: [azureAccount] });
   vi.mocked(api.discoverAzureOptions).mockClear();
@@ -650,14 +713,267 @@ async function openServerActions(
 }
 
 describe("CloudDeploymentWindowApp", () => {
+  it("keeps the main deployment action on Sliver Server and explains dependent prerequisites", async () => {
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await screen.findByRole("button", { name: "New Deployment" });
+
+    await user.click(screen.getByRole("button", { name: "Choose deployment type" }));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getByRole("menuitem", { name: /Crackstation/u })).toHaveAttribute("aria-disabled", "true");
+    expect(within(menu).getByRole("menuitem", { name: /Load Balancer Redirector/u })).toHaveAttribute("aria-disabled", "true");
+    expect(menu).toHaveTextContent("Requires a running AWS Sliver server.");
+
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "New Deployment" }));
+    expect(screen.getByRole("heading", { name: "New Deployment" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Close Setup" })).toBeInTheDocument();
+  });
+
+  it.each([
+    ["Crackstation", "discoverCrackstationOptions"],
+    ["Load Balancer Redirector", "discoverAlbRedirectorOptions"],
+  ] as const)("selects a server in another VPC for a new %s", async (kind, discoveryMethod) => {
+    const secondServerId = "b58987b1-7b88-46dc-b72b-7f34dd5e0e93";
+    const secondVpcId = "vpc-11111111111111111";
+    const secondServer: AwsCloudDeploymentRecord = {
+      ...runningDeployment,
+      id: secondServerId,
+      name: "operations-server",
+      spec: { ...runningDeployment.spec, vpcId: secondVpcId, subnetId: "subnet-11111111111111111" },
+      runtime: { ...runningDeployment.runtime, vpcId: secondVpcId, subnetId: "subnet-11111111111111111" },
+    };
+    const snapshot = runningCloudSnapshot();
+    currentSnapshot = { ...snapshot, state: { ...snapshot.state, deployments: [runningDeployment, secondServer] } };
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: new RegExp(kind, "u") }));
+    const vpcSelect = await screen.findByRole("button", { name: /VPC/u });
+    expect(vpcSelect).toHaveTextContent(runningDeployment.runtime.vpcId!);
+    expect(screen.queryByRole("textbox", { name: "VPC" })).not.toBeInTheDocument();
+    await user.click(vpcSelect);
+    await user.click(screen.getByRole("option", { name: new RegExp(`^${secondVpcId}`, "u") }));
+
+    expect(screen.getByRole("combobox", { name: "Sliver Server" })).toHaveValue(secondServerId);
+    expect(vpcSelect).toHaveTextContent(secondVpcId);
+    await waitFor(() => expect(api[discoveryMethod]).toHaveBeenCalledWith({
+      credentialId: CREDENTIAL_ID,
+      serverDeploymentId: secondServerId,
+    }));
+  });
+
+  it("creates a Crackstation from one of two priced GPU instances in the selected server VPC", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Crackstation/u }));
+    expect(await screen.findByRole("heading", { name: "New Crackstation" })).toBeInTheDocument();
+    await waitFor(() => expect(api.discoverCrackstationOptions).toHaveBeenCalledWith({ credentialId: CREDENTIAL_ID, serverDeploymentId: DEPLOYMENT_ID }));
+    const gpuSelect = await screen.findByRole("button", { name: /GPU Instance Type/u });
+    expect(gpuSelect).toHaveTextContent("~$12.62/day");
+    expect(screen.getByText(/Public IPv4, storage, and transfer cost extra/u)).toBeInTheDocument();
+    await user.click(gpuSelect);
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("option", { name: /^g5\.xlarge/u })).toHaveTextContent("~$24.14/day");
+    await user.click(screen.getByRole("option", { name: /^g5\.xlarge/u }));
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "gpu-worker");
+    await user.click(screen.getByRole("button", { name: "Deploy Crackstation" }));
+    await waitFor(() => expect(api.createCrackstationDeployment).toHaveBeenCalledOnce());
+    expect(api.createCrackstationDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      serverDeploymentId: DEPLOYMENT_ID, name: "gpu-worker",
+      spec: expect.objectContaining({ vpcId: runningDeployment.runtime.vpcId, instanceType: "g5.xlarge", operatorName: "crackstation" }),
+    }));
+  });
+
+  it("creates an ALB with ACM and Route 53 selections and a new private HTTP listener", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    expect(await screen.findByRole("heading", { name: "New Load Balancer Redirector" })).toBeInTheDocument();
+    await waitFor(() => expect(api.discoverAlbRedirectorOptions).toHaveBeenCalledWith({ credentialId: CREDENTIAL_ID, serverDeploymentId: DEPLOYMENT_ID }));
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "edge-redirector");
+    await user.type(screen.getByRole("textbox", { name: "Public Domain" }), "c2.example.test");
+    await user.click(screen.getByRole("button", { name: /ACM Certificate/u }));
+    await user.click(screen.getByRole("option", { name: /^c2\.example\.test/u }));
+    await user.click(screen.getByRole("button", { name: /Route 53 Hosted Zone/u }));
+    await user.click(screen.getByRole("option", { name: /^example\.test\./u }));
+    expect(screen.getByText(/create a Route 53 alias for c2\.example\.test/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Deploy Load Balancer" }));
+    await waitFor(() => expect(api.createAlbRedirectorDeployment).toHaveBeenCalledOnce());
+    expect(api.createAlbRedirectorDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      serverDeploymentId: DEPLOYMENT_ID, name: "edge-redirector",
+      spec: expect.objectContaining({
+        vpcId: runningDeployment.runtime.vpcId,
+        subnetIds: ["subnet-0123456789abcdef0", "subnet-22222222222222222"],
+        hostedZoneId: "Z1234567890", domain: "c2.example.test", backendPort: 8080,
+        listener: { mode: "create", port: 8080 },
+      }),
+    }));
+  });
+
+  it("prefers the existing Sliver HTTP job on port 80 without requesting a new listener", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.discoverAlbRedirectorOptions).mockResolvedValue({ ok: true, value: {
+      ...albOptions, existingHttpListeners: [{ jobId: 1, port: 80, description: "Existing HTTP listener" }],
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    expect(await screen.findByRole("combobox", { name: "Sliver HTTP Listener" })).toHaveValue("existing");
+    expect(screen.getByRole("button", { name: /Existing HTTP Listener/u })).toHaveTextContent("Job #1 · HTTP :80");
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "existing-edge");
+    await user.type(screen.getByRole("textbox", { name: "Public Domain" }), "c2.example.test");
+    await user.click(screen.getByRole("button", { name: /ACM Certificate/u }));
+    await user.click(screen.getByRole("option", { name: /^c2\.example\.test/u }));
+    await user.click(screen.getByRole("button", { name: /Route 53 Hosted Zone/u }));
+    await user.click(screen.getByRole("option", { name: /^example\.test\./u }));
+    expect(screen.getByText(/existing job #1 on port 80/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Deploy Load Balancer" }));
+    await waitFor(() => expect(api.createAlbRedirectorDeployment).toHaveBeenCalledOnce());
+    expect(api.createAlbRedirectorDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      spec: expect.objectContaining({ backendPort: 80, listener: { mode: "existing", port: 80, jobId: 1 } }),
+    }));
+  });
+
+  it("closes a successful ALB wizard and shows the running redirector", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    const refreshedSnapshot = deferred<OperationResult<CloudDeploymentSnapshot>>();
+    vi.mocked(api.getSnapshot).mockImplementationOnce(async () => ({ ok: true, value: currentSnapshot }))
+      .mockImplementationOnce(() => refreshedSnapshot.promise);
+    const createdRedirector: AwsAlbRedirectorDeploymentRecord = {
+      ...runningAlbRedirector,
+      spec: { ...runningAlbRedirector.spec, backendPort: 80, listener: { mode: "existing", port: 80, jobId: 1 } },
+      runtime: { ...runningAlbRedirector.runtime, listenerJobId: 1, listenerOwnership: "existing" },
+    };
+    vi.mocked(api.discoverAlbRedirectorOptions).mockResolvedValue({ ok: true, value: {
+      ...albOptions, existingHttpListeners: [{ jobId: 1, port: 80, description: "Existing HTTP listener" }],
+    } });
+    vi.mocked(api.createAlbRedirectorDeployment).mockImplementation(async () => {
+      currentSnapshot = {
+        ...currentSnapshot,
+        state: {
+          ...currentSnapshot.state,
+          revision: currentSnapshot.state.revision + 1,
+          dependentDeployments: [createdRedirector],
+        },
+      };
+      return { ok: true, value: createdRedirector };
+    });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "edge-redirector");
+    await user.type(screen.getByRole("textbox", { name: "Public Domain" }), "c2.example.test");
+    await user.click(await screen.findByRole("button", { name: /ACM Certificate/u }));
+    await user.click(screen.getByRole("option", { name: /^c2\.example\.test/u }));
+    await user.click(screen.getByRole("button", { name: /Route 53 Hosted Zone/u }));
+    await user.click(screen.getByRole("option", { name: /^example\.test\./u }));
+    await user.click(screen.getByRole("button", { name: "Deploy Load Balancer" }));
+
+    await waitFor(() => expect(api.getSnapshot).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByRole("heading", { name: "New Load Balancer Redirector" })).not.toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "New Deployment" })).toBeEnabled();
+    expect(screen.queryByRole("heading", { name: "edge-redirector" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      refreshedSnapshot.resolve({ ok: true, value: currentSnapshot });
+      await refreshedSnapshot.promise;
+    });
+    expect(await screen.findByRole("heading", { name: "edge-redirector" })).toBeInTheDocument();
+  });
+
+  it("prefers a public ALB subnet in the server instance AZ when the server subnet is private", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 2, revision: 9, dependentDeployments: [], deployments: [{
+      ...runningDeployment,
+      spec: { ...runningDeployment.spec, subnetId: "subnet-33333333333333333" },
+      runtime: { ...runningDeployment.runtime, subnetId: "subnet-33333333333333333" },
+    }] } };
+    vi.mocked(api.discoverAlbRedirectorOptions).mockResolvedValue({ ok: true, value: {
+      ...albOptions, publicSubnets: [albOptions.publicSubnets[1]!, albOptions.publicSubnets[0]!],
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    const first = await screen.findByRole("button", { name: /First Public Subnet/u });
+    expect(within(first).getByText("subnet-0123456789abcdef0")).toBeInTheDocument();
+    const second = screen.getByRole("button", { name: /Second Public Subnet/u });
+    expect(within(second).getByText("subnet-22222222222222222")).toBeInTheDocument();
+  });
+
+  it("blocks ALB creation when no public subnet exists in the server instance AZ", async () => {
+    currentSnapshot = runningCloudSnapshot();
+    vi.mocked(api.discoverAlbRedirectorOptions).mockResolvedValue({ ok: true, value: {
+      ...albOptions, publicSubnets: [albOptions.publicSubnets[1]!],
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    expect(await screen.findByText(/needs a public subnet in the server instance's availability zone \(us-east-1a\)/u)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Deploy Load Balancer" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Refresh ALB Options" }));
+    await waitFor(() => expect(api.discoverAlbRedirectorOptions).toHaveBeenCalledTimes(2));
+    expect(api.createAlbRedirectorDeployment).not.toHaveBeenCalled();
+  });
+
+  it("reviews a second public subnet for a managed server VPC before creating the ALB", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 2, revision: 9, dependentDeployments: [], deployments: [{
+      ...runningDeployment, spec: { ...runningDeployment.spec, networkMode: "managed", vpcId: null,
+        managedVpcCidr: "10.0.0.0/16", managedSubnetCidr: "10.0.1.0/24" },
+    }] } };
+    const suggested = { cidrBlock: "10.0.2.0/24", availabilityZone: "us-east-1b", routeTableId: "rtb-123456" };
+    vi.mocked(api.discoverAlbRedirectorOptions).mockResolvedValue({ ok: true, value: {
+      ...albOptions, publicSubnets: [albOptions.publicSubnets[0]!], suggestedAdditionalSubnet: suggested,
+    } });
+    const user = userEvent.setup();
+    renderCloudDeploymentApp();
+    await user.click(await screen.findByRole("button", { name: "Choose deployment type" }));
+    await user.click(await screen.findByRole("menuitem", { name: /Load Balancer Redirector/u }));
+    await screen.findByRole("heading", { name: "New Load Balancer Redirector" });
+    await user.type(screen.getByRole("textbox", { name: "Deployment Name" }), "managed-edge");
+    await user.type(screen.getByRole("textbox", { name: "Public Domain" }), "c2.example.test");
+    await user.click(await screen.findByRole("button", { name: /ACM Certificate/u }));
+    await user.click(screen.getByRole("option", { name: /^c2\.example\.test/u }));
+    await user.click(screen.getByRole("button", { name: /Route 53 Hosted Zone/u }));
+    await user.click(screen.getByRole("option", { name: /^example\.test\./u }));
+    expect(screen.getByText(/new 10\.0\.2\.0\/24 subnet in us-east-1b/u)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Deploy Load Balancer" }));
+    expect(api.createAlbRedirectorDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      spec: expect.objectContaining({ subnetIds: ["subnet-0123456789abcdef0"], additionalSubnet: suggested }),
+    }));
+  });
+
+  it("shows distinct dependent cards without server-only actions", async () => {
+    currentSnapshot = { ...runningCloudSnapshot(), state: {
+      v: 2, revision: 10, deployments: [runningDeployment], dependentDeployments: [runningCrackstation, runningAlbRedirector],
+    } };
+    renderCloudDeploymentApp();
+    expect(await screen.findByRole("heading", { name: "gpu-worker" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "edge-redirector" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^Deployments\s*3$/u })).toBeInTheDocument();
+    expect(screen.getByText("GPU instance type")).toBeInTheDocument();
+    expect(screen.getByText("Target health")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Terminate Crackstation" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Terminate Load Balancer Redirector" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Server actions for gpu-worker" })).not.toBeInTheDocument();
+  });
+
   it("loads an accessible standalone dashboard and responds to bounded native events", async () => {
     const view = renderCloudDeploymentApp();
 
     expect(await screen.findByRole("heading", { name: "Cloud Deployment" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /^Servers\s*0$/u })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /^Deployments\s*0$/u })).toBeInTheDocument();
     expect(await screen.findByRole("tab", { name: /^DNS\s*0$/u })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: /Credentials/i })).toBeInTheDocument();
-    expect(screen.getByText("No Managed Servers")).toBeInTheDocument();
+    expect(screen.getByText("No Managed Deployments")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "New Deployment" })).toBeInTheDocument();
     expect(screen.queryByText("Encrypted credentials")).not.toBeInTheDocument();
     expect(document.title).toBe("Cloud Deployment");
@@ -703,7 +1019,7 @@ describe("CloudDeploymentWindowApp", () => {
       trailingSnapshot.resolve({ ok: true, value: emptySnapshot });
       await trailingSnapshot.promise;
     });
-    expect(await screen.findByText("No Managed Servers")).toBeInTheDocument();
+    expect(await screen.findByText("No Managed Deployments")).toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledTimes(2);
   });
 
@@ -717,7 +1033,7 @@ describe("CloudDeploymentWindowApp", () => {
     await user.click(screen.getByRole("button", { name: "Add Credential" }));
     await user.type(screen.getByRole("textbox", { name: "Label" }), "Unsaved credential");
     const labelInput = screen.getByRole("textbox", { name: "Label" });
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [{
       ...runningDeployment, status: "stopped", phase: "stopped", remoteHost: "198.51.100.25",
       runtime: { ...runningDeployment.runtime, instanceState: "stopped", publicIpAddress: "198.51.100.25" },
     }] } };
@@ -727,7 +1043,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(api.discoverAzureAccounts).not.toHaveBeenCalled();
     expect(screen.getByRole("textbox", { name: "Label" })).toBe(labelInput);
     expect(labelInput).toHaveValue("Unsaved credential");
-    await user.click(screen.getByRole("tab", { name: /Servers/i }));
+    await user.click(screen.getByRole("tab", { name: /Deployments/i }));
     const serverActions = await openServerActions(user, "range-control");
     expect(within(serverActions).getByRole("menuitem", { name: "Start" })).toBeEnabled();
     await user.keyboard("{Escape}");
@@ -780,7 +1096,7 @@ describe("CloudDeploymentWindowApp", () => {
   });
 
   it("keeps per-server read failures separate and clears them when a manual provider refresh succeeds", async () => {
-    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 9, deployments: [{
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 2, dependentDeployments: [], revision: 9, deployments: [{
       ...runningDeployment, lastError: "Earlier provisioning step failed.",
     }] } };
     vi.mocked(api.refreshDeployments).mockResolvedValueOnce({ ok: true, value: {
@@ -790,7 +1106,7 @@ describe("CloudDeploymentWindowApp", () => {
     renderCloudDeploymentApp();
     expect(await screen.findByText("Status refresh failed")).toBeInTheDocument();
     expect(screen.getByText("Last operation failed")).toBeInTheDocument();
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [runningDeployment] } };
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [runningDeployment] } };
     await user.click(screen.getByRole("button", { name: "Refresh cloud deployments" }));
     await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
     expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
@@ -818,7 +1134,7 @@ describe("CloudDeploymentWindowApp", () => {
     vi.mocked(api.refreshDeployments).mockReturnValueOnce(olderProvider.promise);
     act(() => window.dispatchEvent(new Event("focus")));
     await waitFor(() => expect(api.refreshDeployments).toHaveBeenCalledTimes(2));
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [{
       ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
     }] } };
     act(() => changedListener?.("snapshot"));
@@ -841,7 +1157,7 @@ describe("CloudDeploymentWindowApp", () => {
     act(() => changedListener?.("snapshot"));
     await waitFor(() => expect(api.getSnapshot).toHaveBeenCalledTimes(2));
     const stale = currentSnapshot;
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [{
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [{
       ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
     }] } };
     act(() => window.dispatchEvent(new Event("focus")));
@@ -862,7 +1178,7 @@ describe("CloudDeploymentWindowApp", () => {
     };
     vi.mocked(api.refreshDeployments).mockResolvedValueOnce({ ok: false, error: "Provider refresh connection failed." });
     vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => {
-      currentSnapshot = { ...currentSnapshot, refreshErrors: [], state: { v: 1, revision: 10, deployments: [{
+      currentSnapshot = { ...currentSnapshot, refreshErrors: [], state: { v: 2, dependentDeployments: [], revision: 10, deployments: [{
         ...runningDeployment, status: "stopped", phase: "stopped", runtime: { ...runningDeployment.runtime, instanceState: "stopped" },
       }] } };
       return { ok: true, value: { ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION, loginSessionArn: LOGIN_SESSION_ARN } };
@@ -918,7 +1234,7 @@ describe("CloudDeploymentWindowApp", () => {
   });
 
   it.each(["stopping", "terminated", "unknown"] as const)("shows external AWS %s state and disables connection/lifecycle actions", async (instanceState) => {
-    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 9, deployments: [{
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 2, dependentDeployments: [], revision: 9, deployments: [{
       ...runningDeployment, runtime: { ...runningDeployment.runtime, instanceState },
     }] } };
     const user = userEvent.setup();
@@ -941,7 +1257,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("refreshes only bounded transcript data for transcript change signals", async () => {
     renderCloudDeploymentApp();
-    expect(await screen.findByText("No Managed Servers")).toBeInTheDocument();
+    expect(await screen.findByText("No Managed Deployments")).toBeInTheDocument();
     expect(api.getSnapshot).toHaveBeenCalledOnce();
 
     currentSnapshot = {
@@ -963,7 +1279,7 @@ describe("CloudDeploymentWindowApp", () => {
     const deployment = awsProvisioningDeployment();
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 8, deployments: [deployment] },
+      state: { v: 2, dependentDeployments: [], revision: 8, deployments: [deployment] },
       credentials: [awsCredential],
       provisioningTranscripts: [{
         deploymentId: DEPLOYMENT_ID,
@@ -979,7 +1295,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.getByText("AWS Status Checks")).toBeInTheDocument();
     expect(screen.getByText("0/2 checks passed")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Deployment in progress" })).toBeDisabled();
-    expect(screen.queryByText("No Managed Servers")).not.toBeInTheDocument();
+    expect(screen.queryByText("No Managed Deployments")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "New Deployment" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("Mock read-only SSH provisioning terminal")).toBeInTheDocument();
   });
@@ -1656,7 +1972,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
-      state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
       refreshErrors: [{ deploymentId: DEPLOYMENT_ID, message: "The AWS status session has expired." }],
     };
     renderCloudDeploymentApp();
@@ -1694,7 +2010,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       credentials: [{ ...awsCredential, profileName: "operators", authentication: CONSOLE_PROFILE_AUTHENTICATION }],
-      state: { v: 1, revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [{ ...runningDeployment, status: "failed", lastError: "The AWS session has expired." }] },
     };
     const login = deferred<OperationResult<CloudCredentialSummary>>();
     vi.mocked(api.loginAwsCredential).mockImplementationOnce(async () => login.promise);
@@ -1712,7 +2028,7 @@ describe("CloudDeploymentWindowApp", () => {
 
     currentSnapshot = {
       ...currentSnapshot,
-      state: { v: 1, revision: 10, deployments: [{ ...runningDeployment, lastError: null }] },
+      state: { v: 2, dependentDeployments: [], revision: 10, deployments: [{ ...runningDeployment, lastError: null }] },
       refreshErrors: [],
     };
     act(() => changedListener?.("snapshot"));
@@ -2025,7 +2341,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       ...emptySnapshot,
       credentials: [azureCredential],
-      state: { v: 1, revision: 9, deployments: [{ ...runningAzureDeployment, status: "failed", lastError: "Azure credentials have expired." }] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [{ ...runningAzureDeployment, status: "failed", lastError: "Azure credentials have expired." }] },
     };
     const login = deferred<OperationResult<CloudCredentialSummary>>();
     vi.mocked(api.loginAzureCredential).mockImplementationOnce(async () => login.promise);
@@ -2410,7 +2726,7 @@ describe("CloudDeploymentWindowApp", () => {
     vi.mocked(api.createDeployment).mockImplementationOnce(async () => {
       currentSnapshot = {
         ...currentSnapshot,
-        state: { v: 1, revision: 8, deployments: [waitingDeployment] },
+        state: { v: 2, dependentDeployments: [], revision: 8, deployments: [waitingDeployment] },
         provisioningTranscripts: [{
           deploymentId: DEPLOYMENT_ID,
           status: "streaming",
@@ -2473,7 +2789,7 @@ describe("CloudDeploymentWindowApp", () => {
     await act(async () => {
       currentSnapshot = {
         ...currentSnapshot,
-        state: { v: 1, revision: 9, deployments: [readyForSsh] },
+        state: { v: 2, dependentDeployments: [], revision: 9, deployments: [readyForSsh] },
         provisioningTranscripts: [{
           deploymentId: DEPLOYMENT_ID,
           status: "streaming",
@@ -2491,7 +2807,7 @@ describe("CloudDeploymentWindowApp", () => {
     await act(async () => {
       currentSnapshot = {
         ...currentSnapshot,
-        state: { v: 1, revision: 10, deployments: [runningDeployment] },
+        state: { v: 2, dependentDeployments: [], revision: 10, deployments: [runningDeployment] },
         provisioningTranscripts: [],
       };
       changedListener?.("snapshot");
@@ -2607,7 +2923,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("routes lifecycle and reviewed destruction through their dedicated bridge methods", async () => {
     currentSnapshot = {
-      state: { v: 1, revision: 9, deployments: [runningDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningDeployment] },
       credentials: [awsCredential],
       refreshErrors: [],
       secureCredentialStorage: true,
@@ -2649,7 +2965,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("warns explicitly before recursively deleting a dedicated Azure resource group", async () => {
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     vi.mocked(api.prepareDestroyDeployment).mockResolvedValueOnce({
@@ -2758,7 +3074,7 @@ describe("CloudDeploymentWindowApp", () => {
   it.each([runningDeployment, runningAzureDeployment])("opens the same rename modal from navigation for $provider", async (deployment) => {
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 9, deployments: [deployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [deployment] },
       credentials: [awsCredential, azureCredential],
     };
     const user = userEvent.setup();
@@ -2794,7 +3110,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(successToast).not.toHaveBeenCalled();
 
     const renamed = { ...runningDeployment, name: "Team Server" };
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [renamed] } };
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [renamed] } };
     await act(async () => saved.resolve({ ok: true, value: renamed }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Rename Instance" })).not.toBeInTheDocument());
     expect(await screen.findByRole("button", { name: "Server actions for Team Server" })).toBeInTheDocument();
@@ -2825,7 +3141,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("releases the rename lock when a refreshed inventory removes its instance", async () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      state: { v: 1, revision: 9, deployments: [runningDeployment, runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningDeployment, runningAzureDeployment] },
       credentials: [awsCredential, azureCredential],
     };
     const user = userEvent.setup();
@@ -2834,7 +3150,7 @@ describe("CloudDeploymentWindowApp", () => {
     await screen.findByRole("dialog", { name: "Rename Instance" });
     act(() => navigationListener?.({ view: "deployments", deploymentId: AZURE_DEPLOYMENT_ID, action: "rename" }));
     expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("range-control");
-    currentSnapshot = { ...currentSnapshot, state: { v: 1, revision: 10, deployments: [runningAzureDeployment] } };
+    currentSnapshot = { ...currentSnapshot, state: { v: 2, dependentDeployments: [], revision: 10, deployments: [runningAzureDeployment] } };
     act(() => changedListener?.("snapshot"));
     await waitFor(() => expect(screen.getByRole("textbox", { name: "Name" })).toHaveValue("azure-control"));
     expect(api.renameDeployment).not.toHaveBeenCalled();
@@ -2844,7 +3160,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       state: {
-        v: 1,
+        v: 2, dependentDeployments: [],
         revision: 9,
         deployments: [{ ...runningDeployment, remoteHost: "198.51.100.99" }],
       },
@@ -2924,7 +3240,7 @@ describe("CloudDeploymentWindowApp", () => {
       await creation.promise;
     });
 
-    expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Managed Deployments" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { level: 1, name: "New Operator" })).not.toBeInTheDocument();
     expect(successToast).toHaveBeenCalledWith("Operator config saved", {
       description: "alice_ops-1 now has remote builder access on range-control. alice_ops-1.cfg was saved to disk.",
@@ -2975,7 +3291,7 @@ describe("CloudDeploymentWindowApp", () => {
       expect(await screen.findByRole("textbox", { name: "Operator Name" })).toHaveFocus();
       await user.click(screen.getByRole("button", { name: navigationLabel }));
 
-      expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+      expect(await screen.findByRole("heading", { name: "Managed Deployments" })).toBeInTheDocument();
       await waitFor(() => expect(screen.getByRole("button", {
         name: "New Operator for range-control",
       })).toHaveFocus());
@@ -3026,7 +3342,7 @@ describe("CloudDeploymentWindowApp", () => {
 
     await user.click(submit);
     expect(api.createOperatorConfig).toHaveBeenCalledTimes(3);
-    expect(await screen.findByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Managed Deployments" })).toBeInTheDocument();
   });
 
   it.each([
@@ -3280,7 +3596,7 @@ describe("CloudDeploymentWindowApp", () => {
     currentSnapshot = {
       ...runningCloudSnapshot(),
       state: {
-        v: 1,
+        v: 2, dependentDeployments: [],
         revision: 9,
         deployments: [
           runningDeployment,
@@ -3360,7 +3676,7 @@ describe("CloudDeploymentWindowApp", () => {
     };
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      state: { v: 1, revision: 10, deployments: [stoppedDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 10, deployments: [stoppedDeployment] },
     };
     const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
     vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
@@ -3380,7 +3696,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     expect(await screen.findByRole("dialog", { name: "Starting range-control" })).toBeInTheDocument();
 
-    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 1, revision: 11, deployments: [runningDeployment] } };
+    currentSnapshot = { ...runningCloudSnapshot(), state: { v: 2, dependentDeployments: [], revision: 11, deployments: [runningDeployment] } };
     await act(async () => {
       lifecycleResult.resolve({ ok: true, value: runningDeployment });
       await lifecycleResult.promise;
@@ -3399,7 +3715,7 @@ describe("CloudDeploymentWindowApp", () => {
   ] as const)("opens the existing %s operator form from native navigation without creating an operator", async (_provider, deployment, credential) => {
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 9, deployments: [deployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [deployment] },
       credentials: [credential],
     };
     const user = userEvent.setup();
@@ -3466,7 +3782,7 @@ describe("CloudDeploymentWindowApp", () => {
         : runningDeployment;
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      state: { v: 1, revision: 9, deployments: [deployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [deployment] },
       credentials: reason === "missing SSH credential" ? [] : [awsCredential],
     };
     renderCloudDeploymentApp();
@@ -3497,7 +3813,7 @@ describe("CloudDeploymentWindowApp", () => {
 
     const progress = await screen.findByRole("dialog", { name: "Stopping range-control" });
     expect(within(progress).getByText(/provider request is in progress/u)).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Servers/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
     expect(api.runLifecycleAction).toHaveBeenCalledWith({
       deploymentId: DEPLOYMENT_ID,
       expectedRevision: 9,
@@ -3547,7 +3863,7 @@ describe("CloudDeploymentWindowApp", () => {
     };
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      state: { v: 1, revision: 12, deployments: [runningDeployment, secondDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 12, deployments: [runningDeployment, secondDeployment] },
     };
     const firstResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
     const secondResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
@@ -3605,7 +3921,7 @@ describe("CloudDeploymentWindowApp", () => {
     };
     currentSnapshot = {
       ...runningCloudSnapshot(),
-      state: { v: 1, revision: 10, deployments: [stoppedDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 10, deployments: [stoppedDeployment] },
     };
     const lifecycleResult = deferred<OperationResult<AwsCloudDeploymentRecord>>();
     vi.mocked(api.runLifecycleAction).mockImplementationOnce(() => lifecycleResult.promise);
@@ -3649,7 +3965,7 @@ describe("CloudDeploymentWindowApp", () => {
     }));
 
     expect(await screen.findByRole("alertdialog", { name: "Verify SSH host" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /Servers/u, hidden: true })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: /Deployments/u, hidden: true })).toHaveAttribute("aria-selected", "true");
     expect(api.openSshWindow).toHaveBeenCalledExactlyOnceWith({ deploymentId: DEPLOYMENT_ID });
   });
 
@@ -3699,7 +4015,7 @@ describe("CloudDeploymentWindowApp", () => {
   ] as const)("opens dedicated Managed software from the $provider server card", async ({ provider, name }) => {
     currentSnapshot = provider === "aws" ? runningCloudSnapshot() : {
       ...emptySnapshot,
-      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     const user = userEvent.setup();
@@ -3720,7 +4036,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(screen.queryByRole("heading", { name: "Firewall rules" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Back to managed servers" }));
-    expect(screen.getByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Managed Deployments" })).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "Managed software content" })).not.toBeInTheDocument();
     expect(within(await screen.findByRole("group", { name: `Access and operator actions for ${name}` }))
       .getByRole("button", { name: `Software for ${name}` })).toBeInTheDocument();
@@ -3741,7 +4057,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("opens the requested Azure firewall view and surfaces persistent errors for stale native targets", async () => {
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 9, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     currentFirewallSnapshot = azureFirewallSnapshot;
@@ -3799,7 +4115,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(scrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
     expect(backButton.compareDocumentPosition(instanceHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Cloud Deployment" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /^Servers/u })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^Deployments/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: /^Credentials/u })).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Instance summary" })).not.toBeInTheDocument();
     expect(screen.queryByText("Compute and network identifiers for this managed server.")).not.toBeInTheDocument();
@@ -3844,7 +4160,7 @@ describe("CloudDeploymentWindowApp", () => {
     expect(container.querySelector("main")).toHaveClass("overflow-y-auto");
     expect(container.querySelector("main")).not.toHaveClass("overflow-hidden");
     expect(screen.queryByRole("region", { name: "Instance details content" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Managed Servers" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Managed Deployments" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Edit firewall for range-control" })).toBeInTheDocument();
   });
 
@@ -3963,7 +4279,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 14, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     currentFirewallSnapshot = {
@@ -4029,7 +4345,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 14, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     currentFirewallSnapshot = azureFirewallSnapshot;
@@ -4057,7 +4373,7 @@ describe("CloudDeploymentWindowApp", () => {
     });
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 14, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     currentFirewallSnapshot = {
@@ -4226,7 +4542,7 @@ describe("CloudDeploymentWindowApp", () => {
   it("edits Azure NSG rules end to end while keeping baseline and Azure default rules read-only", async () => {
     currentSnapshot = {
       ...emptySnapshot,
-      state: { v: 1, revision: 14, deployments: [runningAzureDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 14, deployments: [runningAzureDeployment] },
       credentials: [azureCredential],
     };
     currentFirewallSnapshot = azureFirewallSnapshot;
@@ -4320,7 +4636,7 @@ describe("CloudDeploymentWindowApp", () => {
 
   it("keeps the last good snapshot visible and reports a later refresh failure", async () => {
     currentSnapshot = {
-      state: { v: 1, revision: 9, deployments: [runningDeployment] },
+      state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningDeployment] },
       credentials: [awsCredential],
       refreshErrors: [],
       secureCredentialStorage: true,
@@ -4349,7 +4665,7 @@ describe("CloudDeploymentWindowApp", () => {
 
 function runningCloudSnapshot(): CloudDeploymentSnapshot {
   return {
-    state: { v: 1, revision: 9, deployments: [runningDeployment] },
+    state: { v: 2, dependentDeployments: [], revision: 9, deployments: [runningDeployment] },
     credentials: [awsCredential],
     refreshErrors: [],
     secureCredentialStorage: true,

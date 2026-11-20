@@ -7,6 +7,7 @@ import {
   parseAzureCliCredentialSecret,
   parseBeginAzureLoginInput,
   parseAwsConsoleLoginSession,
+  parseAwsAlbRedirectorDeploymentSpec,
   parseAwsProfileAuthentication,
   parseAwsFirewallRuleSpec,
   parseCloudCredentialSummary,
@@ -32,6 +33,24 @@ const AZURE_SUBSCRIPTION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
 const AZURE_TENANT_ID = "11111111-1111-1111-1111-111111111111";
 
 describe("cloud deployment contracts", () => {
+  it("accepts an exact existing ALB HTTP job on port 80 and rejects changed listener identity", () => {
+    const spec = {
+      region: "us-east-1", vpcId: "vpc-0123456789abcdef0",
+      subnetIds: ["subnet-0123456789abcdef0", "subnet-22222222222222222"],
+      additionalSubnet: null,
+      certificateArn: "arn:aws:acm:us-east-1:123456789012:certificate/11111111-1111-4111-8111-111111111111",
+      domain: "c2.example.test", hostedZoneId: "Z1234567890", backendPort: 80,
+      listener: { mode: "existing", port: 80, jobId: 1 },
+    };
+    expect(parseAwsAlbRedirectorDeploymentSpec(spec).listener).toEqual({ mode: "existing", port: 80, jobId: 1 });
+    for (const listener of [
+      { mode: "existing", port: 81, jobId: 1 },
+      { mode: "existing", port: 80, jobId: 0 },
+      { mode: "existing", port: 80, jobId: 1, command: "stop" },
+      { mode: "create", port: 80, jobId: 1 },
+    ]) expect(() => parseAwsAlbRedirectorDeploymentSpec({ ...spec, listener })).toThrow(/Invalid/u);
+  });
+
   it("normalizes a bounded deployment rename without changing its identity or revision", () => {
     const input = { deploymentId: DEPLOYMENT_ID, expectedRevision: 7, name: "  Production Control  " };
     const parsed = parseRenameCloudDeploymentInput(input);
@@ -415,6 +434,7 @@ describe("cloud deployment contracts", () => {
       v: CLOUD_DEPLOYMENT_STATE_VERSION,
       revision: 3,
       deployments: [record],
+      dependentDeployments: [],
     });
 
     expect(state.deployments[0]).toMatchObject({

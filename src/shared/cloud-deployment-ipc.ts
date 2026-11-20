@@ -16,11 +16,14 @@ import type {
   CloudProvider,
   CloudCredentialSummary,
   CloudDeploymentActionInput,
+  CloudDependentDeploymentRecord,
   CloudDeploymentRecord,
   CloudDeploymentState,
   CreateCloudFirewallRuleInput,
   CreateCloudCredentialInput,
   CreateCloudDeploymentInput,
+  CreateAwsCrackstationDeploymentInput,
+  CreateAwsAlbRedirectorDeploymentInput,
   DeleteCloudFirewallRuleInput,
   ListCloudFirewallRulesInput,
   RenameCloudDeploymentInput,
@@ -41,6 +44,10 @@ import type {
 import type { CloudPermissionEvaluation } from "./cloud-provider-permissions.js";
 import type {
   AwsDeploymentOptions,
+  AwsCrackstationOptions,
+  AwsAlbRedirectorOptions,
+  DiscoverAwsCrackstationOptionsInput,
+  DiscoverAwsAlbRedirectorOptionsInput,
   AzureDeploymentOptions,
   DiscoverAwsOptionsInput,
   DiscoverAzureOptionsInput,
@@ -73,6 +80,8 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   testCredential: "sliver:cloud-deployment:credential:test",
   copyAwsPermissionsTerraform: "sliver:cloud-deployment:aws:permissions:copy-terraform",
   discoverAwsOptions: "sliver:cloud-deployment:aws:options:discover",
+  discoverCrackstationOptions: "sliver:cloud-deployment:aws:crackstation-options:discover",
+  discoverAlbRedirectorOptions: "sliver:cloud-deployment:aws:alb-redirector-options:discover",
   discoverAzureAccounts: "sliver:cloud-deployment:azure:accounts:discover",
   discoverAzureOptions: "sliver:cloud-deployment:azure:options:discover",
   listDnsZones: "sliver:cloud-deployment:dns:zones:list",
@@ -81,6 +90,8 @@ export const CLOUD_DEPLOYMENT_IPC_INVOKE = {
   updateDnsRecord: "sliver:cloud-deployment:dns:record:update",
   deleteDnsRecord: "sliver:cloud-deployment:dns:record:delete",
   createDeployment: "sliver:cloud-deployment:create",
+  createCrackstationDeployment: "sliver:cloud-deployment:crackstation:create",
+  createAlbRedirectorDeployment: "sliver:cloud-deployment:alb-redirector:create",
   getSoftwareState: "sliver:cloud-deployment:software:state",
   getSoftwareInstallProgress: "sliver:cloud-deployment:software:install:progress:get",
   listSoftwareListeners: "sliver:cloud-deployment:software:listeners",
@@ -324,6 +335,8 @@ export interface CloudDeploymentAPI {
   /** Copy the app's required AWS IAM policy as Terraform, without credential data. */
   copyAwsPermissionsTerraform(): Promise<OperationResult>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): Promise<OperationResult<AwsDeploymentOptions>>;
+  discoverCrackstationOptions(input: DiscoverAwsCrackstationOptionsInput): Promise<OperationResult<AwsCrackstationOptions>>;
+  discoverAlbRedirectorOptions(input: DiscoverAwsAlbRedirectorOptionsInput): Promise<OperationResult<AwsAlbRedirectorOptions>>;
   discoverAzureAccounts(): Promise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): Promise<OperationResult<AzureDeploymentOptions>>;
   listDnsZones(input: ListCloudDnsZonesInput): Promise<OperationResult<readonly CloudDnsZone[]>>;
@@ -332,6 +345,8 @@ export interface CloudDeploymentAPI {
   updateDnsRecord(input: UpdateCloudDnsRecordInput): Promise<OperationResult>;
   deleteDnsRecord(input: DeleteCloudDnsRecordInput): Promise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  createCrackstationDeployment(input: CreateAwsCrackstationDeploymentInput): Promise<OperationResult<CloudDependentDeploymentRecord>>;
+  createAlbRedirectorDeployment(input: CreateAwsAlbRedirectorDeploymentInput): Promise<OperationResult<CloudDependentDeploymentRecord>>;
   getSoftwareState(): Promise<OperationResult<SoftwareDeploymentState>>;
   getSoftwareInstallProgress(input: ListLocalRedirectorListenersInput): Promise<OperationResult<SoftwareInstallProgressSnapshot | null>>;
   listSoftwareListeners(input: ListLocalRedirectorListenersInput): Promise<OperationResult<readonly LocalRedirectorListenerOption[]>>;
@@ -340,7 +355,7 @@ export interface CloudDeploymentAPI {
   createOperatorConfig(
     input: CreateCloudOperatorConfigInput,
   ): Promise<OperationResult<SaveCloudOperatorConfigResult>>;
-  runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord>>;
+  runLifecycleAction(input: CloudDeploymentActionInput): Promise<OperationResult<CloudDeploymentRecord | CloudDependentDeploymentRecord>>;
   renameDeployment(input: RenameCloudDeploymentInput): Promise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): Promise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): Promise<OperationResult<CloudFirewallSnapshot>>;

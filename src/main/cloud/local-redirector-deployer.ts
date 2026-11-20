@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { isIP } from "node:net";
 
 import { Client, type ClientChannel, type ConnectConfig } from "ssh2";
 
@@ -21,6 +22,11 @@ export interface LocalRedirectorRemoveInput extends LocalRedirectorRecipeIdentit
 export interface LocalRedirectorProbeInput {
   readonly ssh: LocalRedirectorSshTarget;
   readonly kind: "http" | "https";
+  readonly port: number;
+}
+export interface PrivateHttpListenerProbeInput {
+  readonly ssh: LocalRedirectorSshTarget;
+  readonly privateIp: string;
   readonly port: number;
 }
 export interface LocalRedirectorFrontendPortsInput {
@@ -136,6 +142,36 @@ export class LocalRedirectorDeployer {
     const client = await this.connect(input.ssh);
     try {
       return await this.probeLoopbackListenerWithClient(client, input.ssh.username, input.kind, input.port);
+    } finally {
+      client.end();
+    }
+  }
+
+  /** Confirm an ALB backend is bound only to the server's VPC address. */
+  async probePrivateHttpListener(input: PrivateHttpListenerProbeInput): Promise<number | null> {
+    return this.probePrivateHttpListenerBinding(input, false);
+  }
+
+  /** Confirm an existing Sliver HTTP listener is reachable on the VPC address. */
+  async probeExistingPrivateHttpListener(input: PrivateHttpListenerProbeInput): Promise<number | null> {
+    return this.probePrivateHttpListenerBinding(input, true);
+  }
+
+  private async probePrivateHttpListenerBinding(input: PrivateHttpListenerProbeInput, allowWildcard: boolean): Promise<number | null> {
+    validateSshTarget(input.ssh);
+    validPort(input.port);
+    if (isIP(input.privateIp) !== 4) throw new TypeError("Invalid private listener IPv4 address");
+    const client = await this.connect(input.ssh);
+    try {
+      const sockets = parseListeningSockets(await this.exec(client, privileged(input.ssh.username, ["ss", "-H", "-ltnp"]), "checking the private Sliver listener", this.commandTimeoutMs));
+      const selected = sockets.filter((socket) => socket.port === input.port);
+      if (selected.length !== 1 || selected[0]?.process !== "sliver-server" ||
+          (selected[0].address !== input.privateIp && (!allowWildcard ||
+            (selected[0].address !== "0.0.0.0" && selected[0].address !== "*")))) return null;
+      const probe = command(["curl", "--noproxy", "*", "--silent", "--show-error", "--output", "/dev/null", "--write-out", "%{http_code}", "--max-time", "5", `http://${input.privateIp}:${input.port}/`]);
+      const output = await this.exec(client, `${probe} || true`, "probing the private Sliver listener", this.commandTimeoutMs);
+      const status = Number(output.trim());
+      return Number.isSafeInteger(status) && status >= 200 && status <= 499 ? status : null;
     } finally {
       client.end();
     }
