@@ -73,7 +73,7 @@ test("AD Explorer collections open independent dataset windows and preserve thei
     await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
     const themed = await workspace.evaluate(async () => {
       const api = (globalThis as unknown as MainBrowser).sliver;
-      const { v: _version, revision, ...settings } = await api.getApplicationSettings();
+      const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = await api.getApplicationSettings();
       return api.updateApplicationSettings({ expectedRevision: revision, settings: { ...settings, theme: "dark" } });
     });
     assert.equal(themed.ok, true, themed.error ?? "Cannot select the fixture theme");
