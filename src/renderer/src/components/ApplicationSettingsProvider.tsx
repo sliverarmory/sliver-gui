@@ -17,6 +17,7 @@ import {
   isResolvedApplicationIcon,
   parseApplicationSettingsState,
   parseApplicationSettingsValues,
+  resolveApplicationLanguage,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
   type ApplicationSettingsValues,
@@ -25,6 +26,8 @@ import {
 } from "../../../shared/application-settings-contracts";
 import type { OperationResult } from "../../../shared/contracts";
 import { keyboardShortcutsEqual } from "../../../shared/keyboard-shortcuts";
+import { ApplicationLocaleProvider } from "../i18n/ApplicationLocaleProvider";
+import { messagesForLanguage } from "../i18n/messages";
 import {
   CONSOLE_TERMINAL_SETTINGS_STORAGE_KEY,
   loadConsoleTerminalSettings,
@@ -134,16 +137,8 @@ export function ApplicationSettingsProvider({
           const migrated = await settingsApi.updateApplicationSettings({
             expectedRevision: current.revision,
             settings: {
-              theme: current.theme,
-              appIcon: current.appIcon,
-              reduceMotion: current.reduceMotion,
-              disableWindowTransparency: current.disableWindowTransparency,
-              reportScreenshotDirectory: current.reportScreenshotDirectory,
-              commandPaletteShortcut: current.commandPaletteShortcut,
-              keyboardShortcuts: current.keyboardShortcuts,
+              ...settingsValues(current),
               terminal: legacyTerminal,
-              overview: current.overview,
-              rdp: current.rdp,
             },
           });
           if (!active) return;
@@ -152,7 +147,8 @@ export function ApplicationSettingsProvider({
         }
       } catch (error: unknown) {
         if (!active) return;
-        toast.danger("Settings unavailable", {
+        const messages = messagesForLanguage(resolveApplicationLanguage(settingsRef.current)).settings;
+        toast.danger(messages.unavailable, {
           description: error instanceof Error ? error.message : String(error),
         });
       } finally {
@@ -215,6 +211,7 @@ export function ApplicationSettingsProvider({
       setSavingCount((count) => count + 1);
       try {
         const current = settingsRef.current;
+        const messages = messagesForLanguage(resolveApplicationLanguage(current)).settings;
         const currentValues = settingsValues(current);
         const next = parseApplicationSettingsValues(updater(currentValues));
         if (sameSettings(currentValues, next)) {
@@ -226,8 +223,8 @@ export function ApplicationSettingsProvider({
           settings: next,
         });
         if (!response.ok || !response.value) {
-          toast.danger("Settings not saved", {
-            description: response.error ?? "The application settings could not be updated.",
+          toast.danger(messages.notSaved, {
+            description: response.error ?? messages.updateFailed,
           });
           const latest = await settingsApi.getApplicationSettings();
           accept(parseApplicationSettingsState(latest));
@@ -237,7 +234,8 @@ export function ApplicationSettingsProvider({
         accept(parseApplicationSettingsState(response.value));
         resolveResult(true);
       } catch (error: unknown) {
-        toast.danger("Settings not saved", {
+        const messages = messagesForLanguage(resolveApplicationLanguage(settingsRef.current)).settings;
+        toast.danger(messages.notSaved, {
           description: error instanceof Error ? error.message : String(error),
         });
         resolveResult(false);
@@ -263,7 +261,9 @@ export function ApplicationSettingsProvider({
 
   return (
     <ApplicationSettingsContext.Provider value={value}>
-      {children}
+      <ApplicationLocaleProvider language={resolveApplicationLanguage(settings)}>
+        {children}
+      </ApplicationLocaleProvider>
     </ApplicationSettingsContext.Provider>
   );
 }
@@ -274,6 +274,7 @@ export function useApplicationSettings(): ApplicationSettingsContextValue | unde
 
 function settingsValues(state: ApplicationSettingsState): ApplicationSettingsValues {
   return Object.freeze({
+    language: state.language,
     theme: state.theme,
     appIcon: state.appIcon,
     reduceMotion: state.reduceMotion,
@@ -288,7 +289,8 @@ function settingsValues(state: ApplicationSettingsState): ApplicationSettingsVal
 }
 
 function sameSettings(left: ApplicationSettingsValues, right: ApplicationSettingsValues): boolean {
-  return left.theme === right.theme &&
+  return left.language === right.language &&
+    left.theme === right.theme &&
     left.appIcon === right.appIcon &&
     left.reduceMotion === right.reduceMotion &&
     left.disableWindowTransparency === right.disableWindowTransparency &&

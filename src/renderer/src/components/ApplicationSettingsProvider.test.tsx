@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import {
-  APPLICATION_SETTINGS_VERSION,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   type ApplicationSettingsState,
   type ResolvedApplicationIcon,
@@ -200,6 +199,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "system",
         theme: "light",
         appIcon: "passion",
         reduceMotion: false,
@@ -215,10 +215,72 @@ describe("ApplicationSettingsProvider", () => {
     expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
   });
 
+  it("applies a persisted language change and accepts a later change from another window", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: applicationSettings({ ...input.settings, revision: input.expectedRevision + 1 }),
+    }));
+    let publish!: (state: ApplicationSettingsState) => void;
+    installSettingsAPI({
+      updateApplicationSettings,
+      onApplicationSettingsChanged: vi.fn((listener) => {
+        publish = listener;
+        return vi.fn();
+      }),
+    });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    expect(document.documentElement).toHaveAttribute("lang", "en");
+
+    await user.click(screen.getByRole("button", { name: "Use Japanese" }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("lang", "ja"));
+    expect(updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 0,
+      settings: expect.objectContaining({ language: "ja" }),
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Use Japanese" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 1,
+      settings: expect.objectContaining({ language: "ja", theme: "light" }),
+    })));
+
+    act(() => publish(applicationSettings({ revision: 3, language: "uk", theme: "light" })));
+    expect(document.documentElement).toHaveAttribute("lang", "uk");
+  });
+
+  it("follows the system language and preserves an explicit English preference", async () => {
+    const systemLanguage = "fr";
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: applicationSettings({ ...input.settings, systemLanguage, revision: input.expectedRevision + 1 }),
+    }));
+    installSettingsAPI({
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ systemLanguage })),
+      updateApplicationSettings,
+    });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    expect(document.documentElement).toHaveAttribute("lang", "fr");
+
+    await user.click(screen.getByRole("button", { name: "Use English" }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("lang", "en"));
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings.language).toBe("en");
+    expect(updateApplicationSettings.mock.calls[0]?.[0].settings).not.toHaveProperty("systemLanguage");
+
+    await user.click(screen.getByRole("button", { name: "Follow system language" }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("lang", "fr"));
+    expect(updateApplicationSettings.mock.calls[1]?.[0].settings.language).toBe("system");
+  });
+
   it("persists the screenshot directory and keeps it through later changes", async () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
-      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+      value: applicationSettings({ ...input.settings, revision: input.expectedRevision + 1 }),
     }));
     installSettingsAPI({ updateApplicationSettings });
     const user = userEvent.setup();
@@ -259,6 +321,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "system",
         theme: "system",
         appIcon: "passion",
         reduceMotion: false,
@@ -285,14 +348,10 @@ describe("ApplicationSettingsProvider", () => {
     }));
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
-      value: {
-        v: APPLICATION_SETTINGS_VERSION,
-        revision: 1,
-        ...input.settings,
-      },
+      value: applicationSettings({ ...input.settings, revision: 1 }),
     }));
     installSettingsAPI({
-      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency, rdp: { clipboard: false, transparentClipboard: false } })),
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ language: "fr", disableWindowTransparency, rdp: { clipboard: false, transparentClipboard: false } })),
       updateApplicationSettings,
     });
     renderProvider();
@@ -301,6 +360,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "fr",
         theme: "system",
         appIcon: "auto",
         reduceMotion: false,
@@ -326,7 +386,7 @@ describe("ApplicationSettingsProvider", () => {
   it("persists a shortcut-only change and preserves it across other preference updates", async () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
-      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+      value: applicationSettings({ ...input.settings, revision: input.expectedRevision + 1 }),
     }));
     installSettingsAPI({ updateApplicationSettings });
     const user = userEvent.setup();
@@ -347,7 +407,7 @@ describe("ApplicationSettingsProvider", () => {
   it("persists a transparency-only change and preserves it through later updates", async () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
-      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+      value: applicationSettings({ ...input.settings, revision: input.expectedRevision + 1 }),
     }));
     installSettingsAPI({ updateApplicationSettings });
     const user = userEvent.setup();
@@ -371,7 +431,7 @@ describe("ApplicationSettingsProvider", () => {
   it("persists an RDP clipboard-only change and preserves it across other preference updates", async () => {
     const updateApplicationSettings = vi.fn(async (input) => ({
       ok: true as const,
-      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+      value: applicationSettings({ ...input.settings, revision: input.expectedRevision + 1 }),
     }));
     installSettingsAPI({ updateApplicationSettings });
     const user = userEvent.setup();
@@ -428,6 +488,24 @@ function SettingsProbe(): React.JSX.Element {
         onClick={() => void context.updateSettings((current) => ({ ...current, theme: "light" }))}
       >
         Use light theme
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, language: "ja" }))}
+      >
+        Use Japanese
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, language: "en" }))}
+      >
+        Use English
+      </button>
+      <button
+        type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, language: "system" }))}
+      >
+        Follow system language
       </button>
       <button
         type="button"
@@ -499,7 +577,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory" | "rdp">>,
+  overrides: Partial<Omit<ApplicationSettingsState, "v">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

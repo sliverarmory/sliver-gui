@@ -91,6 +91,7 @@ import {
 import { createUpdateCertificateTrust } from "./update-certificate-trust.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { detectApplicationSystemLanguage } from "./application-system-language.js";
 import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
 import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
@@ -2953,6 +2954,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   applicationContextMenus = new ApplicationContextMenuController();
   const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
     join(consoleClientRootDirectory, "gui", APPLICATION_SETTINGS_FILE_NAME),
+    detectApplicationSystemLanguage(() => app.getPreferredSystemLanguages()),
   );
   const loadedTextEditorSettingsStore = await TextEditorSettingsStore.load(
     join(consoleClientRootDirectory, "gui", TEXT_EDITOR_SETTINGS_FILE_NAME),

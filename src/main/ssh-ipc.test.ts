@@ -134,6 +134,7 @@ describe("SSH IPC boundary", () => {
     await invoke(SSH_IPC_INVOKE.updateApplicationSettings, event, {
       expectedRevision: 0,
       settings: {
+        language: DEFAULT_APPLICATION_SETTINGS_STATE.language,
         theme: "dark",
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: true,

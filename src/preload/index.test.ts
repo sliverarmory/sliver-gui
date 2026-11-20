@@ -47,6 +47,7 @@ const invokeArguments = {
   updateApplicationSettings: [{
     expectedRevision: 0,
     settings: {
+      language: DEFAULT_APPLICATION_SETTINGS_STATE.language,
       theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
@@ -631,11 +632,12 @@ describe("sandboxed preload bridge", () => {
     const [channel, handler] = electronMocks.on.mock.calls[0] ?? [];
     expect(channel).toBe(IPC.applicationSettingsChanged);
     if (typeof handler !== "function") throw new Error("Expected the application-settings event handler");
-    const valid = { ...DEFAULT_APPLICATION_SETTINGS_STATE, revision: 4, theme: "light", appIcon: "passion" };
+    const valid = { ...DEFAULT_APPLICATION_SETTINGS_STATE, revision: 4, systemLanguage: "uk", theme: "light", appIcon: "passion" };
     handler({} as Electron.IpcRendererEvent, valid);
     handler({} as Electron.IpcRendererEvent, { ...valid, untrustedPath: "/tmp/private" });
     handler({} as Electron.IpcRendererEvent, { ...valid, theme: "sepia" });
     handler({} as Electron.IpcRendererEvent, { ...valid, appIcon: "system" });
+    handler({} as Electron.IpcRendererEvent, { ...valid, systemLanguage: "uk-UA" });
 
     expect(listener).toHaveBeenCalledExactlyOnceWith(valid);
     expect(Object.isFrozen(listener.mock.calls[0]?.[0])).toBe(true);

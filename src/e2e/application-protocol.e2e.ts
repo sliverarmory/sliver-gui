@@ -146,6 +146,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
         expectedRevision: settings.revision,
         settings: {
           theme: "light",
+          language: settings.language,
           appIcon: settings.appIcon,
           reduceMotion: true,
           disableWindowTransparency: settings.disableWindowTransparency,

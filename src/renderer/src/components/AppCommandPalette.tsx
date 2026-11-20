@@ -5,6 +5,7 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faMagnifyingGlass } from "@fortawesome/free-solid-svg-icons";
 import type { IconDefinition } from "@fortawesome/fontawesome-svg-core";
 
+import { useMessages } from "../i18n/ApplicationLocaleProvider";
 import { CommandPaletteShortcutKbd } from "./CommandPaletteShortcut";
 
 export type AppCommandGroup = "Navigate" | "Sessions" | "Beacons" | "Server" | "Windows";
@@ -39,6 +40,7 @@ export function AppCommandPalette({
   shortcut,
   onOpenChange,
 }: AppCommandPaletteProps): React.JSX.Element {
+  const { palette: copy, paletteGroups, shell } = useMessages();
   const [inputValue, setInputValue] = useState("");
 
   const setOpen = useCallback((next: boolean): void => {
@@ -58,17 +60,17 @@ export function AppCommandPalette({
       <Command.Backdrop isOpen={isOpen} variant="blur" onOpenChange={setOpen}>
         <Command.Container size="lg">
           <Command.Dialog
-            aria-label="Command palette"
+            aria-label={shell.commandPalette}
             inputValue={inputValue}
             onInputChange={setInputValue}
           >
-            <Command.InputGroup autoFocus>
+            <Command.InputGroup aria-label={copy.search} autoFocus>
               <Command.InputGroup.Prefix>
                 <FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} />
               </Command.InputGroup.Prefix>
               <Command.InputGroup.Input
-                aria-label="Search commands"
-                placeholder="Search commands, sessions, and beacons…"
+                aria-label={copy.search}
+                placeholder={copy.searchPlaceholder}
               />
               <Command.InputGroup.ClearButton />
               <Command.InputGroup.Suffix>
@@ -79,14 +81,14 @@ export function AppCommandPalette({
             </Command.InputGroup>
             {hasMoreTargets ? (
               <p className="text-muted px-4 py-2 text-xs">
-                More targets are available. Open Sessions or Beacons to search the full inventory.
+                {copy.moreTargets}
               </p>
             ) : null}
             <Command.List
-              aria-label="Application commands"
+              aria-label={copy.applicationCommands}
               renderEmptyState={() => (
                 <div className="text-muted flex h-20 items-center justify-center px-4 text-sm">
-                  No commands found.
+                  {copy.noResults}
                 </div>
               )}
               onAction={runCommand}
@@ -95,7 +97,7 @@ export function AppCommandPalette({
                 const groupCommands = commands.filter((command) => command.group === group);
                 if (groupCommands.length === 0) return null;
                 return (
-                  <Command.Group key={group} heading={group}>
+                  <Command.Group key={group} heading={paletteGroups[group]}>
                     {groupCommands.map((command) => (
                       <Command.Item
                         key={command.id}
@@ -113,7 +115,7 @@ export function AppCommandPalette({
                           <span className="text-muted truncate text-xs">{command.description}</span>
                         </span>
                         {command.isCurrent ? (
-                          <span className="text-muted shrink-0 text-xs">Current</span>
+                          <span className="text-muted shrink-0 text-xs">{copy.current}</span>
                         ) : null}
                         {command.shortcut ? (
                           <CommandPaletteShortcutKbd
@@ -132,15 +134,15 @@ export function AppCommandPalette({
                 <span className="flex items-center gap-1.5">
                   <Kbd className="text-xs"><Kbd.Abbr keyValue="up" /></Kbd>
                   <Kbd className="text-xs"><Kbd.Abbr keyValue="down" /></Kbd>
-                  <span>Navigate</span>
+                  <span>{copy.navigate}</span>
                 </span>
                 <span className="flex items-center gap-1.5">
                   <Kbd className="text-xs"><Kbd.Abbr keyValue="enter" /></Kbd>
-                  <span>Run</span>
+                  <span>{copy.run}</span>
                 </span>
               </div>
               <span className="hidden items-center gap-2 sm:flex">
-                <span>Toggle</span>
+                <span>{copy.toggle}</span>
                 <CommandPaletteShortcutKbd className="text-xs" shortcut={shortcut} />
               </span>
             </Command.Footer>

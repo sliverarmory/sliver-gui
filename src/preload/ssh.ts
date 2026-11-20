@@ -61,6 +61,7 @@ const OPAQUE_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const TERMINAL_FONT_IDS = new Set(["fira-code", "jetbrains-mono", "cascadia-mono", "source-code-pro"]);
 const TERMINAL_CURSOR_STYLES = new Set(["block", "underline", "bar"]);
+const APPLICATION_LANGUAGES = new Set(["en", "es", "fr", "ja", "uk"]);
 const APPLICATION_THEMES = new Set(["system", "light", "dark"]);
 const APPLICATION_ICONS = new Set(["auto", "light", "dark", "passion"]);
 const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
@@ -588,12 +589,16 @@ function parseManagedTarget(value: unknown): ManagedSshTarget {
 function parseApplicationSettingsState(value: unknown): ApplicationSettingsState {
   const state = exactRecord(
     value,
-    ["v", "revision", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"],
+    ["v", "revision", "language", "systemLanguage", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"],
     "application settings",
   );
-  if (state["v"] !== 10 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
+  if (state["v"] !== 12 || !Number.isSafeInteger(state["revision"]) || (state["revision"] as number) < 0) {
     throw new TypeError("Invalid application settings state");
   }
+  if (state["language"] !== "system" && !APPLICATION_LANGUAGES.has(stringValue(state["language"]))) {
+    throw new TypeError("Invalid application language");
+  }
+  if (!APPLICATION_LANGUAGES.has(stringValue(state["systemLanguage"]))) throw new TypeError("Invalid system language");
   if (!APPLICATION_THEMES.has(stringValue(state["theme"]))) throw new TypeError("Invalid application theme");
   if (!APPLICATION_ICONS.has(stringValue(state["appIcon"]))) throw new TypeError("Invalid application icon");
   if (typeof state["reduceMotion"] !== "boolean") throw new TypeError("Invalid reduced-motion setting");
@@ -640,8 +645,10 @@ function parseApplicationSettingsState(value: unknown): ApplicationSettingsState
   const rdp = exactRecord(state["rdp"], ["clipboard", "transparentClipboard"], "RDP settings");
   if (typeof rdp["clipboard"] !== "boolean" || typeof rdp["transparentClipboard"] !== "boolean") throw new TypeError("Invalid RDP clipboard setting");
   return Object.freeze({
-    v: 10,
+    v: 12,
     revision: state["revision"] as number,
+    language: state["language"] as ApplicationSettingsState["language"],
+    systemLanguage: state["systemLanguage"] as ApplicationSettingsState["systemLanguage"],
     theme: state["theme"] as ApplicationSettingsState["theme"],
     appIcon: state["appIcon"] as ApplicationSettingsState["appIcon"],
     reduceMotion: state["reduceMotion"],

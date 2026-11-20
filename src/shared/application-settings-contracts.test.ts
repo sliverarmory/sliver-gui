@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  APPLICATION_LANGUAGES,
   APPLICATION_SETTINGS_VERSION,
+  DEFAULT_APPLICATION_LANGUAGE,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   DEFAULT_APPLICATION_SETTINGS_VALUES,
   DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
   DEFAULT_APPLICATION_RDP_SETTINGS,
   DEFAULT_APPLICATION_TERMINAL_SETTINGS,
   isApplicationIcon,
+  isApplicationLanguage,
+  isApplicationLanguagePreference,
   isReportScreenshotDirectory,
   parseApplicationSettingsState,
   parsePersistedApplicationSettingsState,
@@ -16,6 +20,7 @@ import {
   parseApplicationTerminalSettings,
   parseApplicationOverviewSettings,
   parseApplicationRdpSettings,
+  resolveApplicationLanguage,
 } from "./application-settings-contracts.js";
 
 const terminal = {
@@ -27,6 +32,7 @@ const terminal = {
   transparentWindows: true,
 };
 const settings = {
+  language: "fr" as const,
   theme: "light" as const,
   appIcon: "passion" as const,
   reduceMotion: true,
@@ -38,12 +44,15 @@ const settings = {
   overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
   rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
 };
+const { language: _language, ...preLanguageSettings } = settings;
 
 describe("application settings contracts", () => {
-  it("provides deeply frozen version-nine defaults with native transparency and RDP text clipboard enabled", () => {
+  it("provides deeply frozen defaults with system language, native transparency, and RDP text clipboard enabled", () => {
     expect(DEFAULT_APPLICATION_SETTINGS_STATE).toEqual({
       v: APPLICATION_SETTINGS_VERSION,
       revision: 0,
+      language: "system",
+      systemLanguage: "en",
       theme: "system",
       appIcon: "auto",
       reduceMotion: false,
@@ -72,17 +81,17 @@ describe("application settings contracts", () => {
 
   it("migrates version-six terminal preferences without losing settings", () => {
     const { transparentWindows: _transparent, ...legacyTerminal } = terminal;
-    const { disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = settings;
+    const { disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = preLanguageSettings;
     const legacy = { ...previousSettings, v: 6, revision: 25, terminal: legacyTerminal };
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
-      ...legacy, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, terminal: { ...legacyTerminal, transparentWindows: true }, rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      ...legacy, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, terminal: { ...legacyTerminal, transparentWindows: true }, rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
     });
     expect(() => parseApplicationSettingsState({ ...legacy, v: APPLICATION_SETTINGS_VERSION })).toThrow();
     expect(() => parseApplicationTerminalSettings({ ...terminal, transparentWindows: "yes" })).toThrow();
   });
 
   it("migrates version-seven settings with native transparency enabled and preserves terminal and overview preferences", () => {
-    const { disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = settings;
+    const { disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = preLanguageSettings;
     const previous = {
       ...previousSettings,
       v: 7,
@@ -96,6 +105,8 @@ describe("application settings contracts", () => {
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
       ...previous,
       v: APPLICATION_SETTINGS_VERSION,
+      language: "system",
+      systemLanguage: DEFAULT_APPLICATION_LANGUAGE,
       disableWindowTransparency: false,
       rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
     });
@@ -109,11 +120,11 @@ describe("application settings contracts", () => {
   });
 
   it("migrates version-eight settings with text clipboard enabled and preserves existing preferences", () => {
-    const { rdp: _rdp, ...previousSettings } = settings;
+    const { rdp: _rdp, ...previousSettings } = preLanguageSettings;
     const previous = { ...previousSettings, v: 8, revision: 37 };
 
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
-      ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard: true, transparentClipboard: false },
+      ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, rdp: { clipboard: true, transparentClipboard: false },
     });
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     expect(() => parseApplicationSettingsValues(previousSettings)).toThrow("Invalid application settings");
@@ -122,12 +133,62 @@ describe("application settings contracts", () => {
   });
 
   it.each([false, true])("migrates version-nine settings preserving clipboard=%s with transparent clipboard disabled", (clipboard) => {
-    const previous = { ...settings, v: 9, revision: 41, rdp: { clipboard } };
+    const previous = { ...preLanguageSettings, v: 9, revision: 41, rdp: { clipboard } };
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
-      ...previous, v: APPLICATION_SETTINGS_VERSION, rdp: { clipboard, transparentClipboard: false },
+      ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, rdp: { clipboard, transparentClipboard: false },
     });
     expect(() => parseApplicationSettingsState(previous)).toThrow();
     expect(() => parsePersistedApplicationSettingsState({ ...previous, rdp: { clipboard, transparentClipboard: true } })).toThrow();
+  });
+
+  it("migrates exact version-ten settings to follow the system language", () => {
+    const previous = {
+      ...preLanguageSettings,
+      v: 10,
+      revision: 42,
+      rdp: { clipboard: false, transparentClipboard: true },
+    };
+    expect(parsePersistedApplicationSettingsState(previous, "ja")).toEqual({
+      ...previous,
+      v: APPLICATION_SETTINGS_VERSION,
+      language: "system",
+      systemLanguage: "ja",
+    });
+    expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
+    expect(() => parsePersistedApplicationSettingsState({ ...previous, language: "ja" })).toThrow();
+    expect(() => parseApplicationSettingsValues(preLanguageSettings)).toThrow("Invalid application settings");
+  });
+
+  it.each(APPLICATION_LANGUAGES)("accepts the $id language code", ({ id: language }) => {
+    expect(isApplicationLanguage(language)).toBe(true);
+    expect(isApplicationLanguagePreference(language)).toBe(true);
+    expect(parseApplicationSettingsValues({ ...settings, language }).language).toBe(language);
+  });
+
+  it.each(APPLICATION_LANGUAGES)("preserves the explicit $id language from version eleven", ({ id: language }) => {
+    const previous = { ...settings, v: 11, revision: 43, language };
+    const state = parsePersistedApplicationSettingsState(previous, "uk");
+    expect(state).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, systemLanguage: "uk" });
+    expect(resolveApplicationLanguage(state)).toBe(language);
+    expect(() => parsePersistedApplicationSettingsState({ ...previous, language: "system" })).toThrow();
+  });
+
+  it("uses the system language when selected and accepts only the persisted fields on disk", () => {
+    const persisted = { ...settings, v: APPLICATION_SETTINGS_VERSION, revision: 44, language: "system" };
+    const state = parsePersistedApplicationSettingsState(persisted, "fr");
+    expect(resolveApplicationLanguage(state)).toBe("fr");
+    expect(resolveApplicationLanguage(parsePersistedApplicationSettingsState(persisted))).toBe("en");
+    expect(isApplicationLanguage("system")).toBe(false);
+    expect(isApplicationLanguagePreference("system")).toBe(true);
+    expect(() => parsePersistedApplicationSettingsState(state)).toThrow("Invalid persisted application settings state");
+    expect(() => parseApplicationSettingsState(persisted)).toThrow("Invalid application settings state");
+    expect(() => parseApplicationSettingsUpdateInput({ expectedRevision: 44, settings: { ...settings, systemLanguage: "fr" } }))
+      .toThrow("Invalid application settings update");
+  });
+
+  it.each([undefined, null, "", "FR", "fr-CA", "pt", "../fr"])("rejects unsupported language %s", (language) => {
+    expect(isApplicationLanguage(language)).toBe(false);
+    expect(() => parseApplicationSettingsValues({ ...settings, language })).toThrow("Invalid application settings");
   });
 
   it.each([false, true])("parses and freezes the explicit RDP clipboard=%s preference", (clipboard) => {
@@ -164,6 +225,7 @@ describe("application settings contracts", () => {
     const state = parseApplicationSettingsState({
       v: APPLICATION_SETTINGS_VERSION,
       revision: 7,
+      systemLanguage: "en",
       ...settings,
     });
     const update = parseApplicationSettingsUpdateInput({
@@ -171,7 +233,7 @@ describe("application settings contracts", () => {
       settings,
     });
 
-    expect(state).toEqual({ v: APPLICATION_SETTINGS_VERSION, revision: 7, ...settings });
+    expect(state).toEqual({ v: APPLICATION_SETTINGS_VERSION, revision: 7, systemLanguage: "en", ...settings });
     expect(update).toEqual({ expectedRevision: 7, settings });
     expect(Object.isFrozen(state)).toBe(true);
     expect(Object.isFrozen(state.terminal)).toBe(true);
@@ -203,7 +265,7 @@ describe("application settings contracts", () => {
     };
     expect(() => parseApplicationSettingsState(previous)).toThrow("Invalid application settings state");
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(Object.isFrozen(migrated)).toBe(true);
     expect(Object.isFrozen(migrated.terminal)).toBe(true);
   });
@@ -219,22 +281,22 @@ describe("application settings contracts", () => {
       terminal,
     };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(Object.isFrozen(migrated.keyboardShortcuts)).toBe(true);
   });
 
   it("migrates version-four settings to the Desktop screenshot location", () => {
-    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = settings;
+    const { reportScreenshotDirectory: _directory, overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = preLanguageSettings;
     const previous = { v: 4, revision: 14, ...previousSettings };
     const migrated = parsePersistedApplicationSettingsState(previous);
-    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(migrated).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
   });
 
   it("migrates version-five settings without discarding existing preferences", () => {
-    const { overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = settings;
+    const { overview: _overview, disableWindowTransparency: _disableTransparency, rdp: _rdp, ...previousSettings } = preLanguageSettings;
     const previous = { v: 5, revision: 19, ...previousSettings };
     expect(parsePersistedApplicationSettingsState(previous)).toEqual({
-      ...previous, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+      ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
       rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
     });
   });
@@ -292,6 +354,8 @@ describe("application settings contracts", () => {
     expect(parsePersistedApplicationSettingsState(legacy)).toEqual({
       v: APPLICATION_SETTINGS_VERSION,
       revision: 4,
+      language: "system",
+      systemLanguage: DEFAULT_APPLICATION_LANGUAGE,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
@@ -369,7 +433,7 @@ describe("application settings contracts", () => {
 
   it.each([APPLICATION_SETTINGS_VERSION - 1, APPLICATION_SETTINGS_VERSION + 1])(
     "rejects noncurrent state version %s outside the migration parser", (v) => {
-      expect(() => parseApplicationSettingsState({ v, revision: 0, ...settings }))
+      expect(() => parseApplicationSettingsState({ v, revision: 0, systemLanguage: "en", ...settings }))
         .toThrow("Invalid application settings state");
     },
   );
@@ -380,8 +444,10 @@ describe("application settings contracts", () => {
     { name: "extra field", patch: { extra: true } },
     { name: "unknown theme", patch: { theme: "sepia" } },
     { name: "unknown icon", patch: { appIcon: "system" } },
+    { name: "unknown system language", patch: { systemLanguage: "pt" } },
+    { name: "unresolved system language", patch: { systemLanguage: "system" } },
   ])("rejects current state with $name", ({ patch }) => {
-    expect(() => parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: 0, ...settings, ...patch }))
+    expect(() => parseApplicationSettingsState({ v: APPLICATION_SETTINGS_VERSION, revision: 0, systemLanguage: "en", ...settings, ...patch }))
       .toThrow("Invalid application settings state");
   });
 

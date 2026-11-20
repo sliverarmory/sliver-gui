@@ -1335,6 +1335,7 @@ async function setApplicationTheme(
         theme: nextTheme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
+        language: current.language,
         disableWindowTransparency: current.disableWindowTransparency,
         reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut,

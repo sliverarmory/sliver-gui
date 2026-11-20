@@ -2,6 +2,8 @@ import { useMemo, useState } from "react";
 import { Button, Card, Description, Label, ListBox, Select } from "@heroui/react";
 
 import type { GhosttySettingsSnapshot } from "../../../shared/ghostty-settings-contracts";
+import { useCollator } from "@react-aria/i18n";
+import { useMessages } from "../i18n/ApplicationLocaleProvider";
 import { useApplicationSettings } from "./ApplicationSettingsProvider";
 import { applicationTerminalAppearance } from "./application-terminal-appearance";
 
@@ -12,6 +14,8 @@ const ANSI_THEME_KEYS = [
 ] as const;
 
 export function GhosttyThemeSettings(): React.JSX.Element {
+  const { terminal: copy } = useMessages();
+  const collator = useCollator();
   const applicationSettings = useApplicationSettings();
   const bridge = window.ghosttySettings;
   const [lastSaved, setLastSaved] = useState<GhosttySettingsSnapshot>();
@@ -22,8 +26,8 @@ export function GhosttyThemeSettings(): React.JSX.Element {
   const themeNames = useMemo(() => {
     const names = new Set(config?.themes.map(({ name }) => name) ?? []);
     if (config?.theme) names.add(config.theme);
-    return [...names].sort((left, right) => left.localeCompare(right));
-  }, [config]);
+    return [...names].sort(collator.compare);
+  }, [collator, config]);
   const preview = applicationSettings && applicationTerminalAppearance(
     applicationSettings.settings.terminal,
     applicationSettings.resolvedTheme,
@@ -40,11 +44,11 @@ export function GhosttyThemeSettings(): React.JSX.Element {
         setLastSaved(await bridge.reloadConfig());
       } else if (action === "theme") {
         const result = await bridge.setTheme(theme ?? "");
-        if (!result.ok || !result.value) throw new Error(result.error ?? "The terminal theme could not be saved.");
+        if (!result.ok || !result.value) throw new Error(result.error ?? copy.saveThemeFailed);
         setLastSaved(result.value);
       } else {
         const result = await bridge.editConfig();
-        if (!result.ok) throw new Error(result.error ?? "The Ghostty configuration could not be opened.");
+        if (!result.ok) throw new Error(result.error ?? copy.openConfigFailed);
       }
     } catch (caught: unknown) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -57,8 +61,8 @@ export function GhosttyThemeSettings(): React.JSX.Element {
     <Card variant="secondary">
       <Card.Header>
         <div>
-          <Card.Title>Ghostty Themes</Card.Title>
-          <Card.Description>Use the same theme files as your Ghostty terminal.</Card.Description>
+          <Card.Title>{copy.ghosttyThemes}</Card.Title>
+          <Card.Description>{copy.ghosttyThemesDescription}</Card.Description>
         </div>
       </Card.Header>
       <Card.Content className="space-y-5">
@@ -72,15 +76,15 @@ export function GhosttyThemeSettings(): React.JSX.Element {
             void performAction("theme", value === DEFAULT_THEME_KEY ? "" : value.slice("theme:".length));
           }}
         >
-          <Label>Terminal theme</Label>
+          <Label>{copy.theme}</Label>
           <Select.Trigger>
-            <Select.Value>{config?.theme || "Application default"}</Select.Value>
+            <Select.Value>{config?.theme || copy.defaultTheme}</Select.Value>
             <Select.Indicator />
           </Select.Trigger>
           <Select.Popover>
             <ListBox>
-              <ListBox.Item id={DEFAULT_THEME_KEY} textValue="Application default">
-                Application default
+              <ListBox.Item id={DEFAULT_THEME_KEY} textValue={copy.defaultTheme}>
+                {copy.defaultTheme}
                 <ListBox.ItemIndicator />
               </ListBox.Item>
               {themeNames.map((name) => (
@@ -91,19 +95,19 @@ export function GhosttyThemeSettings(): React.JSX.Element {
               ))}
             </ListBox>
           </Select.Popover>
-          <Description>Applies immediately to open terminals. Config color overrides take precedence.</Description>
+          <Description>{copy.themeDescription}</Description>
         </Select>
 
         {preview?.theme ? (
           <div
-            aria-label="Terminal theme preview"
+            aria-label={copy.preview}
             className="overflow-hidden rounded-xl px-4 py-4"
             role="img"
             style={{ backgroundColor: preview.theme.background, color: preview.theme.foreground }}
           >
             <div className="space-y-1 text-xs leading-5" style={{ fontFamily: preview.fontFamily }}>
-              <p><span style={{ color: preview.theme.green }}>❯</span> Terminal theme preview</p>
-              <p className="opacity-70">The quick brown fox jumps over the lazy dog.</p>
+              <p><span style={{ color: preview.theme.green }}>❯</span> {copy.preview}</p>
+              <p className="opacity-70">{copy.previewSample}</p>
             </div>
             <div aria-hidden className="mt-4 grid gap-1" style={{ gridTemplateColumns: "repeat(16, minmax(0, 1fr))" }}>
               {ANSI_THEME_KEYS.map((key) => <span className="h-4 rounded-xs" key={key} style={{ backgroundColor: preview.theme?.[key] }} />)}
@@ -113,24 +117,22 @@ export function GhosttyThemeSettings(): React.JSX.Element {
 
         {config ? (
           <div className="space-y-2 text-xs leading-5 text-muted">
-            <p>
-              Add Ghostty theme files to <code className="break-all text-foreground">{config.themesDirectory}</code>,
-              or use themes from your installed Ghostty. Edit the config to use a theme path or separate light and dark themes.
-            </p>
-            <p>
-              Config: <code className="break-all text-foreground">{config.configPath}</code>
-            </p>
+            <p>{copy.themeDirectory}</p>
+            <p><code className="break-all text-foreground">{config.themesDirectory}</code></p>
+            <p>{copy.themeDirectoryDescription}</p>
+            <p>{copy.configPath}</p>
+            <p><code className="break-all text-foreground">{config.configPath}</code></p>
           </div>
         ) : (
           <p className="text-xs text-muted">
-            {bridge ? "Loading Ghostty configuration…" : "Ghostty configuration is unavailable in this window."}
+            {bridge ? copy.loadingConfig : copy.configUnavailable}
           </p>
         )}
 
         {error ? <p className="text-sm text-danger" role="alert">{error}</p> : null}
         {config?.diagnostics.length ? (
           <div className="space-y-2 rounded-lg bg-warning-soft p-3 text-xs text-warning-soft-foreground" role="status">
-            <p className="font-medium">Configuration notes</p>
+            <p className="font-medium">{copy.configNotes}</p>
             <ul className="max-h-40 space-y-2 overflow-y-auto">
               {config.diagnostics.map((diagnostic, index) => (
                 <li className="break-words" key={`${diagnostic.source}:${diagnostic.line ?? 0}:${index}`}>
@@ -152,7 +154,7 @@ export function GhosttyThemeSettings(): React.JSX.Element {
           variant="secondary"
           onPress={() => void performAction("edit")}
         >
-          Edit Ghostty config
+          {copy.editConfig}
         </Button>
         <Button
           isDisabled={!bridge || pendingAction !== undefined}
@@ -161,7 +163,7 @@ export function GhosttyThemeSettings(): React.JSX.Element {
           variant="tertiary"
           onPress={() => void performAction("reload")}
         >
-          Reload themes
+          {copy.reloadThemes}
         </Button>
       </Card.Footer>
     </Card>

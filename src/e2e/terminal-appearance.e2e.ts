@@ -57,7 +57,7 @@ test("terminal themes, native glass toggle and Monaco config saves work under CS
     await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
     await workspace.evaluate(async () => {
       const api = (globalThis as unknown as { sliver: SliverDesktopAPI }).sliver;
-      const { v: _version, revision, ...settings } = await api.getApplicationSettings();
+      const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = await api.getApplicationSettings();
       await api.updateApplicationSettings({ expectedRevision: revision, settings: { ...settings, theme: "dark" } });
     });
     await workspace.locator("html.dark").waitFor();
