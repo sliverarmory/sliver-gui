@@ -1,13 +1,17 @@
 import { GhosttyThemeSettings } from "../components/GhosttyThemeSettings";
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, Tabs, toast } from "@heroui/react";
+import { Button, Card, Description, Label, ListBox, Select, Tabs, toast } from "@heroui/react";
 import { Segment } from "@heroui-pro/react/segment";
 
-import type {
-  ApplicationIcon,
-  ApplicationSettingsState,
-  ApplicationTheme,
+import {
+  APPLICATION_LANGUAGES,
+  isApplicationLanguage,
+  type ApplicationLanguage,
+  type ApplicationIcon,
+  type ApplicationSettingsState,
+  type ApplicationTheme,
 } from "../../../shared/application-settings-contracts";
+import { useMessages } from "../i18n/ApplicationLocaleProvider";
 import { KeyboardShortcutsSettings } from "../components/KeyboardShortcutsSettings";
 import type { KeyboardShortcutAction } from "../../../shared/keyboard-shortcuts";
 import { SwitchRow } from "../components/FormControls";
@@ -23,6 +27,7 @@ import {
 export interface SettingsPageProps {
   readonly settings: ApplicationSettingsState;
   readonly isSaving?: boolean;
+  readonly onLanguageChange: (language: ApplicationLanguage) => void;
   readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
@@ -36,6 +41,7 @@ export interface SettingsPageProps {
 export function SettingsPage({
   settings,
   isSaving = false,
+  onLanguageChange,
   onAppIconChange,
   onThemeChange,
   onReduceMotionChange,
@@ -45,6 +51,8 @@ export function SettingsPage({
   onResetKeyboardShortcuts,
   onTerminalChange,
 }: SettingsPageProps): React.JSX.Element {
+  const { settings: copy, terminal: terminalCopy } = useMessages();
+  const selectedLanguage = APPLICATION_LANGUAGES.find(({ id }) => id === settings.language);
   const [terminalDraft, setTerminalDraft] = useState<ConsoleTerminalSettings>(() =>
     copyTerminalSettings(settings.terminal));
   const previousSavedTerminal = useRef<ConsoleTerminalSettings>(settings.terminal);
@@ -82,10 +90,10 @@ export function SettingsPage({
       if (result.ok) {
         onReportScreenshotDirectoryChange(result.value.directory);
       } else if (result.error !== "cancelled") {
-        toast.danger("Could not choose screenshot folder", { description: result.error });
+        toast.danger(copy.screenshotFolderError, { description: result.error });
       }
     } catch (error: unknown) {
-      toast.danger("Could not choose screenshot folder", {
+      toast.danger(copy.screenshotFolderError, {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -97,8 +105,8 @@ export function SettingsPage({
     <section className="settings-page page-stack max-w-4xl" aria-labelledby="settings-page-heading">
       <header className="page-heading">
         <div>
-          <h1 id="settings-page-heading">Settings</h1>
-          <p>Customize Sliver Desktop across application and terminal windows.</p>
+          <h1 id="settings-page-heading">{copy.heading}</h1>
+          <p>{copy.description}</p>
         </div>
       </header>
 
@@ -106,17 +114,17 @@ export function SettingsPage({
         <div aria-hidden="true" className="settings-page__scroll-marker" ref={scrollMarker} />
         <div className="settings-page__controls tabs--secondary" data-orientation="horizontal" data-scrolled={isScrolled}>
           <Tabs.ListContainer className="w-fit max-w-full">
-            <Tabs.List aria-label="Settings sections">
+            <Tabs.List aria-label={copy.sections}>
               <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="general">
-                General
+                {copy.general}
                 <Tabs.Indicator />
               </Tabs.Tab>
               <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="keyboard">
-                Keyboard Shortcuts
+                {copy.keyboard}
                 <Tabs.Indicator />
               </Tabs.Tab>
               <Tabs.Tab className="w-auto shrink-0 whitespace-nowrap" id="terminal">
-                Terminal
+                {copy.terminal}
                 <Tabs.Indicator />
               </Tabs.Tab>
             </Tabs.List>
@@ -126,22 +134,55 @@ export function SettingsPage({
 
         <Tabs.Panel className="space-y-6 pt-6" id="general">
           <Card variant="secondary">
+            <Card.Content>
+              <Select
+                className="w-full sm:max-w-xs"
+                isDisabled={isSaving}
+                value={settings.language}
+                variant="secondary"
+                onChange={(value) => {
+                  if (isApplicationLanguage(value)) onLanguageChange(value);
+                }}
+              >
+                <Label>{copy.language}</Label>
+                <Select.Trigger>
+                  <Select.Value>
+                    <span lang={selectedLanguage?.id}>{selectedLanguage?.label}</span>
+                  </Select.Value>
+                  <Select.Indicator />
+                </Select.Trigger>
+                <Description>{copy.languageDescription}</Description>
+                <Select.Popover>
+                  <ListBox>
+                    {APPLICATION_LANGUAGES.map(({ id, label }) => (
+                      <ListBox.Item id={id} key={id} textValue={label}>
+                        <span lang={id}>{label}</span>
+                        <ListBox.ItemIndicator />
+                      </ListBox.Item>
+                    ))}
+                  </ListBox>
+                </Select.Popover>
+              </Select>
+            </Card.Content>
+          </Card>
+
+          <Card variant="secondary">
             <Card.Header>
               <div>
-                <Card.Title>Appearance</Card.Title>
-                <Card.Description>Choose how the app and its icon appear.</Card.Description>
+                <Card.Title>{copy.appearance}</Card.Title>
+                <Card.Description>{copy.appearanceDescription}</Card.Description>
               </div>
             </Card.Header>
             <Card.Content className="space-y-6">
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground">Color theme</p>
+                  <p className="text-sm font-medium text-foreground">{copy.theme}</p>
                   <p className="mt-1 text-xs leading-5 text-muted">
-                    Follow the operating system or keep a consistent light or dark appearance.
+                    {copy.themeDescription}
                   </p>
                 </div>
                 <Segment
-                  aria-label="Color theme"
+                  aria-label={copy.theme}
                   className="w-fit shrink-0"
                   isDisabled={isSaving}
                   selectedKey={settings.theme}
@@ -150,20 +191,20 @@ export function SettingsPage({
                     if (theme) onThemeChange(theme);
                   }}
                 >
-                  <Segment.Item id="system">System</Segment.Item>
-                  <Segment.Item id="light">Light</Segment.Item>
-                  <Segment.Item id="dark">Dark</Segment.Item>
+                  <Segment.Item id="system">{copy.system}</Segment.Item>
+                  <Segment.Item id="light">{copy.light}</Segment.Item>
+                  <Segment.Item id="dark">{copy.dark}</Segment.Item>
                 </Segment>
               </div>
               <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-foreground">App icon</p>
+                  <p className="text-sm font-medium text-foreground">{copy.icon}</p>
                   <p className="mt-1 text-xs leading-5 text-muted">
-                    Auto follows the system appearance. Some launchers always use the dark icon.
+                    {copy.iconDescription}
                   </p>
                 </div>
                 <Segment
-                  aria-label="App icon"
+                  aria-label={copy.icon}
                   className="w-fit shrink-0"
                   isDisabled={isSaving}
                   selectedKey={settings.appIcon}
@@ -172,16 +213,16 @@ export function SettingsPage({
                     if (appIcon) onAppIconChange(appIcon);
                   }}
                 >
-                  <Segment.Item id="auto">Auto</Segment.Item>
-                  <Segment.Item id="light">Light</Segment.Item>
-                  <Segment.Item id="dark">Dark</Segment.Item>
-                  <Segment.Item id="passion">Passion</Segment.Item>
+                  <Segment.Item id="auto">{copy.auto}</Segment.Item>
+                  <Segment.Item id="light">{copy.light}</Segment.Item>
+                  <Segment.Item id="dark">{copy.dark}</Segment.Item>
+                  <Segment.Item id="passion">{copy.passion}</Segment.Item>
                 </Segment>
               </div>
               <SwitchRow
                 disabled={isSaving}
-                label="Disable window transparency"
-                description="Use opaque backgrounds in all application windows. Changes apply immediately."
+                label={copy.disableTransparency}
+                description={copy.disableTransparencyDescription}
                 selected={settings.disableWindowTransparency}
                 onChange={onDisableWindowTransparencyChange}
               />
@@ -191,15 +232,15 @@ export function SettingsPage({
           <Card variant="secondary">
             <Card.Header>
               <div>
-                <Card.Title>Accessibility</Card.Title>
-                <Card.Description>Limit motion without changing the information shown.</Card.Description>
+                <Card.Title>{copy.accessibility}</Card.Title>
+                <Card.Description>{copy.accessibilityDescription}</Card.Description>
               </div>
             </Card.Header>
             <Card.Content className="p-1">
               <SwitchRow
                 disabled={isSaving}
-                label="Reduce motion"
-                description="Minimize non-essential animation and smooth scrolling throughout the app."
+                label={copy.reduceMotion}
+                description={copy.reduceMotionDescription}
                 selected={settings.reduceMotion}
                 onChange={onReduceMotionChange}
               />
@@ -209,18 +250,18 @@ export function SettingsPage({
           <Card variant="secondary">
             <Card.Header>
               <div>
-                <Card.Title>Report Screenshots</Card.Title>
-                <Card.Description>Save a PNG for each open application window.</Card.Description>
+                <Card.Title>{copy.screenshots}</Card.Title>
+                <Card.Description>{copy.screenshotsDescription}</Card.Description>
               </div>
             </Card.Header>
             <Card.Content className="space-y-4">
               <div>
-                <p className="text-sm font-medium text-foreground">Save location</p>
+                <p className="text-sm font-medium text-foreground">{copy.screenshotLocation}</p>
                 <p className="mt-1 text-xs leading-5 text-muted">
-                  Report Screenshot saves to your Desktop by default.
+                  {copy.screenshotLocationDescription}
                 </p>
-                <p aria-label="Report screenshot save location" className="mt-3 break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-xs text-foreground">
-                  {settings.reportScreenshotDirectory ?? "Desktop (default)"}
+                <p aria-label={copy.screenshotLocationLabel} className="mt-3 break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-xs text-foreground">
+                  {settings.reportScreenshotDirectory ?? copy.screenshotLocationDefault}
                 </p>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -231,7 +272,7 @@ export function SettingsPage({
                   variant="secondary"
                   onPress={() => void chooseScreenshotDirectory()}
                 >
-                  Browse…
+                  {copy.browse}
                 </Button>
                 <Button
                   isDisabled={isSaving || isChoosingScreenshotDirectory || settings.reportScreenshotDirectory === null}
@@ -239,7 +280,7 @@ export function SettingsPage({
                   variant="tertiary"
                   onPress={() => onReportScreenshotDirectoryChange(null)}
                 >
-                  Use Desktop
+                  {copy.useDesktop}
                 </Button>
               </div>
             </Card.Content>
@@ -256,8 +297,8 @@ export function SettingsPage({
           <Card variant="secondary">
             <Card.Header>
               <div>
-                <Card.Title>Terminal Appearance</Card.Title>
-                <Card.Description>Applied to every console, SSH session, and managed shell window.</Card.Description>
+                <Card.Title>{terminalCopy.appearance}</Card.Title>
+                <Card.Description>{terminalCopy.appearanceDescription}</Card.Description>
               </div>
             </Card.Header>
             <Card.Content>
@@ -272,7 +313,7 @@ export function SettingsPage({
                 variant="tertiary"
                 onPress={() => setTerminalDraft(copyTerminalSettings(DEFAULT_CONSOLE_TERMINAL_SETTINGS))}
               >
-                Reset defaults
+                {copy.resetDefaults}
               </Button>
               <div className="flex items-center justify-end gap-2">
                 <Button
@@ -281,7 +322,7 @@ export function SettingsPage({
                   variant="secondary"
                   onPress={() => setTerminalDraft(copyTerminalSettings(settings.terminal))}
                 >
-                  Discard
+                  {copy.discard}
                 </Button>
                 <Button
                   isDisabled={!terminalIsDirty || !terminalIsValid}
@@ -289,7 +330,7 @@ export function SettingsPage({
                   size="sm"
                   onPress={() => onTerminalChange(copyTerminalSettings(terminalDraft))}
                 >
-                  Save
+                  {copy.save}
                 </Button>
               </div>
             </Card.Footer>

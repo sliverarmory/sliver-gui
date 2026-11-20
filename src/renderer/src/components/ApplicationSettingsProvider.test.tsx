@@ -200,6 +200,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "en",
         theme: "light",
         appIcon: "passion",
         reduceMotion: false,
@@ -213,6 +214,43 @@ describe("ApplicationSettingsProvider", () => {
       },
     });
     expect(screen.getByTestId("app-icon")).toHaveTextContent("passion");
+  });
+
+  it("applies a persisted language change and accepts a later change from another window", async () => {
+    const updateApplicationSettings = vi.fn(async (input) => ({
+      ok: true as const,
+      value: { ...input.settings, v: APPLICATION_SETTINGS_VERSION, revision: input.expectedRevision + 1 },
+    }));
+    let publish!: (state: ApplicationSettingsState) => void;
+    installSettingsAPI({
+      updateApplicationSettings,
+      onApplicationSettingsChanged: vi.fn((listener) => {
+        publish = listener;
+        return vi.fn();
+      }),
+    });
+    const user = userEvent.setup();
+    renderProvider();
+    await screen.findByText("ready");
+    expect(document.documentElement).toHaveAttribute("lang", "en");
+
+    await user.click(screen.getByRole("button", { name: "Use Japanese" }));
+    await waitFor(() => expect(document.documentElement).toHaveAttribute("lang", "ja"));
+    expect(updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 0,
+      settings: expect.objectContaining({ language: "ja" }),
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Use Japanese" }));
+    expect(updateApplicationSettings).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Use light theme" }));
+    await waitFor(() => expect(updateApplicationSettings).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 1,
+      settings: expect.objectContaining({ language: "ja", theme: "light" }),
+    })));
+
+    act(() => publish(applicationSettings({ revision: 3, language: "uk", theme: "light" })));
+    expect(document.documentElement).toHaveAttribute("lang", "uk");
   });
 
   it("persists the screenshot directory and keeps it through later changes", async () => {
@@ -259,6 +297,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "en",
         theme: "system",
         appIcon: "passion",
         reduceMotion: false,
@@ -292,7 +331,7 @@ describe("ApplicationSettingsProvider", () => {
       },
     }));
     installSettingsAPI({
-      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ disableWindowTransparency, rdp: { clipboard: false, transparentClipboard: false } })),
+      getApplicationSettings: vi.fn().mockResolvedValue(applicationSettings({ language: "fr", disableWindowTransparency, rdp: { clipboard: false, transparentClipboard: false } })),
       updateApplicationSettings,
     });
     renderProvider();
@@ -301,6 +340,7 @@ describe("ApplicationSettingsProvider", () => {
     expect(updateApplicationSettings).toHaveBeenCalledExactlyOnceWith({
       expectedRevision: 0,
       settings: {
+        language: "fr",
         theme: "system",
         appIcon: "auto",
         reduceMotion: false,
@@ -431,6 +471,12 @@ function SettingsProbe(): React.JSX.Element {
       </button>
       <button
         type="button"
+        onClick={() => void context.updateSettings((current) => ({ ...current, language: "ja" }))}
+      >
+        Use Japanese
+      </button>
+      <button
+        type="button"
         onClick={() => void context.updateSettings((current) => ({ ...current, disableWindowTransparency: true }))}
       >
         Disable transparency
@@ -499,7 +545,7 @@ function installSettingsAPI(overrides: Partial<SettingsAPI> = {}): SettingsAPI {
 }
 
 function applicationSettings(
-  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory" | "rdp">>,
+  overrides: Partial<Pick<ApplicationSettingsState, "revision" | "language" | "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency" | "reportScreenshotDirectory" | "rdp">>,
 ): ApplicationSettingsState {
   return {
     ...DEFAULT_APPLICATION_SETTINGS_STATE,

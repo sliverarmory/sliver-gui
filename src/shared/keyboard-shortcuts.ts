@@ -35,6 +35,11 @@ export const KEYBOARD_SHORTCUT_DEFINITIONS = [
 
 export type KeyboardShortcutAction = (typeof KEYBOARD_SHORTCUT_DEFINITIONS)[number]["id"];
 export type KeyboardShortcutOverrides = Readonly<Partial<Record<Exclude<KeyboardShortcutAction, "commandPalette">, string>>>;
+type KeyboardShortcutDefinition = (typeof KEYBOARD_SHORTCUT_DEFINITIONS)[number];
+
+export type KeyboardShortcutConflict =
+  | { readonly reason: "invalidShortcut" | "unknownAction" | "reservedF5" | "reservedShortcut" }
+  | { readonly reason: "alreadyAssigned"; readonly action: KeyboardShortcutDefinition };
 
 export interface KeyboardShortcutSettings {
   readonly commandPaletteShortcut: string;
@@ -63,6 +68,12 @@ const RESERVED_SHORTCUTS = new Set([
   "mod+h", "mod+alt+h", "mod+m", "mod+q", "mod+r", "mod+shift+r",
   "mod+-", "mod+=", "mod+shift+=", "mod+alt+i", "mod+shift+i", "f11", "f12",
 ]);
+const KEYBOARD_SHORTCUT_CONFLICT_MESSAGES = {
+  invalidShortcut: "Choose a modified letter, number, arrow or punctuation key, or a function key.",
+  unknownAction: "Unknown keyboard shortcut action.",
+  reservedF5: "F5 is reserved for server refresh and native window commands.",
+  reservedShortcut: "This shortcut is reserved for standard system or editing commands.",
+} as const;
 
 export function defaultKeyboardShortcut(action: KeyboardShortcutAction, apple: boolean): string {
   switch (action) {
@@ -147,11 +158,24 @@ export function keyboardShortcutConflict(
   settings: KeyboardShortcutSettings,
   apple: boolean,
 ): string | undefined {
-  if (!isKeyboardShortcut(shortcut)) return "Choose a modified letter, number, arrow or punctuation key, or a function key.";
+  const conflict = getKeyboardShortcutConflict(action, shortcut, settings, apple);
+  if (!conflict) return undefined;
+  return conflict.reason === "alreadyAssigned"
+    ? `This shortcut is already assigned to ${conflict.action.label}.`
+    : KEYBOARD_SHORTCUT_CONFLICT_MESSAGES[conflict.reason];
+}
+
+export function getKeyboardShortcutConflict(
+  action: KeyboardShortcutAction,
+  shortcut: string,
+  settings: KeyboardShortcutSettings,
+  apple: boolean,
+): KeyboardShortcutConflict | undefined {
+  if (!isKeyboardShortcut(shortcut)) return { reason: "invalidShortcut" };
   const definition = KEYBOARD_SHORTCUT_DEFINITIONS.find(({ id }) => id === action);
-  if (!definition) return "Unknown keyboard shortcut action.";
+  if (!definition) return { reason: "unknownAction" };
   if (shortcut === "f5" && RENDERER_ONLY_ACTIONS.has(action)) {
-    return "F5 is reserved for server refresh and native window commands.";
+    return { reason: "reservedF5" };
   }
   if (
     isReservedKeyboardShortcut(action, shortcut) ||
@@ -159,12 +183,12 @@ export function keyboardShortcutConflict(
     (definition.scope !== "terminal" && shortcut === "mod+w") ||
     (apple && (shortcut === "mod+`" || shortcut === "mod+shift+`"))
   ) {
-    return "This shortcut is reserved for standard system or editing commands.";
+    return { reason: "reservedShortcut" };
   }
   const conflict = KEYBOARD_SHORTCUT_DEFINITIONS.find((candidate) => candidate.id !== action &&
     (definition.scope === "global" || candidate.scope === "global" || definition.scope === candidate.scope) &&
     resolveKeyboardShortcut(candidate.id, settings, apple) === shortcut);
-  return conflict ? `This shortcut is already assigned to ${conflict.label}.` : undefined;
+  return conflict ? { reason: "alreadyAssigned", action: conflict } : undefined;
 }
 
 export function parseKeyboardShortcutOverrides(value: unknown): KeyboardShortcutOverrides {

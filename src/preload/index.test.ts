@@ -47,6 +47,7 @@ const invokeArguments = {
   updateApplicationSettings: [{
     expectedRevision: 0,
     settings: {
+      language: DEFAULT_APPLICATION_SETTINGS_STATE.language,
       theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,

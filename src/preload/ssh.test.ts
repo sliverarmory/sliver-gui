@@ -95,6 +95,7 @@ describe("SSH preload bridge", () => {
     const settingsInput = {
       expectedRevision: 0,
       settings: {
+        language: DEFAULT_APPLICATION_SETTINGS_STATE.language,
         theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
@@ -272,6 +273,7 @@ describe("SSH preload bridge", () => {
     const valid = {
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       revision: 4,
+      language: "ja" as const,
       theme: "light" as const,
       appIcon: "passion" as const,
       disableWindowTransparency: true,
@@ -320,6 +322,10 @@ describe("SSH preload bridge", () => {
     };
     handler({}, windowsRedo);
     handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });
+    const { language: _language, ...missingLanguage } = valid;
+    handler({}, missingLanguage);
+    handler({}, { ...missingLanguage, v: 10 });
+    handler({}, { ...valid, language: "pt" });
     const { disableWindowTransparency: _disableTransparency, ...missingTransparency } = valid;
     handler({}, missingTransparency);
     handler({}, { ...missingTransparency, v: 7 });

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Chip, Dropdown, Label, Modal, Tooltip, toast } from "@heroui/react";
 import { Sidebar, useSidebar } from "@heroui-pro/react/sidebar";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useNumberFormatter } from "@react-aria/i18n";
 import { Heading } from "react-aria-components";
 import {
   faArrowLeft,
@@ -73,6 +74,8 @@ import {
   type SessionWorkspaceRoute,
 } from "./pages/SessionWorkspacePage";
 import { TargetsPage } from "./pages/TargetsPage";
+import { ApplicationLocaleProvider, useMessages } from "./i18n/ApplicationLocaleProvider";
+import { formatMessage, messagesForLanguage } from "./i18n/messages";
 
 type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "websites" | "loot" | "credentials" | "settings";
 
@@ -87,34 +90,30 @@ interface BeaconWorkspaceRoute {
   connectionIncarnation: number;
 }
 
-const overviewNavItem = { id: "overview" as const, label: "Overview", description: "Explore infrastructure and reported connections.", icon: faNetworkWired };
+const overviewNavItem = { id: "overview" as const, icon: faNetworkWired };
 
 const infrastructureNavItems = [
-  { id: "generate" as const, label: "Generate", description: "Create implant artifacts.", icon: faBolt },
+  { id: "generate" as const, icon: faBolt },
   {
     id: "artifacts" as const,
-    label: "Builds & profiles",
-    description: "Browse generated builds and reusable profiles.",
     icon: faBoxesStacked,
   },
   {
     id: "operations" as const,
-    label: "Jobs & listeners",
-    description: "Manage server jobs and listener endpoints.",
     icon: faSatelliteDish,
   },
 ];
 
-const websitesNavItem = { id: "websites" as const, label: "Websites", description: "Manage hosted websites and their content.", icon: faGlobe };
+const websitesNavItem = { id: "websites" as const, icon: faGlobe };
 
 const interactNavItems = [
-  { id: "sessions" as const, label: "Sessions", description: "Browse interactive sessions.", icon: faComputer },
-  { id: "beacons" as const, label: "Beacons", description: "Browse asynchronous beacons.", icon: faSatellite },
+  { id: "sessions" as const, icon: faComputer },
+  { id: "beacons" as const, icon: faSatellite },
 ];
 
 const dataNavItems = [
-  { id: "loot" as const, label: "Loot", description: "Browse collected files.", icon: faBoxOpen },
-  { id: "credentials" as const, label: "Credentials", description: "Browse collected credentials.", icon: faKey },
+  { id: "loot" as const, icon: faBoxOpen },
+  { id: "credentials" as const, icon: faKey },
 ];
 
 type NavigationItem =
@@ -136,14 +135,17 @@ function SidebarNavigationItem({
   isCurrent: boolean;
   onAction: () => void;
 }) {
+  const { navigation } = useMessages();
+  const label = navigation[item.id].label;
+  const countFormatter = useNumberFormatter();
   const { collapsible, isMobile, isOpen } = useSidebar();
   const isIconCollapsed = collapsible === "icon" && !isMobile && !isOpen;
 
   return (
     <Sidebar.MenuItem
       id={item.id}
-      aria-label={item.label}
-      textValue={item.label}
+      aria-label={label}
+      textValue={label}
       isCurrent={isCurrent}
       isDisabled={isDisabled}
       tooltip={false}
@@ -151,7 +153,7 @@ function SidebarNavigationItem({
       {...(isIconCollapsed
         ? {
             tooltipProps: {
-              content: item.label,
+              content: label,
               delay: 250,
               placement: "right" as const,
             },
@@ -159,8 +161,8 @@ function SidebarNavigationItem({
         : {})}
     >
       <Sidebar.MenuIcon><FontAwesomeIcon icon={item.icon} /></Sidebar.MenuIcon>
-      <Sidebar.MenuLabel>{item.label}</Sidebar.MenuLabel>
-      {count && count > 0 ? <Sidebar.MenuChip>{count}</Sidebar.MenuChip> : null}
+      <Sidebar.MenuLabel>{label}</Sidebar.MenuLabel>
+      {count && count > 0 ? <Sidebar.MenuChip>{countFormatter.format(count)}</Sidebar.MenuChip> : null}
     </Sidebar.MenuItem>
   );
 }
@@ -171,6 +173,8 @@ export function App() {
     DEFAULT_APPLICATION_SETTINGS_STATE,
   );
   const settings = applicationSettings?.settings ?? standaloneSettings;
+  const { settings: settingsCopy, shortcutActions, shell, navigation, palette } =
+    messagesForLanguage(settings.language);
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
   const inventoryIdentity = connected ? [
@@ -599,6 +603,7 @@ export function App() {
       v: APPLICATION_SETTINGS_VERSION,
       revision: current.revision + 1,
       ...updater({
+        language: current.language,
         theme: current.theme,
         appIcon: current.appIcon,
         reduceMotion: current.reduceMotion,
@@ -706,7 +711,7 @@ export function App() {
           group: isSession ? "Sessions" : "Beacons",
           icon: isSession ? faComputer : faSatellite,
           label: target.name || target.id,
-          description: [isSession ? "Session" : "Beacon", target.hostname, target.username, target.id]
+          description: [isSession ? shell.session : shell.beacon, target.hostname, target.username, target.id]
             .filter(Boolean).join(" · "),
           keywords: [target.os, target.arch, target.remoteAddress],
           isCurrent: isSession
@@ -731,8 +736,7 @@ export function App() {
     id: `navigate-${item.id}`,
     group: "Navigate",
     icon: item.icon,
-    label: item.label,
-    description: item.description,
+    ...navigation[item.id],
     isCurrent: view === item.id,
     isDisabled: !isViewAvailable(item.id),
     onAction: () => changeView(item.id),
@@ -744,9 +748,9 @@ export function App() {
       id: "navigate-settings",
       group: "Navigate",
       icon: faGear,
-      label: "Settings",
-      description: "Configure appearance, keyboard shortcuts, and terminals.",
-      keywords: ["preferences"],
+      label: settingsCopy.heading,
+      description: palette.settingsDescription,
+      keywords: ["preferences", "language", settingsCopy.language],
       isCurrent: view === "settings",
       onAction: () => {
         setConfigSelectorOpen(false);
@@ -757,8 +761,8 @@ export function App() {
       id: "navigate-back",
       group: "Navigate",
       icon: faArrowLeft,
-      label: "Go back",
-      description: "Return to the previous page.",
+      label: shortcutActions.navigateBack.label,
+      description: palette.backDescription,
       keywords: ["previous", "history"],
       shortcut: historyShortcuts.back.shortcut,
       isDisabled: !canGoBack,
@@ -768,8 +772,8 @@ export function App() {
       id: "navigate-forward",
       group: "Navigate",
       icon: faArrowRight,
-      label: "Go forward",
-      description: "Return to the next page in navigation history.",
+      label: shortcutActions.navigateForward.label,
+      description: palette.forwardDescription,
       keywords: ["next", "history"],
       shortcut: historyShortcuts.forward.shortcut,
       isDisabled: !canGoForward,
@@ -779,8 +783,8 @@ export function App() {
       id: "server-switch-config",
       group: "Server",
       icon: faLink,
-      label: "Saved configurations",
-      description: "Connect to or manage an operator configuration.",
+      label: shell.savedConfigurations,
+      description: palette.savedDescription,
       keywords: ["switch server", "connect"],
       onAction: () => setConfigSelectorOpen(true),
     },
@@ -788,9 +792,9 @@ export function App() {
       id: "server-console",
       group: "Server",
       icon: faTerminal,
-      label: "Open Sliver console",
+      label: shell.openConsole,
       shortcut: consoleShortcut,
-      description: connected ? "Open a console for the active server." : "Connect to a server first.",
+      description: connected ? palette.consoleDescription : palette.connectFirst,
       keywords: ["terminal"],
       isDisabled: !connected,
       onAction: () => void openConsole(),
@@ -799,8 +803,8 @@ export function App() {
       id: "server-disconnect",
       group: "Server",
       icon: faLinkSlash,
-      label: "Disconnect",
-      description: connected ? "Disconnect the active server." : "No active server connection.",
+      label: shell.disconnect,
+      description: connected ? palette.disconnectDescription : palette.noConnection,
       isDisabled: !connected,
       onAction: () => void disconnect(),
     },
@@ -808,9 +812,9 @@ export function App() {
       id: "server-refresh",
       group: "Server",
       icon: faRotate,
-      label: "Refresh server",
+      label: shortcutActions.refreshServer.label,
       shortcut: resolveKeyboardShortcut("refreshServer", settings, isApplePlatform()),
-      description: connected ? "Reconcile the active server snapshot." : "Connect to a server first.",
+      description: connected ? palette.refreshDescription : palette.connectFirst,
       keywords: ["reload", "sync"],
       isDisabled: !connected,
       onAction: () => void refreshServer(),
@@ -819,8 +823,8 @@ export function App() {
       id: "window-cloud-deployment",
       group: "Windows",
       icon: faCloudArrowUp,
-      label: "Cloud Deployment",
-      description: "Open or focus the Cloud Deployment window.",
+      label: palette.cloudDeployment,
+      description: palette.cloudDescription,
       keywords: ["aws", "cloud infrastructure"],
       onAction: () => void openCloudDeployment(),
     },
@@ -828,8 +832,8 @@ export function App() {
       id: "window-rdp",
       group: "Windows",
       icon: faDesktop,
-      label: "Remote Desktop",
-      description: "Open or focus the standalone RDP client.",
+      label: palette.remoteDesktop,
+      description: palette.remoteDesktopDescription,
       keywords: ["rdp", "remote desktop", "windows", "network"],
       onAction: () => void openRdp(),
     },
@@ -837,9 +841,9 @@ export function App() {
       id: "report-screenshot",
       group: "Windows",
       icon: faCamera,
-      label: "Report Screenshot",
+      label: shortcutActions.reportScreenshot.label,
       shortcut: resolveKeyboardShortcut("reportScreenshot", settings, isApplePlatform()),
-      description: "Capture all open application windows to the configured screenshot folder.",
+      description: palette.screenshotDescription,
       keywords: ["capture", "windows", "desktop"],
       onAction: () => void reportScreenshot(),
     },
@@ -847,9 +851,9 @@ export function App() {
       id: "window-same-server",
       group: "Windows",
       icon: faWindowRestore,
-      label: "New connected window",
+      label: palette.newConnectedWindow,
       shortcut: resolveKeyboardShortcut("duplicateWindow", settings, isApplePlatform()),
-      description: connected ? "Open another window on the active server." : "Connect to a server first.",
+      description: connected ? palette.newConnectedDescription : palette.connectFirst,
       keywords: ["duplicate", "same server"],
       isDisabled: !connected,
       onAction: () => void openWindow(true),
@@ -858,9 +862,9 @@ export function App() {
       id: "window-different-server",
       group: "Windows",
       icon: faPlus,
-      label: "New connection window",
+      label: palette.newConnectionWindow,
       shortcut: resolveKeyboardShortcut("newWindow", settings, isApplePlatform()),
-      description: "Open another window for a different server.",
+      description: palette.newConnectionDescription,
       keywords: ["different server"],
       onAction: () => void openWindow(false),
     },
@@ -912,12 +916,12 @@ export function App() {
           <div className="header-server">
             <div className="header-server__label hidden min-w-0 text-center sm:block">
               <p className="truncate text-sm font-medium text-foreground">
-                {connected ? snapshot.connection.server : "No server connected"}
+                {connected ? snapshot.connection.server : shell.noServer}
               </p>
               <p className="truncate text-xs text-muted">
                 {connected
-                  ? `${snapshot.connection.operator ?? "operator"} · ${snapshot.connection.configName ?? "configuration"}`
-                  : "Select a saved configuration to begin"}
+                  ? `${snapshot.connection.operator ?? shell.operator} · ${snapshot.connection.configName ?? shell.configuration}`
+                  : shell.chooseConfig}
               </p>
             </div>
           </div>
@@ -925,20 +929,18 @@ export function App() {
             {connected ? <EventStatus status={snapshot.eventStream.status} /> : null}
             {connected && snapshot.connection.status === "reconnecting" ? <ReconnectingStatus /> : null}
             <Tooltip delay={250}>
-              <Tooltip.Trigger>
-                <Button
-                  aria-label="Open command palette"
-                  isIconOnly
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => setIsCommandPaletteOpen(true)}
-                >
-                  <FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} />
-                </Button>
-              </Tooltip.Trigger>
+              <Button
+                aria-label={shell.openPalette}
+                isIconOnly
+                size="sm"
+                variant="ghost"
+                onPress={() => setIsCommandPaletteOpen(true)}
+              >
+                <FontAwesomeIcon aria-hidden icon={faMagnifyingGlass} />
+              </Button>
               <Tooltip.Content placement="bottom">
                 <span className="flex items-center gap-2">
-                  Command palette
+                  {shell.commandPalette}
                   <CommandPaletteShortcutKbd className="text-xs" shortcut={settings.commandPaletteShortcut} />
                 </span>
               </Tooltip.Content>
@@ -946,7 +948,7 @@ export function App() {
             <WindowMenu connected={connected} settings={settings} onOpenWindow={openWindow} />
             <Tooltip delay={250}>
               <Button
-                aria-label="Open Sliver console"
+                aria-label={shell.openConsole}
                 isDisabled={!connected}
                 isIconOnly
                 size="sm"
@@ -960,14 +962,14 @@ export function App() {
               </Button>
               <Tooltip.Content placement="bottom">
                 <span className="flex items-center gap-2">
-                  {connected ? "Open console for the active server" : "Connect to a server first"}
+                  {connected ? shell.consoleTooltip : shell.connectFirstTooltip}
                   <CommandPaletteShortcutKbd className="text-xs" shortcut={consoleShortcut} />
                 </span>
               </Tooltip.Content>
             </Tooltip>
             {!connected ? (
               <Button size="sm" isPending={isConnecting} onPress={() => setConfigSelectorOpen(true)}>
-                <FontAwesomeIcon icon={faLink} /> Connect
+                <FontAwesomeIcon icon={faLink} /> {shell.connect}
               </Button>
             ) : null}
           </div>
@@ -992,6 +994,7 @@ export function App() {
                 ...current,
                 appIcon,
               }))}
+              onLanguageChange={(language) => updateSettings((current) => ({ ...current, language }))}
               onReportScreenshotDirectoryChange={(reportScreenshotDirectory) => updateSettings((current) => ({
                 ...current,
                 reportScreenshotDirectory,
@@ -1115,7 +1118,10 @@ export function App() {
     </Sidebar.Provider>
   );
 
-  return <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
+  const workspace = <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
+  return applicationSettings ? workspace : (
+    <ApplicationLocaleProvider language={settings.language}>{workspace}</ApplicationLocaleProvider>
+  );
 }
 
 function WindowNavigation({ canGoBack, canGoForward, onBack, onForward, settings }: {
@@ -1125,17 +1131,18 @@ function WindowNavigation({ canGoBack, canGoForward, onBack, onForward, settings
   onBack: () => void;
   onForward: () => void;
 }) {
+  const { shell, shortcutActions } = useMessages();
   const { isMobile, isMobileOpen, isOpen, toggleSidebar } = useSidebar();
-  const sidebarLabel = (isMobile ? isMobileOpen : isOpen) ? "Collapse sidebar" : "Expand sidebar";
+  const sidebarLabel = (isMobile ? isMobileOpen : isOpen) ? shell.collapseSidebar : shell.expandSidebar;
   const shortcuts = navigationShortcuts(isApplePlatform(), settings);
   const actions = [
     { id: "sidebar", label: sidebarLabel, icon: faTableColumns, onPress: toggleSidebar, isDisabled: false, shortcut: undefined },
-    { id: "back", label: "Go back", icon: faArrowLeft, onPress: onBack, isDisabled: !canGoBack, shortcut: shortcuts.back },
-    { id: "forward", label: "Go forward", icon: faArrowRight, onPress: onForward, isDisabled: !canGoForward, shortcut: shortcuts.forward },
+    { id: "back", label: shortcutActions.navigateBack.label, icon: faArrowLeft, onPress: onBack, isDisabled: !canGoBack, shortcut: shortcuts.back },
+    { id: "forward", label: shortcutActions.navigateForward.label, icon: faArrowRight, onPress: onForward, isDisabled: !canGoForward, shortcut: shortcuts.forward },
   ];
 
   return (
-    <nav aria-label="Window navigation" className="window-navigation">
+    <nav aria-label={shell.windowNavigation} className="window-navigation">
       {actions.map(({ id, label, icon, onPress, isDisabled, shortcut }) => (
         <Tooltip delay={250} key={id}>
           <Button
@@ -1187,6 +1194,7 @@ export function NavigationContent({
   onViewChange: (view: ViewId) => void;
 }) {
   const applicationSettings = useApplicationSettings();
+  const { shell } = useMessages();
   const sidebarIcon = applicationSettings?.resolvedAppIcon ?? "dark";
   const connected = isUsableConnection(snapshot.connection.status);
   const { setMobileOpen } = useSidebar();
@@ -1212,26 +1220,26 @@ export function NavigationContent({
   };
   return (
     <>
-      <Heading className="sr-only" slot="title">Sliver navigation</Heading>
+      <Heading className="sr-only" slot="title">{shell.navigation}</Heading>
       <Sidebar.Header className="brand-block">
         <div className="brand-mark" aria-hidden="true">
           <img alt="" className="brand-mark__image" draggable={false} src={sidebarIcons[sidebarIcon]} />
         </div>
         <div className="min-w-0" data-sidebar="label">
           <p className="truncate text-sm font-semibold tracking-tight">Sliver Desktop</p>
-          <p className="truncate text-[11px] text-muted">Operator console</p>
+          <p className="truncate text-[11px] text-muted">{shell.operatorConsole}</p>
         </div>
       </Sidebar.Header>
       <Sidebar.Content>
         <Sidebar.Group className="mt-3">
-          <Sidebar.Menu aria-label="Overview navigation" showGuideLines={false}>
+          <Sidebar.Menu aria-label={shell.overviewNavigation} showGuideLines={false}>
             <SidebarNavigationItem item={overviewNavItem} isCurrent={view === "overview"}
               isDisabled={false} onAction={() => navigate("overview")} />
           </Sidebar.Menu>
         </Sidebar.Group>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Operational</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Operational navigation" showGuideLines={false}>
+          <Sidebar.GroupLabel>{shell.operational}</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label={shell.operationalNavigation} showGuideLines={false}>
             {infrastructureNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
@@ -1245,8 +1253,8 @@ export function NavigationContent({
           </Sidebar.Menu>
         </Sidebar.Group>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Interact</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Interact navigation" showGuideLines={false}>
+          <Sidebar.GroupLabel>{shell.interact}</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label={shell.interactNavigation} showGuideLines={false}>
             {interactNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
@@ -1262,8 +1270,8 @@ export function NavigationContent({
           </Sidebar.Menu>
         </Sidebar.Group>
         <Sidebar.Group>
-          <Sidebar.GroupLabel>Data</Sidebar.GroupLabel>
-          <Sidebar.Menu aria-label="Data navigation" showGuideLines={false}>
+          <Sidebar.GroupLabel>{shell.data}</Sidebar.GroupLabel>
+          <Sidebar.Menu aria-label={shell.dataNavigation} showGuideLines={false}>
             {dataNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
@@ -1305,7 +1313,8 @@ export function ConnectionMenu({
   onSwitchConfig: () => void;
 }) {
   const connected = isUsableConnection(snapshot.connection.status);
-  const operator = snapshot.connection.operator ?? "Current server";
+  const { settings: settingsCopy, shell } = useMessages();
+  const operator = snapshot.connection.operator ?? shell.server;
   const { collapsible, isMobile, isOpen } = useSidebar();
   const isIconCollapsed = collapsible === "icon" && !isMobile && !isOpen;
 
@@ -1313,7 +1322,7 @@ export function ConnectionMenu({
     <Tooltip delay={250} isDisabled={!isIconCollapsed}>
       <Dropdown>
         <Button
-          aria-label={connected ? `Current server: ${operator}` : "Application menu, offline"}
+          aria-label={connected ? formatMessage(shell.currentServer, { operator }) : shell.applicationMenuOffline}
           className="connection-summary connection-summary--trigger"
           fullWidth={!isIconCollapsed}
           isIconOnly={isIconCollapsed}
@@ -1323,9 +1332,9 @@ export function ConnectionMenu({
             className={`connection-summary__status status-dot status-dot--${connected ? "connected" : "stopped"}`}
           />
           <span className="min-w-0 text-left" data-sidebar="label">
-            <span className="block truncate text-xs font-medium">{connected ? operator : "Offline"}</span>
+            <span className="block truncate text-xs font-medium">{connected ? operator : shell.offline}</span>
             <span className="block truncate text-[11px] text-muted">
-              {connected ? snapshot.connection.version : "No active channel"}
+              {connected ? snapshot.connection.version : shell.noChannel}
             </span>
           </span>
           <FontAwesomeIcon
@@ -1336,7 +1345,7 @@ export function ConnectionMenu({
         </Button>
         <Dropdown.Popover className="min-w-56" placement="top start">
           <Dropdown.Menu
-            aria-label="Application and current server actions"
+            aria-label={shell.applicationActions}
             onAction={(key) => {
               if (String(key) === "switch-config") onSwitchConfig();
               if (String(key) === "disconnect") onDisconnect();
@@ -1344,28 +1353,28 @@ export function ConnectionMenu({
               if (String(key) === "settings") onSettings();
             }}
           >
-            <Dropdown.Item id="exit-app" textValue="Exit app" variant="danger">
+            <Dropdown.Item id="exit-app" textValue={shell.exit} variant="danger">
               <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faPowerOff} />
-              <Label>Exit app</Label>
+              <Label>{shell.exit}</Label>
             </Dropdown.Item>
             {connected ? (
-              <Dropdown.Item id="disconnect" textValue="Disconnect" variant="danger">
+              <Dropdown.Item id="disconnect" textValue={shell.disconnect} variant="danger">
                 <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-danger" icon={faLinkSlash} />
-                <Label>Disconnect</Label>
+                <Label>{shell.disconnect}</Label>
               </Dropdown.Item>
             ) : null}
-            <Dropdown.Item id="switch-config" textValue="Switch config">
+            <Dropdown.Item id="switch-config" textValue={shell.switchConfig}>
               <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faLink} />
-              <Label>Switch config</Label>
+              <Label>{shell.switchConfig}</Label>
             </Dropdown.Item>
-            <Dropdown.Item id="settings" textValue="Settings">
+            <Dropdown.Item id="settings" textValue={settingsCopy.heading}>
               <FontAwesomeIcon aria-hidden className="size-3.5 shrink-0 text-muted" icon={faGear} />
-              <Label>Settings</Label>
+              <Label>{settingsCopy.heading}</Label>
             </Dropdown.Item>
           </Dropdown.Menu>
         </Dropdown.Popover>
       </Dropdown>
-      <Tooltip.Content placement="right">Application menu</Tooltip.Content>
+      <Tooltip.Content placement="right">{shell.applicationMenu}</Tooltip.Content>
     </Tooltip>
   );
 }
@@ -1379,37 +1388,38 @@ export function WindowMenu({
   onOpenWindow: (inherit: boolean) => Promise<void>;
   settings?: ApplicationSettingsState;
 }) {
+  const { shell } = useMessages();
   const newWindowShortcut = resolveKeyboardShortcut("newWindow", settings, isApplePlatform());
   const duplicateWindowShortcut = resolveKeyboardShortcut("duplicateWindow", settings, isApplePlatform());
   return (
     <Tooltip delay={250}>
       <Dropdown>
-        <Button aria-label="New window options" isIconOnly size="sm" variant="ghost">
+        <Button aria-label={shell.newWindowOptions} isIconOnly size="sm" variant="ghost">
           <FontAwesomeIcon aria-hidden icon={faWindowRestore} />
         </Button>
         <Dropdown.Popover className="min-w-52">
           <Dropdown.Menu
-            aria-label="New window"
+            aria-label={shell.newWindow}
             onAction={(key) => void onOpenWindow(String(key) === "same-server")}
           >
             {connected ? (
               <Dropdown.Item
                 id="same-server"
-                textValue="Same server"
-                aria-label="Same server"
+                textValue={shell.sameServer}
+                aria-label={shell.sameServer}
               >
                 <FontAwesomeIcon aria-hidden icon={faWindowRestore} className="size-3.5 shrink-0 text-muted" />
-                <Label>Same server</Label>
+                <Label>{shell.sameServer}</Label>
                 <CommandPaletteShortcutKbd slot="keyboard" shortcut={duplicateWindowShortcut} />
               </Dropdown.Item>
             ) : null}
             <Dropdown.Item
               id="different-server"
-              textValue="Different server"
-              aria-label="Different server"
+              textValue={shell.differentServer}
+              aria-label={shell.differentServer}
             >
               <FontAwesomeIcon aria-hidden icon={faPlus} className="size-3.5 shrink-0 text-muted" />
-              <Label>Different server</Label>
+              <Label>{shell.differentServer}</Label>
               <CommandPaletteShortcutKbd slot="keyboard" shortcut={newWindowShortcut} />
             </Dropdown.Item>
           </Dropdown.Menu>
@@ -1417,7 +1427,7 @@ export function WindowMenu({
       </Dropdown>
       <Tooltip.Content placement="bottom">
         <span className="flex items-center gap-2">
-          New window
+          {shell.newWindow}
           <CommandPaletteShortcutKbd className="text-xs" shortcut={newWindowShortcut} />
         </span>
       </Tooltip.Content>
@@ -1426,11 +1436,12 @@ export function WindowMenu({
 }
 
 function EventStatus({ status }: { status: EventStreamStatus }) {
+  const { shell } = useMessages();
   const metadata = {
-    connected: { label: "Live", color: "success" as const },
-    connecting: { label: "Awaiting events", color: "accent" as const },
-    retrying: { label: "Reconnecting", color: "warning" as const },
-    stopped: { label: "Events offline", color: "danger" as const },
+    connected: { label: shell.live, color: "success" as const },
+    connecting: { label: shell.waitingEvents, color: "accent" as const },
+    retrying: { label: shell.reconnecting, color: "warning" as const },
+    stopped: { label: shell.eventsOffline, color: "danger" as const },
   }[status];
   return (
     <Chip size="sm" color={metadata.color} variant="soft" className="hidden sm:inline-flex">
@@ -1440,9 +1451,10 @@ function EventStatus({ status }: { status: EventStreamStatus }) {
 }
 
 function ReconnectingStatus() {
+  const { shell } = useMessages();
   return (
     <Chip size="sm" color="warning" variant="soft" className="hidden md:inline-flex">
-      Backend reconnecting
+      {shell.backendReconnecting}
     </Chip>
   );
 }

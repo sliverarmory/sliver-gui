@@ -1108,6 +1108,7 @@ async function setRdpTheme(page: Page, theme: "light" | "dark"): Promise<void> {
       expectedRevision: current.revision,
       settings: {
         theme: nextTheme, appIcon: current.appIcon, reduceMotion: current.reduceMotion,
+        language: current.language,
         disableWindowTransparency: current.disableWindowTransparency,
         reportScreenshotDirectory: current.reportScreenshotDirectory,
         commandPaletteShortcut: current.commandPaletteShortcut, keyboardShortcuts: current.keyboardShortcuts,

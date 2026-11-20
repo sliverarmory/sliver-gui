@@ -35,8 +35,9 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn((): ApplicationSettingsState => ({
-      v: 10,
+      v: 11,
       revision: 0,
+      language: "en",
       theme: "dark",
       appIcon: "auto",
       reduceMotion: false,

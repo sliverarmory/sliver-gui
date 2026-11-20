@@ -1,0 +1,362 @@
+{
+  "settings": {
+    "heading": "Configuración",
+    "description": "Personaliza Sliver Desktop y sus ventanas de terminal.",
+    "sections": "Secciones de configuración",
+    "general": "General",
+    "keyboard": "Atajos de teclado",
+    "terminal": "Terminal",
+    "language": "Idioma de la aplicación",
+    "languageDescription": "El cambio de idioma se aplica de inmediato a la vista Configuración y a la navegación.",
+    "appearance": "Apariencia",
+    "appearanceDescription": "Personaliza el aspecto de la aplicación y su icono.",
+    "theme": "Tema de color",
+    "themeDescription": "Usa el tema del sistema operativo o elige un tema claro u oscuro.",
+    "system": "Del sistema",
+    "light": "Claro",
+    "dark": "Oscuro",
+    "icon": "Icono de la aplicación",
+    "iconDescription": "En modo automático, el icono sigue el tema del sistema. Algunos lanzadores usan siempre el icono oscuro.",
+    "auto": "Automático",
+    "passion": "Passion",
+    "disableTransparency": "Desactivar la transparencia de las ventanas",
+    "disableTransparencyDescription": "Usa fondos opacos en todas las ventanas de la aplicación. El cambio se aplica de inmediato.",
+    "accessibility": "Accesibilidad",
+    "accessibilityDescription": "Reduce el movimiento en pantalla sin cambiar la información que se muestra.",
+    "reduceMotion": "Reducir movimiento",
+    "reduceMotionDescription": "Reduce las animaciones y el desplazamiento suave que no sean imprescindibles en la aplicación.",
+    "screenshots": "Capturas para informes",
+    "screenshotsDescription": "Guarda una imagen PNG por cada ventana abierta de la aplicación.",
+    "screenshotLocation": "Carpeta de destino",
+    "screenshotLocationDescription": "Las capturas para informes se guardan en el escritorio de forma predeterminada.",
+    "screenshotLocationLabel": "Carpeta de destino de las capturas para informes",
+    "screenshotLocationDefault": "Escritorio (predeterminado)",
+    "screenshotFolderError": "No se pudo seleccionar la carpeta para las capturas",
+    "browse": "Examinar…",
+    "useDesktop": "Usar el escritorio",
+    "resetDefaults": "Restablecer valores predeterminados",
+    "discard": "Descartar",
+    "save": "Guardar",
+    "cancel": "Cancelar",
+    "unavailable": "Configuración no disponible",
+    "notSaved": "No se guardó la configuración",
+    "updateFailed": "No se pudo actualizar la configuración de la aplicación."
+  },
+  "terminal": {
+    "appearance": "Apariencia del terminal",
+    "appearanceDescription": "Estos ajustes se aplican a todas las consolas, sesiones SSH y ventanas de shell administradas.",
+    "settings": "Configuración del terminal",
+    "fontFamily": "Familia de fuentes",
+    "fontFamilyDescription": "Las fuentes vienen incluidas en Sliver GUI y se pueden usar sin conexión.",
+    "fontSize": "Tamaño de fuente",
+    "fontSizeRange": "De {min} a {max} píxeles.",
+    "cursorShape": "Forma del cursor",
+    "block": "Bloque",
+    "underline": "Subrayado",
+    "bar": "Barra",
+    "transparent": "Ventanas de terminal transparentes",
+    "transparentDescription": "Usa el efecto de transparencia del sistema en las ventanas de consola y SSH compatibles. Requiere que la transparencia de las ventanas esté activada en la sección General.",
+    "cursorBlink": "Cursor parpadeante",
+    "cursorBlinkDescription": "El cursor parpadea mientras la consola está activa.",
+    "smoothScrolling": "Desplazamiento suave",
+    "smoothScrollingDescription": "Suaviza el desplazamiento por el historial del terminal.",
+    "ghosttyThemes": "Temas de Ghostty",
+    "ghosttyThemesDescription": "Usa los mismos archivos de tema que en el terminal Ghostty.",
+    "theme": "Tema del terminal",
+    "defaultTheme": "Predeterminado de la aplicación",
+    "themeDescription": "El tema se aplica de inmediato a los terminales abiertos. Tienen prioridad los colores definidos en el archivo de configuración.",
+    "preview": "Vista previa del tema del terminal",
+    "previewSample": "El veloz murciélago toma café con la cigüeña.",
+    "themeDirectory": "Carpeta de temas de Ghostty",
+    "themeDirectoryDescription": "Agrega archivos de tema a esta carpeta o usa los temas de tu instalación de Ghostty. Edita la configuración para indicar la ruta de un tema o usar un tema para el modo claro y otro para el oscuro.",
+    "configPath": "Archivo de configuración",
+    "loadingConfig": "Cargando la configuración de Ghostty…",
+    "configUnavailable": "La configuración de Ghostty no está disponible en esta ventana.",
+    "configNotes": "Avisos de configuración",
+    "editConfig": "Editar la configuración de Ghostty",
+    "reloadThemes": "Recargar temas",
+    "saveThemeFailed": "No se pudo guardar el tema del terminal.",
+    "openConfigFailed": "No se pudo abrir la configuración de Ghostty.",
+    "openConfigError": "No se pudo abrir la configuración de Ghostty",
+    "themeSettingsHint": "Elige un tema de Ghostty en Configuración → Terminal. Los cambios se aplican al guardar la configuración."
+  },
+  "shortcuts": {
+    "resetAll": "Restablecer todos los atajos",
+    "search": "Buscar atajos",
+    "recordFailed": "No se pudo empezar a registrar el atajo. Inténtalo de nuevo.",
+    "invalidKey": "Combina una tecla modificadora con una letra, un número, una flecha o un signo de puntuación. También puedes pulsar una tecla de función.",
+    "invalidShortcut": "Elige una tecla de función o combina una tecla modificadora con una letra, un número, una flecha o un signo de puntuación.",
+    "unknownAction": "El atajo corresponde a una acción desconocida.",
+    "reservedF5": "F5 está reservada para actualizar los datos del servidor y para los comandos de ventana del sistema.",
+    "reservedShortcut": "Este atajo está reservado para los comandos habituales de edición o del sistema.",
+    "alreadyAssigned": "Este atajo ya está asignado a «{action}».",
+    "changeAction": "Cambiar el atajo de «{action}»",
+    "cancelChangeAction": "Cancelar el cambio de atajo de «{action}»",
+    "resetAction": "Restablecer el atajo de «{action}»",
+    "preparing": "Preparando…",
+    "pressShortcut": "Pulsa el atajo…",
+    "escapeCancels": "Pulsa Esc para cancelar",
+    "change": "Cambiar atajo",
+    "reset": "Restablecer el atajo predeterminado",
+    "recordHint": "Pulsa la nueva combinación de teclas o pulsa Esc para cancelar.",
+    "noResults": "No hay atajos que coincidan con la búsqueda.",
+    "platformHint": "Usa Comando (⌘) en macOS o Ctrl en Windows y Linux. Los atajos de edición y del sistema y las teclas de control del terminal conservan su funcionamiento habitual."
+  },
+  "shortcutGroups": {
+    "Application": "Aplicación",
+    "Navigation": "Navegación",
+    "Text Editor": "Editor de texto",
+    "Terminal": "Terminal",
+    "Terminal tabs": "Pestañas del terminal"
+  },
+  "shortcutActions": {
+    "commandPalette": {
+      "label": "Abrir la paleta de comandos",
+      "description": "Busca páginas y acciones habituales de la aplicación."
+    },
+    "newWindow": {
+      "label": "Nueva ventana",
+      "description": "Abre otra ventana de la aplicación."
+    },
+    "duplicateWindow": {
+      "label": "Nueva ventana para este servidor",
+      "description": "Abre otra ventana conectada al servidor actual."
+    },
+    "reportScreenshot": {
+      "label": "Capturar ventanas para un informe",
+      "description": "Guarda imágenes de todas las ventanas abiertas de la aplicación."
+    },
+    "openConsole": {
+      "label": "Abrir la consola",
+      "description": "Abre la consola del servidor conectado."
+    },
+    "navigateBack": {
+      "label": "Atrás",
+      "description": "Vuelve a la página anterior de la aplicación."
+    },
+    "navigateForward": {
+      "label": "Adelante",
+      "description": "Avanza a la página siguiente de la aplicación."
+    },
+    "refreshServer": {
+      "label": "Actualizar datos del servidor",
+      "description": "Actualiza los datos del servidor conectado."
+    },
+    "textEditorOpen": {
+      "label": "Abrir archivo",
+      "description": "Abre un archivo local en el editor de texto independiente."
+    },
+    "textEditorSaveAs": {
+      "label": "Guardar archivo como",
+      "description": "Guarda el documento actual en un archivo local nuevo."
+    },
+    "textEditorSave": {
+      "label": "Guardar archivo",
+      "description": "Guarda el documento actual o sobrescribe el archivo remoto correspondiente."
+    },
+    "textEditorUndo": {
+      "label": "Deshacer cambio",
+      "description": "Deshace el último cambio en el editor de texto."
+    },
+    "textEditorRedo": {
+      "label": "Rehacer cambio",
+      "description": "Rehace el último cambio en el editor de texto."
+    },
+    "textEditorFind": {
+      "label": "Buscar en el archivo",
+      "description": "Busca texto en el documento actual."
+    },
+    "textEditorReplace": {
+      "label": "Reemplazar en el archivo",
+      "description": "Busca y reemplaza texto en el documento actual."
+    },
+    "textEditorWordWrap": {
+      "label": "Alternar el ajuste de línea",
+      "description": "Activa o desactiva el ajuste de línea en el editor."
+    },
+    "textEditorCommandPalette": {
+      "label": "Abrir la paleta de comandos del editor",
+      "description": "Busca y ejecuta comandos del editor Monaco."
+    },
+    "textEditorSettings": {
+      "label": "Configuración del editor",
+      "description": "Abre la configuración del editor de texto independiente."
+    },
+    "terminalNewTab": {
+      "label": "Nueva pestaña del terminal",
+      "description": "Abre una pestaña en la ventana del terminal."
+    },
+    "terminalCloseTab": {
+      "label": "Cerrar pestaña del terminal",
+      "description": "Cierra la pestaña activa del terminal."
+    },
+    "terminalSettings": {
+      "label": "Configuración del terminal",
+      "description": "Abre la configuración desde la ventana del terminal."
+    },
+    "terminalCloseWindow": {
+      "label": "Cerrar ventana del terminal",
+      "description": "Cierra la ventana del terminal con todas sus pestañas."
+    },
+    "terminalTab1": {
+      "label": "Ir a la pestaña 1 del terminal",
+      "description": "Cambia a la primera pestaña del terminal."
+    },
+    "terminalTab2": {
+      "label": "Ir a la pestaña 2 del terminal",
+      "description": "Cambia a la segunda pestaña del terminal."
+    },
+    "terminalTab3": {
+      "label": "Ir a la pestaña 3 del terminal",
+      "description": "Cambia a la tercera pestaña del terminal."
+    },
+    "terminalTab4": {
+      "label": "Ir a la pestaña 4 del terminal",
+      "description": "Cambia a la cuarta pestaña del terminal."
+    },
+    "terminalTab5": {
+      "label": "Ir a la pestaña 5 del terminal",
+      "description": "Cambia a la quinta pestaña del terminal."
+    },
+    "terminalTab6": {
+      "label": "Ir a la pestaña 6 del terminal",
+      "description": "Cambia a la sexta pestaña del terminal."
+    },
+    "terminalTab7": {
+      "label": "Ir a la pestaña 7 del terminal",
+      "description": "Cambia a la séptima pestaña del terminal."
+    },
+    "terminalTab8": {
+      "label": "Ir a la pestaña 8 del terminal",
+      "description": "Cambia a la octava pestaña del terminal."
+    },
+    "terminalTab9": {
+      "label": "Ir a la pestaña 9 del terminal",
+      "description": "Cambia a la novena pestaña del terminal."
+    },
+    "terminalTab10": {
+      "label": "Ir a la pestaña 10 del terminal",
+      "description": "Cambia a la décima pestaña del terminal."
+    }
+  },
+  "shell": {
+    "navigation": "Navegación de Sliver",
+    "operatorConsole": "Consola de operador",
+    "overviewNavigation": "Navegación de la vista general",
+    "operational": "Operaciones",
+    "operationalNavigation": "Navegación de operaciones",
+    "interact": "Interacción",
+    "interactNavigation": "Navegación de interacción",
+    "data": "Datos",
+    "dataNavigation": "Navegación de datos",
+    "windowNavigation": "Navegación de la ventana",
+    "collapseSidebar": "Contraer la barra lateral",
+    "expandSidebar": "Expandir la barra lateral",
+    "noServer": "No hay ningún servidor conectado",
+    "chooseConfig": "Selecciona una configuración guardada para empezar",
+    "operator": "operador",
+    "configuration": "configuración",
+    "connect": "Conectar",
+    "server": "Servidor actual",
+    "currentServer": "Servidor actual: {operator}",
+    "applicationMenuOffline": "Menú de la aplicación, sin conexión",
+    "applicationMenu": "Menú de la aplicación",
+    "offline": "Sin conexión",
+    "noChannel": "No hay ningún canal activo",
+    "applicationActions": "Acciones de la aplicación y del servidor actual",
+    "exit": "Salir de la aplicación",
+    "disconnect": "Desconectar",
+    "switchConfig": "Cambiar de configuración",
+    "newWindowOptions": "Opciones para abrir una ventana",
+    "newWindow": "Nueva ventana",
+    "sameServer": "Mismo servidor",
+    "differentServer": "Otro servidor",
+    "openConsole": "Abrir la consola de Sliver",
+    "consoleTooltip": "Abrir la consola del servidor activo",
+    "connectFirstTooltip": "Conéctate primero a un servidor",
+    "openPalette": "Abrir la paleta de comandos",
+    "commandPalette": "Paleta de comandos",
+    "savedConfigurations": "Configuraciones guardadas",
+    "live": "En tiempo real",
+    "waitingEvents": "En espera de eventos",
+    "reconnecting": "Reconectando…",
+    "eventsOffline": "Canal de eventos desconectado",
+    "backendReconnecting": "Reconectando con el servicio…",
+    "session": "Sesión",
+    "beacon": "Beacon"
+  },
+  "navigation": {
+    "overview": {
+      "label": "Vista general",
+      "description": "Consulta la infraestructura y las conexiones registradas."
+    },
+    "generate": {
+      "label": "Generar",
+      "description": "Genera archivos de implante."
+    },
+    "artifacts": {
+      "label": "Compilaciones y perfiles",
+      "description": "Consulta las compilaciones generadas y los perfiles reutilizables."
+    },
+    "operations": {
+      "label": "Trabajos y servicios de escucha",
+      "description": "Administra los trabajos del servidor y los puntos de conexión de los servicios de escucha."
+    },
+    "websites": {
+      "label": "Sitios web",
+      "description": "Administra los sitios web alojados y su contenido."
+    },
+    "sessions": {
+      "label": "Sesiones",
+      "description": "Consulta las sesiones interactivas."
+    },
+    "beacons": {
+      "label": "Beacons",
+      "description": "Consulta los beacons asíncronos."
+    },
+    "loot": {
+      "label": "Archivos recopilados",
+      "description": "Consulta los archivos recopilados."
+    },
+    "credentials": {
+      "label": "Credenciales",
+      "description": "Consulta las credenciales recopiladas."
+    }
+  },
+  "palette": {
+    "settingsDescription": "Personaliza la apariencia, los atajos de teclado y el terminal.",
+    "backDescription": "Vuelve a la página anterior.",
+    "forwardDescription": "Avanza a la página siguiente del historial de navegación.",
+    "savedDescription": "Conéctate con una configuración de operador o adminístrala.",
+    "consoleDescription": "Abre una consola para el servidor activo.",
+    "connectFirst": "Conéctate primero a un servidor.",
+    "disconnectDescription": "Desconecta el servidor activo.",
+    "noConnection": "No hay ninguna conexión activa con un servidor.",
+    "refreshDescription": "Sincroniza la información con el servidor activo.",
+    "cloudDeployment": "Implementación en la nube",
+    "cloudDescription": "Abre la ventana de implementación en la nube o tráela al frente.",
+    "remoteDesktop": "Escritorio remoto",
+    "remoteDesktopDescription": "Abre el cliente RDP independiente o tráelo al frente.",
+    "screenshotDescription": "Guarda las capturas de todas las ventanas abiertas de la aplicación en la carpeta elegida.",
+    "newConnectedWindow": "Nueva ventana conectada",
+    "newConnectedDescription": "Abre otra ventana para el servidor activo.",
+    "newConnectionWindow": "Nueva ventana para otra conexión",
+    "newConnectionDescription": "Abre otra ventana para un servidor distinto.",
+    "search": "Buscar comandos",
+    "searchPlaceholder": "Buscar comandos, sesiones y beacons…",
+    "applicationCommands": "Comandos de la aplicación",
+    "moreTargets": "Hay más resultados disponibles. Abre Sesiones o Beacons para buscar en la lista completa.",
+    "noResults": "No se encontraron comandos.",
+    "current": "Actual",
+    "navigate": "Ir a",
+    "run": "Ejecutar",
+    "toggle": "Alternar"
+  },
+  "paletteGroups": {
+    "Navigate": "Navegación",
+    "Sessions": "Sesiones",
+    "Beacons": "Beacons",
+    "Server": "Servidor",
+    "Windows": "Ventanas"
+  }
+}

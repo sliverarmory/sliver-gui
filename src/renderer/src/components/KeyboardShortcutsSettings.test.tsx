@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import { ApplicationLocaleProvider } from "../i18n/ApplicationLocaleProvider";
 import { KeyboardShortcutsSettings, type KeyboardShortcutsSettingsProps } from "./KeyboardShortcutsSettings";
 
 const setKeyboardShortcutRecording = vi.fn<(recording: boolean) => Promise<void>>();
@@ -70,6 +71,26 @@ describe("KeyboardShortcutsSettings", () => {
     await user.clear(search);
     expect(screen.queryByText("No shortcuts match your search.")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change shortcut for Open command palette" })).toBeInTheDocument();
+  });
+
+  it("searches translated labels and names the conflicting action in the chosen language", async () => {
+    const user = userEvent.setup();
+    const { onShortcutChange } = renderShortcuts({
+      settings: { ...DEFAULT_APPLICATION_SETTINGS_STATE, language: "es" },
+    });
+    const search = screen.getByRole("searchbox", { name: "Buscar atajos" });
+    await user.type(search, "NAVEGACION");
+    expect(screen.getByRole("heading", { name: "Navegación" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Aplicación" })).not.toBeInTheDocument();
+    await user.clear(search);
+    await user.type(search, "ABRIR LA PALETA DE COMANDOS");
+    expect(screen.queryByRole("group", { name: "Nueva ventana" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Cambiar el atajo de «Abrir la paleta de comandos»" }));
+    const recording = screen.getByRole("button", { name: "Cancelar el cambio de atajo de «Abrir la paleta de comandos»" });
+    fireEvent.keyDown(recording, { key: "n", code: "KeyN", metaKey: true });
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Este atajo ya está asignado a «Nueva ventana».");
+    expect(onShortcutChange).not.toHaveBeenCalled();
   });
 
   it("waits for native shortcut suppression before recording and restores it after a successful change", async () => {
@@ -228,7 +249,14 @@ function renderShortcuts(overrides: Partial<KeyboardShortcutsSettingsProps> = {}
     onReset: vi.fn(),
     ...overrides,
   };
-  return { ...render(<KeyboardShortcutsSettings {...props} />), ...props };
+  return {
+    ...render(
+      <ApplicationLocaleProvider language={props.settings.language}>
+        <KeyboardShortcutsSettings {...props} />
+      </ApplicationLocaleProvider>,
+    ),
+    ...props,
+  };
 }
 
 function deferred() {
