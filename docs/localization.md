@@ -1,10 +1,12 @@
 # Application localization
 
-Choose a language in **Settings → General → Application language**. English is the default. The list shows English, Español, Français, 日本語, and Українська in their own languages. Settings, the main sidebar, window navigation, the command palette, and the terminal settings dialog use the selected language. Feature-page copy, the connection picker, native menus, and raw backend diagnostics still use English.
+Choose a language in **Settings → General → Application language**. **System language** is the default. On startup, Sliver Desktop uses the first supported language in the operating system’s preference list. It uses English if the list is unavailable or has no supported match. Choose English, Español, Français, 日本語, or Українська to keep a specific language across restarts.
+
+Settings, the main sidebar, window navigation, the command palette, and the terminal settings dialog use the selected language. Feature-page copy, the connection picker, native menus, and raw backend diagnostics still use English.
 
 ## Design
 
-The application settings store persists a validated language tag alongside the other revisioned preferences. Older settings migrate to English and keep their saved preferences. The existing settings broadcast updates open renderer windows that subscribe to application settings.
+The main process reads Electron’s preferred system languages after startup and matches regional tags such as `fr-CA` to the app’s language catalogs. The settings store persists the **System language** choice or an explicit language tag. Files from before the language setting was introduced migrate to **System language** and keep their other preferences. Existing explicit choices, including English, carry forward. The detected language travels with the settings snapshot so open renderer windows share the same language. [Electron preferred system languages](https://www.electronjs.org/docs/latest/api/app/#appgetpreferredsystemlanguages)
 
 The renderer bundles one catalog per language under [locales](../src/renderer/src/i18n/locales). The English catalog defines the TypeScript shape. Tests check for the same keys and named placeholders in all five catalogs. React Aria’s locale provider and the document’s `lang` attribute follow the saved preference. The UI can switch offline under the existing Content Security Policy. [React Aria I18nProvider](https://react-aria.adobe.com/I18nProvider), [W3C language tags](https://www.w3.org/International/articles/language-tags/)
 

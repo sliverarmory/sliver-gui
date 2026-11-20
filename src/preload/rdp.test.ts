@@ -242,9 +242,12 @@ describe("RDP sandbox preload", () => {
     expect(mocks.invoke).toHaveBeenCalledExactlyOnceWith(RDP_IPC.updateApplicationSettings, input);
     expect(() => bridge().updateApplicationSettings({ ...input, expectedRevision: -1 })).toThrow();
     expect(() => bridge().updateApplicationSettings({ ...input, settings: { ...input.settings, rdp: { clipboard: "false" } } } as never)).toThrow();
+    expect(() => bridge().updateApplicationSettings({ ...input, settings: { ...input.settings, systemLanguage: "ja" } } as never)).toThrow();
     expect(() => bridge().updateApplicationSettings({ ...input, path: "/tmp/settings.json" } as never)).toThrow();
     expect(mocks.invoke).toHaveBeenCalledOnce();
     mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...updated, rdp: { clipboard: "false" } } });
+    await expect(bridge().updateApplicationSettings(input)).rejects.toThrow("Invalid application settings state");
+    mocks.invoke.mockResolvedValueOnce({ ok: true, value: { ...updated, systemLanguage: "system" } });
     await expect(bridge().updateApplicationSettings(input)).rejects.toThrow("Invalid application settings state");
   });
 

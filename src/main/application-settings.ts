@@ -2,10 +2,12 @@ import { dirname, isAbsolute } from "node:path";
 
 import {
   APPLICATION_SETTINGS_VERSION,
+  DEFAULT_APPLICATION_LANGUAGE,
   DEFAULT_APPLICATION_SETTINGS_STATE,
   parseApplicationSettingsState,
   parsePersistedApplicationSettingsState,
   parseApplicationSettingsUpdateInput,
+  type ApplicationLanguage,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
@@ -29,9 +31,12 @@ export class ApplicationSettingsStore {
     this.#state = state;
   }
 
-  static async load(filePath: string): Promise<ApplicationSettingsStore> {
+  static async load(filePath: string, systemLanguage: ApplicationLanguage = DEFAULT_APPLICATION_LANGUAGE): Promise<ApplicationSettingsStore> {
     assertSettingsFilePath(filePath);
-    let state = DEFAULT_APPLICATION_SETTINGS_STATE;
+    const defaultState = systemLanguage === DEFAULT_APPLICATION_LANGUAGE
+      ? DEFAULT_APPLICATION_SETTINGS_STATE
+      : Object.freeze({ ...DEFAULT_APPLICATION_SETTINGS_STATE, systemLanguage });
+    let state = defaultState;
     try {
       const loaded = await readBoundedRegularFile(filePath, {
         label: "Application settings",
@@ -39,7 +44,7 @@ export class ApplicationSettingsStore {
         requirePrivateMode: true,
       });
       try {
-        state = parsePersistedApplicationSettingsState(JSON.parse(loaded.data.toString("utf8")) as unknown);
+        state = parsePersistedApplicationSettingsState(JSON.parse(loaded.data.toString("utf8")) as unknown, systemLanguage);
       } finally {
         loaded.data.fill(0);
       }
@@ -47,7 +52,7 @@ export class ApplicationSettingsStore {
       // Settings are non-sensitive convenience state. A missing, unreadable,
       // unsupported, or corrupt file must not prevent the application from
       // launching; the next successful update replaces it atomically.
-      state = DEFAULT_APPLICATION_SETTINGS_STATE;
+      state = defaultState;
     }
     return new ApplicationSettingsStore(filePath, state);
   }
@@ -78,9 +83,11 @@ export class ApplicationSettingsStore {
       const next = parseApplicationSettingsState({
         v: APPLICATION_SETTINGS_VERSION,
         revision: this.#state.revision + 1,
+        systemLanguage: this.#state.systemLanguage,
         ...parsed.settings,
       });
-      const data = Buffer.from(JSON.stringify(next), "utf8");
+      const { systemLanguage: _systemLanguage, ...persisted } = next;
+      const data = Buffer.from(JSON.stringify(persisted), "utf8");
       try {
         if (data.length > APPLICATION_SETTINGS_MAX_BYTES) {
           return { ok: false, error: APPLICATION_SETTINGS_SAVE_ERROR };

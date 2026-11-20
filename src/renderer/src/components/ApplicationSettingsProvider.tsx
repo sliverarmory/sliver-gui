@@ -17,6 +17,7 @@ import {
   isResolvedApplicationIcon,
   parseApplicationSettingsState,
   parseApplicationSettingsValues,
+  resolveApplicationLanguage,
   type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
   type ApplicationSettingsValues,
@@ -146,7 +147,7 @@ export function ApplicationSettingsProvider({
         }
       } catch (error: unknown) {
         if (!active) return;
-        const messages = messagesForLanguage(settingsRef.current.language).settings;
+        const messages = messagesForLanguage(resolveApplicationLanguage(settingsRef.current)).settings;
         toast.danger(messages.unavailable, {
           description: error instanceof Error ? error.message : String(error),
         });
@@ -210,7 +211,7 @@ export function ApplicationSettingsProvider({
       setSavingCount((count) => count + 1);
       try {
         const current = settingsRef.current;
-        const messages = messagesForLanguage(current.language).settings;
+        const messages = messagesForLanguage(resolveApplicationLanguage(current)).settings;
         const currentValues = settingsValues(current);
         const next = parseApplicationSettingsValues(updater(currentValues));
         if (sameSettings(currentValues, next)) {
@@ -233,7 +234,7 @@ export function ApplicationSettingsProvider({
         accept(parseApplicationSettingsState(response.value));
         resolveResult(true);
       } catch (error: unknown) {
-        const messages = messagesForLanguage(settingsRef.current.language).settings;
+        const messages = messagesForLanguage(resolveApplicationLanguage(settingsRef.current)).settings;
         toast.danger(messages.notSaved, {
           description: error instanceof Error ? error.message : String(error),
         });
@@ -260,7 +261,7 @@ export function ApplicationSettingsProvider({
 
   return (
     <ApplicationSettingsContext.Provider value={value}>
-      <ApplicationLocaleProvider language={settings.language}>
+      <ApplicationLocaleProvider language={resolveApplicationLanguage(settings)}>
         {children}
       </ApplicationLocaleProvider>
     </ApplicationSettingsContext.Provider>

@@ -273,7 +273,8 @@ describe("SSH preload bridge", () => {
     const valid = {
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       revision: 4,
-      language: "ja" as const,
+      language: "system" as const,
+      systemLanguage: "ja" as const,
       theme: "light" as const,
       appIcon: "passion" as const,
       disableWindowTransparency: true,
@@ -326,6 +327,11 @@ describe("SSH preload bridge", () => {
     handler({}, missingLanguage);
     handler({}, { ...missingLanguage, v: 10 });
     handler({}, { ...valid, language: "pt" });
+    const { systemLanguage: _systemLanguage, ...missingSystemLanguage } = valid;
+    handler({}, missingSystemLanguage);
+    handler({}, { ...missingSystemLanguage, v: 11, language: "ja" });
+    handler({}, { ...valid, systemLanguage: "system" });
+    handler({}, { ...valid, systemLanguage: "ja-JP" });
     const { disableWindowTransparency: _disableTransparency, ...missingTransparency } = valid;
     handler({}, missingTransparency);
     handler({}, { ...missingTransparency, v: 7 });

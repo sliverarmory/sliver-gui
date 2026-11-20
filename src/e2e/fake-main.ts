@@ -643,6 +643,13 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   executeDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
 };
 
+// Keep renderer copy deterministic on hosts with different language preferences.
+const preferredSystemLanguagesArg = "--preferred-system-languages=";
+const preferredSystemLanguages = (process.argv.find((argument) => (
+  argument.startsWith(preferredSystemLanguagesArg)
+))?.slice(preferredSystemLanguagesArg.length) ?? "en-US").split(",");
+app.getPreferredSystemLanguages = () => [...preferredSystemLanguages];
+
 app.setPath("userData", requiredArgument("--user-data-directory="));
 void startApplication({
   registry,

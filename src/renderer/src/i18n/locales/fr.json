@@ -8,6 +8,8 @@
     "terminal": "Terminal",
     "language": "Langue de l’application",
     "languageDescription": "Le changement de langue s’applique immédiatement aux paramètres et à la navigation.",
+    "systemLanguage": "Langue du système",
+    "systemLanguageDescription": "Utilise la première langue prise en charge dans les préférences du système. À défaut, l’application s’affiche en anglais.",
     "appearance": "Apparence",
     "appearanceDescription": "Personnalisez l’apparence de l’application et de son icône.",
     "theme": "Thème de couleurs",

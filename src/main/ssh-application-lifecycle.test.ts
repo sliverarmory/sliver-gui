@@ -35,9 +35,10 @@ const harness = vi.hoisted(() => ({
   },
   settingsStore: {
     getState: vi.fn((): ApplicationSettingsState => ({
-      v: 11,
+      v: 12,
       revision: 0,
-      language: "en",
+      language: "system",
+      systemLanguage: "en",
       theme: "dark",
       appIcon: "auto",
       reduceMotion: false,
@@ -414,7 +415,7 @@ describe("application protocol lifecycle", () => {
         for (const dark of [false, true]) {
           Object.assign(nativeTheme, { shouldUseDarkColors: dark });
           for (const disabled of [true, false]) {
-            const { v: _version, revision, ...values } = harness.settingsStore.getState();
+            const { v: _version, revision, systemLanguage: _systemLanguage, ...values } = harness.settingsStore.getState();
             expect(await controllerSettings.update({
               expectedRevision: revision,
               settings: { ...values, theme: dark ? "dark" : "light", disableWindowTransparency: disabled },
@@ -481,7 +482,7 @@ describe("application protocol lifecycle", () => {
 
       const controllerSettings = vi.mocked(registerIpcHandlers).mock.calls.at(-1)![8]!;
       for (const disabled of [false, true]) {
-        const { v: _version, revision, ...values } = harness.settingsStore.getState();
+        const { v: _version, revision, systemLanguage: _systemLanguage, ...values } = harness.settingsStore.getState();
         expect(await controllerSettings.update({
           expectedRevision: revision,
           settings: { ...values, disableWindowTransparency: disabled },

@@ -10,7 +10,7 @@ import { cleanupOwnedApplication } from "./packaged-application-update-support.j
 const repositoryRoot = resolve(import.meta.dirname, "../../..");
 const cleanupTimeout = 5_000;
 
-test("application language updates open windows and survives restart", { timeout: 60_000 }, async () => {
+test("application follows system language and preserves explicit changes across windows and restart", { timeout: 60_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "sliver-gui-language-"));
   await Promise.all(["saved", "managed", "client", "user-data"].map((name) => mkdir(join(root, name))));
   let application: ElectronApplication | undefined;
@@ -23,6 +23,7 @@ test("application language updates open windows and survives restart", { timeout
       `--managed-config-directory=${join(root, "managed")}`,
       `--user-data-directory=${join(root, "user-data")}`,
       `--console-client-root-directory=${join(root, "client")}`,
+      "--preferred-system-languages=de-DE,fr-CA,es-MX",
     ],
     cwd: repositoryRoot,
     bypassCSP: false,
@@ -32,16 +33,20 @@ test("application language updates open windows and survives restart", { timeout
     application = await launch();
     const page = await application.firstWindow();
     await dismissConnectionPicker(page);
-    await page.getByRole("button", { name: "New window options" }).click();
+    await page.locator("html[lang=fr]").waitFor();
+    await page.getByText("Console opérateur", { exact: true }).waitFor();
+    await openSettings(page, "Menu de l’application, hors connexion", "Paramètres");
+    await page.getByRole("button", { name: "Options de la nouvelle fenêtre" }).click();
     const [secondWindow] = await Promise.all([
       application.waitForEvent("window"),
-      page.getByRole("menuitem", { name: "Different server" }).click(),
+      page.getByRole("menuitem", { name: "Autre serveur" }).click(),
     ]);
     await dismissConnectionPicker(secondWindow);
-    await openSettings(page, "Application menu, offline", "Settings");
-    await page.getByRole("button", { name: /Application language/u }).click();
+    await secondWindow.locator("html[lang=fr]").waitFor();
+    await page.getByRole("button", { name: /Langue de l’application/u }).click();
     assert.deepEqual(await page.getByRole("option").allTextContents(),
-      ["English", "Español", "Français", "日本語", "Українська"]);
+      ["Langue du système", "English", "Español", "Français", "日本語", "Українська"]);
+    assert.equal(await page.getByRole("option", { name: "Langue du système" }).getAttribute("aria-selected"), "true");
     await page.getByRole("option", { name: "Español" }).click();
     const locales = [
       { language: "es", heading: "Configuración", selector: /Idioma de la aplicación/u, next: "Français" },
@@ -56,21 +61,27 @@ test("application language updates open windows and survives restart", { timeout
     }
     await expectLanguage(page, "ja", "設定");
     await secondWindow.locator("html[lang=ja]").waitFor();
+    await secondWindow.getByRole("button", { name: /コマンドパレット/u }).click();
+    const palette = secondWindow.getByRole("dialog", { name: /コマンドパレット/u });
+    await palette.getByRole("searchbox", { name: /検索/u }).fill("表示言語");
+    await palette.getByRole("menuitem", { name: /^設定/u }).click();
+    await expectLanguage(secondWindow, "ja", "設定");
+    await secondWindow.getByRole("button", { name: /表示言語/u }).click();
+    await secondWindow.getByRole("option", { name: "English" }).click();
+    await expectLanguage(secondWindow, "en", "Settings");
+    await expectLanguage(page, "en", "Settings");
     assert.equal(await application.evaluate(() => globalThis.__SLIVER_GUI_E2E_STATE__.configFactoryCalls), 0);
 
     await cleanupOwnedApplication(application, "language restart", cleanupTimeout);
     application = await launch();
     const reopened = await application.firstWindow();
     await dismissConnectionPicker(reopened);
-    await reopened.locator("html[lang=ja]").waitFor();
-    await reopened.getByRole("button", { name: /コマンドパレット/u }).click();
-    const palette = reopened.getByRole("dialog", { name: /コマンドパレット/u });
-    await palette.getByRole("searchbox", { name: /検索/u }).fill("表示言語");
-    await palette.getByRole("menuitem", { name: /^設定/u }).click();
-    await reopened.getByRole("heading", { name: "設定", exact: true }).waitFor();
-    await reopened.getByRole("button", { name: /表示言語/u }).click();
-    await reopened.getByRole("option", { name: "English" }).click();
+    await openSettings(reopened, "Application menu, offline", "Settings");
     await expectLanguage(reopened, "en", "Settings");
+    await reopened.getByRole("button", { name: /Application language/u }).click();
+    assert.equal(await reopened.getByRole("option", { name: "English" }).getAttribute("aria-selected"), "true");
+    await reopened.getByRole("option", { name: "System language" }).click();
+    await expectLanguage(reopened, "fr", "Paramètres");
   } finally {
     try {
       if (application) await cleanupOwnedApplication(application, "application language", cleanupTimeout);

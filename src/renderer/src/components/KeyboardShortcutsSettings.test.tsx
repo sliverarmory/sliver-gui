@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
+import { DEFAULT_APPLICATION_SETTINGS_STATE, resolveApplicationLanguage } from "../../../shared/application-settings-contracts";
 import { ApplicationLocaleProvider } from "../i18n/ApplicationLocaleProvider";
 import { KeyboardShortcutsSettings, type KeyboardShortcutsSettingsProps } from "./KeyboardShortcutsSettings";
 
@@ -251,7 +251,7 @@ function renderShortcuts(overrides: Partial<KeyboardShortcutsSettingsProps> = {}
   };
   return {
     ...render(
-      <ApplicationLocaleProvider language={props.settings.language}>
+      <ApplicationLocaleProvider language={resolveApplicationLanguage(props.settings)}>
         <KeyboardShortcutsSettings {...props} />
       </ApplicationLocaleProvider>,
     ),

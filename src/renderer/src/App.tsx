@@ -43,6 +43,7 @@ import {
   APPLICATION_SETTINGS_VERSION,
   DEFAULT_COMMAND_PALETTE_SHORTCUT,
   DEFAULT_APPLICATION_SETTINGS_STATE,
+  resolveApplicationLanguage,
   type ApplicationSettingsState,
   type ApplicationSettingsValues,
   type ResolvedApplicationIcon,
@@ -173,8 +174,9 @@ export function App() {
     DEFAULT_APPLICATION_SETTINGS_STATE,
   );
   const settings = applicationSettings?.settings ?? standaloneSettings;
+  const language = resolveApplicationLanguage(settings);
   const { settings: settingsCopy, shortcutActions, shell, navigation, palette } =
-    messagesForLanguage(settings.language);
+    messagesForLanguage(language);
   const [snapshot, setSnapshot] = useState<SliverSnapshot>(() => disconnectedSnapshot());
   const connected = isUsableConnection(snapshot.connection.status);
   const inventoryIdentity = connected ? [
@@ -602,6 +604,7 @@ export function App() {
     setStandaloneSettings((current) => ({
       v: APPLICATION_SETTINGS_VERSION,
       revision: current.revision + 1,
+      systemLanguage: current.systemLanguage,
       ...updater({
         language: current.language,
         theme: current.theme,
@@ -1120,7 +1123,7 @@ export function App() {
 
   const workspace = <ConnectionProvider connection={snapshot.connection}>{content}</ConnectionProvider>;
   return applicationSettings ? workspace : (
-    <ApplicationLocaleProvider language={settings.language}>{workspace}</ApplicationLocaleProvider>
+    <ApplicationLocaleProvider language={language}>{workspace}</ApplicationLocaleProvider>
   );
 }
 

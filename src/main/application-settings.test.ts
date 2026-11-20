@@ -13,7 +13,9 @@ import {
   DEFAULT_APPLICATION_SETTINGS_VALUES,
   DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
   DEFAULT_APPLICATION_RDP_SETTINGS,
+  resolveApplicationLanguage,
   type ApplicationIcon,
+  type ApplicationSettingsState,
   type ApplicationSettingsUpdateInput,
 } from "../shared/application-settings-contracts.js";
 import {
@@ -23,7 +25,8 @@ import {
 
 let temporaryDirectory = "";
 let settingsPath = "";
-const { language: _language, ...preLanguageSettings } = DEFAULT_APPLICATION_SETTINGS_STATE;
+const defaultPersistedSettings = persistedSettings(DEFAULT_APPLICATION_SETTINGS_STATE);
+const { language: _language, ...preLanguageSettings } = defaultPersistedSettings;
 
 beforeEach(async () => {
   temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-gui-application-settings-"));
@@ -42,6 +45,13 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState()).toBe(DEFAULT_APPLICATION_SETTINGS_STATE);
     expect(Object.isFrozen(store.getState())).toBe(true);
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
+  });
+
+  it("uses the detected language when starting with no settings file", async () => {
+    const store = await ApplicationSettingsStore.load(settingsPath, "fr");
+    expect(store.getState()).toMatchObject({ language: "system", systemLanguage: "fr" });
+    expect(resolveApplicationLanguage(store.getState())).toBe("fr");
+    await expect(lstat(settingsPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("loads an exact private current-version file", async () => {
@@ -73,29 +83,41 @@ describe("ApplicationSettingsStore", () => {
 
     const store = await ApplicationSettingsStore.load(settingsPath);
 
-    expect(store.getState()).toEqual(persisted);
+    expect(store.getState()).toEqual({ ...persisted, systemLanguage: DEFAULT_APPLICATION_LANGUAGE });
     expect(Object.isFrozen(store.getState())).toBe(true);
     expect(Object.isFrozen(store.getState().terminal)).toBe(true);
     expect(Object.isFrozen(store.getState().overview)).toBe(true);
   });
 
-  it("persists a language change to migrated settings and reloads it", async () => {
+  it("migrates version-ten settings to the detected language and keeps an explicit English override", async () => {
     const previous = { ...preLanguageSettings, v: 10, revision: 6, theme: "dark", reduceMotion: true };
     await writeFile(settingsPath, JSON.stringify(previous), { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
-    const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "en" });
+    const store = await ApplicationSettingsStore.load(settingsPath, "fr");
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: "fr" });
+    expect(resolveApplicationLanguage(store.getState())).toBe("fr");
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
-    const { v: _version, revision, ...settings } = store.getState();
-    const update = await store.update({ expectedRevision: revision, settings: { ...settings, language: "ja" } });
+    const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
+    const update = await store.update({ expectedRevision: revision, settings: { ...settings, language: "en" } });
     expect(update).toEqual({
       ok: true,
-      value: { ...settings, v: APPLICATION_SETTINGS_VERSION, revision: 7, language: "ja" },
+      value: { ...settings, v: APPLICATION_SETTINGS_VERSION, revision: 7, language: "en", systemLanguage: "fr" },
     });
-    const reloaded = await ApplicationSettingsStore.load(settingsPath);
-    expect(reloaded.getState()).toEqual(update.value);
-    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(update.value);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
+
+    const reloaded = await ApplicationSettingsStore.load(settingsPath, "ja");
+    expect(reloaded.getState()).toMatchObject({ language: "en", systemLanguage: "ja", revision: 7, theme: "dark" });
+    expect(resolveApplicationLanguage(reloaded.getState())).toBe("en");
+    await expect(reloaded.update({ expectedRevision: 7, settings })).resolves.toMatchObject({
+      ok: true, value: { language: "system", systemLanguage: "ja", revision: 8 },
+    });
+    expect(resolveApplicationLanguage(reloaded.getState())).toBe("ja");
+
+    const restarted = await ApplicationSettingsStore.load(settingsPath, "uk");
+    expect(restarted.getState()).toMatchObject({ language: "system", systemLanguage: "uk", revision: 8, theme: "dark" });
+    expect(resolveApplicationLanguage(restarted.getState())).toBe("uk");
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(restarted.getState()));
   });
 
   it("migrates a version-five file and retains its existing settings", async () => {
@@ -105,9 +127,9 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
-    const { v: _version, revision, ...settings } = store.getState();
+    const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
     await expect(store.update({ expectedRevision: revision, settings: {
       ...settings, overview: { kinds: ["future-kind"], statuses: ["inactive"], lightning: true,
         sidebarDisabled: true, presentation: "list" },
@@ -135,7 +157,7 @@ describe("ApplicationSettingsStore", () => {
 
     const store = await ApplicationSettingsStore.load(settingsPath);
 
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
   });
 
@@ -153,20 +175,20 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     let store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, rdp: { clipboard: true, transparentClipboard: false } });
+    expect(store.getState()).toEqual({ ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, rdp: { clipboard: true, transparentClipboard: false } });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
     for (const clipboard of [false, true]) {
-      const { v: _version, revision, ...settings } = store.getState();
+      const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
       const result = await store.update({
         expectedRevision: revision,
         settings: { ...settings, rdp: { clipboard, transparentClipboard: !clipboard } },
       });
       expect(result).toEqual({
         ok: true,
-        value: { ...previous, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, revision: revision + 1, rdp: { clipboard, transparentClipboard: !clipboard } },
+        value: { ...previous, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, revision: revision + 1, rdp: { clipboard, transparentClipboard: !clipboard } },
       });
-      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
       store = await ApplicationSettingsStore.load(settingsPath);
       expect(store.getState()).toEqual(result.value);
     }
@@ -181,7 +203,7 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState()).toEqual({ ...DEFAULT_APPLICATION_SETTINGS_STATE });
 
     const reportScreenshotDirectory = join(temporaryDirectory, "screenshots");
-    const { v: _version, revision, ...settings } = store.getState();
+    const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
     const result = await store.update({
       expectedRevision: revision,
       settings: { ...settings, reportScreenshotDirectory },
@@ -221,18 +243,18 @@ describe("ApplicationSettingsStore", () => {
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
-    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    expect(store.getState()).toEqual({ ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, appIcon: "auto", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
     expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(previous);
 
-    const { v: _version, revision, ...settings } = store.getState();
+    const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
     const result = await store.update({ expectedRevision: revision, settings: { ...settings, appIcon: "passion" } });
     expect(result).toEqual({
       ok: true,
-      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, language: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS },
+      value: { ...previous, terminal: { ...previous.terminal, transparentWindows: true }, v: APPLICATION_SETTINGS_VERSION, language: "system", systemLanguage: DEFAULT_APPLICATION_LANGUAGE, disableWindowTransparency: false, revision: 10, appIcon: "passion", keyboardShortcuts: {}, reportScreenshotDirectory: null, overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS, rdp: DEFAULT_APPLICATION_RDP_SETTINGS },
     });
     const reloaded = await ApplicationSettingsStore.load(settingsPath);
     expect(reloaded.getState()).toEqual(result.value);
-    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
   });
 
   it("migrates an exact private version-one file without discarding preferences", async () => {
@@ -256,7 +278,8 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState()).toEqual({
       v: APPLICATION_SETTINGS_VERSION,
       revision: 9,
-      language: DEFAULT_APPLICATION_LANGUAGE,
+      language: "system",
+      systemLanguage: DEFAULT_APPLICATION_LANGUAGE,
       theme: "dark",
       appIcon: "auto",
       reduceMotion: true,
@@ -280,9 +303,11 @@ describe("ApplicationSettingsStore", () => {
   it.each([
     "not-json",
     JSON.stringify({ v: APPLICATION_SETTINGS_VERSION }),
-    JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, extra: true }),
-    JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, theme: "sepia" }),
-    JSON.stringify({ ...DEFAULT_APPLICATION_SETTINGS_STATE, appIcon: "system" }),
+    JSON.stringify({ ...defaultPersistedSettings, systemLanguage: "uk" }),
+    JSON.stringify({ ...defaultPersistedSettings, language: "pt" }),
+    JSON.stringify({ ...defaultPersistedSettings, extra: true }),
+    JSON.stringify({ ...defaultPersistedSettings, theme: "sepia" }),
+    JSON.stringify({ ...defaultPersistedSettings, appIcon: "system" }),
   ])("falls back to defaults for corrupt or unsupported state %#", async (contents) => {
     await writeFile(settingsPath, contents, { mode: 0o600 });
     if (process.platform !== "win32") await chmod(settingsPath, 0o600);
@@ -294,7 +319,7 @@ describe("ApplicationSettingsStore", () => {
 
   it("falls back safely when the settings path is a symbolic link", async () => {
     const target = join(temporaryDirectory, "target.json");
-    await writeFile(target, JSON.stringify(DEFAULT_APPLICATION_SETTINGS_STATE), { mode: 0o600 });
+    await writeFile(target, JSON.stringify(defaultPersistedSettings), { mode: 0o600 });
     await symlink(target, settingsPath);
 
     const store = await ApplicationSettingsStore.load(settingsPath);
@@ -319,7 +344,7 @@ describe("ApplicationSettingsStore", () => {
       },
     });
     expect(store.getState()).toBe(result.value);
-    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
     const stats = await lstat(settingsPath);
     expect(stats.isFile()).toBe(true);
     expect(stats.isSymbolicLink()).toBe(false);
@@ -342,14 +367,14 @@ describe("ApplicationSettingsStore", () => {
     expect(store.getState().disableWindowTransparency).toBe(false);
 
     for (const disableWindowTransparency of [true, false]) {
-      const { v: _version, revision, ...settings } = store.getState();
+      const { v: _version, revision, systemLanguage: _systemLanguage, ...settings } = store.getState();
       const result = await store.update({
         expectedRevision: revision,
         settings: { ...settings, disableWindowTransparency },
       });
 
       expect(result).toMatchObject({ ok: true, value: { disableWindowTransparency, revision: revision + 1 } });
-      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(result.value);
+      expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
       store = await ApplicationSettingsStore.load(settingsPath);
       expect(store.getState()).toEqual(result.value);
     }
@@ -380,7 +405,7 @@ describe("ApplicationSettingsStore", () => {
     expect(first.ok).toBe(true);
     expect(second).toEqual({ ok: false, error: STALE_APPLICATION_SETTINGS_ERROR });
     expect(store.getState()).toMatchObject({ revision: 1, theme: "light" });
-    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(store.getState());
+    expect(JSON.parse(await readFile(settingsPath, "utf8"))).toEqual(persistedSettings(store.getState()));
   });
 
   it("flushes a queued overview update before shutdown", async () => {
@@ -440,6 +465,10 @@ describe("ApplicationSettingsStore", () => {
   });
 });
 
+function persistedSettings({ systemLanguage: _systemLanguage, ...settings }: ApplicationSettingsState): Omit<ApplicationSettingsState, "systemLanguage"> {
+  return settings;
+}
+
 function updateInput(
   expectedRevision: number,
   overrides: Partial<Pick<ApplicationSettingsUpdateInput["settings"], "theme" | "appIcon" | "reduceMotion" | "disableWindowTransparency">>,
@@ -447,7 +476,7 @@ function updateInput(
   return {
     expectedRevision,
     settings: {
-      language: DEFAULT_APPLICATION_LANGUAGE,
+      language: DEFAULT_APPLICATION_SETTINGS_VALUES.language,
       theme: overrides.theme ?? DEFAULT_APPLICATION_SETTINGS_STATE.theme,
       appIcon: overrides.appIcon ?? DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
       reduceMotion: overrides.reduceMotion ?? DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,

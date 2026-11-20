@@ -8,6 +8,8 @@
     "terminal": "Terminal",
     "language": "Idioma de la aplicación",
     "languageDescription": "El cambio de idioma se aplica de inmediato a la vista Configuración y a la navegación.",
+    "systemLanguage": "Idioma del sistema",
+    "systemLanguageDescription": "Usa el primer idioma compatible de las preferencias del sistema. Si no hay ninguno, usa el inglés.",
     "appearance": "Apariencia",
     "appearanceDescription": "Personaliza el aspecto de la aplicación y su icono.",
     "theme": "Tema de color",

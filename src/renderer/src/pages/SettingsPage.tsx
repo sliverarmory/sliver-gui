@@ -5,9 +5,9 @@ import { Segment } from "@heroui-pro/react/segment";
 
 import {
   APPLICATION_LANGUAGES,
-  isApplicationLanguage,
-  type ApplicationLanguage,
+  isApplicationLanguagePreference,
   type ApplicationIcon,
+  type ApplicationLanguagePreference,
   type ApplicationSettingsState,
   type ApplicationTheme,
 } from "../../../shared/application-settings-contracts";
@@ -27,7 +27,7 @@ import {
 export interface SettingsPageProps {
   readonly settings: ApplicationSettingsState;
   readonly isSaving?: boolean;
-  readonly onLanguageChange: (language: ApplicationLanguage) => void;
+  readonly onLanguageChange: (language: ApplicationLanguagePreference) => void;
   readonly onAppIconChange: (appIcon: ApplicationIcon) => void;
   readonly onThemeChange: (theme: ApplicationTheme) => void;
   readonly onReduceMotionChange: (value: boolean) => void;
@@ -141,19 +141,26 @@ export function SettingsPage({
                 value={settings.language}
                 variant="secondary"
                 onChange={(value) => {
-                  if (isApplicationLanguage(value)) onLanguageChange(value);
+                  if (isApplicationLanguagePreference(value)) onLanguageChange(value);
                 }}
               >
                 <Label>{copy.language}</Label>
                 <Select.Trigger>
                   <Select.Value>
-                    <span lang={selectedLanguage?.id}>{selectedLanguage?.label}</span>
+                    <span lang={selectedLanguage?.id}>{selectedLanguage?.label ?? copy.systemLanguage}</span>
                   </Select.Value>
                   <Select.Indicator />
                 </Select.Trigger>
-                <Description>{copy.languageDescription}</Description>
+                <Description>
+                  <span className="block">{copy.languageDescription}</span>
+                  {settings.language === "system" ? <span className="block">{copy.systemLanguageDescription}</span> : null}
+                </Description>
                 <Select.Popover>
                   <ListBox>
+                    <ListBox.Item id="system" textValue={copy.systemLanguage}>
+                      {copy.systemLanguage}
+                      <ListBox.ItemIndicator />
+                    </ListBox.Item>
                     {APPLICATION_LANGUAGES.map(({ id, label }) => (
                       <ListBox.Item id={id} key={id} textValue={label}>
                         <span lang={id}>{label}</span>

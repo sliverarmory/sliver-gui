@@ -8,6 +8,8 @@
     "terminal": "Terminal",
     "language": "Application language",
     "languageDescription": "Applies immediately to Settings and navigation.",
+    "systemLanguage": "System language",
+    "systemLanguageDescription": "Uses the first supported language in your system preferences, or English if none match.",
     "appearance": "Appearance",
     "appearanceDescription": "Choose how the app and its icon appear.",
     "theme": "Color theme",

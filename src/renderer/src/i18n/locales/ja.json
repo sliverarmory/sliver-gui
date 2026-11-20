@@ -8,6 +8,8 @@
     "terminal": "ターミナル",
     "language": "表示言語",
     "languageDescription": "設定とナビゲーションの表示にすぐ反映されます。",
+    "systemLanguage": "システム言語",
+    "systemLanguageDescription": "システムの言語設定に従い、優先順位が最も高い対応言語を使用します。対応する言語がない場合は英語で表示します。",
     "appearance": "外観",
     "appearanceDescription": "アプリの外観とアイコンを選択できます。",
     "theme": "カラーテーマ",

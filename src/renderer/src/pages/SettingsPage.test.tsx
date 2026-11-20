@@ -42,7 +42,11 @@ describe("SettingsPage", () => {
     const onLanguageChange = vi.fn();
     const props = settingsProps({ onLanguageChange });
     const { rerender } = render(<SettingsPage {...props} />);
-    await user.click(screen.getByRole("button", { name: /Application language/u }));
+    const language = screen.getByRole("button", { name: /Application language/u });
+    expect(language).toHaveTextContent("System language");
+    expect(screen.getByText(messagesForLanguage("en").settings.systemLanguageDescription)).toBeInTheDocument();
+    await user.click(language);
+    expect(screen.getByRole("option", { name: "System language" })).toHaveAttribute("aria-selected", "true");
     for (const [id, label] of [
       ["en", "English"], ["es", "Español"], ["fr", "Français"], ["ja", "日本語"], ["uk", "Українська"],
     ] as const) {
@@ -59,6 +63,9 @@ describe("SettingsPage", () => {
     const { settings, terminal } = messagesForLanguage("ja");
     expect(document.documentElement).toHaveAttribute("lang", "ja");
     expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: new RegExp(settings.language, "u") }));
+    await user.click(screen.getByRole("option", { name: settings.systemLanguage }));
+    expect(onLanguageChange).toHaveBeenLastCalledWith("system");
     await user.click(screen.getByRole("tab", { name: settings.terminal }));
     expect(screen.getByRole("textbox", { name: terminal.fontSize })).toHaveValue("13");
   });
