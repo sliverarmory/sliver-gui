@@ -12,6 +12,7 @@ import {
   faBoxesStacked,
   faCamera,
   faCloudArrowUp,
+  faCircleNodes,
   faComputer,
   faDesktop,
   faEllipsisVertical,
@@ -66,6 +67,7 @@ import { ConnectionProvider } from "./components/ConnectionProvider";
 import { BuildsPage } from "./pages/BuildsPage";
 import { GeneratePage } from "./pages/GeneratePage";
 import { LootPage } from "./pages/LootPage";
+import { ADExplorerPage } from "./pages/ADExplorerPage";
 import { CredentialsPage } from "./pages/CredentialsPage";
 import { OperationsWorkspacePage } from "./pages/OperationsWorkspacePage";
 import { OverviewPage } from "./pages/OverviewPage";
@@ -78,7 +80,7 @@ import { TargetsPage } from "./pages/TargetsPage";
 import { ApplicationLocaleProvider, useMessages } from "./i18n/ApplicationLocaleProvider";
 import { formatMessage, messagesForLanguage } from "./i18n/messages";
 
-type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "websites" | "loot" | "credentials" | "settings";
+type ViewId = "overview" | "operations" | "sessions" | "beacons" | "generate" | "artifacts" | "websites" | "ad-explorer" | "loot" | "credentials" | "settings";
 
 const sidebarIcons = {
   dark: sliverDarkIcon,
@@ -113,6 +115,7 @@ const interactNavItems = [
 ];
 
 const dataNavItems = [
+  { id: "ad-explorer" as const, icon: faCircleNodes },
   { id: "loot" as const, icon: faBoxOpen },
   { id: "credentials" as const, icon: faKey },
 ];
@@ -1079,6 +1082,7 @@ export function App() {
               ) : null}
               {view === "generate" ? <GeneratePage snapshot={snapshot} /> : null}
               {view === "artifacts" ? <BuildsPage snapshot={snapshot} /> : null}
+              {view === "ad-explorer" ? <ADExplorerPage snapshot={snapshot} /> : null}
               {view === "loot" ? <LootPage snapshot={snapshot} onInventoryTotal={acceptLootInventoryTotal} /> : null}
               {view === "credentials" ? <CredentialsPage snapshot={snapshot} onInventoryTotal={acceptCredentialInventoryTotal} onInventoryChanged={invalidateCredentialCount} /> : null}
             </>
@@ -1278,7 +1282,7 @@ export function NavigationContent({
             {dataNavItems.map((item) => (
               <SidebarNavigationItem
                 key={item.id}
-                count={item.id === "loot" ? lootCount : credentialCount}
+                count={item.id === "loot" ? lootCount : item.id === "credentials" ? credentialCount : undefined}
                 item={item}
                 isCurrent={view === item.id}
                 isDisabled={!connected}

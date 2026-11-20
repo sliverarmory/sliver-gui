@@ -1,5 +1,6 @@
 // @vitest-environment node
 
+import { gunzipSync } from "node:zlib";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import { clientpb, sliverpb, type SliverClient } from "sliver-script";
 
@@ -159,6 +160,46 @@ describe("SliverClientAdapter BC-08 beacon tasks", () => {
 });
 
 describe("SliverClientAdapter beacon reads", () => {
+  it("queues only a bounded generated PowerShell collector upload and exact-path cleanup", async () => {
+    const uploaded = sliverpb.Upload.create({ Response: { Async: true, TaskID: "upload-task" } });
+    const removed = sliverpb.Rm.create({ Response: { Async: true, TaskID: "remove-task" } });
+    let encoded: Buffer | undefined;
+    let retained: Buffer | undefined;
+    const upload = vi.fn(async (request: sliverpb.UploadReq) => {
+      encoded = Buffer.from(request.Data);
+      retained = request.Data;
+      return uploaded;
+    });
+    const rm = vi.fn(async () => removed);
+    const adapter = adaptSliverClient({ rpc: { upload, rm } } as unknown as SliverClient);
+    const script = Buffer.from("function Invoke-BloodHound {}", "utf8");
+    const path = "C:\\Users\\Public\\sliver-ad-11111111-2222-4333-8444-555555555555.ps1";
+
+    await expect(adapter.uploadAdCollectionBeacon("beacon-1", path, script, 30)).resolves.toBe(uploaded);
+    expect(gunzipSync(encoded!)).toEqual(script);
+    expect(retained!.every((byte) => byte === 0)).toBe(true);
+    expect(upload).toHaveBeenCalledWith({
+      Path: path, Encoder: "gzip", Data: retained,
+      IsIOC: false, FileName: "", IsDirectory: false, Overwrite: false,
+      Request: { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" },
+    }, { signal: expect.any(AbortSignal) });
+    await expect(adapter.rmAdCollectionBeacon("beacon-1", path, 30)).resolves.toBe(removed);
+    expect(rm).toHaveBeenCalledExactlyOnceWith({
+      Path: path, Recursive: false, Force: true,
+      Request: { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" },
+    }, { signal: expect.any(AbortSignal) });
+    const stampedZip = path.replace("sliver-ad-", "20261023123456_sliver-ad-").replace(/\.ps1$/u, ".zip");
+    await expect(adapter.rmAdCollectionBeacon("beacon-1", stampedZip, 30)).resolves.toBe(removed);
+    await expect(adapter.uploadAdCollectionBeacon("beacon-1", path, Buffer.alloc(4 * 1024 * 1024 + 1), 30))
+      .rejects.toThrow(/size/u);
+    await expect(adapter.rmAdCollectionBeacon("beacon-1", "C:\\Users\\Public\\other.ps1", 30))
+      .rejects.toThrow(/generated AD collection path/u);
+    await expect(adapter.rmAdCollectionBeacon("beacon-1", path.replace(/\.ps1$/u, ".zip"), 30))
+      .rejects.toThrow(/generated AD collection path/u);
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(rm).toHaveBeenCalledTimes(2);
+  });
+
   it("exposes only narrow enqueue wrappers and preserves the raw ls acknowledgement", async () => {
     const ls = vi.fn(async () => ({
       Response: { Async: true, BeaconID: "unexpected_beacon", TaskID: "ls_task" },
@@ -265,6 +306,26 @@ describe("SliverClientAdapter beacon reads", () => {
     ]);
     expect(download.mock.calls.every(([, options]) =>
       (options as { signal?: unknown })?.signal instanceof AbortSignal)).toBe(true);
+  });
+
+  it("queues one fixed-size AD collection DownloadReq before fetching its task content", async () => {
+    const acknowledgement = sliverpb.Download.create({ Response: { Async: true, TaskID: "task-1" } });
+    const download = vi.fn(async () => acknowledgement);
+    const getBeaconTaskContent = vi.fn(async () => clientpb.BeaconTask.create({ ID: "task-1" }));
+    const adapter = adaptSliverClient({ rpc: { download, getBeaconTaskContent } } as unknown as SliverClient);
+
+    expect(() => adapter.downloadAdCollectionBeacon("beacon-1", "C:\\Users\\Public\\output.zip", 64 * 1024 * 1024, 30))
+      .toThrow(/Invalid AD collection download limit/u);
+    expect(download).not.toHaveBeenCalled();
+    await expect(adapter.downloadAdCollectionBeacon("beacon-1", "C:\\Users\\Public\\output.zip", 12 * 1024 * 1024 + 1, 30))
+      .resolves.toBe(acknowledgement);
+    expect(download).toHaveBeenCalledExactlyOnceWith({
+      Path: "C:\\Users\\Public\\output.zip", Start: "0", Stop: "0", RestrictedToFile: true, Recurse: false,
+      MaxBytes: String(12 * 1024 * 1024 + 1), MaxLines: "0",
+      Request: { Async: true, Timeout: "29999999999", BeaconID: "beacon-1", SessionID: "" },
+    }, { signal: expect.any(AbortSignal) });
+    await adapter.fetchAdCollectionBeaconTask("task-1", 30);
+    expect(getBeaconTaskContent).toHaveBeenCalledExactlyOnceWith({ ID: "task-1" }, { signal: expect.any(AbortSignal) });
   });
 
   it("rejects unsafe text-read shapes before queuing a beacon task", async () => {

@@ -11,6 +11,7 @@ import { buildUpdaterTrust } from "./buildUpdaterTrust.mjs";
 import { readUpdateSigningAssets, releaseSigningProfile, verifyPinnedWindowsSignatures } from "./releaseSigning.mjs";
 import { verifyWindowsSigningChanges } from "./verifyWindowsSigningChanges.mjs";
 import { verifyPackagedRdpRuntime } from "./verifyRdpRuntime.mjs";
+import { verifyPackagedBeagleRuntime } from "./verifyBeagleRuntime.mjs";
 
 const rootDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -19,6 +20,7 @@ export default async function afterPack(context, dependencies = {}) {
   const verifySliverConsole = dependencies.verifySliverConsoleBeforeSigning ?? verifySliverConsoleBeforeSigning;
   const prepareTrust = dependencies.prepareUpdaterTrustBeforeSigning ?? prepareUpdaterTrustBeforeSigning;
   const verifyRdp = dependencies.verifyRdpBeforeSigning ?? verifyPackagedRdpRuntime;
+  const verifyBeagle = dependencies.verifyBeagleBeforeSigning ?? verifyPackagedBeagleRuntime;
   const platform = context.electronPlatformName;
   let resourcesDirectory;
   if (platform === "darwin") {
@@ -47,6 +49,12 @@ export default async function afterPack(context, dependencies = {}) {
     resourcesDirectory,
   });
   await verifyRdp({
+    platform,
+    projectDirectory: context.packager?.projectDir ?? rootDirectory,
+    resourcesDirectory,
+    stage: "before-sign",
+  });
+  await verifyBeagle({
     platform,
     projectDirectory: context.packager?.projectDir ?? rootDirectory,
     resourcesDirectory,

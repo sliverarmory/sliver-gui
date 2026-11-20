@@ -42,6 +42,7 @@ export default defineConfig({
           navigation: resolve("src/preload/navigation.ts"),
           "cloud-deployment": resolve("src/preload/cloud-deployment.ts"),
           network: resolve("src/preload/network.ts"),
+          beagle: resolve("src/preload/beagle.ts"),
           armory: resolve("src/preload/armory.ts"),
           ssh: resolve("src/preload/ssh.ts"),
           rdp: resolve("src/preload/rdp.ts"),

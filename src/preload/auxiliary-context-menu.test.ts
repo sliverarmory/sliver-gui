@@ -43,6 +43,7 @@ interface TestNode {
 }
 
 describe.each([
+  { name: "Beagle", surfaces: ["beagle", "applicationContextMenu"], load: () => import("./beagle.js") },
   { name: "Armory", surfaces: ["armory", "applicationContextMenu"], load: () => import("./armory.js") },
   { name: "Network", surfaces: ["network", "applicationContextMenu"], load: () => import("./network.js") },
   { name: "Cloud Deployment", surfaces: ["cloudDeployment", "applicationContextMenu"], load: () => import("./cloud-deployment.js") },

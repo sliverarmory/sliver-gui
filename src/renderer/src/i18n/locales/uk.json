@@ -316,6 +316,10 @@
       "label": "Агенти Beacon",
       "description": "Перегляньте асинхронні агенти Sliver."
     },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Збирайте й досліджуйте дані Active Directory."
+    },
     "loot": {
       "label": "Зібрані файли",
       "description": "Перегляньте зібрані файли."

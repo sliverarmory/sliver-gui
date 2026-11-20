@@ -60,7 +60,7 @@ test("checks the emitted navigation guard even though it exposes no bridge", () 
     'navigation.addEventListener("navigate", () => {});'), /allowed an external document/u);
 });
 
-test("checks all eight outputs and rejects missing bundles or extracted shared chunks", async (context) => {
+test("checks all nine outputs and rejects missing bundles or extracted shared chunks", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "sliver-preload-bundles-test-"));
   context.after(() => rm(directory, { recursive: true, force: true }));
   await assert.rejects(verifyPreloadBundles(directory), /exactly the expected standalone/u);
@@ -68,6 +68,7 @@ test("checks all eight outputs and rejects missing bundles or extracted shared c
     "index.cjs": ["sliver", "applicationZoom", "applicationContextMenu", "ghosttySettings"],
     "cloud-deployment.cjs": ["cloudDeployment", "applicationContextMenu"],
     "network.cjs": ["network", "applicationContextMenu"],
+    "beagle.cjs": ["beagle", "applicationContextMenu"],
     "armory.cjs": ["armory", "applicationContextMenu"],
     "ssh.cjs": ["ssh", "applicationContextMenu", "ghosttySettings"],
     "rdp.cjs": ["rdp", "applicationContextMenu"],
@@ -87,7 +88,7 @@ test("checks all eight outputs and rejects missing bundles or extracted shared c
       if (event.destination.url === "about:blank") event.preventDefault();
     });
   `);
-  assert.equal((await verifyPreloadBundles(directory)).length, 8);
+  assert.equal((await verifyPreloadBundles(directory)).length, 9);
   await mkdir(join(directory, "chunks"));
   await writeFile(join(directory, "chunks", "shared.cjs"), "module.exports = {};");
   await assert.rejects(verifyPreloadBundles(directory), /shared chunks are unsupported/u);

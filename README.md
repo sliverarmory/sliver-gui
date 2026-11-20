@@ -78,8 +78,9 @@ Keep credentials out of tracked files.
 
 `npm run dev` builds and launches the static application at
 `sliver://app/index.html`, using the production content security policy.
-It also builds the host RDP helper from the pinned IronRDP fork. Ordinary
-TypeScript builds and unit tests do not require compiling Rust.
+It also builds the host RDP helper from the pinned IronRDP fork and stages the
+checksum-pinned Beagle release for this machine. Ordinary TypeScript builds and
+unit tests do not require compiling Rust or downloading Beagle.
 Restart the command after source changes; this workflow does not use HMR.
 
 The TypeScript client is installed from the pinned `sliver-script` npm package.
@@ -130,6 +131,10 @@ sharing, the Monaco editor, platform transparency support, and runtime limits.
 | `npm run build:rdp:host` | Build and verify the RDP helper for this machine. |
 | `npm run build:rdp` | Build the RDP packaging target, including both macOS slices. |
 | `npm run test:rdp:native` | Run the Rust runtime tests. |
+| `npm run build:beagle:host` | Download, stage, and verify the pinned Beagle release for this machine. |
+| `npm run build:beagle` | Prepare bundled Beagle for packaging, including both macOS slices. |
+| `npm run test:beagle:loader` | Exercise bundled Beagle through the real Electron ASAR loader. |
+| `npm run test:e2e:beagle:bundled` | Open AD Explorer with fresh settings and query bundled Beagle. |
 | `npm run package` | Create an unpacked application under `release/`. |
 | `npm run dist` | Create platform installers under `release/`. |
 | `npm run test:e2e:packaged` | Verify and test an existing unpacked application against a local fixture. |
@@ -160,6 +165,11 @@ license inventory before packaging. Generated output under `dist/`, `release/`,
 `native/sliver-console/`, and `.e2e-dist/` is ignored by Git.
 The generated RDP executables, provenance, and Cargo license inventory under
 `native/rdp/bin/` are also ignored. The helper source and lockfile are tracked.
+Beagle release archives are pinned in `protocol/beagle-provenance.json` and
+downloaded during native build preparation. Its generated executable, provenance,
+and license inventory under `native/beagle/bin/` are ignored, as is the generated
+`native/beagle/packaged-provenance.json` ASAR trust anchor. Universal macOS builds
+combine the verified Intel and Apple Silicon release executables with `lipo`.
 
 ## Packages and updates
 
@@ -219,3 +229,95 @@ Sliver GUI is licensed under [GPL-3.0-or-later](LICENSE). Third-party components
 including HeroUI Pro, retain their own terms. See the
 [licensing notes](LICENSES/LICENSING.md) for attribution and distribution
 constraints.
+
+
+### Active Directory Explorer (Beagle)
+
+Open **Data → AD Explorer** in the main workspace to collect from Windows
+sessions and beacons. Targets are grouped by Windows domain; the selected
+active Windows session can suggest its `USERDNSDOMAIN`, which the operator can
+edit before collecting. The first choice on Windows/amd64 is the exact signed
+[sliverarmory RustHound-CE](https://github.com/sliverarmory/RustHound-CE)
+DLL when installed through Armory. Release v2.5.30 supports the target's
+current Windows logon, with optional explicit AD credentials. It collects into
+target memory through Reflektor, returns bounded chunks, and does not create a
+target-side output file. The other verified choices are the exact
+[SharpHound CE v2.17.1](https://github.com/SpecterOps/SharpHound/releases/tag/v2.17.1)
+executable and its `Invoke-BloodHound` PowerShell script, selected through the
+native picker. An installed Armory alias appears only when its executable has
+the same verified digest. Legacy SharpHound3/4 aliases are excluded. Advanced
+choices allow an operator-supplied SharpHound-compatible `.exe` or
+`Invoke-BloodHound` `.ps1`. These use fixed collection options, and Beagle
+validates their output before reporting an import. Select a collection method
+and run it. The GUI saves the resulting ZIP privately under
+`~/.sliver-client/gui/ad-explorer/collections/<domain>/`, imports it into a
+domain project, and opens the standalone AD Explorer window. The collector
+is supplied through Armory or selected by the operator and is not bundled with
+the GUI. RustHound transfers ZIPs up to 64 MiB in bounded chunks for sessions
+and beacons. SharpHound session downloads support ZIPs under 64 MiB; its beacon
+downloads are limited to 12 MiB by the current Sliver client RPC channel.
+Generated SharpHound target ZIPs are removed after a verified local save when
+possible. SharpHound requires a domain user context on the target; see its
+[upstream usage guide](https://github.com/SpecterOps/SharpHound).
+
+Open **View → AD Explorer** for a standalone local AD workspace. Create a project,
+choose **Import data** to load SharpHound ZIP/JSON collections, then search entities,
+run parameterized Cypher or a built-in BloodHound query, and inspect the React Flow
+graph or table results. Object details support owned/tier-zero tags, relationship
+expansion and path endpoints; relationship details expose Beagle's composition
+workflow. Custom queries are saved per project, and **Export graph** writes the
+complete canonical graph through a native save dialog.
+
+[Beagle](https://github.com/sliverarmory/Beagle) is bundled with native packages
+and available automatically. The application verifies its pinned provenance,
+executable identity, and helper protocol before launching it. Downloads happen
+during build preparation; the installed application uses its bundled executable.
+
+To use a custom Beagle build with the `helper-stdio` subcommand, choose it in
+the window's runtime settings. The selection pins its SHA-256, checked before
+every helper launch. Select it again after intentionally upgrading that file;
+existing unpinned saved paths also require reselection. Alternatively, configure
+both `SLIVER_BEAGLE_BINARY` (an absolute path) and `SLIVER_BEAGLE_SHA256` (the expected
+SHA-256). Explicit overrides retain their verification requirements. There is no
+automatic PATH search.
+
+Project databases live under Electron's user-data directory in `beagle/`; imports
+merge into the selected project and run analysis. Use a new project for a separate
+dataset. Cypher is read-only; the desktop bridge also blocks file-loading and
+dynamic-query functions so queries cannot bypass native file selection. Queries have a 30-second backend timeout and a
+40-second request deadline; imports/analysis have a five-minute deadline. One
+persistent helper holds the selected project's database and receives typed JSON
+requests over stdin. Project changes stop the previous helper before opening the
+next database. A deadline or protocol failure terminates the helper; interrupted
+mutations are never automatically replayed. Display
+limits are 5,000 rows, 1,500 nodes and 3,000 relationships, with visible truncation.
+The backend response ceiling is 32 MiB, including exports.
+
+Run the real helper integration test with synthetic collection data:
+
+```sh
+npm run build:beagle:host
+SLIVER_BEAGLE_E2E_BINARY=/absolute/path/to/beagle npm run test:beagle:helper
+```
+
+Use the prepared `native/beagle/bin/beagle` (`beagle.exe` on Windows) or an
+explicit custom build. CI exercises the prepared helper without private data.
+After preparing the helper, `npm run test:e2e:beagle:bundled` opens a fresh
+AD Explorer window without a runtime setup prompt and executes a local query.
+Its screenshot is written to `artifacts/e2e/beagle-bundled.png`.
+
+Run focused native validation with an existing private GOAD collection:
+
+```sh
+SLIVER_BEAGLE_E2E_BINARY=/absolute/path/to/beagle \
+SLIVER_BEAGLE_E2E_COLLECTION=/absolute/path/to/goad.zip \
+npm run test:e2e:beagle
+```
+
+See [the implementation plan](docs/beagle-implementation-plan.md) and
+[compatibility evidence and reproduction instructions](docs/beagle-verification.md).
+The [AD collector compatibility record](docs/ad-collector-compatibility.md) lists
+the verified default, advanced operator choices, and other collectors considered.
+The [persistent helper architecture](docs/beagle-helper.md) describes its protocol,
+executable trust, environment and lifecycle.
+The private lab collection and generated databases are excluded from version control.

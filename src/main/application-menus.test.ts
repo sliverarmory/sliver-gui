@@ -197,7 +197,7 @@ describe("configured native shortcuts", () => {
   it("shows the configured accelerators while preserving trusted menu callbacks", () => {
     const actions = {
       newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), openCloudDeployment: vi.fn(),
-      openNetwork: vi.fn(), openArmory: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
+      openNetwork: vi.fn(), openArmory: vi.fn(), openBeagle: vi.fn(), openDocumentation: vi.fn(), showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(), restartToApplyApplicationUpdate: vi.fn(),
     };
     const terminal = { newTab: vi.fn(), closeTab: vi.fn(), selectTab: vi.fn(), closeWindow: vi.fn(), showSettings: vi.fn() };
@@ -223,7 +223,7 @@ describe("application menu templates", () => {
     const reportScreenshot = vi.fn();
     const actions = {
       newWindow: vi.fn(), duplicateConnectedWindow: vi.fn(), reportScreenshot,
-      openCloudDeployment: vi.fn(), openArmory: vi.fn(), openNetwork: vi.fn(),
+      openCloudDeployment: vi.fn(), openArmory: vi.fn(), openBeagle: vi.fn(), openNetwork: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(), downloadRelease: vi.fn(), checkForApplicationUpdates: vi.fn(),
       restartToApplyApplicationUpdate: vi.fn(),
@@ -247,7 +247,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -267,6 +267,10 @@ describe("application menu templates", () => {
       "Window",
       "Help",
     ]);
+    const beagleItem = menuItems(template, "View").find((item) => item.id === "beagle.open");
+    expect(beagleItem).toMatchObject({ label: "AD Explorer" });
+    clickItem(beagleItem!);
+    expect(actions.openBeagle).toHaveBeenCalledExactlyOnceWith();
     const armoryItems = menuItems(template, "Armory");
     expect(armoryItems.map((item) => item.id).filter(Boolean)).toEqual(["armory.manage", "armory.install", "armory.sources"]);
     expect(armoryItems[0]).toMatchObject({ label: "Manage" });
@@ -312,7 +316,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork,
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -366,7 +370,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment,
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -527,7 +531,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel,
       downloadRelease: vi.fn(),
@@ -551,7 +555,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -652,7 +656,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease,
@@ -722,7 +726,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),
@@ -776,7 +780,7 @@ describe("application menu templates", () => {
       duplicateConnectedWindow: vi.fn(),
       openCloudDeployment: vi.fn(),
       openNetwork: vi.fn(),
-      openArmory: vi.fn(),
+      openArmory: vi.fn(), openBeagle: vi.fn(),
       openDocumentation: vi.fn(),
       showAboutPanel: vi.fn(),
       downloadRelease: vi.fn(),

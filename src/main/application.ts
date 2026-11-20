@@ -1,6 +1,14 @@
+import type { AdCollectorLifecycle } from "./ad-explorer-ipc.js";
+import { AdCollectionStore } from "./ad-collection-store.js";
 import { GhosttyConfigStore } from "./ghostty-config.js";
 import { registerGhosttySettingsIpc } from "./ghostty-settings-ipc.js";
 import { ARMORY_IPC_EVENTS, type ArmoryTabId } from "../shared/armory-contracts.js";
+import { BeaglePostCommitError, BeagleService, type BeagleServiceWorkspace } from "./beagle-service.js";
+import { parseAdExplorerOpenInput, type AdExplorerOpenInput } from "../shared/ad-explorer-contracts.js";
+import { registerBeagleIpcHandlers, unregisterBeagleIpcHandlers } from "./beagle-ipc.js";
+import { BEAGLE_IPC_EVENTS } from "../shared/beagle-contracts.js";
+import { registerAdExplorerIpcHandlers, unregisterAdExplorerIpcHandlers } from "./ad-explorer-ipc.js";
+import { BEAGLE_SESSION_PARTITION, beagleWindowOptions } from "./window-options.js";
 import { ArmoryService } from "./armory-service.js";
 import { registerArmoryIpcHandlers, unregisterArmoryIpcHandlers } from "./armory-ipc.js";
 import { ARMORY_SESSION_PARTITION, armoryWindowOptions } from "./window-options.js";
@@ -98,6 +106,7 @@ import { TextEditorSettingsStore } from "./text-editor-settings.js";
 import { RdpWindows, type RdpRuntimeFactory } from "./rdp-windows.js";
 import { RdpStore } from "./rdp-store.js";
 import { resolveVerifiedRdpRuntime } from "./rdp-runtime-loader.js";
+import { resolveVerifiedBeagleRuntime } from "./beagle-runtime-loader.js";
 import { RDP_SESSION_PARTITION } from "./window-options.js";
 import { ApplicationIconController } from "./application-icon.js";
 import { createSystemIconAppearance } from "./system-icon-appearance.js";
@@ -191,6 +200,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 type NativeWindowSurface =
+  | "beagle"
   | "armory"
   | "workspace"
   | "cloud-deployment"
@@ -210,6 +220,8 @@ export interface StartApplicationOptions {
   cloudDeploymentPreloadPath?: string;
   networkPreloadPath?: string;
   armoryPreloadPath?: string;
+  beaglePreloadPath?: string;
+  beagleRuntimeRootDirectory?: string;
   sshPreloadPath?: string;
   textEditorPreloadPath?: string;
   rdpPreloadPath?: string;
@@ -346,6 +358,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     mainBundleDirectory,
     "../preload/cloud-deployment.cjs",
   );
+  const beaglePreloadPath = options.beaglePreloadPath ?? join(mainBundleDirectory, "../preload/beagle.cjs");
   const armoryPreloadPath = options.armoryPreloadPath ?? join(mainBundleDirectory, "../preload/armory.cjs");
   const networkPreloadPath = options.networkPreloadPath ?? join(
     mainBundleDirectory,
@@ -366,6 +379,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     ".sliver-client",
   ));
   const registry = options.registry ?? new ConnectionRegistry({
+    clientRootDirectory: consoleClientRootDirectory,
     savedConfigDirectory: join(consoleClientRootDirectory, "configs"),
     managedConfigDirectory: join(consoleClientRootDirectory, "gui"),
   });
@@ -376,6 +390,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let workspaceZoomSettings: WorkspaceZoomSettings | undefined;
   const zoomReadyWorkspaceContents = new Set<number>();
   const cloudDeploymentRendererUrl = rendererUrlForSurface(rendererUrl, "cloud-deployment");
+  const beagleRendererUrl = rendererUrlForSurface(rendererUrl, "beagle");
+  const beagleService = new BeagleService({
+    userDataPath: app.getPath("userData"),
+    collectionRootPath: join(consoleClientRootDirectory, "gui", "ad-explorer", "collections"),
+    resolveBundledRuntime: () => resolveVerifiedBeagleRuntime({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      developmentRoot: options.beagleRuntimeRootDirectory ?? resolve(mainBundleDirectory, "../.."),
+    }),
+  });
+  const beagleWorkspaces = new Map<BrowserWindow, BeagleServiceWorkspace>();
+  let lastFocusedBeagleWindow: BrowserWindow | undefined;
+  let pendingBeagleOpen: Promise<void> = Promise.resolve();
   const armoryRendererUrl = rendererUrlForSurface(rendererUrl, "armory");
   const armoryService = new ArmoryService({ rootPath: consoleClientRootDirectory });
   let armoryWindow: BrowserWindow | undefined;
@@ -428,6 +455,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   let cloudDeploymentMenuRefreshSequence = 0;
   let unsubscribeCloudDeployment: (() => void) | undefined;
   let cloudDeploymentDisposed = false;
+  let adCollectorLifecycle: AdCollectorLifecycle | undefined;
   const shutdown = new ApplicationShutdownCoordinator({
     stopReleaseDownloads: () => {
       releaseDownloader?.stop();
@@ -486,7 +514,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
 
   async function loadRenderer(
     window: BrowserWindow,
-    surface?: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh",
+    surface?: "beagle" | "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh",
   ): Promise<void> {
     const url = new URL(rendererUrl);
     if (surface) url.searchParams.set("surface", surface);
@@ -530,7 +558,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     hardenWindow(
       window,
       rendererUrl,
-      surface === "armory"
+      surface === "beagle"
+        ? beagleRendererUrl
+        : surface === "armory"
         ? armoryRendererUrl
         : surface === "cloud-deployment"
         ? cloudDeploymentRendererUrl
@@ -715,6 +745,19 @@ export async function startApplication(options: StartApplicationOptions = {}): P
         });
       });
     }
+    let closingAfterCollection = false;
+    window.on("close", (event) => {
+      if (nativeWindowSurfaces.get(window) !== "workspace" || !adCollectorLifecycle?.hasActive(contentsId)) return;
+      event.preventDefault();
+      if (closingAfterCollection) return;
+      closingAfterCollection = true;
+      const cleanup = adCollectorLifecycle.cancelAndWait(contentsId).finally(() => {
+        closingAfterCollection = false;
+        if (isQuitRequested) app.quit();
+        else if (!window.isDestroyed()) window.close();
+      });
+      trackPendingCleanup(cleanup);
+    });
     window.on("closed", () => {
       shortcutRecordingWindows.delete(window);
       windows.delete(window);
@@ -785,9 +828,73 @@ export async function startApplication(options: StartApplicationOptions = {}): P
     return window;
   }
 
+  function openBeagleWindow(input?: AdExplorerOpenInput): Promise<void> {
+    const request = input === undefined ? undefined : parseAdExplorerOpenInput(input);
+    const opening = pendingBeagleOpen.then(() => createOrFocusBeagleWindow(request));
+    pendingBeagleOpen = opening.catch(() => undefined);
+    return opening;
+  }
+
+  async function createOrFocusBeagleWindow(input?: AdExplorerOpenInput): Promise<void> {
+    if (shutdown.isStopping) throw new Error("AD Explorer is closing");
+    if (input && !(await beagleService.listCollections()).some((project) => project.id === input.projectId)) {
+      throw new Error("This AD Explorer collection is no longer available");
+    }
+    if (shutdown.isStopping) throw new Error("AD Explorer is closing");
+    const available = [...beagleWorkspaces.entries()].filter(([window]) => !window.isDestroyed() && !window.webContents.isDestroyed());
+    const existing = input
+      ? available.find(([, workspace]) => workspace.getSelectedProjectId() === input.projectId)?.[0]
+      : available.find(([window]) => window === lastFocusedBeagleWindow)?.[0] ?? available[0]?.[0];
+    if (existing) {
+      if (existing.isMinimized()) existing.restore();
+      existing.show();
+      existing.focus();
+      return;
+    }
+    let createdWindow: BrowserWindow | undefined;
+    const workspace = beagleService.createWorkspace(input?.projectId);
+    try {
+      const window = new BrowserWindow(beagleWindowOptions(
+        beaglePreloadPath, process.platform, applicationIcons.getIconPath(), nativeTheme.shouldUseDarkColors,
+      ));
+      createdWindow = window;
+      beagleWorkspaces.set(window, workspace);
+      window.on("focus", () => { lastFocusedBeagleWindow = window; });
+      window.on("closed", () => {
+        beagleWorkspaces.delete(window);
+        if (lastFocusedBeagleWindow === window) lastFocusedBeagleWindow = undefined;
+        trackPendingCleanup(workspace.dispose());
+      });
+      window.webContents.on("did-finish-load", () => { if (!window.isDestroyed()) window.setTitle("AD Explorer"); });
+      window.webContents.on("render-process-gone", () => { if (!window.isDestroyed()) window.destroy(); });
+      trackWindow(window, undefined, undefined, undefined, undefined, "beagle", false);
+      await loadRenderer(window, "beagle");
+      if (window.isDestroyed() || window.webContents.isDestroyed()) throw new Error("AD Explorer window closed during loading");
+    } catch {
+      if (createdWindow) beagleWorkspaces.delete(createdWindow);
+      if (createdWindow && !createdWindow.isDestroyed()) createdWindow.destroy();
+      await workspace.dispose();
+      throw new Error("The AD Explorer window could not be opened");
+    }
+  }
+
+  function publishBeagleCollectionImported(projectId: string): void {
+    if (shutdown.isStopping) return;
+    for (const [window, workspace] of beagleWorkspaces) {
+      if (workspace.getSelectedProjectId() !== projectId || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try { window.webContents.send(BEAGLE_IPC_EVENTS.collectionImported); } catch { /* Closing renderer. */ }
+    }
+  }
+
   function publishArmoryChanged(): void {
-    if (shutdown.isStopping || !armoryWindow || armoryWindow.isDestroyed() || armoryWindow.webContents.isDestroyed()) return;
-    try { armoryWindow.webContents.send(ARMORY_IPC_EVENTS.changed); } catch { /* Closing renderer. */ }
+    if (shutdown.isStopping) return;
+    if (armoryWindow && !armoryWindow.isDestroyed() && !armoryWindow.webContents.isDestroyed()) {
+      try { armoryWindow.webContents.send(ARMORY_IPC_EVENTS.changed); } catch { /* Closing renderer. */ }
+    }
+    for (const window of windowsByContentsId.values()) {
+      if (nativeWindowSurfaces.get(window) !== "workspace" || window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      try { window.webContents.send(IPC.adCollectorsChanged); } catch { /* Closing renderer. */ }
+    }
   }
 
   async function openArmoryWindow(tab: ArmoryTabId): Promise<void> {
@@ -2386,6 +2493,9 @@ export async function startApplication(options: StartApplicationOptions = {}): P
           });
         },
         openCloudDeployment: (request) => void openCloudDeploymentWindow(request),
+        openBeagle: () => void openBeagleWindow().catch((error: unknown) => {
+          if (!shutdown.isStopping) dialog.showErrorBox("AD Explorer unavailable", error instanceof Error ? error.message : "The AD Explorer window could not be opened");
+        }),
         openArmory: (tab) => void openArmoryWindow(tab),
         openNetwork: (tab, sourceWindow) => {
           void openNetworkWindow(
@@ -2500,6 +2610,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       const rdpCleanup = rdpWindows?.dispose();
       if (rdpCleanup) trackPendingCleanup(rdpCleanup);
       armoryService.dispose();
+      trackPendingCleanup(beagleService.dispose());
       const sshCleanup = sshSessions?.dispose();
       if (sshCleanup) {
         const cleanup = sshCleanup.finally(disposeCloudDeployment);
@@ -3049,13 +3160,15 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   configureSessionSecurity(cloudDeploymentSession);
   const networkSession = session.fromPartition(NETWORK_SESSION_PARTITION);
   configureSessionSecurity(networkSession);
+  const beagleSession = session.fromPartition(BEAGLE_SESSION_PARTITION);
+  configureSessionSecurity(beagleSession);
   const armorySession = session.fromPartition(ARMORY_SESSION_PARTITION);
   configureSessionSecurity(armorySession);
   const textEditorSession = session.fromPartition(TEXT_EDITOR_SESSION_PARTITION);
   configureSessionSecurity(textEditorSession, undefined, textEditorRendererUrl);
   const rdpSession = session.fromPartition(RDP_SESSION_PARTITION);
   configureSessionSecurity(rdpSession, undefined, rdpRendererUrl);
-  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, textEditorSession, rdpSession]);
+  const appProtocolSessions = new Set([session.defaultSession, cloudDeploymentSession, networkSession, armorySession, beagleSession, textEditorSession, rdpSession]);
   for (const rendererSession of appProtocolSessions) {
     rendererSession.protocol.handle(
       APP_SCHEME,
@@ -3248,6 +3361,35 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       approveHostKey: approveManagedSshHostKey,
     },
   );
+  registerBeagleIpcHandlers({
+    getManager: (window) => beagleWorkspaces.get(window),
+    getApplicationSettings: () => loadedApplicationSettingsStore.getState(),
+  }, beagleRendererUrl, (identity, window) =>
+    !shutdown.isStopping && beagleWorkspaces.has(window) && nativeWindowSurfaces.get(window) === "beagle" &&
+    sameWindowIdentity(identity, identityForWindow(window)),
+  );
+  adCollectorLifecycle = registerAdExplorerIpcHandlers({
+    registry,
+    artifacts: new AdCollectionStore(join(consoleClientRootDirectory, "gui", "ad-explorer", "collections")),
+    revealCollectedFile: (path) => shell.showItemInFolder(path),
+    listCollections: () => beagleService.listCollections(),
+    importCollectedData: async (input) => {
+      try {
+        const imported = await beagleService.importCollectedData(input);
+        publishBeagleCollectionImported(imported.state.selectedProjectId);
+        return { projectId: imported.state.selectedProjectId };
+      } catch (error) {
+        if (error instanceof BeaglePostCommitError && error.projectId) publishBeagleCollectionImported(error.projectId);
+        throw error;
+      }
+    },
+    openBeagleWindow,
+    openAdCollectorArmory: () => openArmoryWindow("install"),
+  }, rendererUrl, (identity, window) =>
+    !shutdown.isStopping && nativeWindowSurfaces.get(window) === "workspace" &&
+    windowsByContentsId.get(identity.contentsId) === window &&
+    sameWindowIdentity(identity, identityForWindow(window)),
+  );
   registerArmoryIpcHandlers({
     manager: armoryService,
     writeClipboardText: (text) => clipboard.writeText(text),
@@ -3332,6 +3474,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       await rdpWindows.openFiles(paths);
     },
     async stop(): Promise<void> {
+      await adCollectorLifecycle?.cancelAndWait();
       captureWorkspaceZoom(BrowserWindow.getFocusedWindow());
       beginShutdown();
       // A real application quit keeps the updater subscription alive through
@@ -3353,6 +3496,8 @@ export async function startApplication(options: StartApplicationOptions = {}): P
       unregisterCloudDeploymentIpcHandlers();
       unregisterNetworkForwardingIpcHandlers();
       unregisterArmoryIpcHandlers();
+      unregisterAdExplorerIpcHandlers();
+      unregisterBeagleIpcHandlers();
       unregisterSshIpcHandlers();
       textEditorWindows?.dispose();
       await rdpWindows?.dispose();
@@ -3406,7 +3551,7 @@ function readLinuxPackageType(): string | undefined {
 
 function rendererUrlForSurface(
   rendererUrl: string,
-  surface: "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor" | "rdp",
+  surface: "beagle" | "armory" | "cloud-deployment" | "console" | "interaction" | "managed-shells" | "session-panel" | "network" | "ssh" | "text-editor" | "rdp",
 ): string {
   const url = new URL(rendererUrl);
   url.searchParams.set("surface", surface);

@@ -89,6 +89,24 @@ Windows host, desktop/input/clipboard behavior, and complete disconnect and
 process cleanup. The current developer-host universal build and self-tests
 are local evidence only; Rosetta execution does not certify native Intel.
 
+## AD Explorer
+
+The bundled Beagle helper supports the same four execution targets. GUI native
+preparation downloads the release archives pinned by
+`protocol/beagle-provenance.json`, validates their checksums and build provenance,
+and combines the two macOS slices into a universal executable. Windows uses
+Beagle's GNU x64 build with statically linked POSIX compatibility libraries.
+Linux uses the GNU x64 build produced on Ubuntu 22.04. Native dependency notices
+are retained separately for each target.
+
+The ASAR contains Beagle's source manifest and expected build record. Package
+checks verify the external helper before signing and after packaging, and the
+runtime loader verifies it before starting a project. Each package CI lane runs
+the actual Electron ASAR loader and synthetic helper integration tests; the
+Intel lane also prepares and executes the universal helper. These checks do not
+certify the minimum installed-runtime lanes or BloodHound compatibility. Tests
+requiring private collections remain explicitly configured local checks.
+
 ## Required evidence and CI policy
 
 Each matrix lane must retain or report:

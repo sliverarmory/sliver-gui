@@ -1,3 +1,4 @@
+import { BeagleWindowApp } from "./BeagleWindowApp";
 import { ArmoryWindowApp } from "./ArmoryWindowApp";
 import React from "react";
 import ReactDOM from "react-dom/client";
@@ -41,6 +42,11 @@ function RendererSurface(): React.JSX.Element {
 }
 
 function ApplicationRoot(): React.JSX.Element {
+  if (surface === "beagle") {
+    return window.beagle ? <ApplicationSettingsProvider api={window.beagle}>
+      <BeagleWindowApp />
+    </ApplicationSettingsProvider> : <BeagleWindowApp />;
+  }
   if (surface === "rdp") {
     return window.rdp ? <ApplicationSettingsProvider api={window.rdp}>
       <RdpWindowApp />

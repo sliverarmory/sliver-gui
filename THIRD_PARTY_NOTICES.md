@@ -13,7 +13,7 @@ Maxime Gris, and were provided under the MIT License. The MIT license text is
 reproduced in `LICENSES/MIT.txt`; that attribution does not change the license
 of the combined Sliver GUI application.
 
-The application bundles `sliver-script` version 2.0.0-rc.5, the TypeScript
+The application bundles `sliver-script` version 2.0.0-rc.6, the TypeScript
 client for the Sliver Implant Framework, copyright Bishop Fox. It is
 distributed under GPL-3.0-or-later. Native packages retain the exact published
 npm package's license, source, build metadata, and protobuf/integration locks
@@ -28,6 +28,15 @@ upstream Ghostty submodule commit, runtime size, and SHA-256 are pinned in
 available in `LICENSES/MIT.txt`, the retained package license, and the generated
 `dist/THIRD_PARTY_LICENSES.txt` shipped with native packages. Source:
 https://github.com/coder/ghostty-web
+
+AD Explorer bundles Beagle under the Apache License 2.0. Its release archive,
+source revision, and checksums are pinned in `protocol/beagle-provenance.json`.
+The application retains Beagle's `LICENSE`, `THIRD_PARTY_NOTICES.md`, and dependency
+license files under `resources/beagle/licenses/<target>/`, including the notices for its statically
+linked GraphQLite, PCRE2, and SQLite components. Windows builds additionally retain
+the notices for the static POSIX compatibility libraries. Beagle's matching GitHub
+release provides its source and Windows dependency source archive with rebuild
+instructions. Source and releases: https://github.com/sliverarmory/Beagle
 
 The Text Editor bundles Monaco Editor 0.56.0, copyright Microsoft Corporation,
 distributed under the MIT License. Its exact package integrity is retained in
@@ -86,7 +95,7 @@ repository at the matching version tag together with the retained source for
 the exact published `sliver-script` package:
 
 https://github.com/sliverarmory/sliver-gui
-https://github.com/sliverarmory/sliver-script/tree/v2.0.0-rc.5
+https://github.com/sliverarmory/sliver-script/tree/v2.0.0-rc.6
 
 GitHub release pages provide source archives for the matching tag alongside
 the native application packages. Build instructions are in `README.md`.

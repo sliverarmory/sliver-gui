@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "protocolVersion": 1,
+  "version": "0.1.1",
+  "source": {
+    "repository": "https://github.com/sliverarmory/Beagle",
+    "commit": "07291ddad29edf26e24df0a636bd5c3948b63ce0",
+    "tree": "2380cb85d715cd5962fc38ae1575200907b23b29"
+  },
+  "toolchain": {
+    "rust": "1.94.1"
+  },
+  "release": {
+    "tag": "v0.1.1",
+    "manifestSha256": "ddf57b6db641d358ccc6b516c07339c2817285a1b2a9d186a11cfdbaaa3d02f7",
+    "assets": [
+      {
+        "target": "aarch64-apple-darwin",
+        "fileName": "beagle-0.1.1-aarch64-apple-darwin.tar.gz",
+        "url": "https://github.com/sliverarmory/Beagle/releases/download/v0.1.1/beagle-0.1.1-aarch64-apple-darwin.tar.gz",
+        "sha256": "58207dafbf578dc07b15bebda2442025b973bb08e599d4d512fa32fb0711f9cf",
+        "binarySha256": "602e739cbdfbedeff947b85fd18506152b71365711b68dbb8841469f46219ba7"
+      },
+      {
+        "target": "x86_64-apple-darwin",
+        "fileName": "beagle-0.1.1-x86_64-apple-darwin.tar.gz",
+        "url": "https://github.com/sliverarmory/Beagle/releases/download/v0.1.1/beagle-0.1.1-x86_64-apple-darwin.tar.gz",
+        "sha256": "26e7ccc4bb1a38ef61a3fb7f79600c2a050d028fc4e448874efe22e68c852c0a",
+        "binarySha256": "3ea3dbf315ff3710bbc63ef893dea844d2d6acf4a16c719b1ce3f837298c4c15"
+      },
+      {
+        "target": "x86_64-pc-windows-gnu",
+        "fileName": "beagle-0.1.1-x86_64-pc-windows-gnu.zip",
+        "url": "https://github.com/sliverarmory/Beagle/releases/download/v0.1.1/beagle-0.1.1-x86_64-pc-windows-gnu.zip",
+        "sha256": "a44d3c5049930d0d431839e9696b58bbd8c98873c58ebcc247818ad3279bcf01",
+        "binarySha256": "cc6e6a3d82ef3181adacb786e17aa79e8db6f3fa607a5ce1bb3b70618156b048"
+      },
+      {
+        "target": "x86_64-unknown-linux-gnu",
+        "fileName": "beagle-0.1.1-x86_64-unknown-linux-gnu.tar.gz",
+        "url": "https://github.com/sliverarmory/Beagle/releases/download/v0.1.1/beagle-0.1.1-x86_64-unknown-linux-gnu.tar.gz",
+        "sha256": "8ec87aa79037215c618a2b8619a84ac8dbb6e1f80de3a01de663d28f1f9fa3e7",
+        "binarySha256": "9b27e590253b3b375dea15a626b9ef6c81fc11580cf4862e716054818ae99bc3"
+      }
+    ]
+  }
+}

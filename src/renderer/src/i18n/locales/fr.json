@@ -316,6 +316,10 @@
       "label": "Beacons",
       "description": "Consultez les beacons asynchrones."
     },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Collectez et explorez les données d’Active Directory."
+    },
     "loot": {
       "label": "Fichiers collectés",
       "description": "Consultez les fichiers collectés."

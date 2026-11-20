@@ -78,6 +78,7 @@ import type {
   SaveExecutionResultResult,
 } from "./execution-contracts.js";
 import type { DotNetCatalog } from "./dotnet-contracts.js";
+import type { AdCollectionSummary, AdCollectorCatalog, AdCollectorRunInput, AdCollectorRunResult, AdExplorerOpenInput, AdCollectorProgress, AdCollectorCancelInput, AdCollectionArtifact, AdCollectionArtifactInput } from "./ad-explorer-contracts.js";
 import type {
   AddBofOutputToLootInput,
   BofArgumentFileSelection,
@@ -230,6 +231,17 @@ export const IPC_INVOKE = {
   clearDotNetExecutionHistory: "sliver:dotnet:history:clear",
   listDotNetAssemblies: "sliver:dotnet:catalog",
   chooseDotNetAssemblyFile: "sliver:dotnet:choose-file",
+  listAdCollectors: "sliver:ad-explorer:collectors",
+  getAdTargetDomain: "sliver:ad-explorer:target-domain",
+  listAdCollections: "sliver:ad-explorer:collections",
+  runAdCollector: "sliver:ad-explorer:collect",
+  getAdCollectorProgress: "sliver:ad-explorer:progress:get",
+  cancelAdCollector: "sliver:ad-explorer:cancel",
+  listAdCollectionArtifacts: "sliver:ad-explorer:artifacts",
+  retryAdCollectionImport: "sliver:ad-explorer:import:retry",
+  revealAdCollection: "sliver:ad-explorer:artifact:reveal",
+  openBeagleWindow: "sliver:ad-explorer:open-window",
+  openAdCollectorArmory: "sliver:ad-explorer:open-armory",
   listInstalledBofs: "sliver:bof:catalog",
   chooseBofDirectory: "sliver:bof:choose-directory",
   chooseBofArgumentFile: "sliver:bof:choose-file",
@@ -247,6 +259,8 @@ export const IPC_STREAM = {
 } as const;
 
 export const IPC_EVENTS = {
+  adCollectorProgress: "sliver:ad-explorer:progress",
+  adCollectorsChanged: "sliver:ad-explorer:collectors-changed",
   savedConfigsChanged: "sliver:connection:saved-configs-changed",
   cloudDeploymentThemeChanged: "sliver:cloud-deployment:theme-changed",
   snapshotChanged: "sliver:snapshot:changed",
@@ -1223,6 +1237,17 @@ export type IpcInvokeContract = CompleteIpcInvokeContract<{
   [IPC.clearDotNetExecutionHistory]: { args: [input: ClearDotNetExecutionHistoryInput]; result: OperationResult };
   [IPC.listDotNetAssemblies]: { args: []; result: OperationResult<DotNetCatalog> };
   [IPC.chooseDotNetAssemblyFile]: { args: []; result: OperationResult<DotNetFileSelection | null> };
+  [IPC.listAdCollectors]: { args: [target: TargetRef]; result: OperationResult<AdCollectorCatalog> };
+  [IPC.getAdTargetDomain]: { args: [target: TargetRef]; result: OperationResult<{ domain?: string }> };
+  [IPC.listAdCollections]: { args: []; result: OperationResult<AdCollectionSummary[]> };
+  [IPC.runAdCollector]: { args: [input: AdCollectorRunInput]; result: OperationResult<AdCollectorRunResult> };
+  [IPC.getAdCollectorProgress]: { args: []; result: OperationResult<AdCollectorProgress | null> };
+  [IPC.cancelAdCollector]: { args: [input: AdCollectorCancelInput]; result: OperationResult };
+  [IPC.listAdCollectionArtifacts]: { args: []; result: OperationResult<AdCollectionArtifact[]> };
+  [IPC.retryAdCollectionImport]: { args: [input: AdCollectionArtifactInput]; result: OperationResult<AdCollectorRunResult> };
+  [IPC.revealAdCollection]: { args: [input: AdCollectionArtifactInput]; result: OperationResult };
+  [IPC.openBeagleWindow]: { args: [input?: AdExplorerOpenInput]; result: OperationResult };
+  [IPC.openAdCollectorArmory]: { args: []; result: OperationResult };
   [IPC.listInstalledBofs]: { args: []; result: OperationResult<BofCatalog> };
   [IPC.chooseBofDirectory]: { args: []; result: OperationResult<BofDirectorySelection | null> };
   [IPC.chooseBofArgumentFile]: { args: [input: ChooseBofArgumentFileInput]; result: OperationResult<BofArgumentFileSelection | null> };
@@ -1255,6 +1280,8 @@ export type SliverDesktopAPI = SliverDesktopInvokeAPI & {
     input: SessionDroppedUploadInput,
   ) => Promise<OperationResult<SessionWorkbenchInvocationResult>>;
   onSavedConfigsChanged: (listener: () => void) => () => void;
+  onAdCollectorsChanged: (listener: () => void) => () => void;
+  onAdCollectorProgress: (listener: (progress: AdCollectorProgress) => void) => () => void;
   /**
    * Transfer one narrow MessagePort capability to the trusted main process.
    * The port is delivered back to this document through a fixed window-message
@@ -1305,6 +1332,8 @@ export const SLIVER_DESKTOP_NON_INVOKE_API_KEYS = defineSliverDesktopNonInvokeAP
   "addDroppedLoot",
   "uploadDroppedSessionFile",
   "onSavedConfigsChanged",
+  "onAdCollectorsChanged",
+  "onAdCollectorProgress",
   "openStream",
   "openConsoleStream",
   "onSnapshotChanged",

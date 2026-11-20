@@ -55,6 +55,8 @@ files:
   - docs/rpc-message-budgets.md
   - protocol/ironrdp-provenance.json
   - native/rdp/packaged-provenance.json
+  - protocol/beagle-provenance.json
+  - native/beagle/packaged-provenance.json
 asarUnpack:
   - node_modules/node-pty/build/Release/**
 extraResources:
@@ -100,6 +102,16 @@ extraResources:
       - source-provenance.json
       - LICENSE
       - THIRD_PARTY_LICENSES.txt
+  - from: native/beagle/bin
+    to: beagle
+    filter:
+      - beagle
+      - beagle.exe
+      - provenance.json
+      - source-provenance.json
+      - LICENSE
+      - THIRD_PARTY_LICENSES.txt
+      - licenses/**
 extraMetadata:
   main: dist/main/index.js
 mac:

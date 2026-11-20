@@ -9,6 +9,7 @@ const PRELOAD_BRIDGES = Object.freeze({
   "navigation.cjs": [],
   "cloud-deployment.cjs": ["cloudDeployment", "applicationContextMenu"],
   "network.cjs": ["network", "applicationContextMenu"],
+  "beagle.cjs": ["beagle", "applicationContextMenu"],
   "armory.cjs": ["armory", "applicationContextMenu"],
   "ssh.cjs": ["ssh", "applicationContextMenu", "ghosttySettings"],
   "rdp.cjs": ["rdp", "applicationContextMenu"],

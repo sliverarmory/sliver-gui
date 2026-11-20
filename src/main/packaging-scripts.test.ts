@@ -21,7 +21,7 @@ describe("native distribution wiring", () => {
       beforePack: "scripts/stageNodePtyForElectron.mjs",
     });
     expect(packageJson.scripts["predist"]?.split(/\s*&&\s*/u)).toEqual([
-      "npm run build:rdp", "npm run build:licenses", "npm run prepare:node-pty", "npm run build:console",
+      "npm run build:rdp", "npm run build:beagle", "npm run build:licenses", "npm run prepare:node-pty", "npm run build:console",
       "npm run build", "npm run verify:release-content",
     ]);
     expect(packageJson.scripts["dist"]).toBe("electron-builder");

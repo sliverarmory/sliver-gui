@@ -270,6 +270,18 @@ describe("TargetStore", () => {
     expect(store.revalidateTargetRef(original!, 7)).toBeUndefined();
   });
 
+  it("keeps a live session reference valid when an unrelated beacon checks in", () => {
+    const store = new TargetStore({ now: () => NOW_MS });
+    store.replaceSessions([session({ ID: "selected", UUID: "host-a", FirstContact: "1700000000" })]);
+    const ref = store.createTargetRef("session", "selected", 7);
+    expect(ref).toBeDefined();
+    store.replaceBeacons([beacon({ ID: "new-beacon", UUID: "host-b", FirstContact: "1700000001" })]);
+    const latest = store.revalidateTargetRef(ref!, 7);
+    expect(latest?.target.id).toBe("selected");
+    expect(latest?.ref.fingerprint).toBe(ref?.fingerprint);
+    expect(latest?.target.mode).toBe("session");
+  });
+
   it("retains exact ActiveC2 only in the main-owned index while snapshots stay redacted", () => {
     const store = new TargetStore({ now: () => NOW_MS });
     const exact = "https://operator:secret@c2.example.test:8443/private?token=hidden#fragment";

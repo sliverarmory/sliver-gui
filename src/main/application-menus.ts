@@ -34,6 +34,7 @@ export interface ApplicationMenuActions {
   readonly duplicateConnectedWindow: () => void;
   readonly reportScreenshot?: () => void;
   readonly openCloudDeployment: (request?: CloudDeploymentNavigationRequest) => void;
+  readonly openBeagle: () => void;
   readonly openArmory: (tab: ArmoryTabId) => void;
   readonly openNetwork: (tab: NetworkTabId, sourceWindow?: BaseWindow) => void;
   readonly openDocumentation: () => void;
@@ -235,6 +236,8 @@ export function buildApplicationMenuTemplate(
     {
       label: "View",
       submenu: [
+        { id: "beagle.open", label: "AD Explorer", click: () => actions.openBeagle() },
+        { type: "separator" },
         { role: "reload" },
         { role: "forceReload" },
         { type: "separator" },

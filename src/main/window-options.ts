@@ -365,3 +365,26 @@ export function armoryWindowOptions(
 }
 
 export const ARMORY_SESSION_PARTITION = "sliver-armory";
+
+/** Local AD analysis with a dedicated sandbox and typed Beagle bridge. */
+export function beagleWindowOptions(
+  preload: string,
+  platform: NodeJS.Platform = process.platform,
+  icon?: string,
+  dark = true,
+): BrowserWindowConstructorOptions {
+  return {
+    width: 1440,
+    height: 920,
+    minWidth: 1000,
+    minHeight: 700,
+    show: false,
+    title: "AD Explorer",
+    backgroundColor: nativeWindowBackgroundColor(dark),
+    ...(platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
+    ...(platform !== "darwin" && icon ? { icon } : {}),
+    webPreferences: { ...secureWebPreferences(preload), partition: BEAGLE_SESSION_PARTITION },
+  };
+}
+
+export const BEAGLE_SESSION_PARTITION = "persist:sliver-beagle";

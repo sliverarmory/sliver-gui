@@ -316,6 +316,10 @@
       "label": "Beacons",
       "description": "Browse asynchronous beacons."
     },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Collect and explore Active Directory data."
+    },
     "loot": {
       "label": "Loot",
       "description": "Browse collected files."

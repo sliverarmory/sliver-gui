@@ -316,6 +316,10 @@
       "label": "ビーコン",
       "description": "非同期で動作するビーコンを表示します。"
     },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Active Directory のデータを収集して探索します。"
+    },
     "loot": {
       "label": "収集ファイル",
       "description": "収集したファイルを表示します。"
