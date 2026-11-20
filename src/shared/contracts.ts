@@ -348,6 +348,8 @@ export interface ManagedServerOverview {
   readonly cloud?: ManagedCloudOverview;
   /** Persisted redirectors linked to this managed server, not live probes. */
   readonly redirectors?: readonly import("./software-deployment-contracts.js").LocalRedirectorOverview[];
+  /** Saved dependent infrastructure in the same managed AWS VPC. */
+  readonly dependentDeployments?: readonly ManagedDependentDeploymentOverview[];
   readonly region: string;
   readonly size: string;
   readonly instanceId?: string;
@@ -361,6 +363,34 @@ export interface ManagedServerOverview {
   /** Time the local deployment record changed, not a live provider observation. */
   readonly updatedAt: string;
 }
+
+export type ManagedDependentDeploymentOverview = {
+  readonly kind: "crackstation";
+  readonly id: string;
+  readonly name: string;
+  readonly serverDeploymentId: string;
+  readonly status: string;
+  readonly phase: string;
+  readonly updatedAt: string;
+  readonly instanceId: string | null;
+  readonly instanceType: string;
+  readonly hostUuid: string | null;
+  readonly privateIpAddress: string | null;
+} | {
+  readonly kind: "alb-redirector";
+  readonly id: string;
+  readonly name: string;
+  readonly serverDeploymentId: string;
+  readonly status: string;
+  readonly phase: string;
+  readonly updatedAt: string;
+  readonly loadBalancerArn: string | null;
+  readonly dnsName: string | null;
+  readonly domain: string;
+  readonly backendPort: number;
+  readonly listenerJobId: number | null;
+  readonly targetHealth: string;
+};
 
 export interface ManagedServerReference {
   readonly deploymentId: string;

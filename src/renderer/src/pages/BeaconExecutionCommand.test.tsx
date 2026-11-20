@@ -3,6 +3,8 @@ import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { ExecutionActionPlan, ExecutionCapability, ExecutionCatalog, ExecutionOperationId } from "../../../shared/execution-contracts";
 import type { BeaconSummary, TargetRef } from "../../../shared/target-contracts";
@@ -67,13 +69,6 @@ function Harness({ expectedTarget = targetRef, onQueuedTask = () => undefined, s
   return <><button type="submit" form="beacon-execution-test" disabled={!state.isAvailable || state.isPending}>Queue task</button>
     <BeaconExecutionCommand expectedTarget={expectedTarget} targetIdentity={`backend:${expectedTarget.id}`} formId="beacon-execution-test" selection={selection} onQueuedTask={onQueuedTask} onStateChange={setState} /></>;
 }
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<T>((next, fail) => { resolve = next; reject = fail; });
-  return { promise, resolve, reject };
-}
-
 describe("beacon execution command", () => {
   it.each([
     ["execution.children", target],

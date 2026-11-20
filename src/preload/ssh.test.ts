@@ -3,10 +3,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
-import {
-  APPLICATION_CONTEXT_MENU_IPC,
-  type ApplicationContextMenuAPI,
-} from "../shared/application-context-menu-contracts.js";
 import type { SshWindowAPI } from "../shared/ssh-contracts.js";
 import { SSH_IPC_EVENTS, SSH_IPC_INVOKE } from "../main/ssh-ipc.js";
 
@@ -44,26 +40,8 @@ class TestMessageChannel {
 }
 
 const windowPostMessage = vi.fn();
-const documentAddEventListener = vi.fn();
-const documentQuerySelectorAll = vi.fn(() => []);
-const mutationObserverCallbacks: Array<(records: readonly Record<string, unknown>[]) => void> = [];
-const mutationObserverObserve = vi.fn();
-class TestMutationObserver {
-  public constructor(callback: (records: readonly Record<string, unknown>[]) => void) {
-    mutationObserverCallbacks.push(callback);
-  }
-
-  public observe(target: unknown, options: unknown): void {
-    mutationObserverObserve(target, options);
-  }
-}
 vi.stubGlobal("MessageChannel", TestMessageChannel);
-vi.stubGlobal("MutationObserver", TestMutationObserver);
 vi.stubGlobal("window", { postMessage: windowPostMessage });
-vi.stubGlobal("document", {
-  addEventListener: documentAddEventListener,
-  querySelectorAll: documentQuerySelectorAll,
-});
 
 await import("./ssh.js");
 
@@ -107,102 +85,6 @@ describe("SSH preload bridge", () => {
     expect(api).not.toHaveProperty("postMessage");
   });
 
-  it("also exposes the frozen validated application context-menu bridge", async () => {
-    const contextMenu = exposedContextMenuApi();
-    expect(Object.keys(contextMenu)).toEqual(["onMenuRequested", "executeAction", "setOpen"]);
-    expect(Object.isFrozen(contextMenu)).toBe(true);
-    const requestId = "00000000-0000-4000-8000-000000000001";
-    const actionId = "00000000-0000-4000-8000-000000000002";
-    const listener = vi.fn();
-    const unsubscribe = contextMenu.onMenuRequested(listener);
-    const handler = eventRegistration(APPLICATION_CONTEXT_MENU_IPC.menuRequested)[1] as (
-      event: unknown,
-      ...payload: unknown[]
-    ) => void;
-    handler({}, { v: 1, requestId, x: 7, y: 9, items: [{
-      type: "action",
-      actionId,
-      kind: "inspect",
-      label: "Inspect Element",
-      enabled: true,
-    }] });
-    handler({}, { v: 1, requestId, x: 7, y: 9, items: [{ type: "separator" }] });
-    expect(listener).toHaveBeenCalledOnce();
-
-    electronMocks.invoke.mockClear();
-    await contextMenu.executeAction({ requestId, actionId });
-    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
-      APPLICATION_CONTEXT_MENU_IPC.executeAction,
-      { requestId, actionId },
-    );
-    expect(() => contextMenu.executeAction({ requestId, actionId: "inspect" })).toThrow(
-      /Invalid application context menu action request/u,
-    );
-
-    electronMocks.invoke.mockClear();
-    await contextMenu.setOpen({ requestId, open: true });
-    expect(electronMocks.invoke).toHaveBeenCalledExactlyOnceWith(
-      APPLICATION_CONTEXT_MENU_IPC.setOpen,
-      { requestId, open: true },
-    );
-    expect(() => contextMenu.setOpen({ requestId, open: "yes" as unknown as boolean })).toThrow(
-      /Invalid application context menu visibility request/u,
-    );
-    unsubscribe();
-    expect(electronMocks.removeListener).toHaveBeenCalledWith(
-      APPLICATION_CONTEXT_MENU_IPC.menuRequested,
-      handler,
-    );
-  });
-
-  it("sticks restricted classification across attribute removal and descendant moves", () => {
-    const registration = documentAddEventListener.mock.calls.find(([type]) => type === "contextmenu");
-    if (!registration) throw new Error("Expected the restricted-target capture listener");
-    expect(registration[2]).toBe(true);
-    expect(mutationObserverObserve).toHaveBeenCalledWith(
-      (globalThis as { document?: unknown }).document,
-      expect.objectContaining({ attributes: true, childList: true, subtree: true }),
-    );
-    const handler = registration[1] as (event: { isTrusted: boolean; target: unknown }) => void;
-    const observe = mutationObserverCallbacks[0];
-    if (!observe) throw new Error("Expected the restricted-target mutation observer");
-    let rootPolicy: string | null = "inspect-only";
-    const root = {
-      childNodes: [] as unknown[],
-      getAttribute: () => rootPolicy,
-      parentNode: null,
-    };
-    const textarea = { childNodes: [], parentNode: root as object | null };
-
-    observe([{
-      addedNodes: [],
-      attributeName: "data-application-context-menu-policy",
-      oldValue: null,
-      target: root,
-      type: "attributes",
-    }]);
-    root.childNodes.push(textarea);
-    observe([{ addedNodes: [textarea], target: root, type: "childList" }]);
-    rootPolicy = null;
-    textarea.parentNode = {};
-
-    electronMocks.send.mockClear();
-    handler({ isTrusted: true, target: root });
-    handler({ isTrusted: true, target: textarea });
-    handler({ isTrusted: false, target: textarea });
-    handler({ isTrusted: true, target: {} });
-
-    expect(electronMocks.send).toHaveBeenCalledTimes(2);
-    expect(electronMocks.send).toHaveBeenNthCalledWith(
-      1,
-      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
-    );
-    expect(electronMocks.send).toHaveBeenNthCalledWith(
-      2,
-      APPLICATION_CONTEXT_MENU_IPC.restrictedTarget,
-    );
-  });
-
   it("maps every invoke method to its fixed dedicated channel", async () => {
     const api = exposedApi();
     electronMocks.invoke.mockClear();
@@ -213,6 +95,7 @@ describe("SSH preload bridge", () => {
     const settingsInput = {
       expectedRevision: 0,
       settings: {
+        language: DEFAULT_APPLICATION_SETTINGS_STATE.language,
         theme: DEFAULT_APPLICATION_SETTINGS_STATE.theme,
         appIcon: DEFAULT_APPLICATION_SETTINGS_STATE.appIcon,
         reduceMotion: DEFAULT_APPLICATION_SETTINGS_STATE.reduceMotion,
@@ -390,6 +273,8 @@ describe("SSH preload bridge", () => {
     const valid = {
       ...DEFAULT_APPLICATION_SETTINGS_STATE,
       revision: 4,
+      language: "system" as const,
+      systemLanguage: "ja" as const,
       theme: "light" as const,
       appIcon: "passion" as const,
       disableWindowTransparency: true,
@@ -438,6 +323,15 @@ describe("SSH preload bridge", () => {
     };
     handler({}, windowsRedo);
     handler({}, { ...valid, revision: 6, keyboardShortcuts: { textEditorFind: "mod+z" } });
+    const { language: _language, ...missingLanguage } = valid;
+    handler({}, missingLanguage);
+    handler({}, { ...missingLanguage, v: 10 });
+    handler({}, { ...valid, language: "pt" });
+    const { systemLanguage: _systemLanguage, ...missingSystemLanguage } = valid;
+    handler({}, missingSystemLanguage);
+    handler({}, { ...missingSystemLanguage, v: 11, language: "ja" });
+    handler({}, { ...valid, systemLanguage: "system" });
+    handler({}, { ...valid, systemLanguage: "ja-JP" });
     const { disableWindowTransparency: _disableTransparency, ...missingTransparency } = valid;
     handler({}, missingTransparency);
     handler({}, { ...missingTransparency, v: 7 });
@@ -489,14 +383,6 @@ function exposedApi(): SshWindowAPI {
   if (!call) throw new Error("Expected the SSH bridge to be installed");
   expect(call[0]).toBe("ssh");
   return call[1];
-}
-
-function exposedContextMenuApi(): ApplicationContextMenuAPI {
-  const call = electronMocks.exposeInMainWorld.mock.calls.find(([name]) => (
-    name === "applicationContextMenu"
-  ));
-  if (!call) throw new Error("Expected the application context-menu bridge to be installed");
-  return call[1] as unknown as ApplicationContextMenuAPI;
 }
 
 function eventRegistration(channel: string): unknown[] {

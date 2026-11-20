@@ -26,38 +26,56 @@ import { redactDiagnosticText, stringifyRedactedDiagnostics } from "./diagnostic
 import {
   assertPrivatePackagedUpdateConfiguration,
   assertPublicPackagedUpdateConfiguration,
-  attachCleanupFailure,
   boundedUpdateDiagnostic,
-  cleanupOwnedApplication,
-  observePromiseSettlement,
   packagedUpdateLaunchProfile,
   packagedUpdateApplicationEnvironment,
   packagedUpdateGithubToken,
   parsePackagedUpdateFeed,
   parsePackagedUpdateVersions,
   parseWindowsAuthenticodeInspection,
-  type ObservedPromiseSettlement,
   type PackagedUpdateVersions,
   type PackagedUpdateFeed,
   windowsAuthenticodeInspectionCommand,
 } from "./packaged-application-update-support.js";
+
+import {
+  cleanupPackagedUpdate,
+  completeNativeUpdateTransition,
+  finishPackagedUpdateLaunch,
+} from "./packaged-update-lifecycle.js";
+
+import {
+  BROAD_APPLICATION_PROCESS_INVENTORY,
+  createPackagedUpdateProcessController,
+  type ProcessRecord,
+} from "./packaged-update-process.js";
 
 const ENABLE_VARIABLE = "SLIVER_GUI_UPDATE_E2E";
 const TEST_TIMEOUT_MS = 20 * 60 * 1_000;
 const UPDATE_TIMEOUT_MS = 10 * 60 * 1_000;
 const PLAYWRIGHT_CLOSE_SETTLE_TIMEOUT_MS = 30_000;
 const APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS = 5_000;
-const APPLICATION_PROCESS_GRACEFUL_EXIT_TIMEOUT_MS = 5_000;
-const APPLICATION_PROCESS_FORCE_EXIT_TIMEOUT_MS = 15_000;
 const PROCESS_POLL_INTERVAL_MS = 250;
 const COMMAND_OUTPUT_LIMIT = 64 * 1_024;
 const FAILURE_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const PROCESS_DIAGNOSTIC_LIMIT = 4_096;
 
-const BROAD_APPLICATION_PROCESS_INVENTORY = {
-  includeDescendants: true,
-  includeHelpers: true,
-} as const;
+const {
+  applicationProcesses,
+  waitForForcedRelaunch,
+  terminateExactApplicationProcess,
+  waitForNoApplicationProcesses,
+  terminateRemainingApplicationProcesses,
+  waitForProcessIdToExit,
+} = createPackagedUpdateProcessController({
+  platform: process.platform,
+  harnessPid: process.pid,
+  runCommand,
+  pollUntil,
+  readFile,
+  readProcessEntries: () => readdir("/proc", { withFileTypes: true }),
+  kill: (pid, signal) => { process.kill(pid, signal); },
+});
 
 const enableValue = process.env[ENABLE_VARIABLE];
 if (enableValue !== undefined && enableValue !== "" && enableValue !== "0" && enableValue !== "1") {
@@ -181,39 +199,26 @@ test("packaged application updates from N-1 to N through its configured GitHub f
     });
 
     recordPhase(diagnostics, "installing-and-forced-relaunch");
-    const oldApplicationClose = observePromiseSettlement(
-      firstApplication.waitForEvent("close", { timeout: 0 }),
-    );
-    await restartDialog.getByRole("button", { name: "Restart and update", exact: true }).click();
-    await waitForProcessIdToExit(
-      initialState.pid,
-      installation.executablePath,
-      installRoot,
-      30_000,
-    );
-
-    const updatedExecutable = await waitForUpdatedExecutable(installation, input.versions, UPDATE_TIMEOUT_MS);
-    diagnostics["updatedExecutable"] = updatedExecutable;
-    // Native updater relaunches do not preserve the controlled launch's
-    // --user-data-dir argument. Verify that native process and executable here,
-    // then terminate it; profile identity is asserted only after the second
-    // controlled Playwright launch below.
-    forcedRelaunch = await waitForForcedRelaunch({
-      executablePath: updatedExecutable,
-      installRoot,
-      excludedPids: preUpdateProcesses,
-      timeoutMs: UPDATE_TIMEOUT_MS,
+    const updatingApplication = firstApplication;
+    const updatedExecutable = await completeNativeUpdateTransition({
+      observeClose: () => updatingApplication.waitForEvent("close", { timeout: 0 }),
+      requestUpdate: () => restartDialog.getByRole("button", { name: "Restart and update", exact: true }).click(),
+      waitForOriginalExit: () => waitForProcessIdToExit(initialState.pid, installation.executablePath, installRoot, 30_000),
+      waitForUpdatedExecutable: () => waitForUpdatedExecutable(installation, input.versions, UPDATE_TIMEOUT_MS),
+      updatedExecutable: (path) => { diagnostics["updatedExecutable"] = path; },
+      // Native updater relaunches do not preserve the controlled user-data argument.
+      // Verify and terminate that process before the next controlled launch.
+      waitForRelaunch: (path) => waitForForcedRelaunch({
+        executablePath: path, installRoot, excludedPids: preUpdateProcesses, timeoutMs: UPDATE_TIMEOUT_MS,
+      }),
+      trackRelaunch: (process) => {
+        forcedRelaunch = process;
+        if (process) diagnostics["forcedRelaunch"] = process;
+      },
+      terminateRelaunch: (process, path) => terminateExactApplicationProcess(process, path, installRoot),
+      proveProcessAbsence: () => waitForNoApplicationProcesses(undefined, installRoot, 30_000, BROAD_APPLICATION_PROCESS_INVENTORY),
+      closeTimeoutMs: PLAYWRIGHT_CLOSE_SETTLE_TIMEOUT_MS,
     });
-    diagnostics["forcedRelaunch"] = forcedRelaunch;
-    await terminateExactApplicationProcess(forcedRelaunch, updatedExecutable, installRoot);
-    await waitForNoApplicationProcesses(
-      undefined,
-      installRoot,
-      30_000,
-      BROAD_APPLICATION_PROCESS_INVENTORY,
-    );
-    forcedRelaunch = undefined;
-    await requireObservedApplicationClose(oldApplicationClose, PLAYWRIGHT_CLOSE_SETTLE_TIMEOUT_MS);
     firstApplication = undefined;
     firstPage = undefined;
 
@@ -336,44 +341,16 @@ test("packaged application updates from N-1 to N through its configured GitHub f
     });
     throw error;
   } finally {
-    const cleanupFailures: unknown[] = [];
-    // A native relaunch can inherit Playwright's transport descriptor. Stop it
-    // before asking the original connection to close, including failure paths.
-    if (forcedRelaunch) {
-      await terminateExactApplicationProcess(forcedRelaunch, undefined, installRoot).catch((cleanupError) => {
-        console.error("Failed to terminate the tracked updater relaunch", errorMessage(cleanupError));
-      });
-    }
-    for (const [label, application] of [
-      ["N", secondApplication],
-      ["N-1", firstApplication],
-    ] as const) {
-      if (!application) continue;
-      await cleanupOwnedApplication(application, label, APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS).catch((cleanupError) => {
-        cleanupFailures.push(cleanupError);
-        console.error(`Failed to close the controlled ${label} application`, errorMessage(cleanupError));
-      });
-    }
-    let processAbsenceProved = false;
-    await terminateRemainingApplicationProcesses(installRoot).then(() => {
-      processAbsenceProved = true;
-    }).catch((cleanupError) => {
-      cleanupFailures.push(cleanupError);
-      console.error("Failed to terminate every packaged updater application process", errorMessage(cleanupError));
+    await cleanupPackagedUpdate({
+      forcedRelaunch,
+      terminateRelaunch: (process) => terminateExactApplicationProcess(process, undefined, installRoot),
+      applications: [["N", secondApplication], ["N-1", firstApplication]],
+      cleanupTimeoutMs: APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS,
+      terminateRemaining: () => terminateRemainingApplicationProcesses(installRoot),
+      removeTemporaryRoot: () => rm(temporaryRoot, { recursive: true, force: true }),
+      testFailed,
+      testFailure,
     });
-    if (!processAbsenceProved) {
-      console.error("Retaining the packaged updater temporary directory because process absence was not proved");
-    } else {
-      await rm(temporaryRoot, { recursive: true, force: true }).catch((cleanupError: NodeJS.ErrnoException) => {
-        cleanupFailures.push(cleanupError);
-        console.error("Failed to clean the packaged updater temporary directory", cleanupError.code ?? "unknown");
-      });
-    }
-    if (cleanupFailures.length > 0) {
-      const cleanupError = new AggregateError(cleanupFailures, "Packaged updater E2E cleanup failed");
-      if (testFailed) attachCleanupFailure(testFailure, cleanupError);
-      else throw cleanupError;
-    }
   }
 });
 
@@ -403,24 +380,6 @@ interface ApplicationState {
   readonly resourcesPath: string;
   readonly userDataPath: string;
   readonly version: string;
-}
-
-interface ProcessRecord {
-  readonly pid: number;
-  readonly parentPid?: number;
-  readonly executablePath?: string;
-  readonly commandLine: string;
-}
-
-interface ApplicationProcessInventoryOptions {
-  readonly includeDescendants?: boolean;
-  readonly includeHelpers?: boolean;
-}
-
-interface ApplicationProcessCandidate extends ProcessRecord {
-  readonly directlyOwned: boolean;
-  readonly helper: boolean;
-  readonly parentPid: number;
 }
 
 async function readInput(repositoryRoot: string): Promise<TestInput> {
@@ -658,22 +617,12 @@ async function launchApplication(
       processDiagnostics[stream] = `${processDiagnostics[stream]}${chunk.toString()}`.slice(-PROCESS_DIAGNOSTIC_LIMIT);
     });
   }
-  try {
+  return finishPackagedUpdateLaunch(application, async () => {
     const page = await application.firstWindow({ timeout: 120_000 });
     await beginUpdateStateCapture(page, diagnostics, phase);
     await page.emulateMedia({ reducedMotion: "reduce" });
     return { application, page, userDataDirectory: launchProfile.userDataDirectory };
-  } catch (error) {
-    await cleanupOwnedApplication(
-      application,
-      "partially launched",
-      APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS,
-    ).catch((cleanupError) => {
-      console.error("Failed to clean a partially launched application", errorMessage(cleanupError));
-      attachCleanupFailure(error, cleanupError);
-    });
-    throw error;
-  }
+  }, APPLICATION_CLEANUP_SETTLE_TIMEOUT_MS);
 }
 
 function isolatedApplicationEnvironment(profileRoot: string, githubToken: string | undefined): Record<string, string> {
@@ -854,417 +803,6 @@ async function waitForUpdatedExecutable(
   }, timeoutMs, "updated AppImage to replace N-1");
 }
 
-async function waitForForcedRelaunch({
-  executablePath,
-  installRoot,
-  excludedPids,
-  timeoutMs,
-}: {
-  executablePath: string;
-  installRoot: string;
-  excludedPids: ReadonlySet<number>;
-  timeoutMs: number;
-}): Promise<ProcessRecord> {
-  return pollUntil(async () => {
-    const processes = await applicationProcesses(executablePath, installRoot);
-    return processes.find(({ pid }) => !excludedPids.has(pid));
-  }, timeoutMs, "the updater-forced N relaunch");
-}
-
-async function applicationProcesses(
-  executablePath: string | undefined,
-  installRoot: string,
-  options: ApplicationProcessInventoryOptions = {},
-): Promise<ProcessRecord[]> {
-  if (process.platform === "win32") {
-    const script = [
-      "$ErrorActionPreference = 'Stop'",
-      "$items = @(Get-CimInstance Win32_Process -ErrorAction Stop | " +
-        "Where-Object {-not [string]::IsNullOrWhiteSpace($_.ExecutablePath)} | " +
-        "Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine)",
-      "ConvertTo-Json -Compress -InputObject $items -ErrorAction Stop",
-    ].join("; ");
-    const result = await runCommand("pwsh.exe", [
-      "-NoLogo",
-      "-NoProfile",
-      "-NonInteractive",
-      "-EncodedCommand",
-      Buffer.from(script, "utf16le").toString("base64"),
-    ], { timeoutMs: 30_000 });
-    if (result.stderr) {
-      throw new Error(`Windows process inventory wrote stderr: ${redactDiagnosticText(result.stderr, [], 4_096)}`);
-    }
-    const parsed = parseWindowsProcessInventory(result.stdout);
-    const candidates = parsed.flatMap((item): ApplicationProcessCandidate[] => {
-      const commandLine = item.CommandLine ?? item.ExecutablePath;
-      const directlyOwned = isPathInside(item.ExecutablePath, installRoot) &&
-        (!executablePath || samePath(item.ExecutablePath, executablePath));
-      return [{
-        pid: item.ProcessId,
-        parentPid: item.ParentProcessId,
-        executablePath: item.ExecutablePath,
-        commandLine,
-        directlyOwned,
-        helper: isApplicationHelperCommand(commandLine),
-      }];
-    });
-    return selectOwnedApplicationProcesses(candidates, options);
-  }
-
-  if (process.platform === "linux") {
-    return linuxAppImageProcesses(executablePath, installRoot, options);
-  }
-
-  return macApplicationProcesses(executablePath, installRoot, options);
-}
-
-interface WindowsProcessInventoryRecord {
-  readonly CommandLine: string | null;
-  readonly ExecutablePath: string;
-  readonly ParentProcessId: number;
-  readonly ProcessId: number;
-}
-
-function parseWindowsProcessInventory(content: string): WindowsProcessInventoryRecord[] {
-  const value = JSON.parse(content) as unknown;
-  if (!Array.isArray(value)) throw new Error("Windows process inventory must return a JSON array");
-  return value.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error(`Windows process inventory item ${index} must be an object`);
-    }
-    const record = item as Record<string, unknown>;
-    const processId = record["ProcessId"];
-    const parentProcessId = record["ParentProcessId"];
-    const executablePath = record["ExecutablePath"];
-    const commandLine = record["CommandLine"];
-    if (
-      typeof processId !== "number" ||
-      !Number.isSafeInteger(processId) ||
-      processId <= 0 ||
-      typeof parentProcessId !== "number" ||
-      !Number.isSafeInteger(parentProcessId) ||
-      parentProcessId < 0 ||
-      typeof executablePath !== "string" ||
-      !isAbsolute(executablePath) ||
-      (commandLine !== null && typeof commandLine !== "string")
-    ) {
-      throw new Error(`Windows process inventory item ${index} has an invalid shape`);
-    }
-    return {
-      ProcessId: processId,
-      ParentProcessId: parentProcessId,
-      ExecutablePath: executablePath,
-      CommandLine: commandLine,
-    };
-  });
-}
-
-async function macApplicationProcesses(
-  executablePath: string | undefined,
-  installRoot: string,
-  options: ApplicationProcessInventoryOptions,
-): Promise<ProcessRecord[]> {
-  const result = await runCommand("/bin/ps", ["-axo", "pid=,ppid=,command="]);
-  const candidates = result.stdout.split(/\r?\n/u).flatMap((line): ApplicationProcessCandidate[] => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/u.exec(line);
-    if (!match?.[1] || !match[2] || !match[3]) return [];
-    const pid = Number(match[1]);
-    const parentPid = Number(match[2]);
-    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(parentPid)) return [];
-    const commandLine = match[3];
-    const target = executablePath ?? installRoot;
-    const directlyOwned = commandLine.includes(target);
-    return [{
-      pid,
-      parentPid,
-      commandLine,
-      directlyOwned,
-      helper: isApplicationHelperCommand(commandLine),
-    }];
-  });
-  return selectOwnedApplicationProcesses(candidates, options);
-}
-
-function selectOwnedApplicationProcesses(
-  candidates: readonly ApplicationProcessCandidate[],
-  options: ApplicationProcessInventoryOptions,
-): ProcessRecord[] {
-  const ownedPids = new Set(
-    candidates.filter(({ directlyOwned }) => directlyOwned).map(({ pid }) => pid),
-  );
-  if (options.includeDescendants) {
-    let addedDescendant = true;
-    while (addedDescendant) {
-      addedDescendant = false;
-      for (const candidate of candidates) {
-        if (ownedPids.has(candidate.pid) || !ownedPids.has(candidate.parentPid)) continue;
-        ownedPids.add(candidate.pid);
-        addedDescendant = true;
-      }
-    }
-  }
-  return candidates.flatMap((candidate): ProcessRecord[] => {
-    if (!ownedPids.has(candidate.pid) || (!options.includeHelpers && candidate.helper)) return [];
-    return [{
-      pid: candidate.pid,
-      parentPid: candidate.parentPid,
-      commandLine: candidate.commandLine,
-      ...(candidate.executablePath ? { executablePath: candidate.executablePath } : {}),
-    }];
-  });
-}
-
-function isApplicationHelperCommand(commandLine: string): boolean {
-  return /(?:--type=|Helper|crashpad_handler)/u.test(commandLine);
-}
-
-function absoluteCommandArgumentPath(argument: string): string | undefined {
-  if (isAbsolute(argument)) return argument;
-  const separatorIndex = argument.indexOf("=");
-  if (separatorIndex < 0) return undefined;
-  const value = argument.slice(separatorIndex + 1);
-  return isAbsolute(value) ? value : undefined;
-}
-
-function directlyOwnedLinuxCommand(
-  arguments_: readonly string[],
-  executablePath: string | undefined,
-  installRoot: string,
-): string | undefined {
-  for (const argument of arguments_) {
-    const path = absoluteCommandArgumentPath(argument);
-    if (!path || !isPathInside(path, installRoot)) continue;
-    if (!executablePath || samePath(path, executablePath)) return path;
-  }
-  return undefined;
-}
-
-function linuxParentPid(status: string): number | undefined {
-  const parent = /^PPid:\s+(\d+)\s*$/mu.exec(status)?.[1];
-  if (!parent) return undefined;
-  const parentPid = Number(parent);
-  return Number.isSafeInteger(parentPid) ? parentPid : undefined;
-}
-
-async function readLinuxEnvironment(pid: number): Promise<Buffer> {
-  try {
-    return await readFile(`/proc/${pid}/environ`);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EPERM") return Buffer.alloc(0);
-    throw error;
-  }
-}
-
-async function linuxAppImageProcesses(
-  executablePath: string | undefined,
-  installRoot: string,
-  options: ApplicationProcessInventoryOptions,
-): Promise<ProcessRecord[]> {
-  const entries = await readdir("/proc", { withFileTypes: true });
-  const candidates = await Promise.all(entries.flatMap(
-    (entry): Array<Promise<ApplicationProcessCandidate | undefined>> => {
-      if (!entry.isDirectory() || !/^\d+$/u.test(entry.name)) return [];
-      const pid = Number(entry.name);
-      return [readLinuxAppImageProcess(pid, executablePath, installRoot, options)];
-    },
-  ));
-  return selectOwnedApplicationProcesses(
-    candidates.filter((record): record is ApplicationProcessCandidate => record !== undefined),
-    options,
-  );
-}
-
-async function readLinuxAppImageProcess(
-  pid: number,
-  executablePath: string | undefined,
-  installRoot: string,
-  options: ApplicationProcessInventoryOptions,
-): Promise<ApplicationProcessCandidate | undefined> {
-  try {
-    const [environmentBuffer, commandBuffer, statusBuffer] = await Promise.all([
-      readLinuxEnvironment(pid),
-      readFile(`/proc/${pid}/cmdline`),
-      readFile(`/proc/${pid}/status`),
-    ]);
-    const parentPid = linuxParentPid(statusBuffer.toString("utf8"));
-    if (parentPid === undefined) return undefined;
-    const environment = environmentBuffer.toString("utf8").split("\0");
-    const appImage = environment.find((entry) => entry.startsWith("APPIMAGE="))?.slice("APPIMAGE=".length);
-    const arguments_ = commandBuffer.toString("utf8").split("\0").filter(Boolean);
-    const commandLine = arguments_.join(" ");
-    const commandPath = directlyOwnedLinuxCommand(arguments_, executablePath, installRoot);
-    const appImageOwned = Boolean(
-      appImage &&
-      isAbsolute(appImage) &&
-      isPathInside(appImage, installRoot) &&
-      (!executablePath || samePath(appImage, executablePath)),
-    );
-    const directlyOwned = appImageOwned || commandPath !== undefined;
-    const helper = isApplicationHelperCommand(commandLine);
-    if (!directlyOwned && !options.includeDescendants) return undefined;
-    if (helper && !options.includeHelpers && !options.includeDescendants) return undefined;
-    const ownedExecutable = appImageOwned ? appImage : commandPath;
-    return {
-      pid,
-      parentPid,
-      commandLine,
-      directlyOwned,
-      helper,
-      ...(ownedExecutable ? { executablePath: ownedExecutable } : {}),
-    };
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "EACCES" || code === "EPERM") return undefined;
-    throw error;
-  }
-}
-
-async function terminateExactApplicationProcess(
-  processRecord: ProcessRecord,
-  expectedExecutablePath: string | undefined,
-  installRoot: string,
-): Promise<void> {
-  const current = (await applicationProcesses(expectedExecutablePath, installRoot))
-    .find(({ pid }) => pid === processRecord.pid);
-  if (!current) return;
-  if (process.platform === "win32") {
-    await runCommand("taskkill.exe", ["/PID", String(current.pid), "/T"], { timeoutMs: 30_000 }).catch(() => undefined);
-  } else {
-    try {
-      process.kill(current.pid, "SIGTERM");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-    }
-  }
-  try {
-    await pollUntil(async () => {
-      const matches = await applicationProcesses(expectedExecutablePath, installRoot);
-      return matches.some(({ pid }) => pid === current.pid) ? undefined : true;
-    }, 15_000, `application process ${current.pid} to exit`);
-  } catch {
-    const stillCurrent = (await applicationProcesses(expectedExecutablePath, installRoot))
-      .some(({ pid }) => pid === current.pid);
-    if (!stillCurrent) return;
-    if (process.platform === "win32") {
-      await runCommand("taskkill.exe", ["/PID", String(current.pid), "/T", "/F"], { timeoutMs: 30_000 });
-    } else {
-      process.kill(current.pid, "SIGKILL");
-    }
-  }
-}
-
-async function waitForNoApplicationProcesses(
-  executablePath: string | undefined,
-  installRoot: string,
-  timeoutMs: number,
-  options: ApplicationProcessInventoryOptions = {},
-): Promise<void> {
-  await pollUntil(async () => {
-    const processes = await applicationProcesses(executablePath, installRoot, options);
-    return processes.length === 0 ? true : undefined;
-  }, timeoutMs, "the forced-relaunch process tree to exit");
-}
-
-async function terminateRemainingApplicationProcesses(installRoot: string): Promise<void> {
-  const gracefulFailures = await terminateApplicationProcessSnapshot(installRoot, false);
-  try {
-    await waitForNoApplicationProcesses(
-      undefined,
-      installRoot,
-      APPLICATION_PROCESS_GRACEFUL_EXIT_TIMEOUT_MS,
-      BROAD_APPLICATION_PROCESS_INVENTORY,
-    );
-    return;
-  } catch {
-    // The bounded graceful phase is expected to expire for a stuck helper.
-  }
-
-  const forcedFailures = await terminateApplicationProcessSnapshot(installRoot, true);
-  try {
-    await waitForNoApplicationProcesses(
-      undefined,
-      installRoot,
-      APPLICATION_PROCESS_FORCE_EXIT_TIMEOUT_MS,
-      BROAD_APPLICATION_PROCESS_INVENTORY,
-    );
-  } catch (absenceError) {
-    const remaining = await applicationProcesses(
-      undefined,
-      installRoot,
-      BROAD_APPLICATION_PROCESS_INVENTORY,
-    ).catch((inventoryError) => [{
-      pid: -1,
-      commandLine: `inventory failed: ${errorMessage(inventoryError)}`,
-    }]);
-    const failures = [...gracefulFailures, ...forcedFailures];
-    throw new Error(
-      `Test-owned application processes survived bounded cleanup: ${JSON.stringify(remaining)}` +
-        `${failures.length > 0 ? `; termination failures: ${failures.join("; ")}` : ""}` +
-        `; absence proof: ${errorMessage(absenceError)}`,
-    );
-  }
-}
-
-async function terminateApplicationProcessSnapshot(
-  installRoot: string,
-  force: boolean,
-): Promise<string[]> {
-  const processes = await applicationProcesses(
-    undefined,
-    installRoot,
-    BROAD_APPLICATION_PROCESS_INVENTORY,
-  );
-  const failures: string[] = [];
-  for (const processRecord of processes) {
-    if (processRecord.pid === process.pid) {
-      failures.push(`refused to signal the harness process ${processRecord.pid}`);
-      continue;
-    }
-    try {
-      const stillOwned = (await applicationProcesses(
-        undefined,
-        installRoot,
-        BROAD_APPLICATION_PROCESS_INVENTORY,
-      )).some((current) => sameProcessIdentity(current, processRecord));
-      if (!stillOwned) continue;
-      if (process.platform === "win32") {
-        await runCommand(
-          "taskkill.exe",
-          ["/PID", String(processRecord.pid), "/T", ...(force ? ["/F"] : [])],
-          { timeoutMs: 30_000 },
-        );
-      } else {
-        process.kill(processRecord.pid, force ? "SIGKILL" : "SIGTERM");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ESRCH") continue;
-      failures.push(`PID ${processRecord.pid}: ${errorMessage(error)}`);
-    }
-  }
-  return failures;
-}
-
-function sameProcessIdentity(current: ProcessRecord, snapshot: ProcessRecord): boolean {
-  if (current.pid !== snapshot.pid || current.commandLine !== snapshot.commandLine) return false;
-  if (current.executablePath === undefined || snapshot.executablePath === undefined) {
-    return current.executablePath === snapshot.executablePath;
-  }
-  return samePath(current.executablePath, snapshot.executablePath);
-}
-
-async function waitForProcessIdToExit(
-  pid: number,
-  executablePath: string,
-  installRoot: string,
-  timeoutMs: number,
-): Promise<void> {
-  await pollUntil(async () => {
-    const processes = await applicationProcesses(executablePath, installRoot);
-    return processes.some((processRecord) => processRecord.pid === pid) ? undefined : true;
-  }, timeoutMs, `N-1 application process ${pid} to exit`);
-}
-
 function attachPageDiagnostics(page: Page, diagnostics: Record<string, unknown>): void {
   const consoleMessages = diagnostics["consoleMessages"] ?? [];
   const pageErrors = diagnostics["pageErrors"] ?? [];
@@ -1401,27 +939,6 @@ async function assertCanonicalPathEqual(path: string, expected: string, label: s
   const [canonicalPath, canonicalExpected] = await Promise.all([realpath(path), realpath(expected)]);
   if (!samePath(canonicalPath, canonicalExpected)) {
     throw new Error(`${label} must exactly match the controlled user-data directory`);
-  }
-}
-
-async function requireObservedApplicationClose(
-  observation: Promise<ObservedPromiseSettlement<unknown>>,
-  timeoutMs: number,
-): Promise<void> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timeoutResult = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
-      reject(new Error("Timed out waiting for the controlled Playwright application connection to close"));
-    }, timeoutMs);
-    timeout.unref?.();
-  });
-  try {
-    const outcome = await Promise.race([observation, timeoutResult]);
-    if (outcome.status === "rejected") {
-      throw new Error(`Controlled Playwright application close failed: ${errorMessage(outcome.reason)}`);
-    }
-  } finally {
-    if (timeout) clearTimeout(timeout);
   }
 }
 

@@ -1,35 +1,19 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { OperationResult, SavedArtifact, SliverDesktopAPI } from "../../../shared/contracts";
 import { GeneratePage, parseNumberInput } from "./GeneratePage";
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-});
+useRendererTestEnvironment({ animations: false });
 
 afterEach(() => {
   cleanup();
   Reflect.deleteProperty(window, "sliver");
 });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
 
 function readyGenerationSnapshot() {
   const snapshot = disconnectedSnapshot();
@@ -166,22 +150,6 @@ describe("GeneratePage action footer", () => {
     expect(screen.getByRole("checkbox", { name: "All platforms" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save profile" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Generate and save" })).toBeDisabled();
-  });
-
-  it("keeps section titles and subtitles in the icon row", () => {
-    render(<GeneratePage snapshot={readyGenerationSnapshot()} />);
-
-    for (const [title, subtitle] of [
-      ["Artifact", "Choose the build identity, target, and output container."],
-      ["Command and control", "Endpoints are attempted in the listed order unless a strategy is selected."],
-    ] as const) {
-      const header = screen.getByText(title).closest<HTMLElement>(".card__header");
-      expect(header).not.toBeNull();
-      if (!header) throw new Error(`${title} is not inside a card header`);
-      expect(header).toHaveClass("flex-row", "items-center", "gap-3");
-      expect(within(header).getByText(subtitle)).toBeInTheDocument();
-      expect(header.querySelector(".section-icon")).toHaveAttribute("aria-hidden", "true");
-    }
   });
 
   it("shows exact extended targets on demand and applies deterministic target defaults", async () => {

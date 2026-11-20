@@ -1,0 +1,368 @@
+{
+  "settings": {
+    "heading": "Settings",
+    "description": "Customize Sliver Desktop across application and terminal windows.",
+    "sections": "Settings sections",
+    "general": "General",
+    "keyboard": "Keyboard Shortcuts",
+    "terminal": "Terminal",
+    "language": "Application language",
+    "languageDescription": "Applies immediately to Settings and navigation.",
+    "systemLanguage": "System language",
+    "systemLanguageDescription": "Uses the first supported language in your system preferences, or English if none match.",
+    "appearance": "Appearance",
+    "appearanceDescription": "Choose how the app and its icon appear.",
+    "theme": "Color theme",
+    "themeDescription": "Follow the operating system or keep a consistent light or dark appearance.",
+    "system": "System",
+    "light": "Light",
+    "dark": "Dark",
+    "icon": "App icon",
+    "iconDescription": "Auto follows the system appearance. Some launchers always use the dark icon.",
+    "auto": "Auto",
+    "passion": "Passion",
+    "disableTransparency": "Disable window transparency",
+    "disableTransparencyDescription": "Use opaque backgrounds in all application windows. Changes apply immediately.",
+    "accessibility": "Accessibility",
+    "accessibilityDescription": "Limit motion without changing the information shown.",
+    "reduceMotion": "Reduce motion",
+    "reduceMotionDescription": "Minimize non-essential animation and smooth scrolling throughout the app.",
+    "screenshots": "Report Screenshots",
+    "screenshotsDescription": "Save a PNG for each open application window.",
+    "screenshotLocation": "Save location",
+    "screenshotLocationDescription": "Report Screenshot saves to your Desktop by default.",
+    "screenshotLocationLabel": "Report screenshot save location",
+    "screenshotLocationDefault": "Desktop (default)",
+    "screenshotFolderError": "Could not choose screenshot folder",
+    "browse": "Browse…",
+    "useDesktop": "Use Desktop",
+    "resetDefaults": "Reset defaults",
+    "discard": "Discard",
+    "save": "Save",
+    "cancel": "Cancel",
+    "unavailable": "Settings unavailable",
+    "notSaved": "Settings not saved",
+    "updateFailed": "The application settings could not be updated."
+  },
+  "terminal": {
+    "appearance": "Terminal Appearance",
+    "appearanceDescription": "Applied to every console, SSH session, and managed shell window.",
+    "settings": "Terminal Settings",
+    "fontFamily": "Font family",
+    "fontFamilyDescription": "Embedded in Sliver GUI and available offline.",
+    "fontSize": "Font size",
+    "fontSizeRange": "{min}–{max} pixels.",
+    "cursorShape": "Cursor shape",
+    "block": "Block",
+    "underline": "Underline",
+    "bar": "Bar",
+    "transparent": "Transparent terminal windows",
+    "transparentDescription": "Use native glass in console and SSH windows where supported. Requires window transparency to be enabled in General settings.",
+    "cursorBlink": "Blinking cursor",
+    "cursorBlinkDescription": "Animate the cursor while the console is active.",
+    "smoothScrolling": "Smooth scrolling",
+    "smoothScrollingDescription": "Animate movement through terminal scrollback.",
+    "ghosttyThemes": "Ghostty Themes",
+    "ghosttyThemesDescription": "Use the same theme files as your Ghostty terminal.",
+    "theme": "Terminal theme",
+    "defaultTheme": "Application default",
+    "themeDescription": "Applies immediately to open terminals. Config color overrides take precedence.",
+    "preview": "Terminal theme preview",
+    "previewSample": "The quick brown fox jumps over the lazy dog.",
+    "themeDirectory": "Ghostty theme folder",
+    "themeDirectoryDescription": "Add theme files here or use themes from your installed Ghostty. Edit the configuration to use a theme path or separate light and dark themes.",
+    "configPath": "Configuration file",
+    "loadingConfig": "Loading Ghostty configuration…",
+    "configUnavailable": "Ghostty configuration is unavailable in this window.",
+    "configNotes": "Configuration notes",
+    "editConfig": "Edit Ghostty config",
+    "reloadThemes": "Reload themes",
+    "saveThemeFailed": "The terminal theme could not be saved.",
+    "openConfigFailed": "The Ghostty configuration could not be opened.",
+    "openConfigError": "Could not open Ghostty config",
+    "themeSettingsHint": "Choose Ghostty themes in Settings → Terminal. Config changes apply when saved."
+  },
+  "shortcuts": {
+    "resetAll": "Reset all to defaults",
+    "search": "Search shortcuts",
+    "recordFailed": "Could not start recording. Try again.",
+    "invalidKey": "Use a modifier with a letter, number, arrow or punctuation key, or press a function key.",
+    "invalidShortcut": "Choose a modified letter, number, arrow or punctuation key, or a function key.",
+    "unknownAction": "Unknown keyboard shortcut action.",
+    "reservedF5": "F5 is reserved for server refresh and native window commands.",
+    "reservedShortcut": "This shortcut is reserved for standard system or editing commands.",
+    "alreadyAssigned": "This shortcut is already assigned to {action}.",
+    "changeAction": "Change shortcut for {action}",
+    "cancelChangeAction": "Cancel changing shortcut for {action}",
+    "resetAction": "Reset shortcut for {action}",
+    "preparing": "Preparing…",
+    "pressShortcut": "Press shortcut…",
+    "escapeCancels": "Escape cancels",
+    "change": "Change shortcut",
+    "reset": "Reset to default",
+    "recordHint": "Press a new shortcut, or Escape to cancel.",
+    "noResults": "No shortcuts match your search.",
+    "platformHint": "Use Command on macOS or Ctrl on Windows and Linux. Standard editing, system shortcuts, and terminal control keys keep their usual behavior."
+  },
+  "shortcutGroups": {
+    "Application": "Application",
+    "Navigation": "Navigation",
+    "Text Editor": "Text Editor",
+    "Terminal": "Terminal",
+    "Terminal tabs": "Terminal tabs"
+  },
+  "shortcutActions": {
+    "commandPalette": {
+      "label": "Open command palette",
+      "description": "Find pages and common application actions."
+    },
+    "newWindow": {
+      "label": "New window",
+      "description": "Open a new application window."
+    },
+    "duplicateWindow": {
+      "label": "New window for this server",
+      "description": "Open another window connected to the current server."
+    },
+    "reportScreenshot": {
+      "label": "Report Screenshot",
+      "description": "Save images of all open application windows."
+    },
+    "openConsole": {
+      "label": "Open console",
+      "description": "Open the console for the connected server."
+    },
+    "navigateBack": {
+      "label": "Go back",
+      "description": "Return to the previous application page."
+    },
+    "navigateForward": {
+      "label": "Go forward",
+      "description": "Return to the next application page."
+    },
+    "refreshServer": {
+      "label": "Refresh server",
+      "description": "Refresh the connected server's information."
+    },
+    "textEditorOpen": {
+      "label": "Open file",
+      "description": "Open a local file in the standalone text editor."
+    },
+    "textEditorSaveAs": {
+      "label": "Save file as",
+      "description": "Save the current document to a new local file."
+    },
+    "textEditorSave": {
+      "label": "Save file",
+      "description": "Save the current document or overwrite its remote file."
+    },
+    "textEditorUndo": {
+      "label": "Undo edit",
+      "description": "Undo the last text editor change."
+    },
+    "textEditorRedo": {
+      "label": "Redo edit",
+      "description": "Redo the last text editor change."
+    },
+    "textEditorFind": {
+      "label": "Find in file",
+      "description": "Find text in the current document."
+    },
+    "textEditorReplace": {
+      "label": "Replace in file",
+      "description": "Find and replace text in the current document."
+    },
+    "textEditorWordWrap": {
+      "label": "Toggle word wrap",
+      "description": "Turn editor word wrapping on or off."
+    },
+    "textEditorCommandPalette": {
+      "label": "Open editor command palette",
+      "description": "Find and run Monaco editor commands."
+    },
+    "textEditorSettings": {
+      "label": "Editor settings",
+      "description": "Open standalone text editor settings."
+    },
+    "terminalNewTab": {
+      "label": "New terminal tab",
+      "description": "Open a new tab in the terminal window."
+    },
+    "terminalCloseTab": {
+      "label": "Close terminal tab",
+      "description": "Close the active terminal tab."
+    },
+    "terminalSettings": {
+      "label": "Terminal settings",
+      "description": "Open settings from the terminal window."
+    },
+    "terminalCloseWindow": {
+      "label": "Close terminal window",
+      "description": "Close the terminal window and its tabs."
+    },
+    "terminalTab1": {
+      "label": "Select terminal tab 1",
+      "description": "Switch to the first terminal tab."
+    },
+    "terminalTab2": {
+      "label": "Select terminal tab 2",
+      "description": "Switch to the second terminal tab."
+    },
+    "terminalTab3": {
+      "label": "Select terminal tab 3",
+      "description": "Switch to the third terminal tab."
+    },
+    "terminalTab4": {
+      "label": "Select terminal tab 4",
+      "description": "Switch to the fourth terminal tab."
+    },
+    "terminalTab5": {
+      "label": "Select terminal tab 5",
+      "description": "Switch to the fifth terminal tab."
+    },
+    "terminalTab6": {
+      "label": "Select terminal tab 6",
+      "description": "Switch to the sixth terminal tab."
+    },
+    "terminalTab7": {
+      "label": "Select terminal tab 7",
+      "description": "Switch to the seventh terminal tab."
+    },
+    "terminalTab8": {
+      "label": "Select terminal tab 8",
+      "description": "Switch to the eighth terminal tab."
+    },
+    "terminalTab9": {
+      "label": "Select terminal tab 9",
+      "description": "Switch to the ninth terminal tab."
+    },
+    "terminalTab10": {
+      "label": "Select terminal tab 10",
+      "description": "Switch to the tenth terminal tab."
+    }
+  },
+  "shell": {
+    "navigation": "Sliver navigation",
+    "operatorConsole": "Operator console",
+    "overviewNavigation": "Overview navigation",
+    "operational": "Operational",
+    "operationalNavigation": "Operational navigation",
+    "interact": "Interact",
+    "interactNavigation": "Interact navigation",
+    "data": "Data",
+    "dataNavigation": "Data navigation",
+    "windowNavigation": "Window navigation",
+    "collapseSidebar": "Collapse sidebar",
+    "expandSidebar": "Expand sidebar",
+    "noServer": "No server connected",
+    "chooseConfig": "Select a saved configuration to begin",
+    "operator": "operator",
+    "configuration": "configuration",
+    "connect": "Connect",
+    "server": "Current server",
+    "currentServer": "Current server: {operator}",
+    "applicationMenuOffline": "Application menu, offline",
+    "applicationMenu": "Application menu",
+    "offline": "Offline",
+    "noChannel": "No active channel",
+    "applicationActions": "Application and current server actions",
+    "exit": "Exit app",
+    "disconnect": "Disconnect",
+    "switchConfig": "Switch config",
+    "newWindowOptions": "New window options",
+    "newWindow": "New window",
+    "sameServer": "Same server",
+    "differentServer": "Different server",
+    "openConsole": "Open Sliver console",
+    "consoleTooltip": "Open console for the active server",
+    "connectFirstTooltip": "Connect to a server first",
+    "openPalette": "Open command palette",
+    "commandPalette": "Command palette",
+    "savedConfigurations": "Saved configurations",
+    "live": "Live",
+    "waitingEvents": "Awaiting events",
+    "reconnecting": "Reconnecting",
+    "eventsOffline": "Events offline",
+    "backendReconnecting": "Backend reconnecting",
+    "session": "Session",
+    "beacon": "Beacon"
+  },
+  "navigation": {
+    "overview": {
+      "label": "Overview",
+      "description": "Explore infrastructure and reported connections."
+    },
+    "generate": {
+      "label": "Generate",
+      "description": "Create implant artifacts."
+    },
+    "artifacts": {
+      "label": "Builds & profiles",
+      "description": "Browse generated builds and reusable profiles."
+    },
+    "operations": {
+      "label": "Jobs & listeners",
+      "description": "Manage server jobs and listener endpoints."
+    },
+    "websites": {
+      "label": "Websites",
+      "description": "Manage hosted websites and their content."
+    },
+    "sessions": {
+      "label": "Sessions",
+      "description": "Browse interactive sessions."
+    },
+    "beacons": {
+      "label": "Beacons",
+      "description": "Browse asynchronous beacons."
+    },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Collect and explore Active Directory data."
+    },
+    "loot": {
+      "label": "Loot",
+      "description": "Browse collected files."
+    },
+    "credentials": {
+      "label": "Credentials",
+      "description": "Browse collected credentials."
+    }
+  },
+  "palette": {
+    "settingsDescription": "Configure appearance, keyboard shortcuts, and terminals.",
+    "backDescription": "Return to the previous page.",
+    "forwardDescription": "Return to the next page in navigation history.",
+    "savedDescription": "Connect to or manage an operator configuration.",
+    "consoleDescription": "Open a console for the active server.",
+    "connectFirst": "Connect to a server first.",
+    "disconnectDescription": "Disconnect the active server.",
+    "noConnection": "No active server connection.",
+    "refreshDescription": "Reconcile the active server snapshot.",
+    "cloudDeployment": "Cloud Deployment",
+    "cloudDescription": "Open or focus the Cloud Deployment window.",
+    "remoteDesktop": "Remote Desktop",
+    "remoteDesktopDescription": "Open or focus the standalone RDP client.",
+    "screenshotDescription": "Capture all open application windows to the configured screenshot folder.",
+    "newConnectedWindow": "New connected window",
+    "newConnectedDescription": "Open another window on the active server.",
+    "newConnectionWindow": "New connection window",
+    "newConnectionDescription": "Open another window for a different server.",
+    "search": "Search commands",
+    "searchPlaceholder": "Search commands, sessions, and beacons…",
+    "applicationCommands": "Application commands",
+    "moreTargets": "More targets are available. Open Sessions or Beacons to search the full inventory.",
+    "noResults": "No commands found.",
+    "current": "Current",
+    "navigate": "Navigate",
+    "run": "Run",
+    "toggle": "Toggle"
+  },
+  "paletteGroups": {
+    "Navigate": "Navigate",
+    "Sessions": "Sessions",
+    "Beacons": "Beacons",
+    "Server": "Server",
+    "Windows": "Windows"
+  }
+}

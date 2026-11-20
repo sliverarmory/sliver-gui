@@ -51,6 +51,7 @@ test("Report Screenshot captures every open app window into the configured direc
         expectedRevision: current.revision,
         settings: {
           theme: current.theme,
+          language: current.language,
           appIcon: current.appIcon,
           reduceMotion: current.reduceMotion,
           disableWindowTransparency: current.disableWindowTransparency,

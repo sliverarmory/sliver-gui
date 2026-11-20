@@ -24,6 +24,7 @@ class FakeSsh extends EventEmitter {
     private readonly scriptStdout = "404",
     private readonly scriptStderr = "",
     private readonly scriptExitCode = 0,
+    private readonly httpStatus = "404",
   ) { super(); }
 
   asClient(): Client { return this as unknown as Client; }
@@ -43,7 +44,7 @@ class FakeSsh extends EventEmitter {
       callback(undefined, channel as unknown as ClientChannel);
       queueMicrotask(() => {
         const script = command.includes("'bash' '-c'");
-        const output = command.includes("'ss'") ? this.sockets : script ? this.scriptStdout : "404";
+        const output = command.includes("'ss'") ? this.sockets : script ? this.scriptStdout : this.httpStatus;
         channel.emit("data", Buffer.from(output, "utf8"));
         if (script && this.scriptStderr) channel.stderr.emit("data", Buffer.from(this.scriptStderr, "utf8"));
         channel.emit("exit", script ? this.scriptExitCode : 0);
@@ -62,6 +63,62 @@ function ssh(hostKeySha256 = fingerprint): LocalRedirectorSshTarget {
 }
 
 describe("LocalRedirectorDeployer SSH guard", () => {
+  it("confirms an HTTP listener bound only to the server private IP", async () => {
+    const fake = new FakeSsh('LISTEN 0 4096 10.0.1.8:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n');
+    const deployer = new LocalRedirectorDeployer({ createSshClient: () => fake.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    expect(await deployer.probePrivateHttpListener({ ssh: ssh(), privateIp: "10.0.1.8", port: 8443 })).toBe(404);
+    expect(fake.commands[1]).toContain("http://10.0.1.8:8443/");
+  });
+
+  it("rejects a private HTTP listener with an additional public binding", async () => {
+    const fake = new FakeSsh('LISTEN 0 4096 10.0.1.8:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\nLISTEN 0 4096 0.0.0.0:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=13))\n');
+    const deployer = new LocalRedirectorDeployer({ createSshClient: () => fake.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    expect(await deployer.probePrivateHttpListener({ ssh: ssh(), privateIp: "10.0.1.8", port: 8443 })).toBeNull();
+    expect(fake.commands).toHaveLength(1);
+  });
+
+  it("accepts an existing Sliver HTTP listener on the private IP or IPv4 wildcard without changing the strict managed probe", async () => {
+    const privateSocket = new FakeSsh('LISTEN 0 4096 10.0.1.8:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n');
+    const privateProbe = new LocalRedirectorDeployer({ createSshClient: () => privateSocket.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    expect(await privateProbe.probeExistingPrivateHttpListener({ ssh: ssh(), privateIp: "10.0.1.8", port: 8443 })).toBe(404);
+
+    const wildcardSocket = new FakeSsh('LISTEN 0 4096 0.0.0.0:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n');
+    const wildcardProbe = new LocalRedirectorDeployer({ createSshClient: () => wildcardSocket.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    expect(await wildcardProbe.probeExistingPrivateHttpListener({ ssh: ssh(), privateIp: "10.0.1.8", port: 8443 })).toBe(404);
+    expect(wildcardSocket.commands[1]).toContain("http://10.0.1.8:8443/");
+    expect(await wildcardProbe.probePrivateHttpListener({ ssh: ssh(), privateIp: "10.0.1.8", port: 8443 })).toBeNull();
+    expect(wildcardSocket.commands).toHaveLength(3);
+  });
+
+  it("recognizes the existing Sliver listener reported by ss as *:80 and probes its private address", async () => {
+    const fake = new FakeSsh('LISTEN 0 4096 *:80 *:* users:(("sliver-server",pid=2478,fd=19))\n');
+    const deployer = new LocalRedirectorDeployer({ createSshClient: () => fake.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    const input = { ssh: ssh(), privateIp: "172.31.4.96", port: 80 };
+    expect(await deployer.probeExistingPrivateHttpListener(input)).toBe(404);
+    expect(fake.commands[1]).toContain("http://172.31.4.96:80/");
+    expect(await deployer.probePrivateHttpListener(input)).toBeNull();
+    expect(fake.commands).toHaveLength(3);
+  });
+
+  it("rejects loopback, duplicate, non-Sliver, and unhealthy existing HTTP bindings", async () => {
+    const input = { ssh: ssh(), privateIp: "10.0.1.8", port: 8443 };
+    for (const sockets of [
+      'LISTEN 0 4096 127.0.0.1:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n',
+      'LISTEN 0 4096 0.0.0.0:8443 0.0.0.0:* users:(("other",pid=41,fd=12))\n',
+      'LISTEN 0 4096 10.0.1.8:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\nLISTEN 0 4096 [::]:8443 [::]:* users:(("sliver-server",pid=41,fd=13))\n',
+    ]) {
+      const fake = new FakeSsh(sockets);
+      const deployer = new LocalRedirectorDeployer({ createSshClient: () => fake.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+      expect(await deployer.probeExistingPrivateHttpListener(input)).toBeNull();
+      expect(fake.commands).toHaveLength(1);
+    }
+    const unhealthy = new FakeSsh('LISTEN 0 4096 0.0.0.0:8443 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n', "", "", 0, "503");
+    const deployer = new LocalRedirectorDeployer({ createSshClient: () => unhealthy.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });
+    expect(await deployer.probeExistingPrivateHttpListener(input)).toBeNull();
+    await expect(deployer.probeExistingPrivateHttpListener({ ...input, ssh: ssh(`SHA256:${"A".repeat(43)}`) }))
+      .rejects.toMatchObject({ code: "host-key-mismatch" });
+  });
+
   it("accepts only a Sliver-owned IPv4 loopback socket with an HTTP response", async () => {
     const fake = new FakeSsh('LISTEN 0 4096 127.0.0.1:8000 0.0.0.0:* users:(("sliver-server",pid=41,fd=12))\n');
     const deployer = new LocalRedirectorDeployer({ createSshClient: () => fake.asClient(), connectTimeoutMs: 100, commandTimeoutMs: 100 });

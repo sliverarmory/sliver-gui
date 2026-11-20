@@ -583,6 +583,7 @@ describe("trusted Electron IPC boundary", () => {
     const input = {
       expectedRevision: 0,
       settings: {
+        language: "uk" as const,
         theme: "light" as const,
         appIcon: "passion" as const,
         reduceMotion: true,

@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { StrictMode } from "react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 const shellMocks = vi.hoisted(() => ({
   open: vi.fn(),
   focus: vi.fn(),
@@ -1196,16 +1198,6 @@ function fakeTransport() {
       terminalSubscription?.onOutput(new TextEncoder().encode(text));
     },
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, reject, resolve };
 }
 
 function setViewport(matches: boolean): void {

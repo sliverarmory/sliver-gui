@@ -3,11 +3,14 @@ import {
   faArrowLeft,
   faArrowsRotate,
   faCheck,
+  faChevronDown,
   faCloudArrowUp,
   faCopy,
   faCubes,
   faEllipsisVertical,
   faKey,
+  faMicrochip,
+  faNetworkWired,
   faPen,
   faPlay,
   faPlus,
@@ -78,13 +81,16 @@ import {
   type AzureFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentRecord,
+  type CloudDependentDeploymentRecord,
   type CloudDeploymentStatus,
   type CloudProvider,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
+  type CreateAwsCrackstationDeploymentInput,
+  type CreateAwsAlbRedirectorDeploymentInput,
   type RenameCloudDeploymentInput,
 } from "../../shared/cloud-deployment-contracts";
-import type { AwsDeploymentOptions, AzureDeploymentOptions } from "../../shared/cloud-provider-inventory";
+import type { AwsAlbRedirectorOptions, AwsCrackstationOptions, AwsDeploymentOptions, AzureDeploymentOptions } from "../../shared/cloud-provider-inventory";
 import type { SshHostKeyReview } from "../../shared/ssh-contracts";
 import type {
   AwsLoginProgress,
@@ -635,7 +641,7 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
               <div>
                 <h1 className="text-2xl font-semibold tracking-tight">Cloud Deployment</h1>
                 <p className="mt-1 max-w-2xl text-sm leading-6 text-muted">
-                  Provision and operate tagged Sliver multiplayer servers on AWS EC2 or Microsoft Azure.
+                  Provision Sliver servers on AWS or Azure, then attach AWS GPU workers and load balancer redirectors.
                 </p>
               </div>
             </div>
@@ -753,8 +759,8 @@ export function CloudDeploymentWindowApp(): React.JSX.Element {
             <Tabs.ListContainer className="cloud-deployment-tabs__nav">
               <Tabs.List aria-label="Cloud Deployment sections">
                 <Tabs.Tab id="deployments">
-                  Servers
-                  <Chip className="ml-1" size="sm" variant="soft">{snapshot.state.deployments.length}</Chip>
+                  Deployments
+                  <Chip className="ml-1" size="sm" variant="soft">{snapshot.state.deployments.length + snapshot.state.dependentDeployments.length}</Chip>
                   <Tabs.Indicator />
                 </Tabs.Tab>
                 <Tabs.Tab id="dns">
@@ -862,10 +868,12 @@ function DeploymentsPanel({
   readonly onRefresh: () => Promise<void>;
   readonly onShowCredentials: () => void;
 }): React.JSX.Element {
-  const [showWizard, setShowWizard] = useState(false);
+  const [wizardKind, setWizardKind] = useState<"server" | "crackstation" | "alb-redirector" | null>(null);
+  const showWizard = wizardKind === "server";
+  const setupOpen = wizardKind !== null;
   const [wizardBusy, setWizardBusy] = useState(false);
   const [activeDeploymentId, setActiveDeploymentId] = useState<string | null>(null);
-  const resumedDeployment = showWizard
+  const resumedDeployment = setupOpen
     ? undefined
     : snapshot.state.deployments.find(({ status }) => status === "provisioning");
   const resumedTranscript = resumedDeployment
@@ -874,18 +882,21 @@ function DeploymentsPanel({
   const displayedDeploymentId = activeDeploymentId ?? resumedDeployment?.id ?? null;
   const visibleDeployments = snapshot.state.deployments.filter((deployment) =>
     deployment.id !== displayedDeploymentId &&
-    !(showWizard && wizardBusy && activeDeploymentId === null && deployment.status === "provisioning")
+    !(setupOpen && wizardBusy && activeDeploymentId === null && deployment.status === "provisioning")
   );
-  const deploymentInProgress = wizardBusy || resumedDeployment !== undefined;
+  const deploymentInProgress = wizardBusy || resumedDeployment !== undefined || snapshot.state.dependentDeployments.some((deployment) => deployment.status === "provisioning" || deployment.status === "deleting");
+  const hasEligibleAwsServer = snapshot.state.deployments.some((deployment) =>
+    deployment.provider === "aws" && deployment.status === "running" && deployment.runtime.instanceState === "running"
+  );
 
   useEffect(() => {
-    if (!actionRequest || !showWizard || wizardBusy) return;
-    setShowWizard(false);
+    if (!actionRequest || !setupOpen || wizardBusy) return;
+    setWizardKind(null);
     setActiveDeploymentId(null);
-  }, [actionRequest, showWizard, wizardBusy]);
+  }, [actionRequest, setupOpen, wizardBusy]);
 
   const closeWizard = (): void => {
-    setShowWizard(false);
+    setWizardKind(null);
     setWizardBusy(false);
     setActiveDeploymentId(null);
   };
@@ -894,19 +905,62 @@ function DeploymentsPanel({
     <div className="space-y-6">
       <section className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
         <div>
-          <h2 className="text-lg font-semibold">Managed Servers</h2>
+          <h2 className="text-lg font-semibold">Managed Deployments</h2>
           <p className="mt-1 text-sm text-muted">Provider resources are tracked by a unique management ID before any lifecycle action.</p>
         </div>
-        <Button
-          isDisabled={deploymentInProgress}
-          variant={showWizard ? "tertiary" : "primary"}
-          onPress={() => {
-            if (showWizard) closeWizard();
-            else setShowWizard(true);
-          }}
-        >
-          {deploymentInProgress ? "Deployment in progress" : showWizard ? "Close Setup" : "New Deployment"}
-        </Button>
+        <ButtonGroup variant="primary">
+          <Button
+            isDisabled={deploymentInProgress}
+            onPress={() => {
+              if (showWizard) closeWizard();
+              else setWizardKind("server");
+            }}
+          >
+            {deploymentInProgress ? "Deployment in progress" : showWizard ? "Close Setup" : "New Deployment"}
+          </Button>
+          <Dropdown>
+            <Tooltip delay={0}>
+              <Button aria-label="Choose deployment type" isDisabled={deploymentInProgress} isIconOnly>
+                <ButtonGroup.Separator />
+                <FontAwesomeIcon aria-hidden icon={faChevronDown} />
+              </Button>
+              <Tooltip.Content>Choose deployment type</Tooltip.Content>
+            </Tooltip>
+            <Dropdown.Popover className="min-w-80" placement="bottom end">
+              <Dropdown.Menu aria-label="Deployment types" onAction={(key) => {
+                if (key === "server" || key === "crackstation" || key === "alb-redirector") setWizardKind(key);
+              }}>
+                <Dropdown.Item id="server" textValue="Sliver Server">
+                  <div className="flex h-8 items-start justify-center pt-px">
+                    <FontAwesomeIcon aria-hidden icon={faServer} className="size-4 shrink-0 text-muted" />
+                  </div>
+                  <div className="flex min-w-0 flex-col">
+                    <Label>Sliver Server</Label>
+                    <Description>Provision a Sliver multiplayer server.</Description>
+                  </div>
+                </Dropdown.Item>
+                <Dropdown.Item id="crackstation" isDisabled={!hasEligibleAwsServer} textValue="Crackstation">
+                  <div className="flex h-8 items-start justify-center pt-px">
+                    <FontAwesomeIcon aria-hidden icon={faMicrochip} className="size-4 shrink-0 text-muted" />
+                  </div>
+                  <div className="flex min-w-0 flex-col">
+                    <Label>Crackstation</Label>
+                    <Description>{hasEligibleAwsServer ? "Add a GPU worker in the server VPC." : "Requires a running AWS Sliver server."}</Description>
+                  </div>
+                </Dropdown.Item>
+                <Dropdown.Item id="alb-redirector" isDisabled={!hasEligibleAwsServer} textValue="Load Balancer Redirector">
+                  <div className="flex h-8 items-start justify-center pt-px">
+                    <FontAwesomeIcon aria-hidden icon={faNetworkWired} className="size-4 shrink-0 text-muted" />
+                  </div>
+                  <div className="flex min-w-0 flex-col">
+                    <Label>Load Balancer Redirector</Label>
+                    <Description>{hasEligibleAwsServer ? "Route public HTTP traffic through AWS." : "Requires a running AWS Sliver server."}</Description>
+                  </div>
+                </Dropdown.Item>
+              </Dropdown.Menu>
+            </Dropdown.Popover>
+          </Dropdown>
+        </ButtonGroup>
       </section>
 
       {resumedDeployment ? (
@@ -953,20 +1007,49 @@ function DeploymentsPanel({
         />
       ) : null}
 
-      {visibleDeployments.length === 0 && !showWizard && !resumedDeployment ? (
+      {wizardKind === "crackstation" ? (
+        <CrackstationDeploymentWizard
+          api={api}
+          snapshot={snapshot}
+          onCancel={closeWizard}
+          onActivityChange={setWizardBusy}
+          onCreated={async (name) => {
+            closeWizard();
+            onFeedback({ tone: "success", title: "Crackstation ready", detail: `${name} is connected to its Sliver server.` });
+            await onRefresh();
+          }}
+          onShowCredentials={onShowCredentials}
+        />
+      ) : null}
+
+      {wizardKind === "alb-redirector" ? (
+        <AlbRedirectorDeploymentWizard
+          api={api}
+          snapshot={snapshot}
+          onCancel={closeWizard}
+          onActivityChange={setWizardBusy}
+          onCreated={async (name) => {
+            closeWizard();
+            onFeedback({ tone: "success", title: "Redirector ready", detail: `${name} forwards to its Sliver server HTTP listener.` });
+            await onRefresh();
+          }}
+        />
+      ) : null}
+
+      {visibleDeployments.length === 0 && snapshot.state.dependentDeployments.length === 0 && !setupOpen && !resumedDeployment ? (
         <EmptyState className="min-h-72 rounded-2xl bg-surface-secondary">
           <EmptyState.Header>
             <EmptyState.Media variant="icon">
               <FontAwesomeIcon aria-hidden icon={faServer} className="size-5 text-accent" />
             </EmptyState.Media>
-            <EmptyState.Title>No Managed Servers</EmptyState.Title>
+            <EmptyState.Title>No Managed Deployments</EmptyState.Title>
             <EmptyState.Description>Add provider credentials, then launch a tagged Sliver multiplayer server.</EmptyState.Description>
           </EmptyState.Header>
           <EmptyState.Content>
             <Button variant="outline" onPress={onShowCredentials}>Manage Credentials</Button>
           </EmptyState.Content>
         </EmptyState>
-      ) : !showWizard ? (
+      ) : !setupOpen ? (
         <div className="grid gap-4 lg:grid-cols-2">
           {visibleDeployments.map((deployment) => (
             <DeploymentCard
@@ -990,10 +1073,619 @@ function DeploymentsPanel({
               onRefresh={onRefresh}
             />
           ))}
+          {snapshot.state.dependentDeployments.map((deployment) => (
+            <DependentDeploymentCard
+              api={api}
+              deployment={deployment}
+              key={deployment.id}
+              revision={snapshot.state.revision}
+              server={snapshot.state.deployments.find(({ id }) => id === deployment.serverDeploymentId)}
+              onFeedback={onFeedback}
+              onRefresh={onRefresh}
+            />
+          ))}
         </div>
       ) : null}
     </div>
   );
+}
+
+function eligibleAwsServers(snapshot: CloudDeploymentSnapshot): AwsCloudDeploymentRecord[] {
+  return snapshot.state.deployments.filter((deployment): deployment is AwsCloudDeploymentRecord => (
+    deployment.provider === "aws" && deployment.status === "running" && deployment.runtime.instanceState === "running"
+  ));
+}
+
+function serverVpcId(server: AwsCloudDeploymentRecord): string {
+  return server.runtime.vpcId ?? server.spec.vpcId ?? "";
+}
+
+function serverVpcKey(server: AwsCloudDeploymentRecord): string {
+  const vpcId = serverVpcId(server);
+  return vpcId ? `${server.credentialId}:${server.spec.region}:${vpcId}` : "";
+}
+
+function ServerVpcSelect({ servers, server, onServerChange }: {
+  readonly servers: readonly AwsCloudDeploymentRecord[];
+  readonly server: AwsCloudDeploymentRecord | undefined;
+  readonly onServerChange: (serverId: string) => void;
+}): React.JSX.Element {
+  const vpcs = new Map<string, { value: string; label: string; description: string; serverId: string }>();
+  for (const candidate of servers) {
+    const value = serverVpcKey(candidate);
+    if (!value) continue;
+    const existing = vpcs.get(value);
+    vpcs.set(value, {
+      value,
+      label: serverVpcId(candidate),
+      description: existing ? `${existing.description}, ${candidate.name}` : `${candidate.spec.region} · ${candidate.name}`,
+      serverId: existing?.serverId ?? candidate.id,
+    });
+  }
+  const selectedValue = server ? serverVpcKey(server) : "";
+  return <CloudRichSelect
+    label="VPC"
+    value={selectedValue}
+    options={[...vpcs.values()]}
+    placeholder="Choose a server VPC"
+    selectedDescription={server ? `${server.spec.region} · ${server.name}` : undefined}
+    description="Only VPCs with running AWS Sliver servers are available. Choosing another VPC changes the server."
+    onChange={(value) => {
+      if (value === selectedValue) return;
+      const nextServerId = vpcs.get(value)?.serverId;
+      if (nextServerId) onServerChange(nextServerId);
+    }}
+  />;
+}
+
+function normalizedDnsName(value: string): string {
+  return value.trim().replace(/\.$/u, "").toLowerCase();
+}
+
+function certificateCoversDomain(certificate: AwsAlbRedirectorOptions["certificates"][number], domain: string): boolean {
+  const host = normalizedDnsName(domain);
+  return [certificate.domainName, ...certificate.subjectAlternativeNames].some((name) => {
+    const candidate = normalizedDnsName(name);
+    if (candidate === host) return true;
+    if (!candidate.startsWith("*.")) return false;
+    const suffix = candidate.slice(2);
+    return host.endsWith(`.${suffix}`) && host.split(".").length === suffix.split(".").length + 1;
+  });
+}
+
+function CrackstationDeploymentWizard({ api, snapshot, onCancel, onActivityChange, onCreated, onShowCredentials }: {
+  readonly api: CloudDeploymentAPI;
+  readonly snapshot: CloudDeploymentSnapshot;
+  readonly onCancel: () => void;
+  readonly onActivityChange: (active: boolean) => void;
+  readonly onCreated: (name: string) => Promise<void>;
+  readonly onShowCredentials: () => void;
+}): React.JSX.Element {
+  const servers = eligibleAwsServers(snapshot);
+  const [serverId, setServerId] = useState(servers[0]?.id ?? "");
+  const server = servers.find(({ id }) => id === serverId);
+  const [name, setName] = useState("");
+  const [operatorName, setOperatorName] = useState("crackstation");
+  const [options, setOptions] = useState<AwsCrackstationOptions | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [instanceType, setInstanceType] = useState("");
+  const [imageId, setImageId] = useState("");
+  const [subnetId, setSubnetId] = useState("");
+  const [sshUsername, setSshUsername] = useState("");
+  const [sshPort, setSshPort] = useState("22");
+  const [sshCidrs, setSshCidrs] = useState("");
+  const [volumeSizeGiB, setVolumeSizeGiB] = useState("80");
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+
+  useEffect(() => {
+    if (!server) return;
+    let active = true;
+    setOptions(null);
+    setOptionsError(null);
+    setInstanceType("");
+    setImageId("");
+    setSubnetId("");
+    setSshUsername("");
+    setSshCidrs(server.spec.sshCidrs.join("\n"));
+    setIsLoadingOptions(true);
+    void api.discoverCrackstationOptions({ credentialId: server.credentialId, serverDeploymentId: server.id }).then((result) => {
+      if (!active) return;
+      if (!result.ok || !result.value) {
+        setOptionsError(result.error ?? "GPU instance options could not be loaded.");
+        return;
+      }
+      const discovered = result.value;
+      const vpcId = server.runtime.vpcId ?? server.spec.vpcId;
+      const subnets = discovered.subnets.filter((subnet) => subnet.vpcId === vpcId);
+      const image = discovered.images.find((candidate) => candidate.distribution === "ubuntu" && candidate.architecture === "x86_64")
+        ?? discovered.images.find((candidate) => candidate.architecture === "x86_64");
+      setOptions(discovered);
+      setInstanceType(discovered.instanceTypes[0]?.name ?? "");
+      setImageId(image?.id ?? "");
+      setSshUsername(image?.sshUsername ?? "ubuntu");
+      setSubnetId(subnets.find((subnet) => subnet.id === (server.runtime.subnetId ?? server.spec.subnetId))?.id ?? subnets[0]?.id ?? "");
+    }).catch((error: unknown) => {
+      if (active) setOptionsError(errorMessage(error));
+    }).finally(() => {
+      if (active) setIsLoadingOptions(false);
+    });
+    return () => { active = false; };
+  }, [api, retry, server?.id, server?.credentialId]);
+
+  const vpcId = server ? serverVpcId(server) : "";
+  const subnets = options?.subnets.filter((subnet) => subnet.vpcId === vpcId) ?? [];
+  const selectedInstance = options?.instanceTypes.find(({ name: optionName }) => optionName === instanceType);
+  const selectedImage = options?.images.find(({ id }) => id === imageId);
+  const estimate = selectedInstance ? `~$${selectedInstance.estimatedCostPerDayUsd.toFixed(2)}/day EC2 compute only · 24 hours` : undefined;
+
+  const create = async (): Promise<void> => {
+    if (!server || !options) { setValidationError("Choose a running AWS Sliver server and load GPU options."); return; }
+    if (!name.trim()) { setValidationError("Enter a deployment name."); return; }
+    if (!/^[a-zA-Z0-9._-]{1,128}$/u.test(operatorName.trim())) { setValidationError("Enter a valid operator name."); return; }
+    if (!selectedInstance || !selectedImage || selectedImage.architecture !== selectedInstance.architecture) {
+      setValidationError("Choose a compatible GPU instance and machine image."); return;
+    }
+    if (!vpcId || !subnets.some(({ id }) => id === subnetId)) { setValidationError("Choose a subnet in the selected server VPC."); return; }
+    if (!/^[a-z_][a-z0-9_-]{0,31}$/u.test(sshUsername.trim()) || !validPort(sshPort)) {
+      setValidationError("Enter a valid Linux SSH username and port."); return;
+    }
+    const parsedCidrs = parseCidrs(sshCidrs);
+    if (!validCidrList(parsedCidrs)) { setValidationError("Add at least one valid SSH source CIDR."); return; }
+    if (!validInteger(volumeSizeGiB, 8)) { setValidationError("Root volume must be at least 8 GiB."); return; }
+    const input: CreateAwsCrackstationDeploymentInput = {
+      expectedRevision: snapshot.state.revision,
+      serverDeploymentId: server.id,
+      name: name.trim(),
+      spec: {
+        region: server.spec.region,
+        vpcId,
+        subnetId,
+        imageId,
+        instanceType,
+        sshUsername: sshUsername.trim(),
+        sshPort: Number(sshPort),
+        sshCidrs: parsedCidrs,
+        operatorName: operatorName.trim(),
+        volumeSizeGiB: Number(volumeSizeGiB),
+      },
+    };
+    setValidationError(null);
+    setIsCreating(true);
+    onActivityChange(true);
+    try {
+      const result = await api.createCrackstationDeployment(input);
+      if (!result.ok || !result.value) {
+        setValidationError(result.error ?? "Crackstation deployment failed.");
+        return;
+      }
+      await onCreated(input.name);
+    } catch (error) {
+      setValidationError(errorMessage(error));
+    } finally {
+      setIsCreating(false);
+      onActivityChange(false);
+    }
+  };
+
+  return <Card>
+    <Card.Header>
+      <Card.Title>New Crackstation</Card.Title>
+      <Card.Description>Deploy a GPU worker in an existing AWS Sliver server VPC and register it with that server.</Card.Description>
+    </Card.Header>
+    <Card.Content className="space-y-6">
+      {validationError ? <InlineMessage tone="danger" title="Check deployment" detail={validationError} /> : null}
+      <div className="grid gap-4 md:grid-cols-2">
+        <CloudNativeSelect label="Sliver Server" value={serverId} options={servers.map((candidate) => ({ value: candidate.id, label: candidate.name }))} onChange={setServerId} />
+        <CloudTextField label="Deployment Name" value={name} placeholder="gpu-worker" onChange={setName} />
+        <CloudTextField isReadOnly label="AWS Region" value={server?.spec.region ?? ""} onChange={() => undefined} />
+        <ServerVpcSelect servers={servers} server={server} onServerChange={setServerId} />
+      </div>
+      {isLoadingOptions ? <p className="text-sm text-muted">Loading GPU instance options and regional prices…</p> : null}
+      {optionsError ? <InlineMessage tone="danger" title="GPU options unavailable" detail={optionsError} /> : null}
+      {optionsError ? <Button variant="outline" onPress={() => setRetry((value) => value + 1)}>Try Again</Button> : null}
+      {options ? <div className="grid gap-4 md:grid-cols-2">
+        <CloudRichSelect
+          label="GPU Instance Type"
+          value={instanceType}
+          options={options.instanceTypes.map((instance) => ({
+            value: instance.name, label: instance.name,
+            description: `${instance.vCpuCount} vCPU · ${formatMemory(instance.memoryMiB)} · ~$${instance.estimatedCostPerDayUsd.toFixed(2)}/day EC2 compute only`,
+          }))}
+          selectedDescription={estimate}
+          description="Estimated On-Demand Linux compute cost for 24 hours. Public IPv4, storage, and transfer cost extra."
+          onChange={setInstanceType}
+        />
+        <CloudRichSelect
+          label="Machine Image"
+          value={imageId}
+          options={options.images.filter((image) => image.architecture === "x86_64").map((image) => ({
+            value: image.id, label: image.name ?? image.id,
+            description: `${image.distribution === "ubuntu" ? "Ubuntu" : "Amazon Linux"} · ${image.version} · ${image.id}`,
+          }))}
+          description="Amazon-owned Ubuntu 24.04 GPU image with NVIDIA drivers and CUDA."
+          onChange={(value) => {
+            setImageId(value);
+            setSshUsername(options.images.find((image) => image.id === value)?.sshUsername ?? "ubuntu");
+          }}
+        />
+        <CloudRichSelect
+          label="Subnet"
+          value={subnetId}
+          options={subnets.map((subnet) => ({ value: subnet.id, label: subnet.name ?? subnet.id,
+            description: `${subnet.id} · ${subnet.availabilityZone ?? "Unknown AZ"}` }))}
+          onChange={setSubnetId}
+        />
+        <CloudTextField label="Operator Profile Name" value={operatorName} onChange={setOperatorName} />
+        <CloudTextField label="SSH Username" value={sshUsername} onChange={setSshUsername} />
+        <CloudTextField inputMode="numeric" label="SSH Port" value={sshPort} onChange={setSshPort} />
+        <CloudTextField inputMode="numeric" label="Root Volume (GiB)" value={volumeSizeGiB} onChange={setVolumeSizeGiB} />
+        <CloudTextArea
+          label="SSH Source CIDRs"
+          value={sshCidrs}
+          description="One CIDR per line. These sources can reach the new GPU instance over SSH."
+          onChange={setSshCidrs}
+        />
+      </div> : null}
+      {options ? <InlineMessage tone="info" title="Deployment review" detail={`The GPU instance will join ${vpcId}. The installer will deploy sliver-crackstation, create its operator profile over SSH, and allow its connection to ${server?.name ?? "the selected server"} inside the VPC.`} /> : null}
+      {!servers.length ? <Button variant="outline" onPress={onShowCredentials}>Manage AWS Credentials</Button> : null}
+    </Card.Content>
+    <Card.Footer className="flex justify-between gap-3">
+      <Button isDisabled={isCreating} variant="tertiary" onPress={onCancel}>Cancel</Button>
+      <Button isDisabled={!options || isLoadingOptions} isPending={isCreating} variant="primary" onPress={() => void create()}>Deploy Crackstation</Button>
+    </Card.Footer>
+  </Card>;
+}
+
+function AlbRedirectorDeploymentWizard({ api, snapshot, onCancel, onActivityChange, onCreated }: {
+  readonly api: CloudDeploymentAPI;
+  readonly snapshot: CloudDeploymentSnapshot;
+  readonly onCancel: () => void;
+  readonly onActivityChange: (active: boolean) => void;
+  readonly onCreated: (name: string) => Promise<void>;
+}): React.JSX.Element {
+  const servers = eligibleAwsServers(snapshot);
+  const [serverId, setServerId] = useState(servers[0]?.id ?? "");
+  const server = servers.find(({ id }) => id === serverId);
+  const [name, setName] = useState("");
+  const [domain, setDomain] = useState("");
+  const [backendPort, setBackendPort] = useState("8080");
+  const [listenerMode, setListenerMode] = useState<"existing" | "create">("existing");
+  const [existingJobId, setExistingJobId] = useState("");
+  const [certificateArn, setCertificateArn] = useState("");
+  const [hostedZoneId, setHostedZoneId] = useState("");
+  const [primarySubnetId, setPrimarySubnetId] = useState("");
+  const [secondarySubnetId, setSecondarySubnetId] = useState("");
+  const [options, setOptions] = useState<AwsAlbRedirectorOptions | null>(null);
+  const [optionsError, setOptionsError] = useState<string | null>(null);
+  const [isLoadingOptions, setIsLoadingOptions] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+
+  useEffect(() => {
+    if (!server) return;
+    let active = true;
+    setOptions(null);
+    setOptionsError(null);
+    setCertificateArn("");
+    setHostedZoneId("");
+    setPrimarySubnetId("");
+    setSecondarySubnetId("");
+    setExistingJobId("");
+    setIsLoadingOptions(true);
+    void api.discoverAlbRedirectorOptions({ credentialId: server.credentialId, serverDeploymentId: server.id }).then((result) => {
+      if (!active) return;
+      if (!result.ok || !result.value) {
+        setOptionsError(result.error ?? "ALB infrastructure options could not be loaded.");
+        return;
+      }
+      const discovered = result.value;
+      const serverAzSubnets = discovered.publicSubnets.filter(({ availabilityZone }) => availabilityZone === server.runtime.availabilityZone);
+      const preferred = serverAzSubnets.find(({ id }) => id === (server.runtime.subnetId ?? server.spec.subnetId))
+        ?? serverAzSubnets[0];
+      const second = discovered.publicSubnets.find((subnet) => subnet.id !== preferred?.id && subnet.availabilityZone !== preferred?.availabilityZone);
+      setOptions(discovered);
+      setPrimarySubnetId(preferred?.id ?? "");
+      setSecondarySubnetId(second?.id ?? "");
+      setListenerMode(discovered.existingHttpListeners.length > 0 ? "existing" : "create");
+      setExistingJobId(String(discovered.existingHttpListeners[0]?.jobId ?? ""));
+    }).catch((error: unknown) => {
+      if (active) setOptionsError(errorMessage(error));
+    }).finally(() => {
+      if (active) setIsLoadingOptions(false);
+    });
+    return () => { active = false; };
+  }, [api, retry, server?.id, server?.credentialId]);
+
+  const serverAzSubnets = options?.publicSubnets.filter(({ availabilityZone }) => availabilityZone === server?.runtime.availabilityZone) ?? [];
+  const primarySubnet = serverAzSubnets.find(({ id }) => id === primarySubnetId);
+  const secondarySubnet = options?.publicSubnets.find(({ id }) => id === secondarySubnetId);
+  const additionalSubnet = server?.spec.networkMode === "managed" && options?.publicSubnets.length === 1
+    ? options?.suggestedAdditionalSubnet ?? null
+    : null;
+  const certificate = options?.certificates.find(({ arn }) => arn === certificateArn);
+  const hostedZone = options?.hostedZones.find(({ id }) => id === hostedZoneId);
+  const existingListener = options?.existingHttpListeners.find(({ jobId }) => String(jobId) === existingJobId);
+  const selectedBackendPort = listenerMode === "existing" ? existingListener?.port : Number(backendPort);
+
+  const create = async (): Promise<void> => {
+    if (!server || !options) { setValidationError("Choose a running AWS Sliver server and load ALB options."); return; }
+    if (!name.trim()) { setValidationError("Enter a deployment name."); return; }
+    if (!/^(?=.{3,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])$/u.test(domain.trim())) {
+      setValidationError("Enter a valid public domain name."); return;
+    }
+    if (!certificate) { setValidationError("Choose an issued ACM certificate."); return; }
+    if (!certificateCoversDomain(certificate, domain)) { setValidationError("Choose an ACM certificate that covers the public domain."); return; }
+    if (!hostedZone) { setValidationError("Choose a Route 53 hosted zone."); return; }
+    const normalizedDomain = normalizedDnsName(domain);
+    const normalizedZone = normalizedDnsName(hostedZone.name);
+    if (normalizedDomain !== normalizedZone && !normalizedDomain.endsWith(`.${normalizedZone}`)) {
+      setValidationError("Choose a Route 53 hosted zone that contains the public domain."); return;
+    }
+    if (listenerMode === "existing" && !existingListener) {
+      setValidationError("Choose a running Sliver HTTP listener on the selected server."); return;
+    }
+    if (listenerMode === "create" && (!validPort(backendPort) || Number(backendPort) === 80 || Number(backendPort) === 443)) {
+      setValidationError("Choose a new Sliver HTTP listener port other than 80 or 443."); return;
+    }
+    if (!selectedBackendPort) { setValidationError("Choose a Sliver HTTP listener."); return; }
+    if (!primarySubnet) {
+      setValidationError(`The ALB needs a public subnet in the server instance's availability zone${server.runtime.availabilityZone ? ` (${server.runtime.availabilityZone})` : ""}. Add one in this VPC, then refresh ALB options.`);
+      return;
+    }
+    if (!additionalSubnet && (!secondarySubnet || secondarySubnet.availabilityZone === primarySubnet.availabilityZone)) {
+      setValidationError("Choose two public subnets in different availability zones."); return;
+    }
+    const subnetIds: readonly [string] | readonly [string, string] = additionalSubnet
+      ? [primarySubnet.id]
+      : [primarySubnet.id, secondarySubnet!.id];
+    const input: CreateAwsAlbRedirectorDeploymentInput = {
+      expectedRevision: snapshot.state.revision,
+      serverDeploymentId: server.id,
+      name: name.trim(),
+      spec: {
+        region: options.region,
+        vpcId: options.vpcId,
+        subnetIds,
+        additionalSubnet,
+        certificateArn: certificate.arn,
+        hostedZoneId,
+        domain: domain.trim(),
+        backendPort: selectedBackendPort,
+        listener: listenerMode === "existing"
+          ? { mode: "existing", port: selectedBackendPort, jobId: existingListener!.jobId }
+          : { mode: "create", port: selectedBackendPort },
+      },
+    };
+    setValidationError(null);
+    setIsCreating(true);
+    onActivityChange(true);
+    try {
+      const result = await api.createAlbRedirectorDeployment(input);
+      if (!result.ok || !result.value) {
+        setValidationError(result.error ?? "Load balancer deployment failed.");
+        return;
+      }
+      await onCreated(input.name);
+    } catch (error) {
+      setValidationError(errorMessage(error));
+    } finally {
+      setIsCreating(false);
+      onActivityChange(false);
+    }
+  };
+
+  return <Card>
+    <Card.Header>
+      <Card.Title>New Load Balancer Redirector</Card.Title>
+      <Card.Description>Deploy an AWS Application Load Balancer that forwards to an HTTP listener on an existing Sliver server.</Card.Description>
+    </Card.Header>
+    <Card.Content className="space-y-6">
+      {validationError ? <InlineMessage tone="danger" title="Check deployment" detail={validationError} /> : null}
+      <div className="grid gap-4 md:grid-cols-2">
+        <CloudNativeSelect label="Sliver Server" value={serverId} options={servers.map((candidate) => ({ value: candidate.id, label: candidate.name }))} onChange={setServerId} />
+        <CloudTextField label="Deployment Name" value={name} placeholder="edge-redirector" onChange={setName} />
+        <CloudTextField isReadOnly label="AWS Region" value={server?.spec.region ?? ""} onChange={() => undefined} />
+        <ServerVpcSelect servers={servers} server={server} onServerChange={setServerId} />
+      </div>
+      {isLoadingOptions ? <p className="text-sm text-muted">Loading VPC subnets and ACM certificates…</p> : null}
+      {optionsError ? <InlineMessage tone="danger" title="ALB options unavailable" detail={optionsError} /> : null}
+      {options && serverAzSubnets.length === 0 ? <InlineMessage tone="danger" title="Public subnet required"
+        detail={`The ALB needs a public subnet in the server instance's availability zone${server?.runtime.availabilityZone ? ` (${server.runtime.availabilityZone})` : ""}. Add one in this VPC, then refresh ALB options.`} /> : null}
+      {optionsError ? <Button variant="outline" onPress={() => setRetry((value) => value + 1)}>Try Again</Button> : null}
+      {options && serverAzSubnets.length === 0 ? <Button variant="outline" onPress={() => setRetry((value) => value + 1)}>Refresh ALB Options</Button> : null}
+      {options ? <div className="grid gap-4 md:grid-cols-2">
+        <CloudTextField label="Public Domain" value={domain} placeholder="c2.example.test" onChange={setDomain} />
+        <CloudRichSelect
+          label="ACM Certificate"
+          value={certificateArn}
+          options={options.certificates.map((candidate) => ({
+            value: candidate.arn, label: candidate.domainName,
+            description: candidate.subjectAlternativeNames.join(", ") || candidate.arn,
+          }))}
+          placeholder="Choose an issued certificate"
+          selectedDescription={certificate?.arn}
+          description="The certificate must cover the public domain."
+          onChange={setCertificateArn}
+        />
+        <CloudRichSelect
+          label="Route 53 Hosted Zone"
+          value={hostedZoneId}
+          options={options.hostedZones.map((zone) => ({ value: zone.id, label: zone.name, description: zone.id }))}
+          placeholder="Choose a hosted zone"
+          description="An alias record for the public domain will be created automatically."
+          onChange={setHostedZoneId}
+        />
+        <CloudNativeSelect
+          label="Sliver HTTP Listener"
+          value={listenerMode}
+          options={[
+            ...(options.existingHttpListeners.length > 0 ? [{ value: "existing", label: "Use an existing HTTP listener" }] : []),
+            { value: "create", label: "Create a new private HTTP listener" },
+          ]}
+          description="An existing listener stays running when the load balancer is removed."
+          onChange={(value) => setListenerMode(value === "existing" ? "existing" : "create")}
+        />
+        {listenerMode === "existing" ? <CloudRichSelect
+          label="Existing HTTP Listener"
+          value={existingJobId}
+          options={options.existingHttpListeners.map((listener) => ({
+            value: String(listener.jobId), label: `Job #${listener.jobId} · HTTP :${listener.port}`,
+            description: listener.description,
+          }))}
+          description="The ALB will forward to this job through the server's private VPC address."
+          onChange={setExistingJobId}
+        /> : <CloudTextField inputMode="numeric" label="Sliver HTTP Listener Port" value={backendPort} onChange={setBackendPort}
+          description="A new listener will bind to the server's private VPC address." />}
+        <CloudRichSelect
+          label="First Public Subnet"
+          value={primarySubnetId}
+          options={serverAzSubnets.map((subnet) => ({ value: subnet.id, label: subnet.id, description: subnet.availabilityZone }))}
+          placeholder="Choose a public subnet"
+          description="This public subnet must be in the server instance's availability zone."
+          onChange={(value) => {
+            setPrimarySubnetId(value);
+            if (options.publicSubnets.find((subnet) => subnet.id === value)?.availabilityZone === secondarySubnet?.availabilityZone) setSecondarySubnetId("");
+          }}
+        />
+        {additionalSubnet ? <CloudTextField
+          isReadOnly
+          label="Planned Second Public Subnet"
+          value={`${additionalSubnet.cidrBlock} · ${additionalSubnet.availabilityZone}`}
+          description={`Cloud Manager will create this subnet in the same VPC and use route table ${additionalSubnet.routeTableId}.`}
+          onChange={() => undefined}
+        /> : <CloudRichSelect
+          label="Second Public Subnet"
+          value={secondarySubnetId}
+          options={options.publicSubnets.filter((subnet) => subnet.id !== primarySubnetId && subnet.availabilityZone !== primarySubnet?.availabilityZone)
+            .map((subnet) => ({ value: subnet.id, label: subnet.id, description: subnet.availabilityZone }))}
+          placeholder="Choose a second public subnet"
+          description="The ALB requires two public subnets in different availability zones."
+          onChange={setSecondarySubnetId}
+        />}
+      </div> : null}
+      {options ? <InlineMessage tone="info" title="Deployment review"
+        detail={`The ALB will use ${primarySubnetId || "the first subnet"}${additionalSubnet ? ` plus a new ${additionalSubnet.cidrBlock} subnet in ${additionalSubnet.availabilityZone}` : ` and ${secondarySubnetId || "a second subnet"}`}. It will terminate TLS with ACM, forward HTTP to ${server?.name ?? "the selected server"} through ${listenerMode === "existing" ? `existing job #${existingListener?.jobId ?? "?"}` : "a new private listener"} on port ${selectedBackendPort ?? "?"}, and create a Route 53 alias for ${domain || "the chosen domain"}.`} /> : null}
+    </Card.Content>
+    <Card.Footer className="flex justify-between gap-3">
+      <Button isDisabled={isCreating} variant="tertiary" onPress={onCancel}>Cancel</Button>
+      <Button isDisabled={!options || isLoadingOptions || options.certificates.length === 0 || options.hostedZones.length === 0 || !primarySubnet || (!secondarySubnet && !additionalSubnet) || (listenerMode === "existing" && !existingListener)}
+        isPending={isCreating} variant="primary" onPress={() => void create()}>Deploy Load Balancer</Button>
+    </Card.Footer>
+  </Card>;
+}
+
+function DependentDeploymentCard({ api, deployment, revision, server, onFeedback, onRefresh }: {
+  readonly api: CloudDeploymentAPI;
+  readonly deployment: CloudDependentDeploymentRecord;
+  readonly revision: number;
+  readonly server: CloudDeploymentRecord | undefined;
+  readonly onFeedback: (feedback: Feedback) => void;
+  readonly onRefresh: () => Promise<void>;
+}): React.JSX.Element {
+  const [destroyPlan, setDestroyPlan] = useState<DestroyCloudDeploymentPlan | null>(null);
+  const [pending, setPending] = useState<"prepare" | "destroy" | null>(null);
+  const kindLabel = deployment.kind === "crackstation" ? "Crackstation" : "Load Balancer Redirector";
+  const runtimeLabel = deployment.kind === "crackstation"
+    ? deployment.runtime.instanceId ?? "EC2 instance pending"
+    : deployment.runtime.dnsName ?? "ALB pending";
+
+  const prepareDestroy = async (): Promise<void> => {
+    if (pending) return;
+    setPending("prepare");
+    try {
+      const result = await api.prepareDestroyDeployment({ deploymentId: deployment.id, expectedRevision: revision });
+      if (!result.ok || !result.value) {
+        onFeedback({ tone: "danger", title: "Could not review termination", detail: result.error ?? "The managed resources could not be verified." });
+        return;
+      }
+      setDestroyPlan(result.value);
+    } catch (error) {
+      onFeedback({ tone: "danger", title: "Could not review termination", detail: errorMessage(error) });
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const executeDestroy = async (): Promise<void> => {
+    if (!destroyPlan || pending) return;
+    const plan = destroyPlan;
+    setDestroyPlan(null);
+    setPending("destroy");
+    try {
+      const result = await api.executeDestroyDeployment({ token: plan.token });
+      if (!result.ok) {
+        onFeedback({ tone: "danger", title: "Termination failed", detail: result.error ?? "The reviewed termination was rejected." });
+        return;
+      }
+      onFeedback({ tone: "success", title: `${kindLabel} terminated`, detail: `${deployment.name} and its verified managed resources were removed.` });
+      await onRefresh();
+    } catch (error) {
+      onFeedback({ tone: "danger", title: "Termination failed", detail: errorMessage(error) });
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return <Card>
+    <Card.Header className="flex-row items-start justify-between gap-3">
+      <div className="min-w-0">
+        <Card.Title className="truncate">{deployment.name}</Card.Title>
+        <Card.Description>{kindLabel} · AWS · {server?.name ?? "Server unavailable"}</Card.Description>
+      </div>
+      <Chip color={statusColor(deployment.status)} size="sm" variant="soft">{titleCase(deployment.status)}</Chip>
+    </Card.Header>
+    <Card.Content className="space-y-4">
+      <dl className="grid gap-3 sm:grid-cols-2">
+        <DeploymentDetail label={deployment.kind === "crackstation" ? "EC2 instance" : "ALB DNS name"} value={runtimeLabel} mono />
+        <DeploymentDetail label="Region" value={deployment.spec.region} />
+        {deployment.kind === "crackstation" ? <>
+          <DeploymentDetail label="GPU instance type" value={deployment.spec.instanceType} />
+          <DeploymentDetail label="VPC" value={deployment.spec.vpcId} mono />
+          <DeploymentDetail label="Host UUID" value={deployment.runtime.stationHostUuid ?? "Pending registration"} mono />
+        </> : <>
+          <DeploymentDetail label="Domain" value={deployment.spec.domain} />
+          <DeploymentDetail label="VPC" value={deployment.spec.vpcId} mono />
+          <DeploymentDetail label="Backend" value={`HTTP :${deployment.spec.backendPort}`} />
+          <DeploymentDetail label="Target health" value={`${deployment.runtime.targetHealth} (cached)`} />
+          <DeploymentDetail label="Route 53 alias" value={deployment.runtime.aliasRecordOwned
+            ? deployment.runtime.aliasRecordName ?? "Created"
+            : "Pending"} />
+        </>}
+      </dl>
+      {deployment.lastError ? <InlineMessage tone="warning" title="Deployment needs attention" detail={deployment.lastError} /> : null}
+    </Card.Content>
+    <Card.Footer className="justify-end">
+      <Button isDisabled={deployment.status === "provisioning" || deployment.status === "deleting" || pending !== null}
+        isPending={pending === "prepare"} size="sm" variant="danger-soft" onPress={() => void prepareDestroy()}>
+        Terminate {kindLabel}
+      </Button>
+    </Card.Footer>
+    <AlertDialog.Backdrop isOpen={destroyPlan !== null} variant="blur" onOpenChange={(open) => { if (!open && pending !== "destroy") setDestroyPlan(null); }}>
+      <AlertDialog.Container placement="center" size="sm">
+        <AlertDialog.Dialog className="sm:max-w-[460px]">
+          <AlertDialog.Header>
+            <AlertDialog.Icon status="danger"><FontAwesomeIcon aria-hidden icon={faTriangleExclamation} className="size-5" /></AlertDialog.Icon>
+            <AlertDialog.Heading>Terminate {destroyPlan?.deploymentName ?? kindLabel}?</AlertDialog.Heading>
+          </AlertDialog.Header>
+          <AlertDialog.Body>
+            <div className="space-y-3 text-sm leading-6 text-muted">
+              <p>The provider resources were rechecked against this deployment’s management ID.</p>
+              <p>This removes the {kindLabel.toLowerCase()} and its managed resources. The linked Sliver server remains available.</p>
+              {destroyPlan ? <p className="text-xs">Review expires {new Date(destroyPlan.expiresAt).toLocaleTimeString()}.</p> : null}
+            </div>
+          </AlertDialog.Body>
+          <AlertDialog.Footer>
+            <Button isDisabled={pending === "destroy"} variant="tertiary" onPress={() => setDestroyPlan(null)}>Cancel</Button>
+            <Button isPending={pending === "destroy"} variant="danger" onPress={() => void executeDestroy()}>Terminate {kindLabel}</Button>
+          </AlertDialog.Footer>
+        </AlertDialog.Dialog>
+      </AlertDialog.Container>
+    </AlertDialog.Backdrop>
+  </Card>;
 }
 
 function DeploymentWizard({
@@ -7349,6 +8041,14 @@ function phaseLabel(phase: CloudDeploymentRecord["phase"]): string {
     "configuring-daemon": "Configuring Linux daemon",
     "creating-operator": "Creating operator profile",
     "copying-operator-config": "Copying operator config",
+    "installing-gpu-driver": "Installing GPU driver",
+    "installing-crackstation": "Installing Crackstation",
+    "connecting-crackstation": "Connecting Crackstation",
+    "creating-load-balancer": "Creating load balancer",
+    "configuring-target-group": "Configuring target group",
+    "configuring-dns": "Configuring Route 53 alias",
+    "starting-listener": "Starting HTTP listener",
+    "waiting-target-health": "Waiting for target health",
     ready: "Ready",
     stopped: "Stopped",
     failed: "Failed",

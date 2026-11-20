@@ -4,7 +4,9 @@ import {
   type KeyboardShortcutOverrides,
 } from "./keyboard-shortcuts.js";
 
-export const APPLICATION_SETTINGS_VERSION = 10 as const;
+export const APPLICATION_SETTINGS_VERSION = 12 as const;
+const EXPLICIT_LANGUAGE_APPLICATION_SETTINGS_VERSION = 11 as const;
+const PRE_LANGUAGE_APPLICATION_SETTINGS_VERSION = 10 as const;
 const PRE_TRANSPARENT_CLIPBOARD_APPLICATION_SETTINGS_VERSION = 9 as const;
 const PRE_RDP_APPLICATION_SETTINGS_VERSION = 8 as const;
 const REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION = 5 as const;
@@ -23,6 +25,18 @@ export const CONSOLE_TERMINAL_FONTS = [
   { id: "cascadia-mono", label: "Cascadia Mono", family: "Cascadia Mono" },
   { id: "source-code-pro", label: "Source Code Pro", family: "Source Code Pro" },
 ] as const;
+
+export const APPLICATION_LANGUAGES = [
+  { id: "en", label: "English" },
+  { id: "es", label: "Español" },
+  { id: "fr", label: "Français" },
+  { id: "ja", label: "日本語" },
+  { id: "uk", label: "Українська" },
+] as const;
+
+export type ApplicationLanguage = (typeof APPLICATION_LANGUAGES)[number]["id"];
+export type ApplicationLanguagePreference = ApplicationLanguage | "system";
+export const DEFAULT_APPLICATION_LANGUAGE: ApplicationLanguage = "en";
 
 export type ApplicationTheme = "system" | "light" | "dark";
 export type ApplicationIcon = "auto" | "light" | "dark" | "passion";
@@ -58,6 +72,7 @@ export interface ApplicationRdpSettings {
 }
 
 export interface ApplicationSettingsValues {
+  readonly language: ApplicationLanguagePreference;
   readonly theme: ApplicationTheme;
   readonly appIcon: ApplicationIcon;
   readonly reduceMotion: boolean;
@@ -74,6 +89,8 @@ export interface ApplicationSettingsValues {
 export interface ApplicationSettingsState extends ApplicationSettingsValues {
   readonly v: typeof APPLICATION_SETTINGS_VERSION;
   readonly revision: number;
+  /** Resolved from the OS at launch and supplied by main for this run. */
+  readonly systemLanguage: ApplicationLanguage;
 }
 
 export interface ApplicationSettingsUpdateInput {
@@ -104,6 +121,7 @@ export const DEFAULT_APPLICATION_RDP_SETTINGS: ApplicationRdpSettings = Object.f
 });
 
 export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Object.freeze({
+  language: "system",
   theme: "system",
   appIcon: "auto",
   reduceMotion: false,
@@ -119,6 +137,7 @@ export const DEFAULT_APPLICATION_SETTINGS_VALUES: ApplicationSettingsValues = Ob
 export const DEFAULT_APPLICATION_SETTINGS_STATE: ApplicationSettingsState = Object.freeze({
   v: APPLICATION_SETTINGS_VERSION,
   revision: 0,
+  systemLanguage: DEFAULT_APPLICATION_LANGUAGE,
   ...DEFAULT_APPLICATION_SETTINGS_VALUES,
 });
 
@@ -137,8 +156,11 @@ const TERMINAL_KEYS = [
 const OVERVIEW_KEYS = ["kinds", "statuses", "lightning", "sidebarDisabled", "presentation"] as const;
 const OVERVIEW_STATUSES = new Set(["healthy", "warning", "inactive", "unknown"]);
 const RDP_KEYS = ["clipboard", "transparentClipboard"] as const;
-const SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"] as const;
-const SETTINGS_STATE_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const PRE_LANGUAGE_SETTINGS_VALUE_KEYS = ["theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview", "rdp"] as const;
+const SETTINGS_VALUE_KEYS = ["language", ...PRE_LANGUAGE_SETTINGS_VALUE_KEYS] as const;
+const PERSISTED_SETTINGS_KEYS = ["v", "revision", ...SETTINGS_VALUE_KEYS] as const;
+const SETTINGS_STATE_KEYS = [...PERSISTED_SETTINGS_KEYS, "systemLanguage"] as const;
+const PRE_LANGUAGE_SETTINGS_STATE_KEYS = ["v", "revision", ...PRE_LANGUAGE_SETTINGS_VALUE_KEYS] as const;
 const PRE_RDP_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "disableWindowTransparency", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
 const PRE_WINDOW_TRANSPARENCY_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal", "overview"] as const;
 const REPORT_SCREENSHOT_SETTINGS_STATE_KEYS = ["v", "revision", "theme", "appIcon", "reduceMotion", "reportScreenshotDirectory", "commandPaletteShortcut", "keyboardShortcuts", "terminal"] as const;
@@ -177,6 +199,18 @@ const RESERVED_COMMAND_PALETTE_SHORTCUTS = new Set([
   "mod+y",
   "mod+z",
 ]);
+
+export function isApplicationLanguage(value: unknown): value is ApplicationLanguage {
+  return APPLICATION_LANGUAGES.some(({ id }) => id === value);
+}
+
+export function isApplicationLanguagePreference(value: unknown): value is ApplicationLanguagePreference {
+  return value === "system" || isApplicationLanguage(value);
+}
+
+export function resolveApplicationLanguage({ language, systemLanguage }: Pick<ApplicationSettingsState, "language" | "systemLanguage">): ApplicationLanguage {
+  return language === "system" ? systemLanguage : language;
+}
 
 export function isApplicationTheme(value: unknown): value is ApplicationTheme {
   return typeof value === "string" && APPLICATION_THEMES.has(value as ApplicationTheme);
@@ -278,6 +312,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     throw new TypeError("Invalid application settings");
   }
   if (
+    !isApplicationLanguagePreference(value["language"]) ||
     !isApplicationTheme(value["theme"]) ||
     !isApplicationIcon(value["appIcon"]) ||
     typeof value["reduceMotion"] !== "boolean" ||
@@ -300,6 +335,7 @@ export function parseApplicationSettingsValues(value: unknown): ApplicationSetti
     throw new TypeError("Invalid application settings");
   }
   return Object.freeze({
+    language: value["language"],
     theme: value["theme"],
     appIcon: value["appIcon"],
     reduceMotion: value["reduceMotion"],
@@ -317,13 +353,15 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
   if (
     !hasExactKeys(value, SETTINGS_STATE_KEYS) ||
     value["v"] !== APPLICATION_SETTINGS_VERSION ||
-    !isRevision(value["revision"])
+    !isRevision(value["revision"]) ||
+    !isApplicationLanguage(value["systemLanguage"])
   ) {
     throw new TypeError("Invalid application settings state");
   }
   let settings: ApplicationSettingsValues;
   try {
     settings = parseApplicationSettingsValues({
+      language: value["language"],
       theme: value["theme"],
       appIcon: value["appIcon"],
       reduceMotion: value["reduceMotion"],
@@ -341,95 +379,102 @@ export function parseApplicationSettingsState(value: unknown): ApplicationSettin
   return Object.freeze({
     v: APPLICATION_SETTINGS_VERSION,
     revision: value["revision"] as number,
+    systemLanguage: value["systemLanguage"],
     ...settings,
   });
 }
 
-export function parsePersistedApplicationSettingsState(value: unknown): ApplicationSettingsState {
-  if (hasExactKeys(value, SETTINGS_STATE_KEYS) && value["v"] === PRE_TRANSPARENT_CLIPBOARD_APPLICATION_SETTINGS_VERSION &&
-      hasExactKeys(value["rdp"], ["clipboard"]) && typeof value["rdp"]["clipboard"] === "boolean") {
-    value = { ...value, v: APPLICATION_SETTINGS_VERSION, rdp: { ...value["rdp"], transparentClipboard: false } };
-  }
+export function parsePersistedApplicationSettingsState(
+  value: unknown,
+  systemLanguage: ApplicationLanguage = DEFAULT_APPLICATION_LANGUAGE,
+): ApplicationSettingsState {
+  const migrate = (legacy: Record<string, unknown>): ApplicationSettingsState => parseApplicationSettingsState({
+    ...legacy,
+    v: APPLICATION_SETTINGS_VERSION,
+    language: DEFAULT_APPLICATION_SETTINGS_VALUES.language,
+    systemLanguage,
+  });
   if (isRecord(value) && Number.isInteger(value["v"]) && Number(value["v"]) >= 1 && Number(value["v"]) <= 6 &&
       hasExactKeys(value["terminal"], TERMINAL_KEYS.filter((key) => key !== "transparentWindows"))) {
     value = { ...value, terminal: { ...value["terminal"], transparentWindows: true } };
   }
   if (hasExactKeys(value, PRE_WINDOW_TRANSPARENCY_SETTINGS_STATE_KEYS) && (value["v"] === 6 || value["v"] === 7)) {
-    return parseApplicationSettingsState({
-      ...value, v: APPLICATION_SETTINGS_VERSION, disableWindowTransparency: false, rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+    return migrate({
+      ...value, disableWindowTransparency: false, rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
     });
   }
   try {
-    return parseApplicationSettingsState(value);
-  } catch {
-    try {
-      if (hasExactKeys(value, PRE_RDP_SETTINGS_STATE_KEYS) && value["v"] === PRE_RDP_APPLICATION_SETTINGS_VERSION) {
-        return parseApplicationSettingsState({
-          ...value, v: APPLICATION_SETTINGS_VERSION, rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-      if (hasExactKeys(value, REPORT_SCREENSHOT_SETTINGS_STATE_KEYS) && value["v"] === REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION) {
-        return parseApplicationSettingsState({
-          ...value,
-          v: APPLICATION_SETTINGS_VERSION,
-          disableWindowTransparency: false,
-          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
-          rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-      if (hasExactKeys(value, KEYBOARD_SHORTCUTS_SETTINGS_STATE_KEYS) && value["v"] === KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION) {
-        return parseApplicationSettingsState({
-          ...value,
-          v: APPLICATION_SETTINGS_VERSION,
-          disableWindowTransparency: false,
-          reportScreenshotDirectory: null,
-          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
-          rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-      if (hasExactKeys(value, PREVIOUS_SETTINGS_STATE_KEYS) && value["v"] === PREVIOUS_APPLICATION_SETTINGS_VERSION) {
-        if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
-        return parseApplicationSettingsState({
-          ...value,
-          v: APPLICATION_SETTINGS_VERSION,
-          disableWindowTransparency: false,
-          keyboardShortcuts: {},
-          reportScreenshotDirectory: null,
-          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
-          rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-      if (hasExactKeys(value, COMMAND_PALETTE_SETTINGS_STATE_KEYS) && value["v"] === COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION) {
-        if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
-        return parseApplicationSettingsState({
-          ...value,
-          v: APPLICATION_SETTINGS_VERSION,
-          disableWindowTransparency: false,
-          appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
-          keyboardShortcuts: {},
-          reportScreenshotDirectory: null,
-          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
-          rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-      if (hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) && value["v"] === LEGACY_APPLICATION_SETTINGS_VERSION) {
-        return parseApplicationSettingsState({
-          ...value,
-          v: APPLICATION_SETTINGS_VERSION,
-          disableWindowTransparency: false,
-          appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
-          commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
-          keyboardShortcuts: {},
-          reportScreenshotDirectory: null,
-          overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
-          rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
-        });
-      }
-    } catch {
-      throw new TypeError("Invalid persisted application settings state");
+    if (hasExactKeys(value, PERSISTED_SETTINGS_KEYS) &&
+        (value["v"] === APPLICATION_SETTINGS_VERSION ||
+          (value["v"] === EXPLICIT_LANGUAGE_APPLICATION_SETTINGS_VERSION && isApplicationLanguage(value["language"])))) {
+      return parseApplicationSettingsState({ ...value, v: APPLICATION_SETTINGS_VERSION, systemLanguage });
     }
+    if (hasExactKeys(value, PRE_LANGUAGE_SETTINGS_STATE_KEYS)) {
+      if (value["v"] === PRE_LANGUAGE_APPLICATION_SETTINGS_VERSION) return migrate(value);
+      if (value["v"] === PRE_TRANSPARENT_CLIPBOARD_APPLICATION_SETTINGS_VERSION &&
+          hasExactKeys(value["rdp"], ["clipboard"]) && typeof value["rdp"]["clipboard"] === "boolean") {
+        return migrate({ ...value, rdp: { ...value["rdp"], transparentClipboard: false } });
+      }
+    }
+    if (hasExactKeys(value, PRE_RDP_SETTINGS_STATE_KEYS) && value["v"] === PRE_RDP_APPLICATION_SETTINGS_VERSION) {
+      return migrate({ ...value, rdp: DEFAULT_APPLICATION_RDP_SETTINGS });
+    }
+    if (hasExactKeys(value, REPORT_SCREENSHOT_SETTINGS_STATE_KEYS) && value["v"] === REPORT_SCREENSHOT_APPLICATION_SETTINGS_VERSION) {
+      return migrate({
+        ...value,
+        disableWindowTransparency: false,
+        overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      });
+    }
+    if (hasExactKeys(value, KEYBOARD_SHORTCUTS_SETTINGS_STATE_KEYS) && value["v"] === KEYBOARD_SHORTCUTS_APPLICATION_SETTINGS_VERSION) {
+      return migrate({
+        ...value,
+        disableWindowTransparency: false,
+        reportScreenshotDirectory: null,
+        overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      });
+    }
+    if (hasExactKeys(value, PREVIOUS_SETTINGS_STATE_KEYS) && value["v"] === PREVIOUS_APPLICATION_SETTINGS_VERSION) {
+      if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
+      return migrate({
+        ...value,
+        disableWindowTransparency: false,
+        keyboardShortcuts: {},
+        reportScreenshotDirectory: null,
+        overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      });
+    }
+    if (hasExactKeys(value, COMMAND_PALETTE_SETTINGS_STATE_KEYS) && value["v"] === COMMAND_PALETTE_APPLICATION_SETTINGS_VERSION) {
+      if (!isCommandPaletteShortcut(value["commandPaletteShortcut"])) throw new TypeError("Invalid previous command palette shortcut");
+      return migrate({
+        ...value,
+        disableWindowTransparency: false,
+        appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
+        keyboardShortcuts: {},
+        reportScreenshotDirectory: null,
+        overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      });
+    }
+    if (hasExactKeys(value, LEGACY_SETTINGS_STATE_KEYS) && value["v"] === LEGACY_APPLICATION_SETTINGS_VERSION) {
+      return migrate({
+        ...value,
+        disableWindowTransparency: false,
+        appIcon: DEFAULT_APPLICATION_SETTINGS_VALUES.appIcon,
+        commandPaletteShortcut: DEFAULT_COMMAND_PALETTE_SHORTCUT,
+        keyboardShortcuts: {},
+        reportScreenshotDirectory: null,
+        overview: DEFAULT_APPLICATION_OVERVIEW_SETTINGS,
+        rdp: DEFAULT_APPLICATION_RDP_SETTINGS,
+      });
+    }
+  } catch {
     throw new TypeError("Invalid persisted application settings state");
   }
+  throw new TypeError("Invalid persisted application settings state");
 }
 
 export function isCommandPaletteShortcut(value: unknown): value is string {

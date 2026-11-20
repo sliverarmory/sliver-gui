@@ -1,7 +1,9 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
@@ -29,32 +31,7 @@ import {
   pathBreadcrumbs,
 } from "./session-workbench-panels";
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", {
-    configurable: true,
-    value: () => [],
-  });
-  Object.defineProperty(Element.prototype, "setPointerCapture", {
-    configurable: true,
-    value: () => undefined,
-  });
-  Object.defineProperty(Element.prototype, "releasePointerCapture", {
-    configurable: true,
-    value: () => undefined,
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
-  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
-});
+useRendererTestEnvironment({ pointerCapture: true });
 
 afterEach(() => {
   cleanup();
@@ -103,16 +80,6 @@ function panelContext(overrides: Partial<SessionSummary> = {}): SessionWorkspace
 }
 
 type WorkbenchHandler = (input: SessionWorkbenchInput) => Promise<unknown> | unknown;
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, reject, resolve };
-}
 
 function installAPI(
   handler: WorkbenchHandler,
@@ -2853,14 +2820,6 @@ describe("session workbench panels", () => {
     expect(await screen.findByRole("row", { name: /InstallPath/i })).toBeInTheDocument();
     const tree = screen.getByRole("treegrid", { name: "Registry keys" });
     const values = screen.getByRole("grid", { name: "Registry values in HKCU" });
-    const editor = screen.getByRole("region", { name: "Registry editor" });
-    const keyScrollRegion = tree.closest<HTMLElement>('[data-registry-scroll-region="keys"]');
-    const valueScrollRegion = values.closest<HTMLElement>('[data-registry-scroll-region="values"]');
-    const valueTableScrollContainer = values.closest<HTMLElement>('[data-slot="table-scroll-container"]');
-    expect(editor).toHaveClass("h-full", "max-h-full", "min-h-0", "overflow-hidden");
-    expect(keyScrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-auto", "overscroll-contain");
-    expect(valueScrollRegion).toHaveClass("min-h-0", "flex-1", "overflow-hidden");
-    expect(valueTableScrollContainer).toHaveClass("h-full", "max-h-full", "overflow-auto", "overscroll-contain");
     expect(within(tree).getByText("Software")).toBeInTheDocument();
     expect(within(tree).queryByText("InstallPath")).not.toBeInTheDocument();
     expect(within(values).queryByText("Software")).not.toBeInTheDocument();

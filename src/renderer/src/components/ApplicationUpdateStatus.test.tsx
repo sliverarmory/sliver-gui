@@ -3,6 +3,8 @@ import { Toast, toast } from "@heroui/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { ApplicationUpdateState } from "../../../shared/application-update-contracts";
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import { ApplicationUpdateStatus } from "./ApplicationUpdateStatus";
@@ -343,12 +345,4 @@ function installUpdateAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesk
 function emit(state: ApplicationUpdateState): void {
   if (!updateListener) throw new Error("Application update listener was not installed");
   act(() => updateListener?.(state));
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
 }

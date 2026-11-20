@@ -10,12 +10,10 @@ import {
   SESSION_WORKBENCH_MAX_COMPLETE_FILE_BYTES,
   type SessionCapturedArtifactResult,
   type SessionDestructiveActionPlan,
-  type SessionDestructiveActionPreparation,
   type SessionLootAddResult,
   type SessionNativeOpenUploadResult,
   type SessionNativeSaveResult,
   type SessionStagedEditorArtifactResult,
-  type SessionWorkbenchInvocationResult,
   type SessionWorkbenchResult,
   parseExecuteSessionDestructiveActionPlanInput,
   parsePrepareSessionDestructiveActionInput,
@@ -408,11 +406,6 @@ describe("session workbench contracts", () => {
     });
   });
 
-  it("distinguishes native-open cancellation from preparation errors", () => {
-    const canceled: SessionDestructiveActionPreparation = { status: "canceled" };
-    expect(canceled).toEqual({ status: "canceled" });
-  });
-
   it("binds each artifact operation to a closed result shape", () => {
     expectTypeOf<Extract<SessionWorkbenchResult, { operationId: "session.screenshot.capture" }>[
       "value"
@@ -432,18 +425,5 @@ describe("session workbench contracts", () => {
     expectTypeOf<Extract<SessionWorkbenchResult, { operationId: "session.filesystem.stage-hex" }>[
       "value"
     ]>().toEqualTypeOf<SessionStagedEditorArtifactResult>();
-  });
-
-  it("represents confirmed post-dispatch target rejection separately from uncertainty", () => {
-    const failed: SessionWorkbenchInvocationResult = {
-      status: "failed",
-      operationId: "session.filesystem.upload-open",
-      message: "The target rejected the upload.",
-    };
-    expect(failed).toEqual({
-      status: "failed",
-      operationId: "session.filesystem.upload-open",
-      message: "The target rejected the upload.",
-    });
   });
 });

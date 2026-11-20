@@ -10,6 +10,8 @@ import {
   DEFAULT_CONSOLE_TERMINAL_SETTINGS,
   type ConsoleTerminalSettings,
 } from "../components/console-terminal-settings";
+import { ApplicationLocaleProvider } from "../i18n/ApplicationLocaleProvider";
+import { messagesForLanguage } from "../i18n/messages";
 import { SettingsPage, type SettingsPageProps } from "./SettingsPage";
 
 beforeAll(() => {
@@ -35,6 +37,39 @@ afterEach(() => {
 });
 
 describe("SettingsPage", () => {
+  it("offers language names in their own languages and renders the active locale", async () => {
+    const user = userEvent.setup();
+    const onLanguageChange = vi.fn();
+    const props = settingsProps({ onLanguageChange });
+    const { rerender } = render(<SettingsPage {...props} />);
+    const language = screen.getByRole("button", { name: /Application language/u });
+    expect(language).toHaveTextContent("System language");
+    expect(screen.getByText(messagesForLanguage("en").settings.systemLanguageDescription)).toBeInTheDocument();
+    await user.click(language);
+    expect(screen.getByRole("option", { name: "System language" })).toHaveAttribute("aria-selected", "true");
+    for (const [id, label] of [
+      ["en", "English"], ["es", "Español"], ["fr", "Français"], ["ja", "日本語"], ["uk", "Українська"],
+    ] as const) {
+      expect(screen.getByRole("option", { name: label }).querySelector("span[lang]")).toHaveAttribute("lang", id);
+    }
+    await user.click(screen.getByRole("option", { name: "日本語" }));
+    expect(onLanguageChange).toHaveBeenCalledExactlyOnceWith("ja");
+
+    rerender(
+      <ApplicationLocaleProvider language="ja">
+        <SettingsPage {...props} settings={{ ...props.settings, language: "ja" }} />
+      </ApplicationLocaleProvider>,
+    );
+    const { settings, terminal } = messagesForLanguage("ja");
+    expect(document.documentElement).toHaveAttribute("lang", "ja");
+    expect(screen.getByRole("heading", { name: "設定" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: new RegExp(settings.language, "u") }));
+    await user.click(screen.getByRole("option", { name: settings.systemLanguage }));
+    expect(onLanguageChange).toHaveBeenLastCalledWith("system");
+    await user.click(screen.getByRole("tab", { name: settings.terminal }));
+    expect(screen.getByRole("textbox", { name: terminal.fontSize })).toHaveValue("13");
+  });
+
   it("presents a concise General and Terminal hierarchy with app-wide copy", async () => {
     const user = userEvent.setup();
     renderSettings();
@@ -278,6 +313,7 @@ function renderSettings(overrides: Partial<SettingsPageProps> = {}): void {
 function settingsProps(overrides: Partial<SettingsPageProps> = {}): SettingsPageProps {
   return {
     settings: DEFAULT_APPLICATION_SETTINGS_STATE,
+    onLanguageChange: vi.fn(),
     onAppIconChange: vi.fn(),
     onThemeChange: vi.fn(),
     onReduceMotionChange: vi.fn(),

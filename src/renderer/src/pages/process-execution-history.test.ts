@@ -1,6 +1,8 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { ProcessExecutionHistorySnapshot, ProcessExecutionRecord } from "../../../shared/execution-contracts";
 import type { TargetRef } from "../../../shared/target-contracts";
@@ -192,9 +194,3 @@ describe("shared process execution history view", () => {
     expect(history.result.current.error).toBe("History unavailable");
   });
 });
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
-}

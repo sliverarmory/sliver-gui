@@ -1,0 +1,368 @@
+{
+  "settings": {
+    "heading": "Paramètres",
+    "description": "Personnalisez Sliver Desktop et ses fenêtres de terminal.",
+    "sections": "Rubriques des paramètres",
+    "general": "Général",
+    "keyboard": "Raccourcis clavier",
+    "terminal": "Terminal",
+    "language": "Langue de l’application",
+    "languageDescription": "Le changement de langue s’applique immédiatement aux paramètres et à la navigation.",
+    "systemLanguage": "Langue du système",
+    "systemLanguageDescription": "Utilise la première langue prise en charge dans les préférences du système. À défaut, l’application s’affiche en anglais.",
+    "appearance": "Apparence",
+    "appearanceDescription": "Personnalisez l’apparence de l’application et de son icône.",
+    "theme": "Thème de couleurs",
+    "themeDescription": "Suivez le thème du système d’exploitation ou choisissez un thème clair ou sombre.",
+    "system": "Système",
+    "light": "Clair",
+    "dark": "Sombre",
+    "icon": "Icône de l’application",
+    "iconDescription": "En mode automatique, l’icône suit le thème du système. Certains lanceurs affichent toujours l’icône sombre.",
+    "auto": "Auto",
+    "passion": "Passion",
+    "disableTransparency": "Désactiver la transparence des fenêtres",
+    "disableTransparencyDescription": "Toutes les fenêtres de l’application utilisent un fond opaque. Le changement s’applique immédiatement.",
+    "accessibility": "Accessibilité",
+    "accessibilityDescription": "Limitez les mouvements à l’écran tout en conservant les informations affichées.",
+    "reduceMotion": "Réduire les animations",
+    "reduceMotionDescription": "Limite les animations et le défilement fluide non essentiels dans l’application.",
+    "screenshots": "Captures pour les rapports",
+    "screenshotsDescription": "Enregistre une image PNG par fenêtre ouverte de l’application.",
+    "screenshotLocation": "Dossier de destination",
+    "screenshotLocationDescription": "Les captures pour les rapports sont enregistrées sur le Bureau par défaut.",
+    "screenshotLocationLabel": "Dossier de destination des captures pour les rapports",
+    "screenshotLocationDefault": "Bureau (par défaut)",
+    "screenshotFolderError": "Impossible de sélectionner le dossier des captures",
+    "browse": "Parcourir…",
+    "useDesktop": "Utiliser le Bureau",
+    "resetDefaults": "Rétablir les valeurs par défaut",
+    "discard": "Ignorer les modifications",
+    "save": "Enregistrer",
+    "cancel": "Annuler",
+    "unavailable": "Paramètres indisponibles",
+    "notSaved": "Échec de l’enregistrement des paramètres",
+    "updateFailed": "Impossible de mettre à jour les paramètres de l’application."
+  },
+  "terminal": {
+    "appearance": "Apparence du terminal",
+    "appearanceDescription": "Ces paramètres s’appliquent aux consoles, aux sessions SSH et aux fenêtres de shell gérées par l’application.",
+    "settings": "Paramètres du terminal",
+    "fontFamily": "Famille de polices",
+    "fontFamilyDescription": "Les polices sont incluses dans Sliver GUI et disponibles hors connexion.",
+    "fontSize": "Taille de la police",
+    "fontSizeRange": "De {min} à {max} pixels.",
+    "cursorShape": "Forme du curseur",
+    "block": "Bloc",
+    "underline": "Soulignement",
+    "bar": "Barre",
+    "transparent": "Fenêtres de terminal transparentes",
+    "transparentDescription": "Utilise l’effet de transparence du système dans les fenêtres de console et SSH compatibles. Activez la transparence des fenêtres dans les paramètres généraux.",
+    "cursorBlink": "Curseur clignotant",
+    "cursorBlinkDescription": "Le curseur clignote lorsque la console est active.",
+    "smoothScrolling": "Défilement fluide",
+    "smoothScrollingDescription": "Adoucit le défilement dans l’historique du terminal.",
+    "ghosttyThemes": "Thèmes Ghostty",
+    "ghosttyThemesDescription": "Utilisez les mêmes fichiers de thème que dans votre terminal Ghostty.",
+    "theme": "Thème du terminal",
+    "defaultTheme": "Thème par défaut de l’application",
+    "themeDescription": "Le thème s’applique immédiatement aux terminaux ouverts. Les couleurs du fichier de configuration sont prioritaires.",
+    "preview": "Aperçu du thème du terminal",
+    "previewSample": "Dès l’aube, le renard s’élance à travers le pré.",
+    "themeDirectory": "Dossier des thèmes Ghostty",
+    "themeDirectoryDescription": "Ajoutez des fichiers de thème à ce dossier ou utilisez les thèmes de votre installation de Ghostty. Modifiez le fichier de configuration pour indiquer le chemin d’un thème ou choisir un thème pour le mode clair et un autre pour le mode sombre.",
+    "configPath": "Fichier de configuration",
+    "loadingConfig": "Chargement de la configuration Ghostty…",
+    "configUnavailable": "La configuration Ghostty est indisponible dans cette fenêtre.",
+    "configNotes": "Remarques sur la configuration",
+    "editConfig": "Modifier la configuration Ghostty",
+    "reloadThemes": "Recharger les thèmes",
+    "saveThemeFailed": "Impossible d’enregistrer le thème du terminal.",
+    "openConfigFailed": "Impossible d’ouvrir la configuration Ghostty.",
+    "openConfigError": "Impossible d’ouvrir la configuration Ghostty",
+    "themeSettingsHint": "Choisissez un thème Ghostty dans Paramètres → Terminal. Les modifications s’appliquent à l’enregistrement de la configuration."
+  },
+  "shortcuts": {
+    "resetAll": "Rétablir tous les raccourcis par défaut",
+    "search": "Rechercher des raccourcis",
+    "recordFailed": "Impossible de commencer la saisie du raccourci. Réessayez.",
+    "invalidKey": "Associez une touche de modification à une lettre, un chiffre, une flèche ou un signe de ponctuation. Vous pouvez aussi appuyer sur une touche de fonction.",
+    "invalidShortcut": "Choisissez une touche de fonction ou combinez une touche de modification avec une lettre, un chiffre, une flèche ou un signe de ponctuation.",
+    "unknownAction": "L’action associée au raccourci est inconnue.",
+    "reservedF5": "La touche F5 est réservée à l’actualisation du serveur et aux commandes système des fenêtres.",
+    "reservedShortcut": "Ce raccourci est réservé aux commandes standard d’édition ou du système.",
+    "alreadyAssigned": "Ce raccourci est déjà attribué à « {action} ».",
+    "changeAction": "Modifier le raccourci de « {action} »",
+    "cancelChangeAction": "Annuler la modification du raccourci de « {action} »",
+    "resetAction": "Rétablir le raccourci de « {action} »",
+    "preparing": "Préparation…",
+    "pressShortcut": "Saisissez le raccourci…",
+    "escapeCancels": "Appuyez sur Échap pour annuler",
+    "change": "Modifier le raccourci",
+    "reset": "Rétablir le raccourci par défaut",
+    "recordHint": "Saisissez le nouveau raccourci ou appuyez sur Échap pour annuler.",
+    "noResults": "Aucun raccourci ne correspond à votre recherche.",
+    "platformHint": "Utilisez Commande (⌘) sous macOS ou Ctrl sous Windows et Linux. Les raccourcis système et d’édition et les touches de contrôle du terminal gardent leur comportement habituel."
+  },
+  "shortcutGroups": {
+    "Application": "Application",
+    "Navigation": "Navigation",
+    "Text Editor": "Éditeur de texte",
+    "Terminal": "Terminal",
+    "Terminal tabs": "Onglets du terminal"
+  },
+  "shortcutActions": {
+    "commandPalette": {
+      "label": "Ouvrir la palette de commandes",
+      "description": "Retrouvez les pages et les actions courantes de l’application."
+    },
+    "newWindow": {
+      "label": "Nouvelle fenêtre",
+      "description": "Ouvre une nouvelle fenêtre de l’application."
+    },
+    "duplicateWindow": {
+      "label": "Nouvelle fenêtre pour ce serveur",
+      "description": "Ouvre une autre fenêtre connectée au serveur actuel."
+    },
+    "reportScreenshot": {
+      "label": "Capturer les fenêtres pour un rapport",
+      "description": "Enregistre une image de chaque fenêtre ouverte de l’application."
+    },
+    "openConsole": {
+      "label": "Ouvrir la console",
+      "description": "Ouvre la console du serveur connecté."
+    },
+    "navigateBack": {
+      "label": "Revenir en arrière",
+      "description": "Revient à la page précédente de l’application."
+    },
+    "navigateForward": {
+      "label": "Avancer",
+      "description": "Passe à la page suivante de l’application."
+    },
+    "refreshServer": {
+      "label": "Actualiser les données du serveur",
+      "description": "Actualise les données du serveur connecté."
+    },
+    "textEditorOpen": {
+      "label": "Ouvrir un fichier",
+      "description": "Ouvre un fichier local dans l’éditeur de texte autonome."
+    },
+    "textEditorSaveAs": {
+      "label": "Enregistrer sous",
+      "description": "Enregistre le document actif dans un nouveau fichier local."
+    },
+    "textEditorSave": {
+      "label": "Enregistrer le fichier",
+      "description": "Enregistre le document actif ou écrase le fichier distant correspondant."
+    },
+    "textEditorUndo": {
+      "label": "Annuler la modification",
+      "description": "Annule la dernière modification dans l’éditeur de texte."
+    },
+    "textEditorRedo": {
+      "label": "Rétablir la modification",
+      "description": "Rétablit la dernière modification annulée dans l’éditeur de texte."
+    },
+    "textEditorFind": {
+      "label": "Rechercher dans le fichier",
+      "description": "Recherche du texte dans le document actif."
+    },
+    "textEditorReplace": {
+      "label": "Remplacer dans le fichier",
+      "description": "Recherche et remplace du texte dans le document actif."
+    },
+    "textEditorWordWrap": {
+      "label": "Basculer le retour à la ligne",
+      "description": "Active ou désactive le retour automatique à la ligne dans l’éditeur."
+    },
+    "textEditorCommandPalette": {
+      "label": "Ouvrir la palette de commandes de l’éditeur",
+      "description": "Recherchez et lancez les commandes de l’éditeur Monaco."
+    },
+    "textEditorSettings": {
+      "label": "Paramètres de l’éditeur",
+      "description": "Ouvre les paramètres de l’éditeur de texte autonome."
+    },
+    "terminalNewTab": {
+      "label": "Nouvel onglet du terminal",
+      "description": "Ouvre un onglet dans la fenêtre du terminal."
+    },
+    "terminalCloseTab": {
+      "label": "Fermer l’onglet du terminal",
+      "description": "Ferme l’onglet actif du terminal."
+    },
+    "terminalSettings": {
+      "label": "Paramètres du terminal",
+      "description": "Ouvre les paramètres depuis la fenêtre du terminal."
+    },
+    "terminalCloseWindow": {
+      "label": "Fermer la fenêtre du terminal",
+      "description": "Ferme la fenêtre du terminal et tous ses onglets."
+    },
+    "terminalTab1": {
+      "label": "Afficher l’onglet 1 du terminal",
+      "description": "Affiche le premier onglet du terminal."
+    },
+    "terminalTab2": {
+      "label": "Afficher l’onglet 2 du terminal",
+      "description": "Affiche le deuxième onglet du terminal."
+    },
+    "terminalTab3": {
+      "label": "Afficher l’onglet 3 du terminal",
+      "description": "Affiche le troisième onglet du terminal."
+    },
+    "terminalTab4": {
+      "label": "Afficher l’onglet 4 du terminal",
+      "description": "Affiche le quatrième onglet du terminal."
+    },
+    "terminalTab5": {
+      "label": "Afficher l’onglet 5 du terminal",
+      "description": "Affiche le cinquième onglet du terminal."
+    },
+    "terminalTab6": {
+      "label": "Afficher l’onglet 6 du terminal",
+      "description": "Affiche le sixième onglet du terminal."
+    },
+    "terminalTab7": {
+      "label": "Afficher l’onglet 7 du terminal",
+      "description": "Affiche le septième onglet du terminal."
+    },
+    "terminalTab8": {
+      "label": "Afficher l’onglet 8 du terminal",
+      "description": "Affiche le huitième onglet du terminal."
+    },
+    "terminalTab9": {
+      "label": "Afficher l’onglet 9 du terminal",
+      "description": "Affiche le neuvième onglet du terminal."
+    },
+    "terminalTab10": {
+      "label": "Afficher l’onglet 10 du terminal",
+      "description": "Affiche le dixième onglet du terminal."
+    }
+  },
+  "shell": {
+    "navigation": "Navigation dans Sliver",
+    "operatorConsole": "Console opérateur",
+    "overviewNavigation": "Navigation dans la vue d’ensemble",
+    "operational": "Opérations",
+    "operationalNavigation": "Navigation entre les opérations",
+    "interact": "Interactions",
+    "interactNavigation": "Navigation entre les interactions",
+    "data": "Données",
+    "dataNavigation": "Navigation entre les données",
+    "windowNavigation": "Navigation dans la fenêtre",
+    "collapseSidebar": "Réduire la barre latérale",
+    "expandSidebar": "Déployer la barre latérale",
+    "noServer": "Aucun serveur connecté",
+    "chooseConfig": "Sélectionnez une configuration enregistrée pour commencer",
+    "operator": "opérateur",
+    "configuration": "configuration",
+    "connect": "Se connecter",
+    "server": "Serveur actuel",
+    "currentServer": "Serveur actuel : {operator}",
+    "applicationMenuOffline": "Menu de l’application, hors connexion",
+    "applicationMenu": "Menu de l’application",
+    "offline": "Hors connexion",
+    "noChannel": "Aucun canal actif",
+    "applicationActions": "Actions de l’application et du serveur actuel",
+    "exit": "Quitter l’application",
+    "disconnect": "Se déconnecter",
+    "switchConfig": "Changer de configuration",
+    "newWindowOptions": "Options de la nouvelle fenêtre",
+    "newWindow": "Nouvelle fenêtre",
+    "sameServer": "Même serveur",
+    "differentServer": "Autre serveur",
+    "openConsole": "Ouvrir la console Sliver",
+    "consoleTooltip": "Ouvrir la console du serveur actif",
+    "connectFirstTooltip": "Connectez-vous d’abord à un serveur",
+    "openPalette": "Ouvrir la palette de commandes",
+    "commandPalette": "Palette de commandes",
+    "savedConfigurations": "Configurations enregistrées",
+    "live": "En temps réel",
+    "waitingEvents": "En attente d’événements",
+    "reconnecting": "Reconnexion…",
+    "eventsOffline": "Canal d’événements déconnecté",
+    "backendReconnecting": "Reconnexion au service…",
+    "session": "Session",
+    "beacon": "Beacon"
+  },
+  "navigation": {
+    "overview": {
+      "label": "Vue d’ensemble",
+      "description": "Consultez l’infrastructure et les connexions signalées."
+    },
+    "generate": {
+      "label": "Générer",
+      "description": "Générez des fichiers d’implant."
+    },
+    "artifacts": {
+      "label": "Compilations et profils",
+      "description": "Retrouvez les compilations générées et les profils réutilisables."
+    },
+    "operations": {
+      "label": "Tâches et services d’écoute",
+      "description": "Gérez les tâches du serveur et les points de terminaison des services d’écoute."
+    },
+    "websites": {
+      "label": "Sites web",
+      "description": "Gérez les sites web hébergés et leur contenu."
+    },
+    "sessions": {
+      "label": "Sessions",
+      "description": "Consultez les sessions interactives."
+    },
+    "beacons": {
+      "label": "Beacons",
+      "description": "Consultez les beacons asynchrones."
+    },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Collectez et explorez les données d’Active Directory."
+    },
+    "loot": {
+      "label": "Fichiers collectés",
+      "description": "Consultez les fichiers collectés."
+    },
+    "credentials": {
+      "label": "Identifiants",
+      "description": "Consultez les identifiants collectés."
+    }
+  },
+  "palette": {
+    "settingsDescription": "Personnalisez l’apparence, les raccourcis clavier et le terminal.",
+    "backDescription": "Revient à la page précédente.",
+    "forwardDescription": "Passe à la page suivante dans l’historique de navigation.",
+    "savedDescription": "Gérez les configurations opérateur ou utilisez-les pour vous connecter.",
+    "consoleDescription": "Ouvre une console pour le serveur actif.",
+    "connectFirst": "Connectez-vous d’abord à un serveur.",
+    "disconnectDescription": "Ferme la connexion au serveur actif.",
+    "noConnection": "Aucune connexion active à un serveur.",
+    "refreshDescription": "Synchronise les informations avec le serveur actif.",
+    "cloudDeployment": "Déploiement dans le cloud",
+    "cloudDescription": "Ouvre la fenêtre de déploiement dans le cloud ou la remet au premier plan.",
+    "remoteDesktop": "Bureau à distance",
+    "remoteDesktopDescription": "Ouvre le client RDP autonome ou le remet au premier plan.",
+    "screenshotDescription": "Enregistre une capture de chaque fenêtre ouverte dans le dossier choisi.",
+    "newConnectedWindow": "Nouvelle fenêtre connectée",
+    "newConnectedDescription": "Ouvre une autre fenêtre pour le serveur actif.",
+    "newConnectionWindow": "Nouvelle fenêtre pour une autre connexion",
+    "newConnectionDescription": "Ouvre une autre fenêtre pour un autre serveur.",
+    "search": "Rechercher des commandes",
+    "searchPlaceholder": "Rechercher des commandes, des sessions et des beacons…",
+    "applicationCommands": "Commandes de l’application",
+    "moreTargets": "D’autres résultats sont disponibles. Ouvrez Sessions ou Beacons pour effectuer une recherche dans la liste complète.",
+    "noResults": "Aucune commande trouvée.",
+    "current": "Actuel",
+    "navigate": "Accéder",
+    "run": "Exécuter",
+    "toggle": "Basculer"
+  },
+  "paletteGroups": {
+    "Navigate": "Navigation",
+    "Sessions": "Sessions",
+    "Beacons": "Beacons",
+    "Server": "Serveur",
+    "Windows": "Fenêtres"
+  }
+}

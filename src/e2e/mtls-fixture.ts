@@ -13,9 +13,10 @@ import {
 } from "nice-grpc";
 import { clientpb, rpcpb } from "sliver-script";
 
+import { shutdownMtlsFixture } from "./packaged-mtls-support.js";
+
 export const PACKAGED_FIXTURE_TOKEN = "PACKAGED_MTLS_TOKEN_M0_DO_NOT_RENDER";
 export const PACKAGED_FIXTURE_EVENT_SECRET = "PACKAGED_EVENT_SECRET_M0_DO_NOT_RENDER";
-const FIXTURE_GRACEFUL_SHUTDOWN_TIMEOUT_MS = 5_000;
 
 interface FixtureCallContext {
   metadata: {
@@ -224,18 +225,7 @@ export async function startMtlsFixture(repositoryRoot: string): Promise<MtlsFixt
     async close(): Promise<void> {
       for (const resolve of eventWaiters) resolve(undefined);
       eventWaiters.clear();
-      let timeout: NodeJS.Timeout | undefined;
-      const graceful = Promise.resolve()
-        .then(() => server.shutdown())
-        .then(() => true, () => false);
-      const completedGracefully = await Promise.race([
-        graceful,
-        new Promise<boolean>((resolveTimeout) => {
-          timeout = setTimeout(() => resolveTimeout(false), FIXTURE_GRACEFUL_SHUTDOWN_TIMEOUT_MS);
-        }),
-      ]);
-      if (timeout) clearTimeout(timeout);
-      if (!completedGracefully) server.forceShutdown();
+      await shutdownMtlsFixture(server);
     },
   };
 }

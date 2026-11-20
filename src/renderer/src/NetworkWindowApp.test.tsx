@@ -3,6 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../tests/renderer-test-helpers";
+
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../shared/application-settings-contracts";
 import type { OperationResult } from "../../shared/contracts";
 import {
@@ -402,11 +404,3 @@ describe("NetworkWindowApp", () => {
     }));
   });
 });
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-}

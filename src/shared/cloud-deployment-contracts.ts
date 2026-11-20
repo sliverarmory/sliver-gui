@@ -1,4 +1,4 @@
-export const CLOUD_DEPLOYMENT_STATE_VERSION = 1 as const;
+export const CLOUD_DEPLOYMENT_STATE_VERSION = 2 as const;
 
 export const CLOUD_DEPLOYMENT_ACTIONS = ["start", "stop", "reboot"] as const;
 export const CLOUD_DEPLOYMENT_STATUSES = [
@@ -20,6 +20,14 @@ export const CLOUD_DEPLOYMENT_PHASES = [
   "configuring-daemon",
   "creating-operator",
   "copying-operator-config",
+  "installing-gpu-driver",
+  "installing-crackstation",
+  "connecting-crackstation",
+  "creating-load-balancer",
+  "configuring-target-group",
+  "starting-listener",
+  "waiting-target-health",
+  "configuring-dns",
   "ready",
   "stopped",
   "failed",
@@ -374,6 +382,7 @@ export type AwsManagedAssetType =
   | "ec2-volume"
   | "ec2-network-interface"
   | "ec2-security-group"
+  | "ec2-security-group-rule"
   | "ec2-key-pair"
   | "ec2-elastic-ip"
   | "ec2-vpc"
@@ -381,6 +390,11 @@ export type AwsManagedAssetType =
   | "ec2-internet-gateway"
   | "ec2-route-table"
   | "ec2-route-table-association";
+export type AwsAlbManagedAssetType =
+  | "elbv2-load-balancer"
+  | "elbv2-target-group"
+  | "elbv2-listener"
+  | "route53-alias";
 export type AzureManagedAssetType =
   | "azure-resource-group"
   | "azure-virtual-network"
@@ -392,7 +406,7 @@ export type AzureManagedAssetType =
   | "azure-virtual-machine";
 
 export interface CloudManagedAsset {
-  readonly resourceType: AwsManagedAssetType | AzureManagedAssetType;
+  readonly resourceType: AwsManagedAssetType | AwsAlbManagedAssetType | AzureManagedAssetType;
   readonly resourceId: string;
   readonly displayName: string | null;
   readonly tagged: boolean;
@@ -463,10 +477,118 @@ export interface AzureCloudDeploymentRecord extends CloudDeploymentRecordBase {
 
 export type CloudDeploymentRecord = AwsCloudDeploymentRecord | AzureCloudDeploymentRecord;
 
+export interface AwsCrackstationDeploymentSpec {
+  readonly region: string;
+  readonly vpcId: string;
+  readonly subnetId: string;
+  readonly imageId: string;
+  readonly instanceType: string;
+  readonly sshUsername: string;
+  readonly sshPort: number;
+  readonly sshCidrs: readonly string[];
+  readonly operatorName: string;
+  readonly volumeSizeGiB: number | null;
+}
+
+export interface AwsCrackstationDeploymentRuntime extends AwsDeploymentRuntime {
+  readonly stationHostUuid: string | null;
+  readonly releaseVersion: string | null;
+  readonly releaseSha256: string | null;
+  readonly operatorConfigSha256: string | null;
+}
+
+export interface AwsAlbRedirectorDeploymentSpec {
+  readonly region: string;
+  readonly vpcId: string;
+  readonly subnetIds: readonly [string] | readonly [string, string];
+  readonly additionalSubnet: {
+    readonly cidrBlock: string;
+    readonly availabilityZone: string;
+    readonly routeTableId: string;
+  } | null;
+  readonly certificateArn: string;
+  readonly domain: string;
+  readonly hostedZoneId: string;
+  readonly backendPort: number;
+  readonly listener:
+    | { readonly mode: "create"; readonly port: number }
+    | { readonly mode: "existing"; readonly port: number; readonly jobId: number };
+}
+
+export interface AwsAlbRedirectorDeploymentRuntime {
+  readonly loadBalancerArn: string | null;
+  readonly targetGroupArn: string | null;
+  readonly listenerArn: string | null;
+  readonly dnsName: string | null;
+  readonly canonicalHostedZoneId: string | null;
+  readonly securityGroupId: string | null;
+  readonly serverIngressRuleId: string | null;
+  readonly listenerJobId: number | null;
+  readonly listenerOwnership: "managed" | "existing" | null;
+  readonly targetHealth: string;
+  readonly aliasRecordName: string | null;
+  readonly aliasRecordOwned: boolean;
+}
+
+interface CloudDependentDeploymentRecordBase {
+  readonly id: string;
+  readonly provider: "aws";
+  readonly serverDeploymentId: string;
+  readonly credentialId: string;
+  readonly name: string;
+  readonly status: CloudDeploymentStatus;
+  readonly phase: CloudDeploymentPhase;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly lastError: string | null;
+  readonly managedAssets: readonly CloudManagedAsset[];
+}
+
+export interface AwsCrackstationDeploymentRecord extends CloudDependentDeploymentRecordBase {
+  readonly kind: "crackstation";
+  readonly spec: AwsCrackstationDeploymentSpec;
+  readonly runtime: AwsCrackstationDeploymentRuntime;
+}
+
+export interface AwsAlbRedirectorDeploymentRecord extends CloudDependentDeploymentRecordBase {
+  readonly kind: "alb-redirector";
+  readonly spec: AwsAlbRedirectorDeploymentSpec;
+  readonly runtime: AwsAlbRedirectorDeploymentRuntime;
+}
+
+export type CloudDependentDeploymentRecord =
+  | AwsCrackstationDeploymentRecord
+  | AwsAlbRedirectorDeploymentRecord;
+
+export interface CreateAwsCrackstationDeploymentInput {
+  readonly expectedRevision: number;
+  readonly serverDeploymentId: string;
+  readonly name: string;
+  readonly spec: AwsCrackstationDeploymentSpec;
+}
+
+export interface CreateAwsAlbRedirectorDeploymentInput {
+  readonly expectedRevision: number;
+  readonly serverDeploymentId: string;
+  readonly name: string;
+  readonly spec: AwsAlbRedirectorDeploymentSpec;
+}
+
+export interface UpdateCloudDependentDeploymentInput {
+  readonly expectedRevision: number;
+  readonly deployment: CloudDependentDeploymentRecord;
+}
+
+export interface DeleteCloudDependentDeploymentInput {
+  readonly expectedRevision: number;
+  readonly deploymentId: string;
+}
+
 export interface CloudDeploymentState {
   readonly v: typeof CLOUD_DEPLOYMENT_STATE_VERSION;
   readonly revision: number;
   readonly deployments: readonly CloudDeploymentRecord[];
+  readonly dependentDeployments: readonly CloudDependentDeploymentRecord[];
 }
 
 export interface UpdateCloudDeploymentInput {
@@ -614,14 +736,22 @@ const LEGACY_AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "
 const AWS_SPEC_KEYS = ["region", "imageId", "instanceType", "subnetId", "vpcId", "networkMode", "managedVpcCidr", "managedSubnetCidr", "sshKeyMode", "existingKeyPairName", "sshUsername", "keyPairName", "operatorName", "sshPort", "multiplayerPort", "volumeSizeGiB", "useElasticIp", "sshCidrs", "operatorCidrs"] as const;
 const AZURE_SPEC_KEYS = ["location", "imageReference", "vmSize", "networkMode", "vnetId", "subnetId", "managedVnetCidr", "managedSubnetCidr", "sshUsername", "operatorName", "sshPort", "multiplayerPort", "osDiskSizeGiB", "usePublicIp", "sshCidrs", "operatorCidrs"] as const;
 const CREATE_DEPLOYMENT_KEYS = ["provider", "expectedRevision", "credentialId", "name", "spec"] as const;
+const CREATE_DEPENDENT_KEYS = ["expectedRevision", "serverDeploymentId", "name", "spec"] as const;
 const ASSET_KEYS = ["resourceType", "resourceId", "displayName", "tagged"] as const;
 const RECORD_KEYS = ["id", "name", "credentialId", "status", "phase", "createdAt", "updatedAt", "operatorConfigFileName", "operatorConfigDigest", "remoteHost", "lastError", "managedAssets", "provider", "spec", "runtime"] as const;
+const DEPENDENT_RECORD_KEYS = ["id", "kind", "provider", "serverDeploymentId", "credentialId", "name", "status", "phase", "createdAt", "updatedAt", "lastError", "managedAssets", "spec", "runtime"] as const;
+const CRACKSTATION_SPEC_KEYS = ["region", "vpcId", "subnetId", "imageId", "instanceType", "sshUsername", "sshPort", "sshCidrs", "operatorName", "volumeSizeGiB"] as const;
+const ALB_SPEC_KEYS = ["region", "vpcId", "subnetIds", "additionalSubnet", "certificateArn", "domain", "hostedZoneId", "backendPort", "listener"] as const;
+const ALB_RUNTIME_KEYS = ["loadBalancerArn", "targetGroupArn", "listenerArn", "dnsName", "canonicalHostedZoneId", "securityGroupId", "serverIngressRuleId", "listenerJobId", "listenerOwnership", "targetHealth", "aliasRecordName", "aliasRecordOwned"] as const;
 const LEGACY_AWS_RUNTIME_KEYS = ["instanceId", "securityGroupIds", "volumeIds", "networkInterfaceIds", "publicIpAddress", "privateIpAddress", "availabilityZone", "elasticIpAllocationId"] as const;
 const AWS_RUNTIME_KEYS = ["instanceId", "securityGroupIds", "volumeIds", "networkInterfaceIds", "publicIpAddress", "privateIpAddress", "availabilityZone", "elasticIpAllocationId", "vpcId", "subnetId", "internetGatewayId", "routeTableId", "routeTableAssociationId"] as const;
 const AWS_RUNTIME_WITH_STATUS_KEYS = [...AWS_RUNTIME_KEYS, "instanceState", "instanceHealth", "systemHealth"] as const;
+const CRACKSTATION_RUNTIME_KEYS = [...AWS_RUNTIME_WITH_STATUS_KEYS, "stationHostUuid", "releaseVersion", "releaseSha256", "operatorConfigSha256"] as const;
 const AZURE_RUNTIME_KEYS = ["resourceGroupName", "vmName", "vmId", "instanceState", "provisioningState", "networkSecurityGroupId", "networkInterfaceId", "osDiskId", "publicIpAddressId", "publicIpAddress", "privateIpAddress", "vnetId", "subnetId"] as const;
-const STATE_KEYS = ["v", "revision", "deployments"] as const;
+const LEGACY_STATE_KEYS = ["v", "revision", "deployments"] as const;
+const STATE_KEYS = ["v", "revision", "deployments", "dependentDeployments"] as const;
 const UPDATE_KEYS = ["expectedRevision", "deployment"] as const;
+const UPDATE_DEPENDENT_KEYS = ["expectedRevision", "deployment"] as const;
 const DELETE_KEYS = ["expectedRevision", "deploymentId"] as const;
 const ACTION_KEYS = ["deploymentId", "expectedRevision", "action"] as const;
 const RENAME_DEPLOYMENT_KEYS = ["deploymentId", "expectedRevision", "name"] as const;
@@ -651,7 +781,8 @@ const AZURE_RESERVED_SSH_USERNAMES = new Set([
   "sql", "support_388945a0", "support", "sys", "test", "test1", "test2", "test3",
   "user", "user1", "user2", "user3", "user4", "user5", "video",
 ]);
-const AWS_ASSET_TYPES = new Set<AwsManagedAssetType>(["ec2-instance", "ec2-volume", "ec2-network-interface", "ec2-security-group", "ec2-key-pair", "ec2-elastic-ip", "ec2-vpc", "ec2-subnet", "ec2-internet-gateway", "ec2-route-table", "ec2-route-table-association"]);
+const AWS_ASSET_TYPES = new Set<AwsManagedAssetType>(["ec2-instance", "ec2-volume", "ec2-network-interface", "ec2-security-group", "ec2-security-group-rule", "ec2-key-pair", "ec2-elastic-ip", "ec2-vpc", "ec2-subnet", "ec2-internet-gateway", "ec2-route-table", "ec2-route-table-association"]);
+const AWS_ALB_ASSET_TYPES = new Set<AwsAlbManagedAssetType | "ec2-security-group" | "ec2-subnet" | "ec2-route-table-association">(["elbv2-load-balancer", "elbv2-target-group", "elbv2-listener", "route53-alias", "ec2-security-group", "ec2-subnet", "ec2-route-table-association"]);
 const AZURE_ASSET_TYPES = new Set<AzureManagedAssetType>(["azure-resource-group", "azure-virtual-network", "azure-subnet", "azure-network-security-group", "azure-public-ip", "azure-network-interface", "azure-os-disk", "azure-virtual-machine"]);
 
 export function isAwsLoginSessionArn(value: unknown): value is string {
@@ -932,6 +1063,148 @@ export function parseCreateCloudDeploymentInput(value: unknown): CreateCloudDepl
   throw invalid("cloud deployment request");
 }
 
+export function parseAwsCrackstationDeploymentSpec(value: unknown): AwsCrackstationDeploymentSpec {
+  if (!hasExactKeys(value, CRACKSTATION_SPEC_KEYS) ||
+    !isAwsRegion(value["region"]) ||
+    !boundedPattern(value["vpcId"], 5, 128, /^vpc-[0-9a-f]+$/u) ||
+    !boundedPattern(value["subnetId"], 8, 128, /^subnet-[0-9a-f]+$/u) ||
+    !boundedPattern(value["imageId"], 5, 128, /^ami-[0-9a-f]+$/u) ||
+    !boundedPattern(value["instanceType"], 2, 64, /^[a-z0-9][a-z0-9.-]+$/u) ||
+    !isSshUsername(value["sshUsername"]) || !isPort(value["sshPort"]) ||
+    !isOperatorName(value["operatorName"]) ||
+    nullableInteger(value["volumeSizeGiB"], 8, 16_384) === undefined) {
+    throw invalid("Crackstation deployment specification");
+  }
+  return Object.freeze({
+    region: value["region"], vpcId: value["vpcId"], subnetId: value["subnetId"],
+    imageId: value["imageId"], instanceType: value["instanceType"],
+    sshUsername: value["sshUsername"], sshPort: value["sshPort"],
+    sshCidrs: parseIngressCidrs(value["sshCidrs"]), operatorName: value["operatorName"],
+    volumeSizeGiB: value["volumeSizeGiB"] as number | null,
+  });
+}
+
+export function parseAwsAlbRedirectorDeploymentSpec(value: unknown): AwsAlbRedirectorDeploymentSpec {
+  if (!hasExactKeys(value, ALB_SPEC_KEYS) || !isAwsRegion(value["region"]) ||
+    !boundedPattern(value["vpcId"], 5, 128, /^vpc-[0-9a-f]+$/u) ||
+    !Array.isArray(value["subnetIds"]) || (value["subnetIds"].length !== 1 && value["subnetIds"].length !== 2) ||
+    !value["subnetIds"].every((id: unknown) => boundedPattern(id, 8, 128, /^subnet-[0-9a-f]+$/u)) ||
+    (value["subnetIds"].length === 2 && value["subnetIds"][0] === value["subnetIds"][1]) ||
+    !boundedPattern(value["certificateArn"], 40, 512, /^arn:(?:aws|aws-cn|aws-us-gov):acm:[a-z0-9-]+:[0-9]{12}:certificate\/[0-9a-f-]+$/u) ||
+    !boundedPattern(value["domain"], 3, 253, /^(?=.{3,253}$)[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])$/u) ||
+    !boundedPattern(value["hostedZoneId"], 3, 128, /^[A-Z0-9]+$/u) ||
+    !isPort(value["backendPort"])) throw invalid("ALB redirector deployment specification");
+  const additionalSubnet = value["additionalSubnet"];
+  if (value["subnetIds"].length === 1) {
+    if (!hasExactKeys(additionalSubnet, ["cidrBlock", "availabilityZone", "routeTableId"]) ||
+      typeof additionalSubnet["cidrBlock"] !== "string" ||
+      nullableIpv4NetworkCidr(additionalSubnet["cidrBlock"], 16, 28) === undefined ||
+      !boundedPattern(additionalSubnet["availabilityZone"], 3, 64, /^[a-z0-9-]+$/u) ||
+      !boundedPattern(additionalSubnet["routeTableId"], 5, 128, /^rtb-[0-9a-f]+$/u)) {
+      throw invalid("ALB additional subnet plan");
+    }
+  } else if (additionalSubnet !== null) {
+    throw invalid("ALB additional subnet plan");
+  }
+  const parsedSubnetIds = Object.freeze([...value["subnetIds"]]) as readonly [string] | readonly [string, string];
+  const parsedAdditionalSubnet = additionalSubnet === null ? null : Object.freeze({
+    cidrBlock: additionalSubnet["cidrBlock"] as string,
+    availabilityZone: additionalSubnet["availabilityZone"] as string,
+    routeTableId: additionalSubnet["routeTableId"] as string,
+  });
+  const listener = value["listener"];
+  if (hasExactKeys(listener, ["mode", "port"]) && listener["mode"] === "create" && isPort(listener["port"]) &&
+    listener["port"] === value["backendPort"]) {
+    return Object.freeze({
+      region: value["region"], vpcId: value["vpcId"], subnetIds: parsedSubnetIds, additionalSubnet: parsedAdditionalSubnet,
+      certificateArn: value["certificateArn"], domain: value["domain"], hostedZoneId: value["hostedZoneId"], backendPort: value["backendPort"],
+      listener: Object.freeze({ mode: "create" as const, port: listener["port"] }),
+    });
+  }
+  if (hasExactKeys(listener, ["mode", "port", "jobId"]) && listener["mode"] === "existing" &&
+    isPort(listener["port"]) && listener["port"] === value["backendPort"] &&
+    boundedInteger(listener["jobId"], 1, Number.MAX_SAFE_INTEGER)) {
+    return Object.freeze({
+      region: value["region"], vpcId: value["vpcId"], subnetIds: parsedSubnetIds, additionalSubnet: parsedAdditionalSubnet,
+      certificateArn: value["certificateArn"], domain: value["domain"], hostedZoneId: value["hostedZoneId"], backendPort: value["backendPort"],
+      listener: Object.freeze({ mode: "existing" as const, port: listener["port"], jobId: listener["jobId"] }),
+    });
+  }
+  throw invalid("ALB redirector deployment specification");
+}
+
+export function parseCreateAwsCrackstationDeploymentInput(value: unknown): CreateAwsCrackstationDeploymentInput {
+  if (!hasExactKeys(value, CREATE_DEPENDENT_KEYS) || !isRevision(value["expectedRevision"]) ||
+    !isUuidV4(value["serverDeploymentId"]) || !boundedName(value["name"])) throw invalid("Crackstation deployment request");
+  return Object.freeze({ expectedRevision: value["expectedRevision"], serverDeploymentId: value["serverDeploymentId"],
+    name: value["name"], spec: parseAwsCrackstationDeploymentSpec(value["spec"]) });
+}
+
+export function parseCreateAwsAlbRedirectorDeploymentInput(value: unknown): CreateAwsAlbRedirectorDeploymentInput {
+  if (!hasExactKeys(value, CREATE_DEPENDENT_KEYS) || !isRevision(value["expectedRevision"]) ||
+    !isUuidV4(value["serverDeploymentId"]) || !boundedName(value["name"])) throw invalid("ALB redirector deployment request");
+  return Object.freeze({ expectedRevision: value["expectedRevision"], serverDeploymentId: value["serverDeploymentId"],
+    name: value["name"], spec: parseAwsAlbRedirectorDeploymentSpec(value["spec"]) });
+}
+
+export function parseCloudDependentDeploymentRecord(value: unknown): CloudDependentDeploymentRecord {
+  if (!hasExactKeys(value, DEPENDENT_RECORD_KEYS) || value["provider"] !== "aws" ||
+    !isUuidV4(value["id"]) || !isUuidV4(value["serverDeploymentId"]) ||
+    !isUuidV4(value["credentialId"]) || !boundedName(value["name"]) ||
+    !isDeploymentStatus(value["status"]) || !isDeploymentPhase(value["phase"]) ||
+    !isIsoTimestamp(value["createdAt"]) || !isIsoTimestamp(value["updatedAt"]) ||
+    !nullableBoundedPlain(value["lastError"], 1, 4_096) ||
+    !Array.isArray(value["managedAssets"]) || value["managedAssets"].length > 64) {
+    throw invalid("dependent cloud deployment record");
+  }
+  const managedAssets = Object.freeze(value["managedAssets"].map(parseCloudManagedAsset));
+  if (new Set(managedAssets.map(({ resourceType, resourceId }) => `${resourceType}:${resourceId}`)).size !== managedAssets.length) {
+    throw invalid("dependent cloud deployment record");
+  }
+  const common = { id: value["id"], provider: "aws" as const,
+    serverDeploymentId: value["serverDeploymentId"], credentialId: value["credentialId"], name: value["name"],
+    status: value["status"], phase: value["phase"], createdAt: value["createdAt"], updatedAt: value["updatedAt"],
+    lastError: value["lastError"], managedAssets };
+  if (value["kind"] === "crackstation") {
+    if (!hasOnlyAssetTypes(managedAssets, AWS_ASSET_TYPES)) throw invalid("Crackstation managed assets");
+    const runtime = value["runtime"];
+    if (!hasExactKeys(runtime, CRACKSTATION_RUNTIME_KEYS) ||
+      !nullableBoundedPlain(runtime["stationHostUuid"], 1, 128) ||
+      !nullableBoundedPlain(runtime["releaseVersion"], 1, 64) ||
+      !isSha256Digest(runtime["releaseSha256"]) || !isSha256Digest(runtime["operatorConfigSha256"])) {
+      throw invalid("Crackstation deployment runtime");
+    }
+    const awsRuntime = parseAwsDeploymentRuntime(Object.fromEntries(AWS_RUNTIME_WITH_STATUS_KEYS.map((key) => [key, runtime[key]])));
+    return Object.freeze({ ...common, kind: "crackstation", spec: parseAwsCrackstationDeploymentSpec(value["spec"]),
+      runtime: Object.freeze({ ...awsRuntime, stationHostUuid: runtime["stationHostUuid"], releaseVersion: runtime["releaseVersion"],
+        releaseSha256: runtime["releaseSha256"], operatorConfigSha256: runtime["operatorConfigSha256"] }) });
+  }
+  if (value["kind"] === "alb-redirector") {
+    if (!hasOnlyAssetTypes(managedAssets, AWS_ALB_ASSET_TYPES)) throw invalid("ALB managed assets");
+    const runtime = value["runtime"];
+    if (!hasExactKeys(runtime, ALB_RUNTIME_KEYS) ||
+      !nullableBoundedPlain(runtime["loadBalancerArn"], 1, 512) ||
+      !nullableBoundedPlain(runtime["targetGroupArn"], 1, 512) ||
+      !nullableBoundedPlain(runtime["listenerArn"], 1, 512) ||
+      !nullableBoundedPlain(runtime["dnsName"], 1, 253) ||
+      !nullableBoundedPattern(runtime["canonicalHostedZoneId"], 3, 128, /^[A-Z0-9]+$/u) ||
+      !nullableBoundedPattern(runtime["securityGroupId"], 5, 128, /^sg-[0-9a-f]+$/u) ||
+      !nullableBoundedPattern(runtime["serverIngressRuleId"], 6, 128, /^sgr-[0-9a-f]+$/u) ||
+      !(runtime["listenerJobId"] === null || boundedInteger(runtime["listenerJobId"], 1, Number.MAX_SAFE_INTEGER)) ||
+      !(runtime["listenerOwnership"] === null || runtime["listenerOwnership"] === "managed" || runtime["listenerOwnership"] === "existing") ||
+      !boundedPlain(runtime["targetHealth"], 1, 64) ||
+      !nullableBoundedPlain(runtime["aliasRecordName"], 3, 253) ||
+      typeof runtime["aliasRecordOwned"] !== "boolean") throw invalid("ALB deployment runtime");
+    return Object.freeze({ ...common, kind: "alb-redirector", spec: parseAwsAlbRedirectorDeploymentSpec(value["spec"]),
+      runtime: Object.freeze({ loadBalancerArn: runtime["loadBalancerArn"], targetGroupArn: runtime["targetGroupArn"],
+        listenerArn: runtime["listenerArn"], dnsName: runtime["dnsName"], canonicalHostedZoneId: runtime["canonicalHostedZoneId"], securityGroupId: runtime["securityGroupId"],
+        serverIngressRuleId: runtime["serverIngressRuleId"], listenerJobId: runtime["listenerJobId"],
+        listenerOwnership: runtime["listenerOwnership"], targetHealth: runtime["targetHealth"],
+        aliasRecordName: runtime["aliasRecordName"], aliasRecordOwned: runtime["aliasRecordOwned"] }) });
+  }
+  throw invalid("dependent cloud deployment record");
+}
+
 export function parseCloudDeploymentRecord(value: unknown): CloudDeploymentRecord {
   if (!hasExactKeys(value, RECORD_KEYS) || !isUuidV4(value["id"]) || !boundedName(value["name"]) || !isUuidV4(value["credentialId"]) || !isDeploymentStatus(value["status"]) || !isDeploymentPhase(value["phase"]) || !isIsoTimestamp(value["createdAt"]) || !isIsoTimestamp(value["updatedAt"]) || !isOperatorConfigFileName(value["operatorConfigFileName"]) || !isSha256Digest(value["operatorConfigDigest"]) || (value["operatorConfigFileName"] === null) !== (value["operatorConfigDigest"] === null) || !nullableBoundedPlain(value["remoteHost"], 1, 255) || !nullableBoundedPlain(value["lastError"], 1, 4_096) || !Array.isArray(value["managedAssets"]) || value["managedAssets"].length > 64) throw invalid("cloud deployment record");
   const managedAssets = Object.freeze(value["managedAssets"].map(parseCloudManagedAsset));
@@ -948,15 +1221,40 @@ export function parseCloudDeploymentRecord(value: unknown): CloudDeploymentRecor
 }
 
 export function parseCloudDeploymentState(value: unknown): CloudDeploymentState {
-  if (!hasExactKeys(value, STATE_KEYS) || value["v"] !== CLOUD_DEPLOYMENT_STATE_VERSION || !isRevision(value["revision"]) || !Array.isArray(value["deployments"]) || value["deployments"].length > 1_000) throw invalid("cloud deployment state");
+  if (!isRecord(value)) throw invalid("cloud deployment state");
+  const legacy = hasExactKeys(value, LEGACY_STATE_KEYS) && value["v"] === 1;
+  if ((!legacy && !hasExactKeys(value, STATE_KEYS)) ||
+    (value["v"] !== CLOUD_DEPLOYMENT_STATE_VERSION && !legacy) ||
+    !isRevision(value["revision"]) || !Array.isArray(value["deployments"]) || value["deployments"].length > 1_000 ||
+    (!legacy && (!Array.isArray(value["dependentDeployments"]) || value["dependentDeployments"].length > 1_000))) {
+    throw invalid("cloud deployment state");
+  }
   const deployments = Object.freeze(value["deployments"].map(parseCloudDeploymentRecord));
-  if (new Set(deployments.map(({ id }) => id)).size !== deployments.length) throw invalid("cloud deployment state");
-  return Object.freeze({ v: CLOUD_DEPLOYMENT_STATE_VERSION, revision: value["revision"], deployments });
+  const dependentValues = legacy ? [] : value["dependentDeployments"] as unknown[];
+  const dependentDeployments = Object.freeze(dependentValues.map(parseCloudDependentDeploymentRecord));
+  const allIds = [...deployments.map(({ id }) => id), ...dependentDeployments.map(({ id }) => id)];
+  if (new Set(allIds).size !== allIds.length) throw invalid("cloud deployment state");
+  for (const dependent of dependentDeployments) {
+    const parent = deployments.find(({ id }) => id === dependent.serverDeploymentId);
+    if (!parent || parent.provider !== "aws" || parent.credentialId !== dependent.credentialId ||
+      parent.spec.region !== dependent.spec.region) throw invalid("dependent cloud deployment parent");
+  }
+  return Object.freeze({ v: CLOUD_DEPLOYMENT_STATE_VERSION, revision: value["revision"], deployments, dependentDeployments });
 }
 
 export function parseUpdateCloudDeploymentInput(value: unknown): UpdateCloudDeploymentInput {
   if (!hasExactKeys(value, UPDATE_KEYS) || !isRevision(value["expectedRevision"])) throw invalid("cloud deployment update");
   return Object.freeze({ expectedRevision: value["expectedRevision"], deployment: parseCloudDeploymentRecord(value["deployment"]) });
+}
+
+export function parseUpdateCloudDependentDeploymentInput(value: unknown): UpdateCloudDependentDeploymentInput {
+  if (!hasExactKeys(value, UPDATE_DEPENDENT_KEYS) || !isRevision(value["expectedRevision"])) throw invalid("dependent cloud deployment update");
+  return Object.freeze({ expectedRevision: value["expectedRevision"], deployment: parseCloudDependentDeploymentRecord(value["deployment"]) });
+}
+
+export function parseDeleteCloudDependentDeploymentInput(value: unknown): DeleteCloudDependentDeploymentInput {
+  if (!hasExactKeys(value, DELETE_KEYS) || !isRevision(value["expectedRevision"]) || !isUuidV4(value["deploymentId"])) throw invalid("dependent cloud deployment deletion");
+  return Object.freeze({ expectedRevision: value["expectedRevision"], deploymentId: value["deploymentId"] });
 }
 
 export function parseDeleteCloudDeploymentInput(value: unknown): DeleteCloudDeploymentInput {
@@ -1189,7 +1487,7 @@ function parseAzureDeploymentRuntime(value: unknown): AzureDeploymentRuntime {
 }
 
 function parseCloudManagedAsset(value: unknown): CloudManagedAsset {
-  if (!hasExactKeys(value, ASSET_KEYS) || typeof value["resourceType"] !== "string" || (!AWS_ASSET_TYPES.has(value["resourceType"] as AwsManagedAssetType) && !AZURE_ASSET_TYPES.has(value["resourceType"] as AzureManagedAssetType)) || !boundedPlain(value["resourceId"], 1, 2_048) || !nullableBoundedPlain(value["displayName"], 1, 255) || typeof value["tagged"] !== "boolean") throw invalid("cloud managed asset");
+  if (!hasExactKeys(value, ASSET_KEYS) || typeof value["resourceType"] !== "string" || (!AWS_ASSET_TYPES.has(value["resourceType"] as AwsManagedAssetType) && !AWS_ALB_ASSET_TYPES.has(value["resourceType"] as AwsAlbManagedAssetType) && !AZURE_ASSET_TYPES.has(value["resourceType"] as AzureManagedAssetType)) || !boundedPlain(value["resourceId"], 1, 2_048) || !nullableBoundedPlain(value["displayName"], 1, 255) || typeof value["tagged"] !== "boolean") throw invalid("cloud managed asset");
   return Object.freeze({ resourceType: value["resourceType"] as CloudManagedAsset["resourceType"], resourceId: value["resourceId"], displayName: value["displayName"], tagged: value["tagged"] });
 }
 

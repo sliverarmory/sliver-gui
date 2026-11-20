@@ -146,6 +146,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
         expectedRevision: settings.revision,
         settings: {
           theme: "light",
+          language: settings.language,
           appIcon: settings.appIcon,
           reduceMotion: true,
           disableWindowTransparency: settings.disableWindowTransparency,
@@ -181,7 +182,7 @@ test("sliver protocol serves built assets and isolated windows with strict CSP a
     cloudPage.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
-    await cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor();
+    await cloudPage.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor();
     assert.equal(cloudPage.url(), CLOUD_URL);
     await assertBuiltAssets(cloudPage);
     await assertStrictPolicy(cloudPage);

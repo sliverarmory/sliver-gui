@@ -2,10 +2,6 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../shared/application-settings-contracts.js";
-import {
-  APPLICATION_CONTEXT_MENU_IPC,
-  type ApplicationContextMenuAPI,
-} from "../shared/application-context-menu-contracts.js";
 import { DEFAULT_TEXT_EDITOR_SETTINGS_STATE } from "../shared/text-editor-settings-contracts.js";
 import { TEXT_EDITOR_IPC, type TextEditorAPI } from "../shared/text-editor-contracts.js";
 
@@ -30,61 +26,18 @@ function api(): TextEditorAPI {
   return bridge as TextEditorAPI;
 }
 
-function contextMenuApi(): ApplicationContextMenuAPI {
-  const bridge = mocks.exposeInMainWorld.mock.calls.find(([name]) => name === "applicationContextMenu")?.[1];
-  if (!bridge) throw new Error("Missing application context menu bridge");
-  return bridge as ApplicationContextMenuAPI;
-}
-
 describe("text editor preload", () => {
-  it("exposes only the frozen editor and context-menu APIs", () => {
+  it("exposes the frozen editor capability API", () => {
     expect(mocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toEqual([
       "textEditor",
       "applicationContextMenu",
     ]);
     expect(Object.isFrozen(api())).toBe(true);
-    expect(Object.isFrozen(contextMenuApi())).toBe(true);
     expect(Object.keys(api())).toEqual([
       "getDocument", "openFile", "save", "setDirty", "respondToRemoteOverwrite",
       "onRemoteOverwriteRequested", "getApplicationSettings", "onApplicationSettingsChanged",
       "getEditorSettings", "updateEditorSettings", "onEditorSettingsChanged",
     ]);
-    expect(Object.keys(contextMenuApi())).toEqual(["onMenuRequested", "executeAction", "setOpen"]);
-  });
-
-  it("validates context-menu events and sends only opaque capabilities on fixed channels", async () => {
-    const listener = vi.fn();
-    const stop = contextMenuApi().onMenuRequested(listener);
-    const registration = mocks.on.mock.calls.find(
-      ([channel]) => channel === APPLICATION_CONTEXT_MENU_IPC.menuRequested,
-    );
-    const handler = registration?.[1] as (_event: unknown, ...payload: unknown[]) => void;
-    const requestId = "00000000-0000-4000-8000-000000000001";
-    const actionId = "00000000-0000-4000-8000-000000000002";
-    const request = {
-      v: 1,
-      requestId,
-      x: 20,
-      y: 30,
-      items: [{ type: "action", actionId, kind: "copy", label: "Copy", enabled: true }],
-    };
-    handler({ sender: "private native event" }, request);
-    handler({}, { ...request, action: "copy" });
-    handler({}, request, "extra payload");
-    expect(listener).toHaveBeenCalledExactlyOnceWith(request);
-    stop();
-    expect(mocks.removeListener).toHaveBeenCalledWith(APPLICATION_CONTEXT_MENU_IPC.menuRequested, handler);
-
-    mocks.invoke.mockClear();
-    await contextMenuApi().executeAction({ requestId, actionId });
-    await contextMenuApi().setOpen({ requestId, open: true });
-    expect(mocks.invoke.mock.calls).toEqual([
-      [APPLICATION_CONTEXT_MENU_IPC.executeAction, { requestId, actionId }],
-      [APPLICATION_CONTEXT_MENU_IPC.setOpen, { requestId, open: true }],
-    ]);
-    expect(() => contextMenuApi().executeAction({ requestId, actionId: "copy" })).toThrow(TypeError);
-    expect(() => contextMenuApi().setOpen({ requestId: "menu", open: true })).toThrow(TypeError);
-    expect(mocks.invoke).toHaveBeenCalledTimes(2);
   });
 
   it("maps every request to exactly one dedicated channel", async () => {

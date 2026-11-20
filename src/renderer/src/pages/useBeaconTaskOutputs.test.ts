@@ -2,6 +2,8 @@ import { createElement, StrictMode, type ReactNode } from "react";
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { SliverDesktopAPI } from "../../../shared/contracts";
 import type { BeaconTaskDetail, BeaconTaskSummary } from "../../../shared/operation-contracts";
 import { useBeaconTaskOutputs } from "./useBeaconTaskOutputs";
@@ -26,13 +28,6 @@ function task(taskId: string, overrides: Partial<BeaconTaskSummary> = {}): Beaco
 
 function detail(summary: BeaconTaskSummary, text = summary.taskId): BeaconTaskDetail {
   return { ...summary, disposition: { kind: "inline-text", text, truncated: false } };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
-  return { promise, resolve, reject };
 }
 
 function installAPI(getBeaconTask: SliverDesktopAPI["getBeaconTask"]) {

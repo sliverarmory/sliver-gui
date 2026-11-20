@@ -1,0 +1,368 @@
+{
+  "settings": {
+    "heading": "設定",
+    "description": "Sliver Desktop のアプリウィンドウやターミナルの動作と外観をカスタマイズできます。",
+    "sections": "設定のカテゴリ",
+    "general": "一般",
+    "keyboard": "キーボードショートカット",
+    "terminal": "ターミナル",
+    "language": "表示言語",
+    "languageDescription": "設定とナビゲーションの表示にすぐ反映されます。",
+    "systemLanguage": "システム言語",
+    "systemLanguageDescription": "システムの言語設定に従い、優先順位が最も高い対応言語を使用します。対応する言語がない場合は英語で表示します。",
+    "appearance": "外観",
+    "appearanceDescription": "アプリの外観とアイコンを選択できます。",
+    "theme": "カラーテーマ",
+    "themeDescription": "OS の外観に合わせるか、ライトまたはダークに固定できます。",
+    "system": "システム",
+    "light": "ライト",
+    "dark": "ダーク",
+    "icon": "アプリのアイコン",
+    "iconDescription": "「自動」ではシステムの外観に合わせます。一部のランチャーでは常にダークアイコンが表示されます。",
+    "auto": "自動",
+    "passion": "Passion",
+    "disableTransparency": "ウィンドウの透明効果を無効にする",
+    "disableTransparencyDescription": "アプリの全ウィンドウが不透明な背景になります。変更はすぐに反映されます。",
+    "accessibility": "アクセシビリティ",
+    "accessibilityDescription": "表示する情報はそのままに、画面上の動きを抑えます。",
+    "reduceMotion": "動きを抑える",
+    "reduceMotionDescription": "アプリ全体で、必要性の低いアニメーションやスムーズスクロールを抑えます。",
+    "screenshots": "レポート用スクリーンショット",
+    "screenshotsDescription": "開いている各ウィンドウの画像を PNG 形式で保存します。",
+    "screenshotLocation": "保存先",
+    "screenshotLocationDescription": "レポート用スクリーンショットは、デフォルトでデスクトップに保存されます。",
+    "screenshotLocationLabel": "レポート用スクリーンショットの保存先",
+    "screenshotLocationDefault": "デスクトップ（デフォルト）",
+    "screenshotFolderError": "スクリーンショットの保存先を選択できませんでした",
+    "browse": "参照…",
+    "useDesktop": "デスクトップに保存",
+    "resetDefaults": "デフォルトに戻す",
+    "discard": "変更を破棄",
+    "save": "保存",
+    "cancel": "キャンセル",
+    "unavailable": "設定を利用できません",
+    "notSaved": "設定を保存できませんでした",
+    "updateFailed": "アプリの設定を更新できませんでした。"
+  },
+  "terminal": {
+    "appearance": "ターミナルの外観",
+    "appearanceDescription": "すべてのコンソール、SSH セッション、管理対象のシェルウィンドウに適用されます。",
+    "settings": "ターミナルの設定",
+    "fontFamily": "フォント",
+    "fontFamilyDescription": "Sliver GUI に同梱されているため、オフラインでも使えます。",
+    "fontSize": "フォントサイズ",
+    "fontSizeRange": "{min}〜{max} ピクセル。",
+    "cursorShape": "カーソルの形状",
+    "block": "ブロック",
+    "underline": "下線",
+    "bar": "縦棒",
+    "transparent": "ターミナルウィンドウを透過する",
+    "transparentDescription": "対応する環境では、コンソールと SSH のウィンドウに OS の透明効果を適用します。「一般」でウィンドウの透明効果を有効にしてください。",
+    "cursorBlink": "カーソルを点滅させる",
+    "cursorBlinkDescription": "コンソールがアクティブな間、カーソルが点滅します。",
+    "smoothScrolling": "スムーズスクロール",
+    "smoothScrollingDescription": "ターミナルの出力履歴をなめらかにスクロールします。",
+    "ghosttyThemes": "Ghostty のテーマ",
+    "ghosttyThemesDescription": "Ghostty ターミナルと同じテーマファイルを使えます。",
+    "theme": "ターミナルのテーマ",
+    "defaultTheme": "アプリのデフォルト",
+    "themeDescription": "開いているターミナルにもすぐに反映されます。設定ファイルで色を指定している場合は、そちらが優先されます。",
+    "preview": "ターミナルテーマのプレビュー",
+    "previewSample": "青空の下、キツネが草原を駆け抜けます。",
+    "themeDirectory": "Ghostty のテーマフォルダー",
+    "themeDirectoryDescription": "このフォルダーにテーマファイルを追加するか、インストール済みの Ghostty のテーマを使用します。設定ファイルでは、テーマのパスやライトとダークそれぞれのテーマを指定できます。",
+    "configPath": "設定ファイル",
+    "loadingConfig": "Ghostty の設定を読み込み中…",
+    "configUnavailable": "このウィンドウでは Ghostty の設定を利用できません。",
+    "configNotes": "設定に関する注意事項",
+    "editConfig": "Ghostty の設定を編集",
+    "reloadThemes": "テーマを再読み込み",
+    "saveThemeFailed": "ターミナルのテーマを保存できませんでした。",
+    "openConfigFailed": "Ghostty の設定ファイルを開けませんでした。",
+    "openConfigError": "Ghostty の設定ファイルを開けませんでした",
+    "themeSettingsHint": "Ghostty のテーマは「設定」の「ターミナル」で選択できます。設定ファイルの変更は保存時に反映されます。"
+  },
+  "shortcuts": {
+    "resetAll": "すべてデフォルトに戻す",
+    "search": "ショートカットを検索",
+    "recordFailed": "キー入力の受け付けを開始できませんでした。もう一度お試しください。",
+    "invalidKey": "修飾キーと文字・数字・矢印・記号のいずれかのキーを組み合わせるか、ファンクションキーを押してください。",
+    "invalidShortcut": "修飾キーと文字・数字・矢印・記号のいずれかのキーを組み合わせるか、ファンクションキーを指定してください。",
+    "unknownAction": "このショートカットの操作が見つかりません。",
+    "reservedF5": "F5 キーは、サーバー情報の更新と OS のウィンドウ操作用に予約されています。",
+    "reservedShortcut": "このショートカットは、標準のシステム操作または編集操作用に予約されています。",
+    "alreadyAssigned": "このショートカットは「{action}」に割り当て済みです。",
+    "changeAction": "「{action}」のショートカットを変更",
+    "cancelChangeAction": "「{action}」のショートカットの変更をキャンセル",
+    "resetAction": "「{action}」のショートカットをデフォルトに戻す",
+    "preparing": "準備中…",
+    "pressShortcut": "キーを押してください…",
+    "escapeCancels": "Esc キーでキャンセル",
+    "change": "ショートカットを変更",
+    "reset": "デフォルトに戻す",
+    "recordHint": "新しいキーの組み合わせを押してください。Esc キーでキャンセルできます。",
+    "noResults": "検索条件に一致するショートカットがありません。",
+    "platformHint": "macOS では Command キー、Windows と Linux では Ctrl キーを使います。標準の編集やシステムのショートカット、ターミナルの制御キーは通常どおり使えます。"
+  },
+  "shortcutGroups": {
+    "Application": "アプリ",
+    "Navigation": "ナビゲーション",
+    "Text Editor": "テキストエディター",
+    "Terminal": "ターミナル",
+    "Terminal tabs": "ターミナルのタブ"
+  },
+  "shortcutActions": {
+    "commandPalette": {
+      "label": "コマンドパレットを開く",
+      "description": "ページやアプリの主な操作を検索します。"
+    },
+    "newWindow": {
+      "label": "新規ウィンドウ",
+      "description": "アプリの新しいウィンドウを開きます。"
+    },
+    "duplicateWindow": {
+      "label": "同じサーバーで新規ウィンドウ",
+      "description": "現在のサーバーに接続したウィンドウをもう一つ開きます。"
+    },
+    "reportScreenshot": {
+      "label": "レポート用スクリーンショットを保存",
+      "description": "開いているすべてのアプリウィンドウの画像を保存します。"
+    },
+    "openConsole": {
+      "label": "コンソールを開く",
+      "description": "接続先のサーバーのコンソールを開きます。"
+    },
+    "navigateBack": {
+      "label": "戻る",
+      "description": "一つ前のページに戻ります。"
+    },
+    "navigateForward": {
+      "label": "進む",
+      "description": "履歴の次のページに進みます。"
+    },
+    "refreshServer": {
+      "label": "サーバー情報を更新",
+      "description": "接続先のサーバーから最新情報を取得します。"
+    },
+    "textEditorOpen": {
+      "label": "ファイルを開く",
+      "description": "ローカルファイルを単独のテキストエディターで開きます。"
+    },
+    "textEditorSaveAs": {
+      "label": "名前を付けて保存",
+      "description": "現在のドキュメントを新しいローカルファイルに保存します。"
+    },
+    "textEditorSave": {
+      "label": "ファイルを保存",
+      "description": "現在のドキュメントを保存します。リモートファイルを編集中の場合は上書きします。"
+    },
+    "textEditorUndo": {
+      "label": "元に戻す",
+      "description": "テキストエディターで行った直前の編集を取り消します。"
+    },
+    "textEditorRedo": {
+      "label": "やり直す",
+      "description": "取り消した編集をやり直します。"
+    },
+    "textEditorFind": {
+      "label": "ファイル内を検索",
+      "description": "現在のドキュメント内のテキストを検索します。"
+    },
+    "textEditorReplace": {
+      "label": "ファイル内を置換",
+      "description": "現在のドキュメント内のテキストを検索して置き換えます。"
+    },
+    "textEditorWordWrap": {
+      "label": "行の折り返しを切り替え",
+      "description": "エディターの行の折り返しをオンまたはオフにします。"
+    },
+    "textEditorCommandPalette": {
+      "label": "エディターのコマンドパレットを開く",
+      "description": "Monaco エディターのコマンドを検索して実行します。"
+    },
+    "textEditorSettings": {
+      "label": "エディターの設定",
+      "description": "単独のテキストエディターの設定を開きます。"
+    },
+    "terminalNewTab": {
+      "label": "ターミナルで新規タブを開く",
+      "description": "ターミナルウィンドウに新しいタブを開きます。"
+    },
+    "terminalCloseTab": {
+      "label": "ターミナルのタブを閉じる",
+      "description": "ターミナルで現在選択しているタブを閉じます。"
+    },
+    "terminalSettings": {
+      "label": "ターミナルの設定",
+      "description": "ターミナルウィンドウから設定を開きます。"
+    },
+    "terminalCloseWindow": {
+      "label": "ターミナルウィンドウを閉じる",
+      "description": "ターミナルウィンドウをすべてのタブごと閉じます。"
+    },
+    "terminalTab1": {
+      "label": "ターミナルのタブ 1 を選択",
+      "description": "ターミナルの 1 番目のタブに切り替えます。"
+    },
+    "terminalTab2": {
+      "label": "ターミナルのタブ 2 を選択",
+      "description": "ターミナルの 2 番目のタブに切り替えます。"
+    },
+    "terminalTab3": {
+      "label": "ターミナルのタブ 3 を選択",
+      "description": "ターミナルの 3 番目のタブに切り替えます。"
+    },
+    "terminalTab4": {
+      "label": "ターミナルのタブ 4 を選択",
+      "description": "ターミナルの 4 番目のタブに切り替えます。"
+    },
+    "terminalTab5": {
+      "label": "ターミナルのタブ 5 を選択",
+      "description": "ターミナルの 5 番目のタブに切り替えます。"
+    },
+    "terminalTab6": {
+      "label": "ターミナルのタブ 6 を選択",
+      "description": "ターミナルの 6 番目のタブに切り替えます。"
+    },
+    "terminalTab7": {
+      "label": "ターミナルのタブ 7 を選択",
+      "description": "ターミナルの 7 番目のタブに切り替えます。"
+    },
+    "terminalTab8": {
+      "label": "ターミナルのタブ 8 を選択",
+      "description": "ターミナルの 8 番目のタブに切り替えます。"
+    },
+    "terminalTab9": {
+      "label": "ターミナルのタブ 9 を選択",
+      "description": "ターミナルの 9 番目のタブに切り替えます。"
+    },
+    "terminalTab10": {
+      "label": "ターミナルのタブ 10 を選択",
+      "description": "ターミナルの 10 番目のタブに切り替えます。"
+    }
+  },
+  "shell": {
+    "navigation": "Sliver のナビゲーション",
+    "operatorConsole": "オペレーターコンソール",
+    "overviewNavigation": "概要へのナビゲーション",
+    "operational": "運用",
+    "operationalNavigation": "運用メニュー",
+    "interact": "操作",
+    "interactNavigation": "操作メニュー",
+    "data": "データ",
+    "dataNavigation": "データメニュー",
+    "windowNavigation": "ウィンドウのナビゲーション",
+    "collapseSidebar": "サイドバーを折りたたむ",
+    "expandSidebar": "サイドバーを展開",
+    "noServer": "サーバーに接続されていません",
+    "chooseConfig": "保存済みの接続設定を選択してください",
+    "operator": "オペレーター",
+    "configuration": "接続設定",
+    "connect": "接続",
+    "server": "現在のサーバー",
+    "currentServer": "現在のサーバー：{operator}",
+    "applicationMenuOffline": "アプリメニュー、オフライン",
+    "applicationMenu": "アプリメニュー",
+    "offline": "オフライン",
+    "noChannel": "接続なし",
+    "applicationActions": "アプリと現在のサーバーの操作",
+    "exit": "アプリを終了",
+    "disconnect": "切断",
+    "switchConfig": "接続設定を切り替え",
+    "newWindowOptions": "新規ウィンドウのオプション",
+    "newWindow": "新規ウィンドウ",
+    "sameServer": "同じサーバー",
+    "differentServer": "別のサーバー",
+    "openConsole": "Sliver コンソールを開く",
+    "consoleTooltip": "接続先のサーバーのコンソールを開く",
+    "connectFirstTooltip": "先にサーバーに接続してください",
+    "openPalette": "コマンドパレットを開く",
+    "commandPalette": "コマンドパレット",
+    "savedConfigurations": "保存済みの接続設定",
+    "live": "イベント受信中",
+    "waitingEvents": "イベント待機中",
+    "reconnecting": "再接続中",
+    "eventsOffline": "イベント配信停止",
+    "backendReconnecting": "バックエンドに再接続中",
+    "session": "セッション",
+    "beacon": "ビーコン"
+  },
+  "navigation": {
+    "overview": {
+      "label": "概要",
+      "description": "インフラストラクチャと報告された接続を確認します。"
+    },
+    "generate": {
+      "label": "生成",
+      "description": "インプラントを生成します。"
+    },
+    "artifacts": {
+      "label": "ビルドとプロファイル",
+      "description": "生成済みのビルドや再利用できるプロファイルを表示します。"
+    },
+    "operations": {
+      "label": "ジョブとリスナー",
+      "description": "サーバーのジョブとリスナーのエンドポイントを管理します。"
+    },
+    "websites": {
+      "label": "ウェブサイト",
+      "description": "ホストしているウェブサイトとそのコンテンツを管理します。"
+    },
+    "sessions": {
+      "label": "セッション",
+      "description": "対話型セッションを表示します。"
+    },
+    "beacons": {
+      "label": "ビーコン",
+      "description": "非同期で動作するビーコンを表示します。"
+    },
+    "ad-explorer": {
+      "label": "AD Explorer",
+      "description": "Active Directory のデータを収集して探索します。"
+    },
+    "loot": {
+      "label": "収集ファイル",
+      "description": "収集したファイルを表示します。"
+    },
+    "credentials": {
+      "label": "資格情報",
+      "description": "収集した資格情報を表示します。"
+    }
+  },
+  "palette": {
+    "settingsDescription": "外観、キーボードショートカット、ターミナルの設定を変更します。",
+    "backDescription": "一つ前のページに戻ります。",
+    "forwardDescription": "履歴の次のページに進みます。",
+    "savedDescription": "オペレーターの接続設定を使って接続したり、設定を管理したりします。",
+    "consoleDescription": "接続先のサーバーのコンソールを開きます。",
+    "connectFirst": "先にサーバーに接続してください。",
+    "disconnectDescription": "現在のサーバーとの接続を切断します。",
+    "noConnection": "サーバーに接続されていません。",
+    "refreshDescription": "接続先のサーバーから最新情報を取得し、表示に反映します。",
+    "cloudDeployment": "クラウドへのデプロイ",
+    "cloudDescription": "クラウドへのデプロイのウィンドウを開きます。すでに開いている場合は前面に表示します。",
+    "remoteDesktop": "リモートデスクトップ",
+    "remoteDesktopDescription": "単独の RDP クライアントを開きます。すでに開いている場合は前面に表示します。",
+    "screenshotDescription": "開いているすべてのウィンドウの画像を、指定した保存先に保存します。",
+    "newConnectedWindow": "同じサーバーで新規ウィンドウ",
+    "newConnectedDescription": "現在のサーバーに接続したウィンドウをもう一つ開きます。",
+    "newConnectionWindow": "別のサーバーで新規ウィンドウ",
+    "newConnectionDescription": "別のサーバーに接続するためのウィンドウを開きます。",
+    "search": "コマンドを検索",
+    "searchPlaceholder": "コマンド、セッション、ビーコンを検索…",
+    "applicationCommands": "アプリのコマンド",
+    "moreTargets": "ほかにも対象があります。すべてを検索するには、「セッション」または「ビーコン」を開いてください。",
+    "noResults": "コマンドが見つかりません。",
+    "current": "表示中",
+    "navigate": "移動",
+    "run": "実行",
+    "toggle": "切り替え"
+  },
+  "paletteGroups": {
+    "Navigate": "ナビゲーション",
+    "Sessions": "セッション",
+    "Beacons": "ビーコン",
+    "Server": "サーバー",
+    "Windows": "ウィンドウ"
+  }
+}

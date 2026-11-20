@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
 import type {
   ExecutionActionPlan,
@@ -192,12 +194,6 @@ function completedProcessResult(
       truncated: false,
     }],
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
 }
 
 async function selectAdvancedCategory(user: ReturnType<typeof userEvent.setup>, label: "Payloads" | "Remote" | "Identity"): Promise<void> {

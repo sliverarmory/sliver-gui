@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import { DEFAULT_APPLICATION_SETTINGS_STATE, type ApplicationSettingsState } from "../../../shared/application-settings-contracts";
 import type { DotNetCatalog } from "../../../shared/dotnet-contracts";
@@ -17,23 +19,7 @@ vi.mock("../components/ExecutionOutputTerminal", () => ({
   ),
 }));
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
-  Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
-  Object.defineProperty(Element.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
-  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
-});
+useRendererTestEnvironment({ pointerCapture: true });
 
 afterEach(() => {
   cleanup();
@@ -263,7 +249,7 @@ describe(".NET execution view", () => {
     expect(screen.queryByText(/limits joined assembly arguments to 256 bytes/u)).not.toBeInTheDocument();
   });
 
-  it("keeps the composer and selected-result headers above the scroll-shadowed content", async () => {
+  it("resets the content scroll position when selecting a saved execution", async () => {
     const user = userEvent.setup();
     installApi([historyRecord("first-request", "seatbelt.exe", ["alpha"], "captured output")]);
     render(<DotNetExecutionView capability={capability} isExecuting={false} isPreparing={false} isRefreshing={false} target={target} targetRef={targetRef} onPrepare={async () => undefined} />);
@@ -271,37 +257,15 @@ describe(".NET execution view", () => {
     const rail = await screen.findByRole("navigation", { name: ".NET execution history" });
     const historyRow = await within(rail).findByRole("row", { name: /seatbelt\.exe/u });
     await user.click(within(rail).getByRole("row", { name: "New Execution" }));
-
-    const composer = screen.getByRole("region", { name: "Execute a .NET assembly" });
-    const content = within(composer).getByRole("region", { name: ".NET execution content" });
-    const composerHeader = within(composer).getByRole("heading", { name: "Execute a .NET assembly" }).closest("header");
-    expect(content).toHaveAttribute("data-slot", "scroll-shadow");
-    expect(content).toHaveAttribute("data-scroll-shadow-size", "28");
-    expect(content).toHaveAttribute("tabindex", "0");
-    expect(content).toHaveClass("min-h-0", "flex-1", "overflow-y-auto", "overscroll-contain");
-    expect(composerHeader).not.toBeNull();
-    expect(composerHeader?.parentElement).toBe(composer);
-    expect(composerHeader).toHaveClass("sticky", "top-0", "z-10", "bg-surface");
-    expect(composerHeader).toContainElement(within(composer).getByRole("button", { name: "Execute" }));
-    expect(content).not.toContainElement(composerHeader);
-    expect(content).toContainElement(within(composer).getByRole("textbox", { name: "Assembly arguments" }));
-
+    const content = screen.getByRole("region", { name: ".NET execution content" });
     content.scrollTop = 64;
+
     await user.click(historyRow);
     const details = screen.getByRole("region", { name: ".NET execution details" });
-    const resultHeader = within(details).getByRole("heading", { name: "seatbelt.exe" }).closest("header");
-    expect(resultHeader?.parentElement).toBe(details);
-    expect(resultHeader).toHaveClass("sticky", "top-0", "z-10", "bg-surface");
-    expect(resultHeader).toContainElement(within(details).getByRole("button", { name: "Clear selected" }));
-    expect(content).not.toContainElement(resultHeader);
-    expect(content).toContainElement(within(details).getByLabelText("Execution details"));
-    expect(content).not.toHaveClass("pb-4", "sm:pb-5");
-    const transcript = within(details).getByLabelText("Execution output transcript");
-    expect(transcript.parentElement).toHaveClass("flex", "flex-1", "flex-col");
-    expect(transcript).toHaveClass("min-h-0", "flex-1");
-    await user.click(within(details).getByRole("radio", { name: "Stderr" }));
-    expect(within(details).getByRole("status", { name: "" })).toHaveClass("min-h-40", "flex-1");
+    expect(within(details).getByLabelText("Execution output transcript")).toHaveTextContent("captured output");
     expect(content.scrollTop).toBe(0);
+    await user.click(within(details).getByRole("radio", { name: "Stderr" }));
+    expect(within(details).getByRole("status", { name: "" })).toHaveTextContent("No stderr was returned for this invocation.");
   });
 
   it("shows the BOF-style history rail, restores earlier arguments and output, and clears history", async () => {

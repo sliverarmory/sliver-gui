@@ -99,6 +99,7 @@ import {
 import { createUpdateCertificateTrust } from "./update-certificate-trust.js";
 import { ApplicationShutdownCoordinator } from "./application-shutdown.js";
 import { ApplicationSettingsStore } from "./application-settings.js";
+import { detectApplicationSystemLanguage } from "./application-system-language.js";
 import { WorkspaceZoomSettings } from "./workspace-zoom-settings.js";
 import { captureReportScreenshots } from "./report-screenshot.js";
 import { TextEditorSettingsStore } from "./text-editor-settings.js";
@@ -3064,6 +3065,7 @@ export async function startApplication(options: StartApplicationOptions = {}): P
   applicationContextMenus = new ApplicationContextMenuController();
   const loadedApplicationSettingsStore = await ApplicationSettingsStore.load(
     join(consoleClientRootDirectory, "gui", APPLICATION_SETTINGS_FILE_NAME),
+    detectApplicationSystemLanguage(() => app.getPreferredSystemLanguages()),
   );
   const loadedTextEditorSettingsStore = await TextEditorSettingsStore.load(
     join(consoleClientRootDirectory, "gui", TEXT_EDITOR_SETTINGS_FILE_NAME),
@@ -3752,6 +3754,8 @@ function unavailableCloudDeploymentController(
     deleteCredential: () => ({ ok: false, error: message }),
     testCredential: () => ({ ok: false, error: message }),
     discoverAwsOptions: () => ({ ok: false, error: message }),
+    discoverCrackstationOptions: () => ({ ok: false, error: message }),
+    discoverAlbRedirectorOptions: () => ({ ok: false, error: message }),
     discoverAzureAccounts: () => ({ ok: false, error: message }),
     discoverAzureOptions: () => ({ ok: false, error: message }),
     listDnsZones: () => ({ ok: false, error: message }),
@@ -3760,6 +3764,8 @@ function unavailableCloudDeploymentController(
     updateDnsRecord: () => ({ ok: false, error: message }),
     deleteDnsRecord: () => ({ ok: false, error: message }),
     createDeployment: () => ({ ok: false, error: message }),
+    createCrackstationDeployment: () => ({ ok: false, error: message }),
+    createAlbRedirectorDeployment: () => ({ ok: false, error: message }),
     getSoftwareState: () => ({ ok: false, error: message }),
     getSoftwareInstallProgress: () => ({ ok: false, error: message }),
     listSoftwareListeners: () => ({ ok: false, error: message }),

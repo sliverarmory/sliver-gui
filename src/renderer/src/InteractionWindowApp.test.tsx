@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { deferred } from "../../tests/renderer-test-helpers";
 import { useConnection } from "./components/ConnectionProvider";
 
 import type {
@@ -464,15 +466,4 @@ function installAPI(initial: Promise<Awaited<ReturnType<SliverDesktopAPI["claimI
     claimInteractionWindow,
     onSnapshotChanged,
   };
-}
-
-function deferred<T>(): {
-  readonly promise: Promise<T>;
-  readonly resolve: (value: T) => void;
-} {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
 }

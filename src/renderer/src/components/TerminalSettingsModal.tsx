@@ -1,5 +1,6 @@
 import { Button, Modal, ScrollShadow, toast } from "@heroui/react";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { useMessages } from "../i18n/ApplicationLocaleProvider";
 import { faGear } from "@fortawesome/free-solid-svg-icons";
 
 import {
@@ -26,6 +27,7 @@ export function TerminalSettingsModal({
   onOpenChange,
   onSave,
 }: TerminalSettingsModalProps): React.JSX.Element {
+  const { settings: copy, terminal: terminalCopy } = useMessages();
   const validSettings = isValidTerminalSettings(draft);
 
   return (
@@ -38,9 +40,9 @@ export function TerminalSettingsModal({
               <FontAwesomeIcon aria-hidden icon={faGear} />
             </Modal.Icon>
             <div className="min-w-0">
-              <Modal.Heading>Terminal Settings</Modal.Heading>
+              <Modal.Heading>{terminalCopy.settings}</Modal.Heading>
               <p className="mt-1 text-sm leading-5 text-muted">
-                Applied to every console, SSH session, and managed shell window.
+                {terminalCopy.appearanceDescription}
               </p>
             </div>
           </Modal.Header>
@@ -53,10 +55,10 @@ export function TerminalSettingsModal({
               <TerminalSettingsFields settings={draft} onChange={onDraftChange} />
               {window.ghosttySettings && <Button variant="secondary" onPress={() => {
                 void window.ghosttySettings!.editConfig().then((result) => {
-                  if (!result.ok) toast.danger("Could not open Ghostty config", { description: result.error });
-                }).catch(() => toast.danger("Could not open Ghostty config"));
-              }}>Edit Ghostty config</Button>}
-              <p className="text-xs text-muted">Choose Ghostty themes in Settings → Terminal. Config changes apply when saved.</p>
+                  if (!result.ok) toast.danger(terminalCopy.openConfigError, { description: result.error });
+                }).catch(() => toast.danger(terminalCopy.openConfigError));
+              }}>{terminalCopy.editConfig}</Button>}
+              <p className="text-xs text-muted">{terminalCopy.themeSettingsHint}</p>
             </div>
           </Modal.Body>
           <Modal.Footer className="items-center justify-between gap-3">
@@ -65,11 +67,11 @@ export function TerminalSettingsModal({
               variant="tertiary"
               onPress={() => onDraftChange(DEFAULT_CONSOLE_TERMINAL_SETTINGS)}
             >
-              Reset defaults
+              {copy.resetDefaults}
             </Button>
             <div className="flex items-center gap-2">
-              <Button size="sm" variant="secondary" onPress={() => onOpenChange(false)}>Cancel</Button>
-              <Button isDisabled={!validSettings} size="sm" onPress={onSave}>Save</Button>
+              <Button size="sm" variant="secondary" onPress={() => onOpenChange(false)}>{copy.cancel}</Button>
+              <Button isDisabled={!validSettings} size="sm" onPress={onSave}>{copy.save}</Button>
             </div>
           </Modal.Footer>
         </Modal.Dialog>

@@ -2,6 +2,8 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import { DEFAULT_APPLICATION_SETTINGS_STATE } from "../../../shared/application-settings-contracts";
 import type { SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
@@ -397,14 +399,6 @@ function operationRecord(overrides: Partial<TargetOperationRecord> = {}): Target
     disposition: { kind: "inline-text", text: "Round-trip: 2 ms", truncated: false },
     ...overrides,
   };
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }
 
 function installAPI(overrides: Partial<SliverDesktopAPI> = {}): SliverDesktopAPI {

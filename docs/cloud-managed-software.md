@@ -70,8 +70,9 @@ Removal stops the redirector service, stops its Sliver listener only if this
 workflow created that listener, and removes cloud firewall rules created by
 this installation. Rules that already covered a port are retained. A failed or
 uncertain install stays visible as **Outcome unknown** so removal can be
-retried. Server termination is blocked while a managed redirector record is
-present.
+retried. Server termination can proceed while managed software is installed.
+Termination does not use SSH to uninstall it; after the cloud provider confirms
+termination, the app removes the server's saved managed software record.
 
 The app saves an installation intent before starting a Sliver job and records
 each frontend port before requesting a cloud firewall change. On restart, an

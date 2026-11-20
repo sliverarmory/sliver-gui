@@ -3,6 +3,8 @@ import { act, cleanup, render, screen, waitFor, within } from "@testing-library/
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
 import type { SessionSummary, TargetActionPlan, TargetRef } from "../../../shared/target-contracts";
@@ -69,14 +71,6 @@ afterEach(() => {
   cleanup();
   intersectionObserverRecords.length = 0;
 });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
-}
 
 const session: SessionSummary = {
   mode: "session",

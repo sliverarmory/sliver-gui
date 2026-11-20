@@ -1,6 +1,8 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import {
   DEFAULT_APPLICATION_SETTINGS_STATE,
@@ -42,23 +44,7 @@ const linuxTarget: SessionSummary = {
   liveness: "active",
 };
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
-  Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
-  Object.defineProperty(Element.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
-  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
-});
+useRendererTestEnvironment({ pointerCapture: true });
 
 afterEach(cleanup);
 

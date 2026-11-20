@@ -2,6 +2,8 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor } from "@
 import { createRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { renderWithApplicationContextMenu } from "../application-context-menu-test-utils";
 
 const ghosttyMocks = vi.hoisted(() => ({
@@ -933,12 +935,4 @@ async function delay(milliseconds: number): Promise<void> {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, milliseconds));
   });
-}
-
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
 }

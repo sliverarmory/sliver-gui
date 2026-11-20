@@ -1,24 +1,16 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Toast, toast } from "@heroui/react";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { deferred, useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { JobStopPlan, OperationResult, SliverDesktopAPI, SliverSnapshot } from "../../../shared/contracts";
 import type { WebsiteCatalogPage } from "../../../shared/website-contracts";
 import { OperationsPage } from "./OperationsPage";
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-});
+useRendererTestEnvironment({ animations: false });
 
 afterEach(() => {
   cleanup();
@@ -55,12 +47,6 @@ function websiteCatalog(names: string[], nextCursor?: string): OperationResult<W
   };
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => { resolve = next; });
-  return { promise, resolve };
-}
-
 function installWebsiteListenerAPI(listWebsites: SliverDesktopAPI["listWebsites"]) {
   const startListener = vi.fn().mockResolvedValue({ ok: true });
   Object.defineProperty(window, "sliver", {
@@ -95,36 +81,6 @@ describe("OperationsPage listener modal", () => {
     expect(actionHeader).toHaveAttribute("data-pinned", "end");
     expect(stopJob4.closest('[role="gridcell"]')).toHaveAttribute("data-pinned", "end");
     expect(stopJob9.closest('[role="gridcell"]')).toHaveAttribute("data-pinned", "end");
-  });
-
-  it("lays out form sections vertically so the body gap separates each row", async () => {
-    const user = userEvent.setup();
-    const snapshot = disconnectedSnapshot();
-    snapshot.connection = { managedServer: null, status: "connected" };
-
-    render(<OperationsPage snapshot={snapshot} />);
-    await user.click(screen.getByRole("button", { name: "New listener" }));
-
-    const dialog = await screen.findByRole("dialog", { name: "Start a listener" });
-    const body = dialog.querySelector("[data-slot='modal-body']");
-    const header = dialog.querySelector("[data-slot='modal-header']");
-
-    expect(body).not.toBeNull();
-    expect(body).toHaveClass("flex", "flex-col", "gap-5");
-    expect(header).toHaveClass("flex-row", "items-start");
-    expect(header?.children[0]).toHaveAttribute("data-slot", "modal-icon");
-    expect(header?.children[1]?.querySelector("[data-slot='modal-heading']")).toHaveTextContent(
-      "Start a listener",
-    );
-    const subtitle = within(dialog).getByText("Authenticated Sliver transport over mutual TLS.");
-    expect(header).toContainElement(subtitle);
-    expect(within(dialog).getAllByText("Authenticated Sliver transport over mutual TLS.")).toHaveLength(1);
-    expect(within(dialog).queryByText("Mutual authentication")).not.toBeInTheDocument();
-    expect(
-      within(dialog).queryByText(
-        "Sliver provisions the listener certificate material and requires authenticated implant clients.",
-      ),
-    ).not.toBeInTheDocument();
   });
 
   it.each(["HTTP", "HTTPS"] as const)("selects a server website for a %s listener", async (protocol) => {

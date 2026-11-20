@@ -25,7 +25,7 @@ export function topologyLayoutInput(document: TopologyDocument): TopologyLayoutI
         // Reserve room for labels placed between resource cards without
         // sending display text to the worker. Seven pixels per glyph is
         // conservative at our 10px font.
-        ...(["egress-connection", "server-redirector"].includes(kind) ? { labelWidth: Array.from(label).length * 7 + 14 } : {}),
+        ...(["egress-connection", "server-redirector", "alb-forwarding", "managed-crackstation-server"].includes(kind) ? { labelWidth: Array.from(label).length * 7 + 14 } : {}),
       })),
   };
 }

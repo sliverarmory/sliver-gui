@@ -23,6 +23,7 @@ import type {
   AzureFirewallSnapshot,
   AzureCliAccountSummary,
   CloudDeploymentRecord,
+  CreateAwsCrackstationDeploymentInput,
   CreateAwsCloudDeploymentInput,
   CreateAzureCloudDeploymentInput,
   ResolvedAwsCloudCredentialInput,
@@ -57,6 +58,7 @@ import {
   type CloudDeploymentServiceOptions,
   type CloudLocalRedirectorDeployer,
   type CloudSliverListenerClient,
+  type CloudCrackstationClient,
 } from "./cloud-deployment-service.js";
 import type { ConsolePortRuntime } from "./console-port-session.js";
 import { SshHostKeyStore } from "./ssh-host-key-store.js";
@@ -105,6 +107,173 @@ beforeEach(async () => {
   temporaryDirectory = await mkdtemp(join(tmpdir(), "sliver-gui-cloud-service-"));
   rootDirectory = join(temporaryDirectory, ".sliver-client", "gui", "cloud-deployment", "v1");
   operatorConfigDirectory = join(temporaryDirectory, ".sliver-client", "configs");
+});
+
+describe("CloudDeploymentService Crackstation deployments", () => {
+  const workerId = SECOND_DEPLOYMENT_ID;
+  const workerResource: AwsEc2DeploymentResource = {
+    ...awsResource(), guid: workerId, name: "GPU worker",
+    instanceId: "i-11111111111111111", securityGroupId: "sg-11111111111111111",
+    keyPair: { id: "key-11111111111111111", name: `sliver-gui-${workerId}` },
+    volumeIds: ["vol-11111111111111111"], networkInterfaceIds: ["eni-11111111111111111"],
+    privateIpAddress: "10.0.0.25", publicIpAddress: "203.0.113.25",
+    elasticIp: { allocationId: "eipalloc-11111111111111111", publicIp: "203.0.113.25" },
+  };
+
+  async function fixture() {
+    const deps = await dependencies([DEPLOYMENT_ID, workerId]);
+    await deps.vault.create(awsCredential());
+    const provider = Object.assign(new FakeAwsProvider(), {
+      discoverCrackstationInstanceTypes: vi.fn(async () => [{
+        name: "g4dn.xlarge", architecture: "x86_64" as const, vCpuCount: 4,
+        memoryMiB: 16_384, processor: "NVIDIA T4", description: "GPU worker",
+        priceHourlyUsd: 0.526, estimatedCostPerDayUsd: 12.624,
+      }]),
+      discoverCrackstationImages: vi.fn(async () => [{
+        id: "ami-11111111111111111", name: "Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 24.04) 20261119",
+        description: null, architecture: "x86_64" as const, rootDeviceName: "/dev/sda1",
+        distribution: "ubuntu" as const, version: "24.04 GPU base", creationDate: null, sshUsername: "ubuntu",
+      }]),
+      discoverCrackstationPublicSubnetIds: vi.fn(async () => ["subnet-a0000000000000000"]),
+      createCrackstation: vi.fn<NonNullable<CloudAwsProvider["createCrackstation"]>>(async (_input, onMutation) => {
+        await onMutation?.({ phase: "key-pair", resources: { keyPair: workerResource.keyPair } });
+        await onMutation?.({ phase: "security-group", resources: {
+          keyPair: workerResource.keyPair, securityGroupId: workerResource.securityGroupId,
+        } });
+        await onMutation?.({ phase: "instance", resources: {
+          keyPair: workerResource.keyPair, securityGroupId: workerResource.securityGroupId,
+          instanceId: workerResource.instanceId,
+        } });
+        return workerResource;
+      }),
+    });
+    provider.stop.mockImplementation(async () => ({ ...workerResource, state: "stopped" }));
+    const provisioner = fakeProvisioner();
+    const install = vi.fn(async (input: Parameters<NonNullable<CloudDeploymentServiceOptions["crackstationDeployer"]>["install"]>[0]) => {
+      expect(input.ssh.host).toBe("203.0.113.25");
+      expect(JSON.parse(input.operatorConfig.toString("utf8"))).toMatchObject({ lhost: "10.0.0.20", operator: "gpu-operator" });
+      return { hostKeySha256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        stationName: `crackstation-${workerId.slice(0, 8)}`, serviceName: `sliver-gui-crackstation-${workerId}.service` };
+    });
+    const crackstations = vi.fn(async () => ({ Crackstations: [{
+      Name: `crackstation-${workerId.slice(0, 8)}`, HostUUID: "worker-host-uuid",
+      CUDA: [{}], HashcatVersion: "6.2.6",
+    }] }));
+    const service = await CloudDeploymentService.create({
+      ...deps, rootDirectory, operatorConfigDirectory, provisioner,
+      awsProviderFactory: () => provider,
+      operatorDirectoryClientFactory: () => fakeOperatorDirectoryClient(),
+      crackstationDeployer: { install },
+      crackstationReleaseDownloader: {
+        stagePrivate: async (_target, path) => {
+          await mkdir(join(rootDirectory, "staging"), { recursive: true, mode: 0o700 });
+          await writeFile(path, "verified-worker");
+          return { version: "v0.0.4", fileName: "sliver-crackstation_linux-amd64", path,
+            size: 15, sha256: "b".repeat(64) };
+        },
+        stop: () => undefined,
+      },
+      crackstationClientFactory: () => ({
+        connect: vi.fn(async () => undefined), disconnect: vi.fn(async () => undefined),
+        rpc: { crackstations },
+      } as unknown as CloudCrackstationClient),
+    });
+    const server = await service.createDeployment(awsDeployment());
+    if (!server.ok) throw new Error(server.error);
+    const workerInput: CreateAwsCrackstationDeploymentInput = {
+      expectedRevision: deps.store.getState().revision, serverDeploymentId: DEPLOYMENT_ID,
+      name: "GPU worker", spec: {
+        region: "us-west-2", vpcId: "vpc-0123456789abcdef0",
+        subnetId: "subnet-a0000000000000000", imageId: "ami-11111111111111111",
+        instanceType: "g4dn.xlarge", sshUsername: "ubuntu", sshPort: 22,
+        sshCidrs: ["192.0.2.10/32"], operatorName: "gpu-operator", volumeSizeGiB: 100,
+      },
+    };
+    return { ...deps, service, provider, provisioner, install, crackstations, workerInput };
+  }
+
+  it("creates and wires a same-VPC CUDA worker, then terminates only its owned resources", async () => {
+    const f = await fixture();
+    try {
+      const created = await f.service.createCrackstationDeployment(f.workerInput);
+      expect(created).toMatchObject({ ok: true, value: { kind: "crackstation", status: "running",
+        runtime: { stationHostUuid: "worker-host-uuid" } } });
+      expect(f.provider.createCrackstation).toHaveBeenCalledWith(expect.objectContaining({
+        network: { mode: "existing", vpcId: "vpc-0123456789abcdef0", subnetId: "subnet-a0000000000000000" },
+        allocateElasticIp: true,
+      }), expect.any(Function));
+      expect(f.provider.createFirewallRule).toHaveBeenCalledWith(expect.objectContaining({ guid: DEPLOYMENT_ID }),
+        expect.objectContaining({ peerType: "security-group", peer: workerResource.securityGroupId, fromPort: 31_337 }));
+      expect(f.provisioner.createOperator).toHaveBeenCalledWith(expect.objectContaining({
+        permissions: "crackstation", operatorEndpointHost: "10.0.0.20",
+      }));
+      expect(f.install).toHaveBeenCalledOnce();
+      const blocked = f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      });
+      expect(blocked).toEqual({ ok: false, error: "Remove dependent deployments before terminating this server." });
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: workerId, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      expect((await f.service.executeDestroyDeployment({ token: plan.value.token })).ok).toBe(true);
+      expect(f.provider.deleteFirewallRuleIfMatches).toHaveBeenCalledWith(expect.objectContaining({ guid: DEPLOYMENT_ID }),
+        FIREWALL_RULE_ID, expect.objectContaining({ peer: workerResource.securityGroupId }));
+      expect(f.provider.destroy).toHaveBeenCalledWith(expect.objectContaining({ guid: workerId }));
+      expect(f.store.getState().dependentDeployments).toEqual([]);
+      expect(f.store.getState().deployments).toHaveLength(1);
+    } finally { f.service.dispose(); }
+  });
+
+  it("stops a launched GPU when worker installation fails and keeps a reviewable failed record", async () => {
+    const f = await fixture();
+    try {
+      f.install.mockRejectedValueOnce(new Error("worker installation failed"));
+      const failed = await f.service.createCrackstationDeployment(f.workerInput);
+      expect(failed).toMatchObject({ ok: false, error: expect.stringContaining("worker installation failed") });
+      expect(f.provider.stop).toHaveBeenCalledWith(expect.objectContaining({ guid: workerId }));
+      expect(f.store.getState().dependentDeployments[0]).toMatchObject({
+        kind: "crackstation", status: "failed", phase: "failed",
+        runtime: { instanceId: workerResource.instanceId, instanceState: "stopped" },
+      });
+    } finally { f.service.dispose(); }
+  });
+
+  it("removes a failed worker with only partial EC2 identities journaled", async () => {
+    const f = await fixture();
+    try {
+      const created = await f.store.createDependent({
+        ...f.workerInput, kind: "crackstation", credentialId: CREDENTIAL_ID,
+      });
+      if (!created.ok) throw new Error(created.error);
+      if (created.value.deployment.kind !== "crackstation") throw new Error("Expected a Crackstation fixture");
+      const patched = await f.store.updateDependent({
+        expectedRevision: f.store.getState().revision,
+        deployment: { ...created.value.deployment, status: "failed", phase: "failed",
+          managedAssets: [
+            { resourceType: "ec2-key-pair", resourceId: "key-11111111111111111", displayName: `sliver-gui-${workerId}`, tagged: true },
+            { resourceType: "ec2-security-group", resourceId: workerResource.securityGroupId, displayName: null, tagged: true },
+            { resourceType: "ec2-elastic-ip", resourceId: "eipalloc-11111111111111111", displayName: null, tagged: true },
+          ],
+          runtime: { ...created.value.deployment.runtime, securityGroupIds: [workerResource.securityGroupId],
+            elasticIpAllocationId: "eipalloc-11111111111111111" },
+        },
+      });
+      if (!patched.ok) throw new Error(patched.error);
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: workerId, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      expect((await f.service.executeDestroyDeployment({ token: plan.value.token })).ok).toBe(true);
+      expect(f.provider.destroy).toHaveBeenCalledWith({
+        guid: workerId, name: "GPU worker", region: "us-west-2",
+        securityGroupId: workerResource.securityGroupId,
+        elasticIp: { allocationId: "eipalloc-11111111111111111" },
+        keyPair: { id: "key-11111111111111111", name: `sliver-gui-${workerId}` },
+      });
+      expect(f.store.getState().dependentDeployments).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
 });
 
 afterEach(async () => {
@@ -304,6 +473,7 @@ describe("CloudDeploymentService", () => {
           overview: {
             cloud: { provider: "aws", vpcId: "vpc-0123456789abcdef0" },
             redirectors: [],
+            dependentDeployments: [],
             region: "us-west-2",
             size: "t3.small",
             instanceName: `Server ${status}`,
@@ -1166,7 +1336,7 @@ describe("CloudDeploymentService", () => {
     });
     expect(prepared).toMatchObject({ ok: true, value: { token: DESTROY_TOKEN, deploymentId: DEPLOYMENT_ID } });
     const destroyed = await service.executeDestroyDeployment({ token: DESTROY_TOKEN });
-    expect(destroyed).toEqual({ ok: true, value: { v: 1, revision: store.getState().revision, deployments: [] } });
+    expect(destroyed).toEqual({ ok: true, value: { v: 2, revision: store.getState().revision, deployments: [], dependentDeployments: [] } });
     expect(provider.destroy).toHaveBeenCalledOnce();
     expect(provider.destroy).toHaveBeenCalledWith(expect.objectContaining({
       volumeIds: ["vol-0123456789abcdef0"],
@@ -5604,7 +5774,7 @@ describe("CloudDeploymentService local redirectors", () => {
     } finally { f.service.dispose(); }
   });
 
-  it("exposes the saved redirector in Overview and blocks server termination until it is removed", async () => {
+  it("terminates an AWS server with managed software without uninstalling it over SSH", async () => {
     const f = await softwareLifecycleFixture();
     try {
       const installed = await f.service.installLocalRedirector(ipInput);
@@ -5618,9 +5788,58 @@ describe("CloudDeploymentService local redirectors", () => {
           listener: { host: "127.0.0.1", jobId: 8 },
         }] },
       });
-      expect(f.service.prepareDestroyDeployment({
+      const plan = f.service.prepareDestroyDeployment({
         deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
-      })).toMatchObject({ ok: false, error: expect.stringContaining("Remove managed software") });
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.provider.destroy).toHaveBeenCalledOnce();
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("terminates an Azure server when managed software appears after the review", async () => {
+    const f = await softwareLifecycleFixture("azure");
+    try {
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      const installed = softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID);
+      const unrelated = softwareRecord("fb94b349-b76a-435c-923e-2b185b2a1dd1", SECOND_DEPLOYMENT_ID);
+      await f.softwareStore.put(installed);
+      await f.softwareStore.put(unrelated);
+
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.azureProvider.destroy).toHaveBeenCalledOnce();
+      expect(f.deployer.remove).not.toHaveBeenCalled();
+      expect(f.client.killJob).not.toHaveBeenCalled();
+      expect(f.softwareStore.getState().records).toEqual([unrelated]);
+      expect((await SoftwareDeploymentStore.load(rootDirectory)).getState().records).toEqual([unrelated]);
+    } finally { f.service.dispose(); }
+  });
+
+  it("reports confirmed termination even if local software record cleanup fails", async () => {
+    const f = await softwareLifecycleFixture();
+    try {
+      await f.softwareStore.put(softwareRecord("7bfdb74e-9267-4f14-a29c-c5fc858347ab", DEPLOYMENT_ID));
+      const plan = f.service.prepareDestroyDeployment({
+        deploymentId: DEPLOYMENT_ID, expectedRevision: f.store.getState().revision,
+      });
+      if (!plan.ok) throw new Error(plan.error);
+      vi.spyOn(f.softwareStore, "removeDeployment").mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(f.service.executeDestroyDeployment({ token: plan.value.token })).resolves.toMatchObject({
+        ok: true, value: { deployments: [] },
+      });
+      expect(f.provider.destroy).toHaveBeenCalledOnce();
+      expect(f.softwareStore.getState().records).toHaveLength(1);
     } finally { f.service.dispose(); }
   });
 });

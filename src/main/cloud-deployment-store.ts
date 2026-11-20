@@ -5,13 +5,23 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
   CLOUD_DEPLOYMENT_STATE_VERSION,
   parseCloudDeploymentState,
+  parseCloudDependentDeploymentRecord,
+  parseCreateAwsAlbRedirectorDeploymentInput,
+  parseCreateAwsCrackstationDeploymentInput,
   parseCreateCloudDeploymentInput,
+  parseDeleteCloudDependentDeploymentInput,
   parseDeleteCloudDeploymentInput,
+  parseUpdateCloudDependentDeploymentInput,
   parseUpdateCloudDeploymentInput,
+  type CloudDependentDeploymentRecord,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
+  type CreateAwsAlbRedirectorDeploymentInput,
+  type CreateAwsCrackstationDeploymentInput,
   type CreateCloudDeploymentInput,
+  type DeleteCloudDependentDeploymentInput,
   type DeleteCloudDeploymentInput,
+  type UpdateCloudDependentDeploymentInput,
   type UpdateCloudDeploymentInput,
 } from "../shared/cloud-deployment-contracts.js";
 import type { OperationResult } from "../shared/contracts.js";
@@ -19,6 +29,7 @@ import { readBoundedRegularFile, writePrivateFileAtomic } from "./secure-file.js
 
 export const CLOUD_DEPLOYMENT_STATE_FILE = "state.json";
 export const RETIRED_PROXMOX_STATE_ARCHIVE_FILE = "state.pre-azure-v1.json";
+export const CLOUD_DEPLOYMENT_V1_ARCHIVE_FILE = "state.pre-dependent-v2.json";
 export const CLOUD_DEPLOYMENT_STATE_MAX_BYTES = 2 * 1024 * 1024;
 export const STALE_CLOUD_DEPLOYMENT_STATE_ERROR =
   "Cloud deployment state changed in another window. Review the latest state and try again.";
@@ -31,6 +42,15 @@ export interface CloudDeploymentMutation {
   readonly deployment: CloudDeploymentRecord;
 }
 
+export interface CloudDependentDeploymentMutation {
+  readonly state: CloudDeploymentState;
+  readonly deployment: CloudDependentDeploymentRecord;
+}
+
+export type CreateCloudDependentDeploymentStoreInput =
+  | (CreateAwsCrackstationDeploymentInput & { readonly kind: "crackstation"; readonly credentialId: string })
+  | (CreateAwsAlbRedirectorDeploymentInput & { readonly kind: "alb-redirector"; readonly credentialId: string });
+
 export interface CloudDeploymentStoreOptions {
   readonly idFactory?: () => string;
   readonly clock?: () => Date;
@@ -40,6 +60,7 @@ const EMPTY_CLOUD_DEPLOYMENT_STATE: CloudDeploymentState = parseCloudDeploymentS
   v: CLOUD_DEPLOYMENT_STATE_VERSION,
   revision: 0,
   deployments: [],
+  dependentDeployments: [],
 });
 
 /**
@@ -85,11 +106,13 @@ export class CloudDeploymentStore {
         const decoded = JSON.parse(loaded.data.toString("utf8")) as unknown;
         const migrated = parseStateRetiringProxmox(decoded);
         state = migrated.state;
-        if (migrated.retired) {
-          // Preserve the exact pre-migration state before removing retired
-          // Proxmox records from the active Azure/AWS state.
+        if (migrated.retired || migrated.upgraded) {
+          // Keep the exact previous document before a destructive schema
+          // normalization so recovery does not depend on a partial rewrite.
           await writePrivateFileAtomic(
-            join(rootDirectory, RETIRED_PROXMOX_STATE_ARCHIVE_FILE),
+            join(rootDirectory, migrated.retired
+              ? RETIRED_PROXMOX_STATE_ARCHIVE_FILE
+              : CLOUD_DEPLOYMENT_V1_ARCHIVE_FILE),
             loaded.data,
           );
           const active = Buffer.from(JSON.stringify(state), "utf8");
@@ -133,7 +156,8 @@ export class CloudDeploymentStore {
       } catch {
         return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
       }
-      if (this.#state.deployments.some((candidate) => candidate.id === deployment.id)) {
+      if (this.#state.deployments.some((candidate) => candidate.id === deployment.id) ||
+        this.#state.dependentDeployments.some((candidate) => candidate.id === deployment.id)) {
         return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
       }
 
@@ -169,7 +193,7 @@ export class CloudDeploymentStore {
       }
       const deployments = [...this.#state.deployments];
       deployments[index] = deployment;
-      const stateResult = await this.#commit(deployments, beforeCommit);
+      const stateResult = await this.#commit(deployments, this.#state.dependentDeployments, beforeCommit);
       return stateResult.ok
         ? { ok: true, value: Object.freeze({ state: stateResult.value, deployment }) }
         : stateResult;
@@ -189,7 +213,88 @@ export class CloudDeploymentStore {
       if (!this.#state.deployments.some(({ id }) => id === parsed.deploymentId)) {
         return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR };
       }
+      if (this.#state.dependentDeployments.some(({ serverDeploymentId }) => serverDeploymentId === parsed.deploymentId)) {
+        return { ok: false, error: "Remove dependent deployments before terminating this server." };
+      }
       return this.#commit(this.#state.deployments.filter(({ id }) => id !== parsed.deploymentId));
+    });
+  }
+
+  createDependent(input: CreateCloudDependentDeploymentStoreInput): Promise<OperationResult<CloudDependentDeploymentMutation>> {
+    return this.#serializeMutation(async () => {
+      let parsed: CreateAwsCrackstationDeploymentInput | CreateAwsAlbRedirectorDeploymentInput;
+      try {
+        parsed = input.kind === "crackstation"
+          ? parseCreateAwsCrackstationDeploymentInput({ expectedRevision: input.expectedRevision, serverDeploymentId: input.serverDeploymentId, name: input.name, spec: input.spec })
+          : parseCreateAwsAlbRedirectorDeploymentInput({ expectedRevision: input.expectedRevision, serverDeploymentId: input.serverDeploymentId, name: input.name, spec: input.spec });
+      } catch {
+        return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR };
+      }
+      const revisionError = this.#checkRevision(parsed.expectedRevision);
+      if (revisionError) return revisionError;
+      const parent = this.#state.deployments.find(({ id }) => id === parsed.serverDeploymentId);
+      if (!parent || parent.provider !== "aws" || parent.credentialId !== input.credentialId ||
+        parent.spec.region !== parsed.spec.region) return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR };
+      const id = this.#idFactory();
+      const timestamp = this.#clock().toISOString();
+      let deployment: CloudDependentDeploymentRecord;
+      try {
+        deployment = input.kind === "crackstation"
+          ? parseNewDependentDeployment(id, timestamp, { ...input, spec: parseCreateAwsCrackstationDeploymentInput({
+              expectedRevision: input.expectedRevision, serverDeploymentId: input.serverDeploymentId,
+              name: input.name, spec: input.spec,
+            }).spec })
+          : parseNewDependentDeployment(id, timestamp, { ...input, spec: parseCreateAwsAlbRedirectorDeploymentInput({
+              expectedRevision: input.expectedRevision, serverDeploymentId: input.serverDeploymentId,
+              name: input.name, spec: input.spec,
+            }).spec });
+      } catch {
+        return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
+      }
+      if (this.#state.deployments.some(({ id: existingId }) => existingId === id) ||
+        this.#state.dependentDeployments.some(({ id: existingId }) => existingId === id)) return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
+      const stateResult = await this.#commit(this.#state.deployments, [...this.#state.dependentDeployments, deployment]);
+      return stateResult.ok
+        ? { ok: true, value: Object.freeze({ state: stateResult.value, deployment }) }
+        : stateResult;
+    });
+  }
+
+  updateDependent(input: UpdateCloudDependentDeploymentInput): Promise<OperationResult<CloudDependentDeploymentMutation>> {
+    return this.#serializeMutation(async () => {
+      let parsed: UpdateCloudDependentDeploymentInput;
+      try { parsed = parseUpdateCloudDependentDeploymentInput(input); }
+      catch { return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR }; }
+      const revisionError = this.#checkRevision(parsed.expectedRevision);
+      if (revisionError) return revisionError;
+      const index = this.#state.dependentDeployments.findIndex(({ id }) => id === parsed.deployment.id);
+      const current = this.#state.dependentDeployments[index];
+      if (index < 0 || !current || !sameDependentIdentity(current, parsed.deployment)) {
+        return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR };
+      }
+      let deployment: CloudDependentDeploymentRecord;
+      try { deployment = parseCloudDependentDeploymentRecord({ ...parsed.deployment, updatedAt: this.#clock().toISOString() }); }
+      catch { return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR }; }
+      const dependents = [...this.#state.dependentDeployments];
+      dependents[index] = deployment;
+      const stateResult = await this.#commit(this.#state.deployments, dependents);
+      return stateResult.ok
+        ? { ok: true, value: Object.freeze({ state: stateResult.value, deployment }) }
+        : stateResult;
+    });
+  }
+
+  deleteDependent(input: DeleteCloudDependentDeploymentInput): Promise<OperationResult<CloudDeploymentState>> {
+    return this.#serializeMutation(async () => {
+      let parsed: DeleteCloudDependentDeploymentInput;
+      try { parsed = parseDeleteCloudDependentDeploymentInput(input); }
+      catch { return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR }; }
+      const revisionError = this.#checkRevision(parsed.expectedRevision);
+      if (revisionError) return revisionError;
+      if (!this.#state.dependentDeployments.some(({ id }) => id === parsed.deploymentId)) {
+        return { ok: false, error: INVALID_CLOUD_DEPLOYMENT_REQUEST_ERROR };
+      }
+      return this.#commit(this.#state.deployments, this.#state.dependentDeployments.filter(({ id }) => id !== parsed.deploymentId));
     });
   }
 
@@ -205,6 +310,7 @@ export class CloudDeploymentStore {
 
   async #commit(
     deployments: readonly CloudDeploymentRecord[],
+    dependentDeployments: readonly CloudDependentDeploymentRecord[] = this.#state.dependentDeployments,
     beforeCommit?: () => void,
   ): Promise<OperationResult<CloudDeploymentState>> {
     let next: CloudDeploymentState;
@@ -213,6 +319,7 @@ export class CloudDeploymentStore {
         v: CLOUD_DEPLOYMENT_STATE_VERSION,
         revision: this.#state.revision + 1,
         deployments,
+        dependentDeployments,
       });
     } catch {
       return { ok: false, error: CLOUD_DEPLOYMENT_SAVE_ERROR };
@@ -289,6 +396,7 @@ function parseNewDeployment(
           routeTableAssociationId: null,
         },
       }],
+      dependentDeployments: [],
     }).deployments[0]!;
   }
   return parseCloudDeploymentState({
@@ -314,19 +422,56 @@ function parseNewDeployment(
         subnetId: null,
       },
     }],
+    dependentDeployments: [],
   }).deployments[0]!;
+}
+
+function parseNewDependentDeployment(
+  id: string,
+  timestamp: string,
+  input: CreateCloudDependentDeploymentStoreInput,
+): CloudDependentDeploymentRecord {
+  const common = {
+    id, provider: "aws" as const, serverDeploymentId: input.serverDeploymentId,
+    credentialId: input.credentialId, name: input.name,
+    status: "provisioning" as const, phase: "validating" as const,
+    createdAt: timestamp, updatedAt: timestamp, lastError: null, managedAssets: [],
+  };
+  if (input.kind === "crackstation") {
+    return parseCloudDependentDeploymentRecord({
+      ...common, kind: "crackstation", spec: input.spec,
+      runtime: {
+        instanceId: null, instanceState: "unknown", instanceHealth: "unknown", systemHealth: "unknown",
+        securityGroupIds: [], volumeIds: [], networkInterfaceIds: [],
+        publicIpAddress: null, privateIpAddress: null, availabilityZone: null,
+        elasticIpAllocationId: null, vpcId: null, subnetId: null,
+        internetGatewayId: null, routeTableId: null, routeTableAssociationId: null,
+        stationHostUuid: null, releaseVersion: null, releaseSha256: null, operatorConfigSha256: null,
+      },
+    });
+  }
+  return parseCloudDependentDeploymentRecord({
+    ...common, kind: "alb-redirector", spec: input.spec,
+    runtime: {
+      loadBalancerArn: null, targetGroupArn: null, listenerArn: null, dnsName: null, canonicalHostedZoneId: null,
+      securityGroupId: null, serverIngressRuleId: null,
+      listenerJobId: null, listenerOwnership: null, targetHealth: "unknown",
+      aliasRecordName: null, aliasRecordOwned: false,
+    },
+  });
 }
 
 function parseStateRetiringProxmox(value: unknown): {
   readonly state: CloudDeploymentState;
   readonly retired: boolean;
+  readonly upgraded: boolean;
 } {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return { state: parseCloudDeploymentState(value), retired: false };
+    return { state: parseCloudDeploymentState(value), retired: false, upgraded: false };
   }
   const record = value as Record<string, unknown>;
   if (!Array.isArray(record["deployments"])) {
-    return { state: parseCloudDeploymentState(value), retired: false };
+    return { state: parseCloudDeploymentState(value), retired: false, upgraded: false };
   }
   const deployments = record["deployments"];
   const active = deployments.filter((deployment) =>
@@ -336,6 +481,7 @@ function parseStateRetiringProxmox(value: unknown): {
   return {
     state: parseCloudDeploymentState(retired ? { ...record, deployments: active } : value),
     retired,
+    upgraded: record["v"] === 1,
   };
 }
 
@@ -347,6 +493,7 @@ function parseCloudDeploymentWithTimestamp(
     v: CLOUD_DEPLOYMENT_STATE_VERSION,
     revision: 0,
     deployments: [{ ...deployment, updatedAt }],
+    dependentDeployments: [],
   }).deployments[0]!;
 }
 
@@ -358,6 +505,15 @@ function sameDeploymentIdentity(
     current.provider === candidate.provider &&
     current.credentialId === candidate.credentialId &&
     current.createdAt === candidate.createdAt;
+}
+
+function sameDependentIdentity(
+  current: CloudDependentDeploymentRecord,
+  candidate: CloudDependentDeploymentRecord,
+): boolean {
+  return current.id === candidate.id && current.kind === candidate.kind &&
+    current.provider === candidate.provider && current.credentialId === candidate.credentialId &&
+    current.serverDeploymentId === candidate.serverDeploymentId && current.createdAt === candidate.createdAt;
 }
 
 function assertRootDirectory(rootDirectory: string): void {

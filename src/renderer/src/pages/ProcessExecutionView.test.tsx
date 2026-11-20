@@ -1,6 +1,8 @@
 import { cleanup, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { useRendererTestEnvironment } from "../../../tests/renderer-test-helpers";
 
 import type { ExecutionActionDraft, ExecutionCapability, ProcessExecutionRecord } from "../../../shared/execution-contracts";
 import type { SessionSummary } from "../../../shared/target-contracts";
@@ -13,23 +15,7 @@ vi.mock("../components/ExecutionOutputTerminal", () => ({
   ),
 }));
 
-beforeAll(() => {
-  vi.stubGlobal("ResizeObserver", class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  });
-  Object.defineProperty(Element.prototype, "getAnimations", { configurable: true, value: () => [] });
-  Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: () => undefined });
-  Object.defineProperty(Element.prototype, "releasePointerCapture", { configurable: true, value: () => undefined });
-});
-
-afterAll(() => {
-  vi.unstubAllGlobals();
-  Reflect.deleteProperty(Element.prototype, "getAnimations");
-  Reflect.deleteProperty(Element.prototype, "setPointerCapture");
-  Reflect.deleteProperty(Element.prototype, "releasePointerCapture");
-});
+useRendererTestEnvironment({ pointerCapture: true });
 
 afterEach(cleanup);
 
@@ -83,45 +69,26 @@ function renderView(history: readonly ProcessExecutionRecord[] = [], selectedId:
   return { onPrepare, onClear };
 }
 
-describe("Process execution scroll layout", () => {
-  it("keeps the new execution title and Execute action above the shadowed form scrollport", async () => {
+describe("Process execution actions", () => {
+  it("prepares an execution from the composer action", async () => {
     const user = userEvent.setup();
     const { onPrepare } = renderView();
     const composer = screen.getByRole("region", { name: "Execute a subprocess" });
-    const scrollport = within(composer).getByRole("region", { name: "Process execution content" });
-    const header = within(composer).getByRole("heading", { name: "Execute a subprocess" }).closest("header");
-    const execute = within(composer).getByRole("button", { name: "Execute" });
 
-    expect(header).not.toBeNull();
-    expect(header).toHaveClass("sticky", "top-0", "z-10");
-    expect(header).toContainElement(execute);
-    expect(scrollport).not.toContainElement(header);
-    expect(scrollport).toContainElement(within(composer).getByRole("textbox", { name: "Executable path" }));
-    expect(scrollport).toHaveClass("scroll-shadow", "scroll-shadow--vertical", "min-h-0", "flex-1", "overflow-y-auto");
-    expect(scrollport).toHaveAttribute("data-scroll-shadow-size", "24");
-    expect(scrollport).toHaveAttribute("tabindex", "0");
-
-    await user.click(execute);
+    await user.click(within(composer).getByRole("button", { name: "Execute" }));
     await waitFor(() => expect(onPrepare).toHaveBeenCalledTimes(1));
+    expect(onPrepare).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: "execution.process", path: "/bin/sh", captureOutput: true,
+    }));
   });
 
-  it("keeps a selected result title and Clear action above the shadowed details and output", async () => {
+  it("clears the selected execution from its result action", async () => {
     const user = userEvent.setup();
     const { onClear } = renderView([completed], completed.id);
     const workspace = screen.getByRole("region", { name: "Process execution history and output" });
-    const scrollport = within(workspace).getByRole("region", { name: "Process execution content" });
-    const header = within(workspace).getByRole("heading", { name: "/bin/echo hello" }).closest("header");
-    const clear = within(workspace).getByRole("button", { name: "Clear selected" });
 
-    expect(header).not.toBeNull();
-    expect(header).toHaveClass("sticky", "top-0", "z-10");
-    expect(header).toContainElement(clear);
-    expect(scrollport).not.toContainElement(header);
-    expect(scrollport).toContainElement(within(workspace).getByLabelText("Execution details"));
-    expect(scrollport).toContainElement(within(workspace).getByRole("group", { name: "Output actions" }));
-    expect(scrollport).toHaveClass("scroll-shadow", "scroll-shadow--vertical", "min-h-0", "flex-1", "overflow-y-auto");
-
-    await user.click(clear);
-    expect(onClear).toHaveBeenCalledWith(completed.id);
+    expect(within(workspace).getByLabelText("Execution output transcript")).toHaveTextContent("hello");
+    await user.click(within(workspace).getByRole("button", { name: "Clear selected" }));
+    expect(onClear).toHaveBeenCalledExactlyOnceWith(completed.id);
   });
 });

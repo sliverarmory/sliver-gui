@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import userEvent from "@testing-library/user-event";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { deferred } from "../../../tests/renderer-test-helpers";
+
 import { disconnectedSnapshot } from "../../../shared/contracts";
 import type { OperationResult, SliverDesktopAPI } from "../../../shared/contracts";
 import type { CredentialCatalogPage } from "../../../shared/operator-data-contracts";
@@ -202,12 +204,4 @@ function installAPI(methods: Partial<SliverDesktopAPI>): void {
     configurable: true,
     value: methods as SliverDesktopAPI,
   });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
 }

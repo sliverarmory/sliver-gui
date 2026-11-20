@@ -6,6 +6,9 @@ import {
   Select,
 } from "@heroui/react";
 
+import { useNumberFormatter } from "@react-aria/i18n";
+import { useMessages } from "../i18n/ApplicationLocaleProvider";
+import { formatMessage } from "../i18n/messages";
 import { SwitchRow } from "./FormControls";
 import {
   CONSOLE_TERMINAL_FONTS,
@@ -34,6 +37,8 @@ export function TerminalSettingsFields({
   readonly settings: ConsoleTerminalSettings;
   readonly onChange: (settings: ConsoleTerminalSettings) => void;
 }): React.JSX.Element {
+  const { terminal: copy } = useMessages();
+  const numberFormatter = useNumberFormatter({ useGrouping: false });
   const selectedFont = CONSOLE_TERMINAL_FONTS.find(({ id }) => id === settings.fontId);
   const validFontSize = Number.isSafeInteger(settings.fontSize) &&
     settings.fontSize >= CONSOLE_TERMINAL_FONT_SIZE_MIN &&
@@ -49,7 +54,7 @@ export function TerminalSettingsFields({
           if (isConsoleTerminalFontId(value)) onChange({ ...settings, fontId: value });
         }}
       >
-        <Label>Font family</Label>
+        <Label>{copy.fontFamily}</Label>
         <Select.Trigger>
           <Select.Value>{selectedFont?.label}</Select.Value>
           <Select.Indicator />
@@ -64,7 +69,7 @@ export function TerminalSettingsFields({
             ))}
           </ListBox>
         </Select.Popover>
-        <Description>Embedded in Sliver GUI and available offline.</Description>
+        <Description>{copy.fontFamilyDescription}</Description>
       </Select>
 
       <NumberField
@@ -81,11 +86,14 @@ export function TerminalSettingsFields({
           fontSize: Number.isFinite(fontSize) ? Math.trunc(fontSize) : 0,
         })}
       >
-        <Label>Font size</Label>
+        <Label>{copy.fontSize}</Label>
         <NumberField.Group className="grid-cols-1">
           <NumberField.Input />
         </NumberField.Group>
-        <Description>{CONSOLE_TERMINAL_FONT_SIZE_MIN}–{CONSOLE_TERMINAL_FONT_SIZE_MAX} pixels.</Description>
+        <Description>{formatMessage(copy.fontSizeRange, {
+          min: numberFormatter.format(CONSOLE_TERMINAL_FONT_SIZE_MIN),
+          max: numberFormatter.format(CONSOLE_TERMINAL_FONT_SIZE_MAX),
+        })}</Description>
       </NumberField>
 
       <Select
@@ -98,37 +106,37 @@ export function TerminalSettingsFields({
           }
         }}
       >
-        <Label>Cursor shape</Label>
+        <Label>{copy.cursorShape}</Label>
         <Select.Trigger>
           <Select.Value />
           <Select.Indicator />
         </Select.Trigger>
         <Select.Popover>
           <ListBox>
-            <ListBox.Item id="block">Block<ListBox.ItemIndicator /></ListBox.Item>
-            <ListBox.Item id="underline">Underline<ListBox.ItemIndicator /></ListBox.Item>
-            <ListBox.Item id="bar">Bar<ListBox.ItemIndicator /></ListBox.Item>
+            <ListBox.Item id="block">{copy.block}<ListBox.ItemIndicator /></ListBox.Item>
+            <ListBox.Item id="underline">{copy.underline}<ListBox.ItemIndicator /></ListBox.Item>
+            <ListBox.Item id="bar">{copy.bar}<ListBox.ItemIndicator /></ListBox.Item>
           </ListBox>
         </Select.Popover>
       </Select>
 
       <SwitchRow
-        description="Use native glass in console and SSH windows where supported. Requires window transparency to be enabled in General settings."
-        label="Transparent terminal windows"
+        description={copy.transparentDescription}
+        label={copy.transparent}
         selected={settings.transparentWindows}
         onChange={(transparentWindows) => onChange({ ...settings, transparentWindows })}
       />
 
       <div className="grid gap-px overflow-hidden rounded-xl bg-surface-secondary p-1">
         <SwitchRow
-          description="Animate the cursor while the console is active."
-          label="Blinking cursor"
+          description={copy.cursorBlinkDescription}
+          label={copy.cursorBlink}
           selected={settings.cursorBlink}
           onChange={(cursorBlink) => onChange({ ...settings, cursorBlink })}
         />
         <SwitchRow
-          description="Animate movement through terminal scrollback."
-          label="Smooth scrolling"
+          description={copy.smoothScrollingDescription}
+          label={copy.smoothScrolling}
           selected={settings.smoothScrolling}
           onChange={(smoothScrolling) => onChange({ ...settings, smoothScrolling })}
         />

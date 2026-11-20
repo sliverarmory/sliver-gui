@@ -424,9 +424,10 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     ok: true,
     value: {
       state: {
-        v: 1,
+        v: 2,
         revision: 1,
         deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT],
+        dependentDeployments: [],
       },
       credentials: [
         {
@@ -474,7 +475,7 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   refreshDeployments: () => ({
     ok: true,
     value: {
-      state: { v: 1, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT] },
+      state: { v: 2, revision: 1, deployments: [E2E_AWS_DEPLOYMENT, E2E_AZURE_DEPLOYMENT], dependentDeployments: [] },
       refreshErrors: [],
     },
   }),
@@ -621,6 +622,10 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
     };
   },
   createDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  discoverCrackstationOptions: () => ({ ok: false, error: "GPU discovery is disabled in this E2E fixture" }),
+  discoverAlbRedirectorOptions: () => ({ ok: false, error: "ALB discovery is disabled in this E2E fixture" }),
+  createCrackstationDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
+  createAlbRedirectorDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   generateOperatorConfig: () => ({
     ok: false,
     error: "Cloud mutations are disabled in this E2E fixture",
@@ -642,6 +647,13 @@ const cloudDeploymentController: ApplicationCloudDeploymentController = {
   prepareDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
   executeDestroyDeployment: () => ({ ok: false, error: "Cloud mutations are disabled in this E2E fixture" }),
 };
+
+// Keep renderer copy deterministic on hosts with different language preferences.
+const preferredSystemLanguagesArg = "--preferred-system-languages=";
+const preferredSystemLanguages = (process.argv.find((argument) => (
+  argument.startsWith(preferredSystemLanguagesArg)
+))?.slice(preferredSystemLanguagesArg.length) ?? "en-US").split(",");
+app.getPreferredSystemLanguages = () => [...preferredSystemLanguages];
 
 app.setPath("userData", requiredArgument("--user-data-directory="));
 void startApplication({

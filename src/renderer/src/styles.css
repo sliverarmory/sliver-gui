@@ -616,6 +616,11 @@
     padding-block: 0;
   }
 
+  .app-sidebar .sidebar__menu-label-text {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   @media (hover: hover) {
     .app-sidebar .connection-summary--trigger:hover,
     .app-sidebar .connection-summary--trigger[data-hovered="true"] {

@@ -6,8 +6,6 @@ import {
   DESTRUCTIVE_TARGET_ACTION_IDS,
   MAX_TARGET_DOMAIN_ITEMS,
   TARGET_CAPABILITY_IDS,
-  type PrepareTargetActionInput,
-  type TargetActionExecutionResult,
 } from "./target-contracts.js";
 
 describe("target contracts", () => {
@@ -39,18 +37,5 @@ describe("target contracts", () => {
     ]);
     expect(DESTRUCTIVE_TARGET_ACTION_IDS).not.toContain("clean");
     expect(DESTRUCTIVE_TARGET_ACTION_IDS).not.toContain("operator.delete");
-  });
-
-  it("keeps prepare requests target-free and execution outcomes per target", () => {
-    const prepare: PrepareTargetActionInput = { actionId: "target.kill" };
-    expect(Object.keys(prepare)).toEqual(["actionId"]);
-    expect(prepare).not.toHaveProperty("targetId");
-
-    const execution: TargetActionExecutionResult = {
-      actionId: "beacons.prune-overdue",
-      outcomes: [],
-      partial: true,
-    };
-    expect(execution).toEqual({ actionId: "beacons.prune-overdue", outcomes: [], partial: true });
   });
 });
