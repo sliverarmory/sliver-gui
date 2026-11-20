@@ -44,7 +44,7 @@ test("DNS manager browses zones and manages records through the isolated cloud b
     page.on("console", (message) => {
       if (/Content Security Policy/iu.test(message.text())) errors.push(message.text());
     });
-    await page.getByRole("tab", { name: /^Servers\s*2$/u }).waitFor();
+    await page.getByRole("tab", { name: /^Deployments\s*2$/u }).waitFor();
     const dnsTab = page.getByRole("tab", { name: /^DNS\b/u });
     await page.getByRole("tab", { name: /^DNS\s*3$/u }).waitFor();
     await dnsTab.click();
@@ -104,7 +104,7 @@ test("DNS manager browses zones and manages records through the isolated cloud b
       "scrolling back restores the tabs' original position below the header");
     assert.ok((await header.boundingBox())!.y >= viewport.y);
     await content.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-    for (const name of [/^Servers\b/u, /^Credentials\b/u, /^DNS\b/u]) {
+    for (const name of [/^Deployments\b/u, /^Credentials\b/u, /^DNS\b/u]) {
       await page.getByRole("tab", { name }).click();
       await page.waitForFunction((element) => element?.scrollTop === 0, await content.elementHandle());
       assert.equal(await content.evaluate((element) => element.scrollTop), 0, "a newly selected tab starts at the top");

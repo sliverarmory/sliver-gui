@@ -258,11 +258,11 @@ test("application hooks confine newly created windows and views to sliver docume
     const cloudOpened = application.waitForEvent("window", { timeout: 10_000 });
     await mainPage.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
     const cloudPage = await cloudOpened;
-    await cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor({ timeout: 10_000 });
+    await cloudPage.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor({ timeout: 10_000 });
     await cloudPage.evaluate("location.href = 'about:blank'; undefined");
     await cloudPage.waitForTimeout(100);
     assert.equal(cloudPage.url(), `${RENDERER_URL}?surface=cloud-deployment`);
-    await cloudPage.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor({ timeout: 5_000 });
+    await cloudPage.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor({ timeout: 5_000 });
 
     const devTools = await application.evaluate(async ({ webContents }, id) => {
       const contents = webContents.fromId(id);

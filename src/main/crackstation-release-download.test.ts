@@ -105,6 +105,43 @@ describe("latest Crackstation release catalog", () => {
 });
 
 describe("Crackstation release downloads", () => {
+  it("stages a verified private Linux binary for cloud provisioning", async () => {
+    const downloadsDirectory = await testDirectory();
+    const fileName = "sliver-crackstation_linux-amd64";
+    const bytes = new TextEncoder().encode("verified cloud worker bytes");
+    const digest = sha256(bytes);
+    const downloader = new CrackstationReleaseDownloader({
+      downloadsDirectory,
+      fetch: releaseFetch(fileName, bytes, digest),
+      createDownloadId: () => downloadId,
+    });
+    const destination = join(downloadsDirectory, "private-worker");
+
+    const staged = await downloader.stagePrivate(
+      { artifact: "crackstation", os: "linux", arch: "amd64" }, destination,
+    );
+
+    expect(staged).toEqual({ version: "v0.0.4", fileName, path: destination, size: bytes.byteLength, sha256: digest });
+    expect(await readFile(destination)).toEqual(Buffer.from(bytes));
+    if (process.platform !== "win32") expect((await stat(destination)).mode & 0o777).toBe(0o700);
+  });
+
+  it("removes an unverified private worker stage", async () => {
+    const downloadsDirectory = await testDirectory();
+    const fileName = "sliver-crackstation_linux-amd64";
+    const downloader = new CrackstationReleaseDownloader({
+      downloadsDirectory,
+      fetch: releaseFetch(fileName, new TextEncoder().encode("tampered"), "a".repeat(64)),
+      createDownloadId: () => downloadId,
+    });
+    const destination = join(downloadsDirectory, "private-worker");
+
+    await expect(downloader.stagePrivate(
+      { artifact: "crackstation", os: "linux", arch: "amd64" }, destination,
+    )).rejects.toThrow("SHA-256 verification");
+    expect(await readdir(downloadsDirectory)).toEqual([]);
+  });
+
   it("verifies SHA-256, publishes progress, and writes a private executable", async () => {
     const downloadsDirectory = await testDirectory();
     const fileName = "sliver-crackstation_linux-amd64";

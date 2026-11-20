@@ -55,6 +55,8 @@ import {
   parseCreateCloudCredentialInput,
   parseBeginAzureLoginInput,
   parseCreateCloudDeploymentInput,
+  parseCreateAwsCrackstationDeploymentInput,
+  parseCreateAwsAlbRedirectorDeploymentInput,
   parseRenameCloudDeploymentInput,
   parseDeleteCloudFirewallRuleInput,
   parseListCloudFirewallRulesInput,
@@ -66,12 +68,15 @@ import {
   type CloudFirewallSnapshot,
   type CloudCredentialSummary,
   type CloudDeploymentActionInput,
+  type CloudDependentDeploymentRecord,
   type RenameCloudDeploymentInput,
   type CloudDeploymentRecord,
   type CloudDeploymentState,
   type CreateCloudFirewallRuleInput,
   type CreateCloudCredentialInput,
   type CreateCloudDeploymentInput,
+  type CreateAwsCrackstationDeploymentInput,
+  type CreateAwsAlbRedirectorDeploymentInput,
   type DeleteCloudFirewallRuleInput,
   type ListCloudFirewallRulesInput,
   type UpdateCloudFirewallRuleInput,
@@ -99,8 +104,14 @@ import {
 } from "../shared/ssh-contracts.js";
 import {
   parseDiscoverAwsOptionsInput,
+  parseDiscoverAwsCrackstationOptionsInput,
+  parseDiscoverAwsAlbRedirectorOptionsInput,
   parseDiscoverAzureOptionsInput,
   type AwsDeploymentOptions,
+  type AwsCrackstationOptions,
+  type AwsAlbRedirectorOptions,
+  type DiscoverAwsCrackstationOptionsInput,
+  type DiscoverAwsAlbRedirectorOptionsInput,
   type AzureDeploymentOptions,
   type DiscoverAwsOptionsInput,
   type DiscoverAzureOptionsInput,
@@ -155,6 +166,8 @@ export interface CloudDeploymentController {
   deleteCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult>;
   testCredential(input: CloudCredentialIdInput): MaybePromise<OperationResult<CloudCredentialTestResult>>;
   discoverAwsOptions(input: DiscoverAwsOptionsInput): MaybePromise<OperationResult<AwsDeploymentOptions>>;
+  discoverCrackstationOptions(input: DiscoverAwsCrackstationOptionsInput): MaybePromise<OperationResult<AwsCrackstationOptions>>;
+  discoverAlbRedirectorOptions(input: DiscoverAwsAlbRedirectorOptionsInput): MaybePromise<OperationResult<AwsAlbRedirectorOptions>>;
   discoverAzureAccounts(): MaybePromise<OperationResult<readonly AzureCliAccountSummary[]>>;
   discoverAzureOptions(input: DiscoverAzureOptionsInput): MaybePromise<OperationResult<AzureDeploymentOptions>>;
   listDnsZones(input: ListCloudDnsZonesInput): MaybePromise<OperationResult<readonly CloudDnsZone[]>>;
@@ -163,6 +176,8 @@ export interface CloudDeploymentController {
   updateDnsRecord(input: UpdateCloudDnsRecordInput): MaybePromise<OperationResult>;
   deleteDnsRecord(input: DeleteCloudDnsRecordInput): MaybePromise<OperationResult>;
   createDeployment(input: CreateCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
+  createCrackstationDeployment(input: CreateAwsCrackstationDeploymentInput): MaybePromise<OperationResult<CloudDependentDeploymentRecord>>;
+  createAlbRedirectorDeployment(input: CreateAwsAlbRedirectorDeploymentInput): MaybePromise<OperationResult<CloudDependentDeploymentRecord>>;
   getSoftwareState(): MaybePromise<OperationResult<SoftwareDeploymentState>>;
   getSoftwareInstallProgress(deploymentId: string): MaybePromise<OperationResult<SoftwareInstallProgressSnapshot | null>>;
   listSoftwareListeners(input: ListLocalRedirectorListenersInput): MaybePromise<OperationResult<readonly LocalRedirectorListenerOption[]>>;
@@ -171,7 +186,7 @@ export interface CloudDeploymentController {
   generateOperatorConfig(
     input: CreateCloudOperatorConfigInput,
   ): MaybePromise<GenerateCloudOperatorConfigResult>;
-  runLifecycleAction(input: CloudDeploymentActionInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
+  runLifecycleAction(input: CloudDeploymentActionInput): MaybePromise<OperationResult<CloudDeploymentRecord | CloudDependentDeploymentRecord>>;
   renameDeployment(input: RenameCloudDeploymentInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   updateFirewall(input: UpdateCloudFirewallInput): MaybePromise<OperationResult<CloudDeploymentRecord>>;
   listFirewallRules(input: ListCloudFirewallRulesInput): MaybePromise<OperationResult<CloudFirewallSnapshot>>;
@@ -420,6 +435,20 @@ export function registerCloudDeploymentIpcHandlers(
     (_sender, input) => controller.discoverAwsOptions(input),
   );
   handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.discoverCrackstationOptions,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseDiscoverAwsCrackstationOptionsInput(requireSingleArgument(args))),
+    (_sender, input) => controller.discoverCrackstationOptions(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAlbRedirectorOptions,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseDiscoverAwsAlbRedirectorOptionsInput(requireSingleArgument(args))),
+    (_sender, input) => controller.discoverAlbRedirectorOptions(input),
+  );
+  handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.discoverAzureAccounts,
     exactRendererUrl,
     authorizeWindow,
@@ -439,6 +468,20 @@ export function registerCloudDeploymentIpcHandlers(
     authorizeWindow,
     (args) => singleArgument(parseCreateCloudDeploymentInput(requireSingleArgument(args))),
     (_sender, input) => controller.createDeployment(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.createCrackstationDeployment,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCreateAwsCrackstationDeploymentInput(requireSingleArgument(args))),
+    (_sender, input) => controller.createCrackstationDeployment(input),
+  );
+  handleCloud(
+    CLOUD_DEPLOYMENT_IPC_INVOKE.createAlbRedirectorDeployment,
+    exactRendererUrl,
+    authorizeWindow,
+    (args) => singleArgument(parseCreateAwsAlbRedirectorDeploymentInput(requireSingleArgument(args))),
+    (_sender, input) => controller.createAlbRedirectorDeployment(input),
   );
   handleCloud(
     CLOUD_DEPLOYMENT_IPC_INVOKE.getSoftwareState,

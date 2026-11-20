@@ -160,7 +160,10 @@
     "ssh2@1.17.0": false
   },
   "dependencies": {
+    "@aws-sdk/client-acm": "3.1155.0",
     "@aws-sdk/client-ec2": "3.1155.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "3.1155.0",
+    "@aws-sdk/client-pricing": "3.1155.0",
     "@aws-sdk/client-route-53": "3.1155.0",
     "@aws-sdk/credential-providers": "3.1155.0",
     "@azure/arm-compute": "25.3.0",

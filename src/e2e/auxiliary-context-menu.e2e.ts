@@ -59,7 +59,7 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     // Each form is local and discarded. The injected cloud controller rejects mutations.
     await workspace.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
     const cloud = await surfacePage(application, "cloud-deployment");
-    await cloud.getByRole("heading", { name: "Managed Servers", exact: true }).waitFor();
+    await cloud.getByRole("heading", { name: "Managed Deployments", exact: true }).waitFor();
     await assertBridge(cloud);
     await cloud.getByRole("tab", { name: /^Credentials/u }).click();
     await cloud.getByRole("button", { name: "Add Credential", exact: true }).click();
@@ -71,7 +71,7 @@ test("Armory, Network, and Cloud Deployment use native context menus in isolated
     await cloud.close();
     await workspace.getByRole("button", { name: "Cloud Deployment", exact: true }).click();
     const reopenedCloud = await surfacePage(application, "cloud-deployment");
-    await assertInspectionMenu(reopenedCloud, reopenedCloud.getByRole("heading", { name: "Managed Servers", exact: true }));
+    await assertInspectionMenu(reopenedCloud, reopenedCloud.getByRole("heading", { name: "Managed Deployments", exact: true }));
     await reopenedCloud.close();
 
     await invokeMenu(application, workspace, "armory.manage");

@@ -57,6 +57,8 @@ export const serviceTopologyContributor: TopologyContributor = (context) => {
     const freshness = serviceFreshness(context, domain);
     const statusLabel = freshness === "current" ? type.statusLabel : `Last known: ${type.statusLabel.toLowerCase()}`;
     for (const service of domain.items) {
+      if (type.kind === "crackstation" && context.snapshot.connection.managedServer?.overview?.dependentDeployments
+        ?.some((deployment) => deployment.kind === "crackstation" && deployment.hostUuid === service.id)) continue;
       const id = scopedId(context, type.kind, service.id);
       const properties: TopologyProperty[] = [
         { label: type.identityLabel, value: service.id },

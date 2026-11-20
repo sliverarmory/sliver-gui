@@ -774,7 +774,7 @@ describe("Cloud Deployment IPC boundary", () => {
   });
 
   it("refreshes cloud status only from the authorized window without renderer arguments", async () => {
-    const response = { ok: true as const, value: { state: { v: 1 as const, revision: 0, deployments: [] }, refreshErrors: [] } };
+    const response = { ok: true as const, value: { state: { v: 2 as const, revision: 0, deployments: [], dependentDeployments: [] }, refreshErrors: [] } };
     const refreshDeployments = vi.fn(async () => response);
     registerCloudDeploymentIpcHandlers(controllerMock({ refreshDeployments }), CLOUD_RENDERER_URL, authorizeCurrentWindow);
 
@@ -1573,7 +1573,7 @@ describe("Cloud Deployment IPC boundary", () => {
 
 function snapshotWithDeployments(deployments: CloudDeploymentSnapshot["state"]["deployments"]): CloudDeploymentSnapshot {
   return {
-    state: { v: 1, revision: 0, deployments },
+    state: { v: 2, revision: 0, deployments, dependentDeployments: [] },
     refreshErrors: [],
     credentials: [],
     secureCredentialStorage: true,
@@ -1604,6 +1604,8 @@ function controllerMock(
     deleteCredential: vi.fn(unavailable),
     testCredential: vi.fn(unavailable),
     discoverAwsOptions: vi.fn(unavailable),
+    discoverCrackstationOptions: vi.fn(unavailable),
+    discoverAlbRedirectorOptions: vi.fn(unavailable),
     discoverAzureAccounts: vi.fn(unavailable),
     discoverAzureOptions: vi.fn(unavailable),
     listDnsZones: vi.fn(unavailable),
@@ -1612,6 +1614,8 @@ function controllerMock(
     updateDnsRecord: vi.fn(unavailable),
     deleteDnsRecord: vi.fn(unavailable),
     createDeployment: vi.fn(unavailable),
+    createCrackstationDeployment: vi.fn(unavailable),
+    createAlbRedirectorDeployment: vi.fn(unavailable),
     getSoftwareState: vi.fn(unavailable),
     getSoftwareInstallProgress: vi.fn(unavailable),
     listSoftwareListeners: vi.fn(unavailable),
