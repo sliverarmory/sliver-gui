@@ -68,7 +68,7 @@ test("AD Explorer collections open independent dataset windows and preserve thei
     workspace = await application.firstWindow();
     observe(workspace);
     const mainWindow = await application.browserWindow(workspace);
-    await mainWindow.evaluate((window) => window.setSize(1440, 950));
+    await mainWindow.evaluate((window) => window.setContentSize(1440, 950));
     await workspace.getByRole("dialog", { name: "Saved configurations" }).getByRole("button", { name: "Connect", exact: true }).click();
     await workspace.getByRole("heading", { name: "Overview", exact: true }).waitFor();
     const themed = await workspace.evaluate(async () => {
@@ -94,14 +94,14 @@ test("AD Explorer collections open independent dataset windows and preserve thei
     await workspace.mouse.move(0, 0);
     await workspace.getByText("Connected", { exact: true }).waitFor({ state: "hidden" });
     await workspace.screenshot({ path: join(artifacts, "ad-explorer-collections.png"), animations: "disabled" });
-    await mainWindow.evaluate((window) => window.setSize(1000, 760));
+    await mainWindow.evaluate((window) => window.setContentSize(1000, 760));
     await workspace.waitForFunction(() => (globalThis as unknown as { innerWidth: number }).innerWidth === 1000);
     assert.equal(await workspace.evaluate(() => {
       const browser = globalThis as unknown as { innerWidth: number; document: { documentElement: { scrollWidth: number } } };
       return browser.document.documentElement.scrollWidth <= browser.innerWidth;
     }), true);
     await workspace.screenshot({ path: join(artifacts, "ad-explorer-collections-narrow.png"), animations: "disabled" });
-    await mainWindow.evaluate((window) => window.setSize(1440, 950));
+    await mainWindow.evaluate((window) => window.setContentSize(1440, 950));
 
     const openCollection = async (name: string, id: string): Promise<Page> => {
       const opened = application!.waitForEvent("window");
@@ -251,7 +251,7 @@ async function verifyCollapsibleCypher(application: ElectronApplication, page: P
   const nativeWindow = await application.browserWindow(page);
   const measurements: { width: number; expanded: number; collapsed: number; gained: number }[] = [];
   for (const [width, height] of [[1440, 920], [1000, 760]] as const) {
-    await nativeWindow.evaluate((window, size) => window.setSize(size.width, size.height), { width, height });
+    await nativeWindow.evaluate((window, size) => window.setContentSize(size.width, size.height), { width, height });
     await page.waitForFunction((expectedWidth) => (globalThis as unknown as { innerWidth: number }).innerWidth === expectedWidth, width);
     const graph = page.getByTestId("beagle-graph");
     await page.mouse.move(0, 0);
